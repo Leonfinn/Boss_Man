@@ -15,10 +15,14 @@ import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clear
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
+import { getHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
+
+/** The runner rebuild, by button path; a server card whose update changes runner code names it (BOS-835). */
+const RUNNER_STEP = "rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
 
 const Available = z.object({
   checkedAt: z.string(),
@@ -395,7 +399,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
             : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → Server and ask us on this ticket.",
         );
       // Only when the runner's files changed: the same flag drives the summary line on the card.
-      if (a?.runnerChanged) handSteps.push("Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.");
+      if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }
     const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
     const rollbackNote = "Database restore isn't a fallback yet.";
@@ -419,7 +423,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     for (const s of ownerChanged) risks.push(`This update changes the ${SERVICE_WORDS[s]}'s settings. Applying the update does not restart it; a separate card follows${s === "db" ? ", with a backup first" : ""}.`);
     if (hostDeployerChanged) risks.push("It changes host-deployer.sh, the script that runs deploys on your server. The hand steps include copying it into place.");
     if (launcherChanged) risks.push("It changes the launcher. The hand steps include rebuilding it.");
-    if (a?.runnerChanged) risks.push("It changes the runner, the containers agents work in. You'll be asked separately about building the new runners.");
+    // BOS-835: the merge gate runs in the runner, so it keeps the old code until the runners are rebuilt.
+    if (a?.runnerChanged) risks.push(`It changes the runner, the containers agents work in and where the merge gate runs. Until you ${RUNNER_STEP}, the merge gate keeps running the old code; Boss Man asks you about it after this update's trial.`);
     const infraCount = a?.infraPaths.length ?? 0;
     // What a hand-apply touches, in plain words (BOS-218): the deployer script, the server itself, or both.
     const handPaths = new Set([...(a?.infraPaths ?? []), ...(hostDeployerChanged ? ["scripts/host-deployer.sh"] : [])]);
@@ -472,7 +477,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         ? `Update the runners to ${short(commit)}?\n\n${alreadyRun}This rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.${runnerTickets.length ? `\n\nIt also carries ${runnerTickets.map((t) => `"${t.title}"`).join("; ")}. Their only setup step is the runner update above, so they have no card of their own.` : ""}`
         : infra
           ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.${carries}`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two). If more work merges before the host runs it, the newest version that has passed its checks goes out instead.`);
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two). If more work merges before the host runs it, the newest version that has passed its checks goes out instead.${a?.runnerChanged ? `\n\nAfter this, ${RUNNER_STEP}: the merge gate keeps running the old code until you do. Boss Man raises that card after the trial.` : ""}`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
@@ -925,7 +930,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
       const installDir = folder(a?.srcDir ?? rec["paths.src"]) ?? undefined;
       const open = (await openFor("server")).map((d) => (d.context as SelfDeployContext)).find((c) => !!c.commit);
-      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}) };
+      // DR-046 part 2: a runner image update already waiting for runs, so R16 refuses a card that asks the owner to
+      // press Build and update runners again. `null` (not absent) says Boss Man looked and found nothing pending.
+      const hold = await getHold(db).catch(() => null);
+      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: hold ? { kind: hold.kind, ...(hold.since ? { since: hold.since } : {}), ...(hold.swapped ? { swapped: hold.swapped } : {}) } : null };
     },
 
     /** Checked before an approval is recorded: one request at a time. */

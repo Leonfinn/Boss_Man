@@ -42,6 +42,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   check_result: "scheduled",
   "checking an old card": "scheduled",
   "live release": "scheduled",
+  "review hold ready": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

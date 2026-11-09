@@ -329,6 +329,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/runs.ts": NEVER_DROPPED,
     "services/scheduler.ts": CHECKS_OUTCOME + " (check due retries next tick; nudge reports the drop)",
     "services/stale-requests.ts": CHECKS_OUTCOME + " (a dropped check is skipped)",
+    "services/review-holds.ts": NEVER_DROPPED,
     "services/sweeps.ts": NEVER_DROPPED,
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,

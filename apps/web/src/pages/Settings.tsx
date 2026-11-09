@@ -5,6 +5,7 @@ import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
+import { setHold, useHold } from "../hold";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
@@ -84,7 +85,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root (on TrueNAS, in the root shell). Skills that need it stay out of runs until then.
+                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
                 </p>
               )}
             </li>
@@ -1983,6 +1984,41 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
   );
 }
 
+/** The longest one run may go (BOS-846). Empty means no limit. */
+export function RunTimeLimit({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [mins, setMins] = useState(company.maxRunMinutes != null ? String(company.maxRunMinutes) : "");
+  const act = useAction();
+  const n = Number(mins);
+  const empty = mins.trim() === "";
+  const valid = empty || (Number.isInteger(n) && n >= 1 && n <= 10_080);
+  return (
+    <Section id="run-time-limit-h" title="Run time limit">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops any single run that goes longer than this many minutes, the same as pressing Stop, and asks you whether to raise the limit. Leave it empty for no limit. Under about 50 minutes it also stops an agent that is waiting on a full check.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="run-time-limit">Most minutes per run</label>
+        <input id="run-time-limit" type="number" min={1} max={10080} step={1} placeholder="No limit" value={mins} onChange={(e) => setMins(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { maxRunMinutes: empty ? null : n } });
+              onChanged();
+              return empty ? "Saved: no limit." : "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
@@ -2263,6 +2299,45 @@ export function RunLimits() {
 }
 
 type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/**
+ * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
+ * stops new runs; ending the ones going is on the Runs page. Resume is on the banner every page shows while it's on.
+ */
+export function StopAllWork() {
+  const hold = useHold();
+  const act = useAction();
+  const paused = hold.data?.paused;
+  return (
+    <Section id="stop-all-h" title="Stop all work">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
+      </p>
+      {paused === true ? (
+        <p style={{ fontSize: 14 }} data-testid="stop-all-on">
+          <span className="tag red">On</span> All work is stopped.
+        </p>
+      ) : (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || paused !== false}
+            onClick={() =>
+              void act.run(async () => {
+                if (!window.confirm("Stop all work? Nothing new starts in any company until you press Resume. Runs already going finish by themselves.")) return;
+                await setHold(true);
+              })
+            }
+          >
+            Stop all work
+          </button>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
 
 /** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
@@ -2646,7 +2721,9 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
+  gitHosts: Array<{ project: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
 
@@ -2707,6 +2784,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   const nameChanged = !!preview && name.trim() !== preview.company.name;
   const scripts = preview?.skills.filter((s) => s.scripts.length) ?? [];
   const stackTools = preview?.toolServers.filter((t) => t.stackService) ?? [];
+  const stackGit = preview?.gitHosts.filter((g) => g.stackService) ?? [];
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2764,6 +2842,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               </ul>
             </div>
           )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {preview.toolServers.length > 0 && (
             <div style={{ fontSize: 14 }}>
               <strong>Tool servers.</strong> Each address below is opened past the runner's network guard for this company:
@@ -2775,12 +2871,25 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                   </li>
                 ))}
               </ul>
-              {stackTools.length > 0 && (
-                <label>
-                  <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
-                </label>
-              )}
             </div>
+          )}
+          {preview.gitHosts.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Project git addresses.</strong> Each is opened past the runner's network guard for this company so its agents can clone:
+              <ul>
+                {preview.gitHosts.map((g) => (
+                  <li key={g.project}>
+                    {g.project}: <code>{g.opens ?? "nothing (no address the guard can allow)"}</code> ({g.url})
+                    {g.stackService && <span className="error"> This is one of Boss Man's own services or a private-network address.</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(stackTools.length > 0 || stackGit.length > 0) && (
+            <label>
+              <input type="checkbox" checked={allowStack} onChange={(e) => setAllowStack(e.target.checked)} /> I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway.
+            </label>
           )}
           {preview.secrets.length > 0 && (
             <div style={{ fontSize: 14 }}>
@@ -2932,6 +3041,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
+            <StopAllWork />
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
@@ -2986,6 +3096,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <RunTimeLimit company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <StandingRules company={company} onChanged={onChanged} />

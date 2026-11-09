@@ -556,12 +556,15 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean }> => {
+  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean }> => {
     const open = col.tickets.filter((t) => !t.waitingOnOwner);
     if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
+    // A reviewer's hold (BOS-808): passed, kept from merging on purpose. Its own lane, shown only when something is held.
+    const held = open.filter((t) => t.reviewStage === "held");
     return [
-      { col, tickets: open.filter((t) => t.reviewStage !== "merging"), mine: false },
+      { col, tickets: open.filter((t) => t.reviewStage !== "merging" && t.reviewStage !== "held"), mine: false },
       { col, tickets: open.filter((t) => t.reviewStage === "merging"), mine: false, merging: true },
+      ...(held.length ? [{ col, tickets: held, mine: false, held: true }] : []),
       { col, tickets: waiting, mine: true },
     ];
   });
@@ -810,7 +813,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
-          {lanes.map(({ col, tickets, mine, merging }) => {
+          {lanes.map(({ col, tickets, mine, merging, held }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
@@ -824,7 +827,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
@@ -841,6 +844,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <span className="lane-hint">
                       Every reviewer approved. Boss Man checks and merges these itself. <a href={`#/merge-queue/${current?.companyId ?? ""}`}>See the merge queue</a>
                     </span>
+                  </header>
+                ) : held ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-held">Passed, held</h2>
+                      <span className="mono">{shown.length}</span>
+                    </div>
+                    <span className="lane-hint">A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends.</span>
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
@@ -943,6 +954,12 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       )}
                       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
                       {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
+                      {t.hold && (
+                        <span className="tag amber" style={{ alignSelf: "flex-start" }} title={t.hold.reason}>
+                          Held: {t.hold.label}
+                          {t.hold.reviewer ? ` · ${t.hold.reviewer}` : ""}
+                        </span>
+                      )}
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />

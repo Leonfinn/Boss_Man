@@ -6,6 +6,7 @@ import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
 import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
+import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
@@ -135,6 +136,36 @@ export function NewBuildBanner({ newer }: { newer: boolean }) {
       <button className="btn" type="button" onClick={() => window.location.reload()}>
         Reload
       </button>
+    </p>
+  );
+}
+
+/** On every page while the owner's "Stop all work" hold is on (BOS-836), with the one button that lifts it. */
+export function HoldBanner() {
+  const hold = useHold();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (hold.data?.paused !== true) return null;
+  const resume = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setHold(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        <strong>All work is stopped.</strong> No new agent runs start in any company until you resume; runs already going finish by themselves.
+      </span>
+      <button className="btn" type="button" disabled={busy} onClick={() => void resume()}>
+        Resume
+      </button>
+      {error && <span role="alert" className="error">{error}</span>}
     </p>
   );
 }
@@ -286,6 +317,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <HoldBanner />
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>

@@ -26,7 +26,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
-import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
+import { allowsPrivate, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
@@ -53,7 +53,8 @@ import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shar
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
-import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
+import { holdView } from "./services/review-holds.js";
+import { isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -682,6 +683,8 @@ export async function buildApp(opts: AppOptions) {
     requeue: (input) => scheduler.wake(input),
     cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
+    // The run time limit stops a run through the Stop button's own cancel (BOS-846).
+    cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
@@ -750,6 +753,7 @@ export async function buildApp(opts: AppOptions) {
     },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
     log: (m) => app.log.error(m),
@@ -765,6 +769,7 @@ export async function buildApp(opts: AppOptions) {
     nudge: (input) => scheduler.nudge(input),
     ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     clearExpired: async () => {
       const n = await clearing.check();
       if (n) await notes.syncDecisions();
@@ -859,7 +864,7 @@ export async function buildApp(opts: AppOptions) {
         : review.startLanding(ticketId, reviewer)
       ).catch(async (err) => {
         // Waiting on the sign-off, or another merge already running, is a wait, not a failed merge: no card.
-        if (isSignoffPending(err)) return;
+        if (isSignoffPending(err) || err instanceof ReviewHeldError) return;
         if (err instanceof ReviewError && /already being checked and merged/i.test(err.message)) return;
         // A landing that couldn't start has already left a trail and a card (startLanding), so raise nothing
         // more, so a single failed press never leaves two cards saying the same thing; log it in case an
@@ -1075,7 +1080,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1484,7 +1489,10 @@ export async function buildApp(opts: AppOptions) {
       const b = McpServerInput.parse(req.body);
       const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
       if (!c) return reply.code(404).send({ error: "not_found" });
-      const [row] = await db.insert(mcpServers).values({ ...b, companyId: id }).onConflictDoNothing().returning();
+      // The owner typed this one in, so a private host (or a LAN name) is meant; a public name they add is not trusted,
+      // since it could be re-pointed at a private address later (BOS-708).
+      const allowPrivate = await allowsPrivate(b.url);
+      const [row] = await db.insert(mcpServers).values({ ...b, companyId: id, allowPrivate }).onConflictDoNothing().returning();
       if (row) void launch.syncAllow(id);
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
     });
@@ -1733,6 +1741,8 @@ export async function buildApp(opts: AppOptions) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
         Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
       }
+      // The owner set this git address themselves, so its private address is meant (a LAN git server); the guard keeps it (BOS-708).
+      if (fields.repoUrl !== undefined) Object.assign(fields, { allowPrivate: !!fields.repoUrl });
       const [p] = await db
         .update(projects)
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
@@ -1914,7 +1924,7 @@ export async function buildApp(opts: AppOptions) {
       const signoffNow = (await signoffState(db, row.t)).state;
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow };
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -2687,6 +2697,8 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/scheduler/queue", async () => scheduler.queue());
     owner.post("/api/scheduler/tick", async () => scheduler.tick());
+    // Read by Settings → "Stop all work" and the every-page banner, so a reload shows the real hold (BOS-836).
+    owner.get("/api/kill-switch", async () => ({ paused: await scheduler.globallyPaused() }));
     owner.post("/api/kill-switch", async (req) => {
       const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
       await scheduler.setGlobalPause(paused);
@@ -2885,6 +2897,18 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    // A reviewer's hold on the merge (BOS-808): the owner can release it (the normal approval and merge follow) or cancel it (the pass is withdrawn).
+    owner.get("/api/tickets/:id/hold", async (req) => ({ hold: await holdView(db, IdParam.parse(req.params).id) }));
+    owner.post("/api/tickets/:id/hold/release", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const r = await review.releaseHold(id, { name: await ownerName(req) }, { background: true }).catch(reviewErrors(reply));
+      if ((r as { approval?: { outcome?: string } } | undefined)?.approval?.outcome === "landing") reply.code(202);
+      return r;
+    });
+    owner.post("/api/tickets/:id/hold/cancel", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return review.cancelHold(id, { name: await ownerName(req) }).catch(reviewErrors(reply));
+    });
     /**
      * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
      * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
@@ -2972,6 +2996,8 @@ export async function buildApp(opts: AppOptions) {
       const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
       return runsSvc.transcript(id, q).catch(runErrors(reply));
     });
+    // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
+    owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
     owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
     // Stale-blocker, stalled-run and missed-work sweeps (R21, R32, R82); also run on a timer.

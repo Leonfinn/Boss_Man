@@ -151,6 +151,9 @@ export function alertLadder(
     clearExpired?: () => Promise<number>;
     /** The host facts Boss Man recorded (BOS-427), for R6 on a CEO escalation with owner steps. Absent: only the host/account check runs. */
     hosts?: () => Promise<HostFacts[]>;
+    /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a CEO escalation
+     * that names another host is refused. Absent: only the name the facts carry stands in. */
+    serverHost?: () => Promise<string | null>;
     /** Add-on facts for the card lint's R9 (DR-023). Absent: R9 is not checked. */
     addons?: () => Promise<AddonFacts>;
     now?: () => Date;
@@ -619,7 +622,7 @@ export function alertLadder(
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung === "owner") throw new WatchdogError(409, "It's already with the owner.");
       // The card's own options are buttons the owner sees, so R7 accepts "press <option>" (BOS-421).
-      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ ...input, options: d.options as string[], byCeo: true, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Every permission card that reaches the owner carries the CEO's advice (BOS-233 item 2): what it's
       // needed for and what wouldn't get done if the owner denies it. Start from any advice the CEO already
