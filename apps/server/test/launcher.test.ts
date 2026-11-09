@@ -2,12 +2,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { companies, notifications, projects, settings } from "../src/db/schema.js";
-import { allowsPrivate, gitHostAddress, isLanHost, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { allowsPrivate, gitHostAddress, isLanHost, resolvesStack, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -43,12 +43,16 @@ function fakeLauncher() {
   return { fetch, calls, running, fail: (v: boolean) => (failing = v) };
 }
 
-async function setup(opts: { launcher?: boolean } = { launcher: true }) {
+/** A made-up DNS: a name not in the table resolves public (93.184.216.34), so a test never depends on the real network. */
+const fakeLookup = (table: Record<string, string[]> = {}) => async (host: string) => table[host] ?? ["93.184.216.34"];
+
+async function setup(options: { launcher?: boolean; lookup?: ReturnType<typeof fakeLookup> } = {}) {
+  const opts = { launcher: true, ...options };
   const fake = fakeLauncher();
   const keyFile = path.join(mkdtempSync(path.join(tmpdir(), "bm-key-")), "key");
   writeFileSync(keyFile, `${KEY}\n`);
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, fetch: fake.fetch, launcher: opts.launcher ? { url: "http://launcher:3105", keyFile } : undefined });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, fetch: fake.fetch, launcher: opts.launcher ? { url: "http://launcher:3105", keyFile } : undefined, lookup: opts.lookup ?? fakeLookup() });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -156,6 +160,74 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [], private: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
+  });
+
+  it("lists the addresses Boss Man opens by itself, per company, with what each one is (BOS-791)", async () => {
+    // A made-up DNS: `repointed.example.net` now resolves to a private address, every other name to a public one.
+    const c = (ctx = await setup({ lookup: fakeLookup({ "repointed.example.net": ["172.18.0.2"] }) }));
+    const { company } = (await c.req("POST", "/api/companies", { name: "Acme Tools" })).json() as { company: { id: string } };
+    // A public-name tool server (resolves to 93.184.216.34): allowed, listed with its company.
+    expect((await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "scrapling", url: "http://example.com:8000/mcp", transport: "http" })).statusCode).toBe(201);
+    // A tool server whose public name now resolves to a private address, with the owner's trust off: shown as not allowed (BOS-708).
+    const repointed = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "db-client", url: "http://repointed.example.net:5432/mcp", transport: "http" })).json() as { id: string };
+    await c.db.execute(sql`update mcp_servers set allow_private = false where id = ${repointed.id}`);
+    // A project with a LAN git host: allowed for this company.
+    const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Website" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://git.example.lan:3003/team/site.git" });
+    // An archived project's git host is no longer opened.
+    const gone = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Old" })).json() as { id: string };
+    await c.req("PATCH", `/api/projects/${gone.id}`, { repoUrl: "http://oldgit.example.lan:3003/o/r.git" });
+    await c.req("PATCH", `/api/projects/${gone.id}`, { archived: true });
+
+    const report = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; kind: string; name: string; company: string | null; notAllowed: string | null }> } };
+    const at = (a: string) => report.report.automatic.find((e) => e.address === a);
+    expect(at("example.com:8000")).toMatchObject({ kind: "tool server", name: "scrapling", company: "Acme Tools", notAllowed: null });
+    expect(at("repointed.example.net:5432")).toMatchObject({ kind: "tool server", name: "db-client", company: "Acme Tools", notAllowed: expect.stringContaining("Not allowed") });
+    expect(at("git.example.lan:3003")).toMatchObject({ kind: "git host", name: "Website", company: "Acme Tools", notAllowed: null });
+    expect(at("oldgit.example.lan:3003")).toBeUndefined();
+    // Only host:port and names come out.
+    expect(JSON.stringify(report)).not.toMatch(/https?:\/\/|\/mcp|\/team\/site/);
+    // The CEO's server status carries the same list.
+    const status = (await c.serverStatus.status(company.id)) as { netguardAllow: { automatic: Array<{ address: string }> } | null };
+    expect(status.netguardAllow?.automatic.map((e) => e.address)).toContain("git.example.lan:3003");
+  });
+
+  it("keeps a tool server the owner trusted for private (BOS-708) out of the not-allowed list, and drops one that isn't trusted (BOS-791)", async () => {
+    const c = (ctx = await setup({ lookup: fakeLookup({ "private.example.net": ["172.18.0.2"] }) }));
+    const { company } = (await c.req("POST", "/api/companies", { name: "Nested Co" })).json() as { company: { id: string } };
+    // A tool server whose name points at a private address, with the owner's trust on (allow_private, the real migration-0128 column):
+    // a LAN host added on purpose, so the guard keeps it.
+    const trusted = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "lan-tool", url: "http://private.example.net:8080/mcp", transport: "http" })).json() as { id: string };
+    await c.db.execute(sql`update mcp_servers set allow_private = true where id = ${trusted.id}`);
+    // The same name with trust off: a public name that now resolves privately, which the guard drops.
+    const untrusted = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "repointed", url: "http://private.example.net:8081/mcp", transport: "http" })).json() as { id: string };
+    await c.db.execute(sql`update mcp_servers set allow_private = false where id = ${untrusted.id}`);
+    const report = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; notAllowed: string | null }> } };
+    const at = (a: string) => report.report.automatic.find((e) => e.address === a);
+    expect(at("private.example.net:8080")).toMatchObject({ notAllowed: null });
+    expect(at("private.example.net:8081")).toMatchObject({ notAllowed: expect.stringContaining("Not allowed") });
+  });
+
+  it("judges each row by the exact list the guard is sent, not a rule of its own (BOS-791 review)", async () => {
+    const c = (ctx = await setup({ lookup: fakeLookup({ "penpot.example.lan": ["192.168.1.5"], "both.example.net": ["172.18.0.9"] }) }));
+    const { company } = (await c.req("POST", "/api/companies", { name: "Rule Co" })).json() as { company: { id: string } };
+    const add = async (name: string, url: string, allowPrivate: boolean) => {
+      const { id } = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name, url, transport: "http" })).json() as { id: string };
+      await c.db.execute(sql`update mcp_servers set allow_private = ${allowPrivate} where id = ${id}`);
+    };
+    // A private IP literal: the guard keeps it whatever its flag says (it can't be re-pointed).
+    await add("literal", "http://192.168.1.7:9000/mcp", false);
+    // One host:port named by a trusted row and an untrusted one: allowFor sends it trusted, so neither row is dropped.
+    await add("trusted-copy", "http://both.example.net:7000/mcp", true);
+    await add("untrusted-copy", "http://both.example.net:7000/other", false);
+    // A dropped tool server at the address of the owner's .env line: the line still matters, so it must not say "can go".
+    await add("penpot-as-tool", "http://penpot.example.lan:9001/mcp", false);
+    const report = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; notAllowed: string | null }>; entries: Array<{ entry: string; note: string | null }> } };
+    const at = (a: string) => report.report.automatic.filter((e) => e.address === a);
+    expect(at("192.168.1.7:9000")).toEqual([expect.objectContaining({ notAllowed: null })]);
+    expect(at("both.example.net:7000")).toEqual([expect.objectContaining({ notAllowed: null })]);
+    expect(at("penpot.example.lan:9001")).toEqual([expect.objectContaining({ notAllowed: expect.stringContaining("Not allowed") })]);
+    expect(report.report.entries.find((e) => e.entry === "penpot.example.lan:9001")).toMatchObject({ note: null });
   });
 
   it("shows the owner the launcher's BOSSMAN_NETGUARD_ALLOW entries and marks the ones a project's git host covers (BOS-770)", async () => {
@@ -266,6 +338,17 @@ describe("runners through the launcher (R55)", () => {
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
     expect(c.fake.calls.map((x) => `${x.method} ${x.path}`)).toEqual(["PUT /runners/app-co/allow"]);
+  });
+
+  it("resolvesStack tells a private name from a public one and a failed lookup (BOS-791)", async () => {
+    const lookup = async (h: string) => (h === "private.example.net" ? ["172.18.0.2"] : h === "public.example.net" ? ["93.184.216.34"] : (() => { throw new Error("ENOTFOUND"); })());
+    expect(await resolvesStack("http://private.example.net:8080/mcp", lookup)).toBe("stack");
+    expect(await resolvesStack("http://public.example.net:8080/mcp", lookup)).toBe("ok");
+    // A failed lookup is its own answer (the guard would drop nothing it couldn't resolve): never a false "stack".
+    expect(await resolvesStack("http://broken.example.net:8080/mcp", lookup)).toBe("lookup-failed");
+    expect(await resolvesStack("http://db:5432/", lookup)).toBe("stack");
+    expect(await resolvesStack("http://10.1.2.3:3100/", lookup)).toBe("stack");
+    expect(await resolvesStack("http://93.184.216.34:3100/", lookup)).toBe("ok");
   });
 
   it("does nothing without the launcher", async () => {
