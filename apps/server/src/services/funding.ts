@@ -61,6 +61,33 @@ const PROVIDER_QUOTA_HISTORY = 20;
 export const PROVIDER_QUOTA_THRESHOLDS = [60, 80, 92] as const;
 /** The old request-window reading warned at these; kept only for accounts that report no weekly credits. */
 export const PROVIDER_QUOTA_REQUEST_THRESHOLDS = [80, 100] as const;
+/** The warning key for "the weekly allowance is used up and work now draws on top-up credit" (BOS-934). */
+export const TOP_UP_NOTICE = 100;
+
+/**
+ * Whether work on a Synthetic plan keeps running once its reading reaches 100%, so Synthetic spends
+ * the account's top-up credit (BOS-934): the owner chose "keep urgent" or "keep all work" under
+ * "I have top-up credit", switched the reading off as a hold trigger, or the plan isn't a subscription
+ * (the scheduler holds subscriptions only).
+ */
+function carriesOnPastLimit(source: FundingRow, measure: "weekly" | "requests") {
+  return source.kind !== "subscription" || source.quotaOverage !== "pause" || (source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS[measure]);
+}
+
+/**
+ * What the scheduler will do about this Synthetic reading, in the owner's words, for the warnings. They
+ * used to say "Boss Man won't pause any runs", which stopped being true when BOS-852 fed the reading
+ * into the hold.
+ */
+function holdWords(source: FundingRow, measure: "weekly" | "requests") {
+  const off = source.kind !== "subscription" || (source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS[measure]);
+  if (off || source.quotaOverage === "all")
+    return "Boss Man won't pause runs for it (your Funding page settings), so once it's used up Synthetic draws on any top-up credit the account has.";
+  const at = Math.round((source.quotaHoldAt ?? 0.95) * 100);
+  return source.quotaOverage === "urgent"
+    ? `Boss Man pauses routine work at ${at}%. Chats and reviews keep running, and urgent tickets carry on past the limit on any top-up credit.`
+    : `Boss Man pauses routine work at ${at}%. Chats and reviews keep running, and urgent tickets run until the limit. Infinite-mode agents are never paused.`;
+}
 
 /** Credits come back 2% every 202 minutes, so a week is about 49.9 of those ticks. */
 const WEEKLY_REGEN_TICK_MS = 202 * 60_000;
@@ -299,8 +326,8 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
           ? `${source.name}: the Synthetic request allowance is used up`
           : `${source.name}: ${threshold}% of the Synthetic request allowance is used`;
       const body = weekly
-        ? `About ${usedPercent}% of this week's credits are used, ${leftPercent}% left. Credits come back 2% at a time${regenAt ? ` (next about ${when(regenAt)})` : ""}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for credits to come back.`
-        : `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`;
+        ? `About ${usedPercent}% of this week's credits are used, ${leftPercent}% left. Credits come back 2% at a time${regenAt ? ` (next about ${when(regenAt)})` : ""}. Paid from it: ${who}. ${holdWords(source, view.measure)}`
+        : `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. ${holdWords(source, view.measure)}`;
       try {
         await notify({ title, body });
       } catch {
@@ -309,6 +336,25 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         continue;
       }
       sent.push(threshold);
+    }
+    // Once the allowance is used up and the owner lets work carry on, Synthetic spends the account's
+    // paid top-up credit (BOS-934). Synthetic doesn't report that balance, so this once-a-week note is
+    // the nearest Boss Man can get to "warn when it runs low". Kept under its own key, 100, so it never
+    // displaces the 60/80/92 points; an account held at the limit (the default) never gets it.
+    if (weekly && percent >= 100 && carriesOnPastLimit(source, view.measure)) {
+      const told = await db.insert(providerQuotaWarnings).values({ fundingSourceId: source.id, period, threshold: TOP_UP_NOTICE, warnedAt: now() }).onConflictDoNothing().returning();
+      if (told.length) {
+        const urgentOnly = source.kind === "subscription" && source.quotaOverage === "urgent" && !(source.quotaDisabledWindows ?? []).includes(SYNTHETIC_WINDOWS.weekly);
+        try {
+          await notify({
+            title: `${source.name}: the weekly allowance is used up, so work now draws on top-up credit`,
+            body: `${urgentOnly ? "Urgent tickets, chats and reviews on this plan keep" : "Work on this plan keeps"} running${regenAt ? ` (credits start coming back about ${when(regenAt)})` : ""}, paid from your Synthetic top-up credit. Synthetic doesn't tell Boss Man the balance, so check it at synthetic.new; when it runs out, Synthetic refuses the runs. To stop spending it, set "I have top-up credit" to hold on the Funding page.`,
+          });
+          sent.push(TOP_UP_NOTICE);
+        } catch {
+          await db.delete(providerQuotaWarnings).where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, period), eq(providerQuotaWarnings.threshold, TOP_UP_NOTICE)));
+        }
+      }
     }
     return sent;
   }
