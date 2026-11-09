@@ -300,6 +300,33 @@ export const NON_PUBLIC_V6: ReadonlyArray<readonly [string, number]> = [
   ["ff00", 8], // multicast
 ];
 
+/**
+ * The address part of an IPv6 literal (BOS-896), brackets and any trailing dot removed, or null if `host` isn't one.
+ * A host name like feed.com starts like an IPv6 prefix (fec0, fc00) but is not an address: only a host with a ':'
+ * whose groups are all hex counts, so the IPv6 rows never read a name.
+ */
+function ipv6Literal(host: string): string | null {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h.includes(":")) return null;
+  if (/^[0-9a-f:]+$/.test(h) === false) {
+    // An embedded dotted IPv4 tail (::ffff:192.168.0.1) is still a literal; the dotted part is checked by mappedV4InRanges.
+    const dotted = /(^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h);
+    if (!dotted || v4Number(dotted[2]!) === null) return null;
+    const withoutDotted = h.slice(0, h.length - dotted[2]!.length).replace(/:$/, "");
+    if (withoutDotted && !/^[0-9a-f:]+$/.test(withoutDotted)) return null;
+    return h;
+  }
+  // Groups of 1-4 hex digits, with one run of "::" allowed to stand for the omitted zero groups; at most 8 groups.
+  if ((h.match(/::/g)?.length ?? 0) > 1) return null;
+  const [head, tail] = h.split("::") as [string, string | undefined];
+  const groups = (s: string) => (s ? s.split(":") : []);
+  const headGroups = groups(head);
+  const tailGroups = tail === undefined ? [] : groups(tail);
+  if (![...headGroups, ...tailGroups].every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  if (tail === undefined ? headGroups.length !== 8 : headGroups.length + tailGroups.length > 7) return null;
+  return h;
+}
+
 /** An IPv4 address as a 32-bit number, or null if it isn't four dotted decimal parts. */
 function v4Number(ip: string): number | null {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
@@ -349,7 +376,13 @@ export function isPrivateHost(host: string): boolean {
   const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!h.includes(".") && !h.includes(":")) return true; // a bare name like "truenas" or "localhost"
   if (/(^|\.)(localhost|local|lan|internal|localdomain|home\.arpa)$/.test(h)) return true;
-  return isPrivateAddress(h);
+  // An address is checked against the ranges for its own family only (BOS-896): an IPv6 literal (with or without
+  // brackets) against the IPv6 rows, a dotted-quad against the IPv4 rows. A host name is neither, so it isn't read as
+  // an address: feed.com starts like fec0::/10 and fcbarcelona.com like fc00::/7, but they are names, not addresses.
+  const v6 = ipv6Literal(h);
+  if (v6 !== null) return isPrivateAddress(v6);
+  if (v4Number(h) !== null) return isPrivateAddress(h);
+  return false;
 }
 
 /**

@@ -235,6 +235,23 @@ describe("home-network guard", () => {
     expect(evaluatePermission(tool("mcp__bossman__wiki_read", { url: "http://localhost" }), []).outcome).toBe("allow");
     expect(evaluatePermission(exec("curl http://192.168.68.1"), []).outcome).toBe("allow");
   });
+
+  it("doesn't read an ordinary host name as a private IPv6 address (BOS-896)", () => {
+    // feed.com starts like fec0::/10 and fcbarcelona.com like fc00::/7; before BOS-896 the IPv6 table was applied to any
+    // host name, so these ordinary sites were refused as privateNet. The IPv6 rows apply only to a real IPv6 literal.
+    for (const url of ["http://feed.com/", "http://fcbarcelona.com/", "http://fe80.example.com/", "https://fdic.gov/", "https://ffmpeg.org/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://feed.com/" }, "fetch"), []).outcome).not.toBe("deny");
+    // The same names in a shell command (an ssh/scp host or an http URL) are not private either.
+    for (const c of ["curl http://feed.com/", "ssh user@fcbarcelona.com", "scp x user@fe80.example.com:y"]) {
+      expect(evaluatePermission(exec(c), []), c).not.toMatchObject({ outcome: "deny", rule: "Fetching from your home network or this machine is blocked" });
+    }
+    // Real IPv6 literals, with and without brackets, still count, including the site-local range the names resemble.
+    for (const url of ["http://[fec0::1]/", "http://[fc00::1]/", "http://[fe80::1]/", "http://[fd12:3456::1]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
+  });
 });
 
 describe("temp-file cleanup (BOS-111)", () => {
