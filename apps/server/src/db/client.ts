@@ -29,7 +29,7 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
 }
 
 // A migrated, empty in-memory database to copy, so each test skips running every migration again.
-// Lost on restart, harmless because it's rebuilt from the migrations on the next call.
+// lost on restart, harmless because it's rebuilt from the migrations on the next call.
 let migratedTemplate: Promise<Blob> | undefined;
 
 // BOS-657: opening a copy costs ~0.7 CPU-s, emptying its tables ~0.08. close() empties a template copy and parks it here for the next openPglite().

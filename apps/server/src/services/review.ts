@@ -74,6 +74,7 @@ export function checkQueueStuck(v: { exitCode: number | null; output: string }):
 }
 /** Tries a merge check that only timed out on the lock this many times, pausing LOCK_RETRY_BASE_MS, then double, between them. */
 export const LOCK_RETRY_ATTEMPTS = 6;
+// shortcut: a constant except for tests, which lower it through setLockRetryBase; no per-request state.
 export let LOCK_RETRY_BASE_MS = 60_000;
 /** For tests. */
 export const setLockRetryBase = (ms: number) => { LOCK_RETRY_BASE_MS = ms; };
@@ -86,6 +87,7 @@ export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
  * checkNeverFinished is the one list of such causes; "the runner didn't answer" is added by the caller.
  */
 export const INFRA_RETRY_ATTEMPTS = 3;
+// shortcut: a constant except for tests, which lower it through setInfraRetryBase; no per-request state.
 export let INFRA_RETRY_BASE_MS = 30_000;
 /** For tests. */
 export const setInfraRetryBase = (ms: number) => { INFRA_RETRY_BASE_MS = ms; };
