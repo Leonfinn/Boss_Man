@@ -87,6 +87,9 @@ has "$D/outbox/host.json" "\"path\": \"$(cd "$D" && pwd)\""
 has "$D/outbox/host.json" '"mode": "'
 hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
 [[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
+# BOS-990: the host reports the sha256 of the script file it runs from, and of the checkout's copy (empty when the checkout has none).
+has "$D/outbox/host.json" "\"deployer\": {\"scriptSha\": \"$(sha256sum "$here/host-deployer.sh" | cut -d' ' -f1)\", \"repoSha\": \""
+[[ $(node -e 'const h=require(process.argv[1]);process.stdout.write(/^([0-9a-f]{64})?$/.test(h.deployer.repoSha)?"ok":"bad")' "$D/outbox/host.json") == ok ]] || fail "deployer.repoSha is malformed: $(cat "$D/outbox/host.json")"
 node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
 # 1a2. Roles (BOS-541): each known folder says what it is for. The deployer folder is "deployer"; the install
 # folder is "install", and the backups folder is "backups" (here a separate folder; the default layout, below,

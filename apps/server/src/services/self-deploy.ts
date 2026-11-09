@@ -82,6 +82,11 @@ const OWNER_SERVICES = ["db", "proxy"] as const;
 type OwnerService = (typeof OWNER_SERVICES)[number];
 const SERVICE_WORDS: Record<OwnerService, string> = { db: "database", proxy: "proxy" };
 const SERVICE_KEY = "self-deploy:services:";
+/** BOS-990: the one open card for a host deployer script that is behind, its settings record and how long a deploy's own copy step is given. */
+const DEPLOYER_SCRIPT_CARD = "self-deploy:deployer-script";
+const DEPLOYER_SCRIPT_KEY = "deployer_script_state";
+const DEPLOYER_COPY_GRACE_MS = 15 * 60_000;
+export type DeployerScriptState = { state: "current" | "behind" | "unknown" | "none"; since?: string };
 // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
 const NO_SRC = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
 const NO_HOST = "Boss Man hasn't been told this machine's name yet, so it can't say where a command runs. Open Settings → Server and runner → This host and ask us on this ticket for the exact commands.";
@@ -97,7 +102,7 @@ const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed:
 /** The pass reads the host's files every time, but if they haven't changed for this long it runs anyway (BOS-414). */
 const FORCED_SYNC_MS = 60_000;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; /** What each host recorded about itself (BOS-427): its name goes on every command's block. */ hosts?: () => Promise<HostFacts[]>; /** BOS-990: the deployer script fingerprints from the host's report; null = no report. */ deployerScript?: () => Promise<{ scriptSha: string; repoSha: string } | null>; /** The settings record's facts as key → value (BOS-419): used for what the update file doesn't say. */ facts?: () => Promise<Record<string, string>>; /** True when nothing is running that a few seconds' outage would cut short (BOS-487); absent = always quiet. */ hostQuiet?: () => Promise<boolean>; /** Both colours' health, the same probe as GET /api/bluegreen (DR-020 E): the trial ends as soon as the standby is stopped (BOS-953). */ colours?: () => Promise<BlueGreen | null>; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -998,6 +1003,70 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     }
   }
 
+  /**
+   * BOS-990: is the host's copy of its deployer script the live version? The host reports the sha256 of the script it
+   * runs and of the copy in its checkout (the live commit's file; the server image has no copy of the repo's scripts).
+   * `since` is when it was first seen behind or unknown, kept so Settings can say how long and so a deploy's own
+   * copy step has time to land before the owner is asked. A host with no report at all says nothing ("none").
+   */
+  async function deployerScriptState(): Promise<DeployerScriptState> {
+    const rep = await deps.deployerScript?.().catch(() => null);
+    if (!rep) return { state: "none" };
+    const state = !rep.scriptSha ? "unknown" : !rep.repoSha || rep.scriptSha === rep.repoSha ? "current" : "behind";
+    const prev = await getSetting<{ state: string; since: string }>(DEPLOYER_SCRIPT_KEY);
+    if (state === "current") {
+      if (prev) await putSetting(DEPLOYER_SCRIPT_KEY, null);
+      return { state };
+    }
+    const since = prev?.state === state ? prev.since : new Date().toISOString();
+    if (prev?.state !== state) await putSetting(DEPLOYER_SCRIPT_KEY, { state, since });
+    return { state, since };
+  }
+
+  /** The owner's copy steps for a deployer script that is behind, on the recorded host and folders, with an undo. */
+  function deployerScriptCard(rec: Record<string, string>, host: string | null) {
+    const src = folder(rec["paths.src"]);
+    const deployer = folder(rec["paths.deployer"]);
+    const cmd = (c: string) => sh(c, { host: host!, as: "root" });
+    const missing = !src || !deployer ? "Boss Man can't tell where the install or deployer folder is, so no command is shown here. Ask us on this ticket for the exact commands." : !host ? NO_HOST : null;
+    const file = `${deployer}/host-deployer.sh`;
+    const steps = [
+      missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && cp -v ${src}/scripts/host-deployer.sh ${file} && chown root:root ${file} && chmod 750 ${file}`)),
+      missing ?? step("Check it. Run this on the same machine; it prints two lines, and the long code at the start of both should be the same:", cmd(`sha256sum ${src}/scripts/host-deployer.sh ${file}`)),
+    ];
+    const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This host then says \"Deployer script: current\".";
+    const rollback = missing ?? step("To undo, put the old script back. Run this on the same machine:", cmd(`cp -p ${file}.old ${file}`));
+    return { steps, check, rollback };
+  }
+
+  /** One owner card while the host's deployer script is behind or unknown; updated in place, closed when it matches (BOS-990). */
+  async function syncDeployerScript() {
+    const st = await deployerScriptState();
+    if (st.state === "current") {
+      await clearOwnerTodo(db, DEPLOYER_SCRIPT_CARD, "The host reports it runs the live deployer script. Marked done.");
+      return;
+    }
+    if (st.state === "none") return;
+    // An update's own copy step needs a few minutes to be applied; an old deployer that can't report is behind already.
+    if (st.state === "behind" && Date.now() - Date.parse(st.since!) < DEPLOYER_COPY_GRACE_MS) return;
+    const companyId = await homeCompany();
+    if (!companyId) return;
+    const rec = await deps.facts?.().catch(() => ({} as Record<string, string>)) ?? {};
+    const host = (await deps.hosts?.())?.[0]?.name ?? null;
+    const c = deployerScriptCard(rec, host);
+    const [open] = await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(and(eq(decisions.dedupeKey, DEPLOYER_SCRIPT_CARD), eq(decisions.status, "open")));
+    if (open) {
+      // Already raised: only refresh its steps if the recorded folders or host name changed since.
+      const ctx = open.context as Extract<DecisionContext, { type: "owner_todo" }>;
+      if (JSON.stringify(ctx.steps) !== JSON.stringify(c.steps)) await db.update(decisions).set({ context: { ...ctx, steps: c.steps, check: c.check, rollback: c.rollback } }).where(eq(decisions.id, open.id));
+      return;
+    }
+    const question = "Your host's deployer script is older than the running version. Boss Man's fixes to the deployer reach your host only when you copy the script in, and the host's copy is "
+      + (st.state === "unknown" ? "too old to say which version it is, so it is behind." : "different from the version that runs.")
+      + " Copy it in when you are ready; nothing restarts and no deploy is affected.";
+    await raiseOwnerTodo(db, { companyId, question, key: DEPLOYER_SCRIPT_CARD, steps: c.steps, check: c.check, rollback: c.rollback, ofDecisionId: "system" });
+  }
+
   return {
     enabled: !!dir,
 
@@ -1045,6 +1114,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s && s.result !== "running") await finished(s, a);
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
+      await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
       await closeBuiltRunnerCards().catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
       // BOS-1010 rule 7: never more than one open runner card; clears any duplicate a release left on the queue.
@@ -1158,6 +1228,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     },
 
     /** What Settings shows. */
+    /** BOS-990: Settings → This host's "Deployer script" line. */
+    deployerScript: () => deployerScriptState(),
+
     async overview() {
       const [s, a] = [await status(), await available()];
       // BOS-953: the runner trial (with the time it ends) and any "try again in N minutes" wait, both worked out
@@ -1171,6 +1244,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         available: a,
         pending: await pending(),
         deployer: await deployerSeen(a, s),
+        deployerScript: await deployerScriptState().catch((): DeployerScriptState => ({ state: "none" })),
         lateAfterMinutes: DEPLOYER_LATE_MS / 60_000,
         trial: trial ? { endsAt: trial.endsAt, seconds: soakSeconds(a) } : null,
         deployWait: wait,
