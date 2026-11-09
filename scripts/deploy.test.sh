@@ -96,6 +96,11 @@ grep -q "scripts/restore-test.sh" "$t/unhealthy.out" || { echo "FAIL: rollback h
 grep -q "before-restore-" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't keep a copy of the current data"; exit 1; }
 grep -q "ON_ERROR_STOP=1" "$t/unhealthy.out" || { echo "FAIL: restore load doesn't stop at the first error"; exit 1; }
 grep -q "To go back to the old code (does not touch the database)" "$t/unhealthy.out" || { echo "FAIL: the old-code rollback line changed"; exit 1; }
+# BOS-874: Guide 10's last two steps: check the restore worked, and how to undo it.
+grep -q "api/ready" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't ask to check the restore"; exit 1; }
+grep -q "To undo the restore" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't say how to undo the restore"; exit 1; }
+grep -q "before-restore-" "$t/unhealthy.out" || { echo "FAIL: undo step doesn't use step 3's copy"; exit 1; }
+! grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t/unhealthy.out" || { echo "FAIL: rollback help hard-codes an IP address"; exit 1; }
 # A restart (BOS-647): --force at the commit that runs recreates the server (an unchanged image would leave it running),
 # leaves the launcher alone and keeps the rollback record, so --rollback still goes back to the release before.
 git reset -q --hard "$one"; : >"$FAKE_LOG"
