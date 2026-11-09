@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 type Pushed = { url: string; body: Record<string, any> };
-const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, pushLevels: ["page", "ask"], publicUrl: "https://bossman.example.ts.net" };
+const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, phonePush: "all", publicUrl: "https://bossman.example.ts.net" };
 
 async function setup(opts: { listen?: boolean } = {}) {
   const { db, close } = await openPglite();

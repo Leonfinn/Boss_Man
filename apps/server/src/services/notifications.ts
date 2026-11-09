@@ -7,7 +7,7 @@ import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "d
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, decisions, notifications, settings } from "../db/schema.js";
+import { companies, decisions, notifications, settings, ticketDependencies } from "../db/schema.js";
 import type { DecisionContext } from "./decisions.js";
 
 /**
@@ -22,6 +22,10 @@ export const NtfyUrl = z
     return !p.search && !p.hash && !u.includes("?") && !u.includes("#");
   }, "Use the ntfy server's address without a ? or # part, e.g. https://ntfy.example.ts.net or https://host/ntfy");
 
+/** Which cards reach the phone (BOS-1006): the urgent ones by default, or everything the old tick boxes did. */
+export const PHONE_PUSH_MODES = ["urgent", "all"] as const;
+export type PhonePushMode = (typeof PHONE_PUSH_MODES)[number];
+
 export const NotifySettings = z.object({
   quietHours: z
     .object({
@@ -34,8 +38,17 @@ export const NotifySettings = z.object({
   agentHourlyCap: z.number().int().min(1).max(100),
   /** Phone push through the owner's own ntfy server; the token is held as a secret. */
   ntfy: z.object({ url: NtfyUrl, topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
-  /** Levels that go to the phone. */
-  pushLevels: z.array(z.enum(NOTIFY_LEVELS)),
+  /**
+   * Which cards go to the phone (BOS-1006). "urgent" (the default, and what an install saved before the
+   * setting existed reads as) sends only a blocking card, a fixesLive deploy, a page and the test push.
+   * "all" sends the routine ones too, at a normal priority. Kept for installs that saved it.
+   */
+  phonePush: z.enum(PHONE_PUSH_MODES).optional(),
+  /**
+   * The old tick boxes, which "all" stands in for (BOS-1006). Kept so an install saved before the setting
+   * still loads: its list of levels says whether it wanted pages and asks on the phone.
+   */
+  pushLevels: z.array(z.enum(NOTIFY_LEVELS)).optional(),
   /** Boss Man's address as the phone should open it, e.g. https://bossman.tailnet.ts.net. */
   publicUrl: z.string().url().nullable(),
   /** The owner's off switch for phone Approve buttons (BOS-243); on unless set to false. */
@@ -67,7 +80,12 @@ export function ntfyPublishUrl(url: string): string {
 
 /** A link in the app as the phone opens it on the public URL. */
 export const appUrl = (publicUrl: string, link: string) => `${publicUrl.replace(/\/$/, "")}/${link}`;
-export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, pushLevels: ["page", "ask"], publicUrl: null };
+export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, phonePush: "urgent", publicUrl: null };
+
+/** Whether the owner wants routine cards on the phone too (BOS-1006); urgent-only unless they chose all. */
+export function wantsEveryPush(s: NotifySettings): boolean {
+  return s.phonePush === "all";
+}
 
 const KEY = "notifications";
 
@@ -91,9 +109,11 @@ function evidenceLink(ctx: DecisionContext): string {
   if (ctx.type === "stale_blocker") return `#/tickets/${ctx.blockedTicketId}`;
   return "#/decisions";
 }
-const PRIORITY: Record<NotifyLevel, number> = { note: 2, flag: 3, page: 4, ask: 4 };
+/** An urgent push breaks through on the phone (BOS-1006); a routine one sent under "All decisions" is normal. */
+export const URGENT_PRIORITY = 5;
+export const ROUTINE_PRIORITY = 3;
 
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null };
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; /** The card is one of the urgent kinds (BOS-1006), so it goes to the phone whatever the setting. */ urgent?: boolean };
 
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
@@ -109,7 +129,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
    * Publishes to ntfy as JSON (to the server's URL, path kept), so titles needn't fit in a header.
    * `plain` turns markdown off, for text that is shown exactly as stored (BOS-243).
    */
-  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel; actions?: PushAction[]; plain?: boolean }) {
+  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel; urgent: boolean; actions?: PushAction[]; plain?: boolean }) {
     if (!s.ntfy) throw new Error("Phone push isn't set up.");
     const token = s.ntfy.tokenSecretId ? await deps.reveal(s.ntfy.tokenSecretId) : null;
     const res = await doFetch(ntfyPublishUrl(s.ntfy.url), {
@@ -120,7 +140,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         title: fitBytes(n.title, 250),
         // ntfy turns a message over 4,096 bytes into an attachment.
         message: fitBytes(n.body ?? n.title, 3500),
-        priority: PRIORITY[n.level],
+        priority: n.urgent ? URGENT_PRIORITY : ROUTINE_PRIORITY,
         tags: [n.level === "ask" ? "question" : n.level === "page" ? "rotating_light" : "bell"],
         ...(s.publicUrl ? { click: appUrl(s.publicUrl, n.link) } : {}),
         ...(n.actions?.length ? { actions: n.actions } : {}),
@@ -164,10 +184,16 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       .onConflictDoNothing()
       .returning();
     if (!row) return null;
-    if (s.ntfy && s.pushLevels.includes(level)) {
+    // BOS-1006: only an urgent card reaches the phone unless the owner chose "All decisions". Quiet hours
+    // still demote first, so an urgent ask in quiet hours arrives as a flag and doesn't push.
+    const urgent = input.level === "page" || !!input.urgent;
+    const flagsToPhone = s.pushLevels?.includes("flag") ?? false;
+    const routineToPhone = wantsEveryPush(s) && (level === "page" || level === "ask");
+    const toPhone = s.ntfy && (urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
+    if (toPhone) {
       const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
-        await push(s, { ...row, actions, ...(approve ? { body: approve.message, plain: true } : {}) });
+        await push(s, { ...row, actions, urgent, ...(approve ? { body: approve.message, plain: true } : {}) });
         await db.update(notifications).set({ pushedAt: now() }).where(eq(notifications.id, row.id));
       } catch (err) {
         const msg = (err as Error).message;
@@ -214,7 +240,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       const s = await getSettings();
       if (!s.ntfy) return false;
       try {
-        await push(s, { ...n, level: "flag", plain: true });
+        await push(s, { ...n, level: "flag", urgent: false, plain: true });
         return true;
       } catch (err) {
         deps.log?.(`phone push failed: ${(err as Error).message}`);
@@ -245,15 +271,29 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         )
         .orderBy(decisions.createdAt)
         .limit(100);
+      // Which of these cards a ticket waits on (BOS-1006): the blocking ones are urgent.
+      const blocking = new Set(
+        open.length
+          ? (
+              await db
+                .select({ id: ticketDependencies.blockerDecisionId })
+                .from(ticketDependencies)
+                .where(inArray(ticketDependencies.blockerDecisionId, open.map(({ d }) => d.id)))
+            ).flatMap((r) => (r.id ? [r.id] : []))
+          : [],
+      );
       for (const { d, company } of open) {
         const options = d.options as string[];
         const alertOnly = options.length === 1 && options[0] === "Got it";
         // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
         // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
         const c = d.context as DecisionContext;
-        const urgent = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
-        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgent && !urgent.repeat ? "page" : alertOnly ? "flag" : "ask";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
+        const urgentFix = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgentFix && !urgentFix.repeat ? "page" : alertOnly ? "flag" : "ask";
+        // BOS-1006: a blocking card (now not just "nothing to do yet") and a live-problem deploy are urgent;
+        // a page or a plain card the CEO is handling is not. The test push is urgent in `test` itself.
+        const urgent = d.tier !== "ceo" && !alertOnly && (blocking.has(d.id) || !!urgentFix);
+        await notify({ companyId: d.companyId, agentId: null, level, urgent, title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id });
       }
       return open.length;
     },
@@ -292,10 +332,10 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         .where(ids === "all" ? isNull(notifications.readAt) : and(inArray(notifications.id, ids), isNull(notifications.readAt)));
     },
 
-    /** Sends a test push with the current settings and says how it went. */
+    /** Sends a test push with the current settings and says how it went. Urgent (BOS-1006): it is what the owner pressed. */
     async test() {
       const s = await getSettings();
-      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device.", link: "#/notifications", level: "page" });
+      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device.", link: "#/notifications", level: "page", urgent: true });
     },
   };
 }
