@@ -1423,9 +1423,10 @@ export async function buildApp(opts: AppOptions) {
     });
     // The address the phone app must use for ntfy: the add-on's own NTFY_BASE_URL as the host reports it (null: not reported).
     const phoneNtfyAddress = async () => (await hostFacts.value("ntfy.baseUrl").catch(() => null)) ?? null;
+    const phoneNtfyContainer = async () => (await hostFacts.value("ntfy.container").catch(() => null)) ?? null;
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneTest: await notes.testStatus() };
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
     });
     owner.put("/api/notification-settings", async (req) => {
       const b = NotifySettings.omit({ ntfy: true })
@@ -1443,7 +1444,7 @@ export async function buildApp(opts: AppOptions) {
           : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
       }
       const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneTest: await notes.testStatus() };
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
     });
     owner.post("/api/notification-settings/test", async (_req, reply) => {
       try {

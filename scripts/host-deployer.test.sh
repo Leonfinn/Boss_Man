@@ -123,6 +123,7 @@ hasnt "$D/outbox/host.json" 'PENPOT_BIND'
 printf 'NTFY_BASE_URL=https://box.example.ts.net:8443\n' >"$T/src/.env"
 host
 has "$D/outbox/host.json" '"ntfy": {"baseUrl": "https://box.example.ts.net:8443"}'
+hasnt "$D/outbox/host.json" '"container"' # no docker here, so no container name is guessed
 printf 'NTFY_BASE_URL=https://user:pw@box.example.ts.net:8443/?x=1\n' >"$T/src/.env"
 host
 hasnt "$D/outbox/host.json" 'baseUrl'

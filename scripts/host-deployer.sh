@@ -501,7 +501,16 @@ host_extra_facts() {
   # address is reported (no login part, query or #), so nothing secret can ride along.
   local nbase
   nbase="$(env_value NTFY_BASE_URL)"; nbase="${nbase%/}"
-  if [[ $nbase =~ ^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,100})?$ ]]; then out+="$sep\"ntfy\": {\"baseUrl\": $(jstr "$nbase")}"; fi
+  # The ntfy container's name (found by its Compose service label) is reported too, so the phone page can print a
+  # `docker exec` command that fits this host. Only a plain container name is kept.
+  local nparts="" ncont=""
+  [[ $nbase =~ ^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,100})?$ ]] && nparts="\"baseUrl\": $(jstr "$nbase")"
+  if have_docker; then
+    ncont="$(dk ps --filter "label=com.docker.compose.service=ntfy" --format '{{.Names}}' | head -n1)" || ncont=""
+    [[ $ncont =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || ncont=""
+  fi
+  [[ -n $ncont ]] && nparts+="${nparts:+, }\"container\": $(jstr "$ncont")"
+  [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
   # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
   # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
   # (any token that isn't host:port is dropped), and no other key is read.

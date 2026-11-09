@@ -273,7 +273,12 @@ function SettingsForm() {
             <li>Subscribe to the topic shown above: {form.topic ? <code>{form.topic}</code> : "the Topic"}.</li>
             <li>In the ntfy app, Settings → Users → Add user: Service URL is the address above, Username and Password are the phone's read-only ntfy user (not the publish access token Boss Man uses).</li>
             <li>
-              No phone login yet? On the host that runs ntfy, make one (the container name is in <code>docker ps</code>; it has "ntfy" in it): <code>docker exec -it &lt;ntfy container&gt; ntfy user add phone-read</code>, then <code>docker exec &lt;ntfy container&gt; ntfy access phone-read {form.topic || "<topic>"} read-only</code>. To reset the password, run <code>ntfy user change-pass phone-read</code> the same way.
+              No phone login yet? Run these on the host that runs ntfy, in a terminal. They are fine as your normal user if it may use Docker; otherwise put <code>sudo</code> in front of each (on TrueNAS, Proxmox and most Linux hosts that means root).
+              {!saved?.phoneContainer && <> Boss Man can't see the ntfy container's name, so replace <code>NTFY_CONTAINER</code> with the name that <code>docker ps</code> shows for ntfy.</>}
+              <pre data-testid="phone-login-commands" style={{ fontSize: 13, overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0" }}>{
+`docker exec -it ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy user add phone-read
+docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read ${form.topic || "YOUR_TOPIC"} read-only`}</pre>
+              The first command asks you to type a password for the phone: use a long one, and use it in the ntfy app. To reset it later: <code>{`docker exec -it ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy user change-pass phone-read`}</code>
             </li>
           </ol>
           {phoneAddress && (

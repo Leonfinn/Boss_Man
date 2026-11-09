@@ -404,6 +404,8 @@ export type NotifySettings = {
   approve?: { on: true } | { on: false; why: string };
   /** The ntfy address the phone app must use (the add-on's NTFY_BASE_URL, as the host reports it); null when not known. */
   phoneAddress?: string | null;
+  /** The ntfy container's name on the host (for `docker exec`); null when the host doesn't report it. */
+  phoneContainer?: string | null;
   /** The last test push: when sent, and when the phone tapped Got it (null: not tapped). */
   phoneTest?: { sentAt: string; confirmedAt: string | null } | null;
 };
