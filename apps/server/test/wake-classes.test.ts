@@ -70,6 +70,9 @@ describe("wake classes: the table", () => {
     "another company",
     "not open",
     "unknown",
+    // The reasons written on a ticket's history row by a system move (BOS-898), not wakes.
+    "what it waited on is resolved",
+    "what it waited on finished",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -311,6 +314,7 @@ describe("wake classes: callers of wake() and notify()", () => {
   const DROP_RECORDED = "an agent-started wake: a drop is on the wake row, and the owner is alerted once";
   const CALLERS: Record<string, string> = {
     "app.ts": DROP_RECORDED + " (assigned, feedback, skill decided); owner and rule wakes are never dropped",
+    "routes/server-admin.ts": "the owner's wake-an-agent route: an owner wake is never dropped",
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",
     "services/check-dispatcher.ts": NEVER_DROPPED + " (check_result is scheduled)",

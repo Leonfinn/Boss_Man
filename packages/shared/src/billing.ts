@@ -2,7 +2,6 @@
 export const MICROS_PER_USD = 1_000_000;
 
 export const usdToMicros = (usd: number): number => Math.round(usd * MICROS_PER_USD);
-export const microsToUsd = (micros: number): number => micros / MICROS_PER_USD;
 
 export type Bounds = { start: Date | null; end: Date | null };
 

@@ -25,6 +25,7 @@ export const HISTORY_PAGE_MAX = 500;
 // with no version of the text before it — the 4 Nov release-log state, where the wipe was not
 // undoable. Every write in this process queues here, so one save's read, version and page change
 // finish before the next starts. Module-level: a process-wide lock, not per-call state.
+// shortcut: a lock in this process only, lost on restart harmlessly: a restart has no write in flight, and the DB write + version insert are ordered per save; it does not span two servers (an older build beside this one can still interleave, hence BOS-496's DB-side fix).
 let writeQueue: Promise<unknown> = Promise.resolve();
 
 /**
@@ -164,17 +165,13 @@ export const MIN_SHRINK = 40;
  * (a grown or barely-changed page, or a brand-new one). The message says the sizes and the headings,
  * so an agent can fix the call instead of re-sending the whole page.
  *
- * `largest` is the biggest the page has held since it was last deliberately replaced: ten writes that
- * each cut 24% pass the per-write rule but end with the page emptied, so the guard measures against what
- * the page has held, not only what it holds now (BOS-430, adversarial round 2). Callers pass it only
- * for a write that shrinks the page from its current text, so a growing write is never refused and an
- * append after a deliberate trim still works (adversarial round 3). It defaults to the text now.
+ * The guard is measured against `largest`, the biggest the page has held since it was last deliberately
+ * replaced, while `before` is what it holds now: ten writes that each cut 24% pass the per-write rule
+ * but end with the page emptied, so the guard measures against what the page has held, not only what it
+ * holds now (BOS-430, adversarial round 2). Callers pass `largest` only for a write that shrinks the
+ * page from its current text, so a growing write is never refused and an append after a deliberate trim
+ * still works (adversarial round 3).
  */
-export function shrinkRefusal(before: string, after: string): string | null {
-  return shrinkRefusalAgainst(before, before.length, after);
-}
-
-/** The guard, measured against `largest` (the biggest the page has been) while `before` is what it holds now. */
 export function shrinkRefusalAgainst(before: string, largest: number, after: string): string | null {
   // Compare against whichever is bigger: a page that just grew and is now being cut back also matters.
   const baseline = Math.max(largest, before.length);
