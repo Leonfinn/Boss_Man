@@ -52,10 +52,11 @@ describe("feedback portal", () => {
     expect(cookie).toMatchObject({ httpOnly: true, sameSite: "Strict", path: "/api/portal" });
     const body = page.json();
     expect(body.title).toBe("What's next for App Co");
+    // The title visitors see is the public summary's first line, never the internal title (BOS-991).
     expect(body.features.map((f: { title: string; stage: string }) => [f.title, f.stage])).toEqual([
-      ["CSV export", "planned"],
-      ["Dark mode", "considering"],
-      ["Shipped", "released"],
+      ["Download your data.", "planned"],
+      ["A dark theme.", "considering"],
+      ["Now live.", "released"],
     ]);
 
     expect((await visitor(t!.app, "x".repeat(32))("GET", "/api/portal")).statusCode).toBe(404);

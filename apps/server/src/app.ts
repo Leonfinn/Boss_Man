@@ -2266,6 +2266,7 @@ export async function buildApp(opts: AppOptions) {
       portalVisible: z.boolean(),
       keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
+      publicTitle: z.string().trim().max(200).nullable(),
       showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {

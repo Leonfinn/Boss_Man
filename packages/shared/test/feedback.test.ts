@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { demandScore, keywords, looksLikeSecurity, portalVerdict, priorityScore, suggestFeatures } from "../src/index.js";
+import { demandScore, keywords, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures } from "../src/index.js";
 
 describe("demandScore", () => {
   it("counts each customer once, at their most important level", () => {
@@ -75,5 +75,14 @@ describe("portalVerdict", () => {
     expect(portalVerdict({ title: "Dark mode", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "needs public summary" });
     // Security still wins over a missing summary: the reason it is off is the security work.
     expect(portalVerdict({ title: "Secrets manager", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "security" });
+  });
+});
+
+describe("portalTitle", () => {
+  it("prefers the public title, then the public summary's first line, and nothing when neither is written", () => {
+    expect(portalTitle("Settings, tidied", "A summary.")).toBe("Settings, tidied");
+    expect(portalTitle("  ", "A dark theme you can switch on.\nTeam-only detail.")).toBe("A dark theme you can switch on.");
+    expect(portalTitle(null, null)).toBeNull();
+    expect(portalTitle("  ", "   \n")).toBeNull();
   });
 });
