@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
 import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
@@ -111,10 +112,27 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
 
 /** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
 export function NewBuildBanner({ newer }: { newer: boolean }) {
+  // BOS-773: if this browser holds any kept text, say plainly that reloading won't lose it, so the
+  // owner isn't warned off by the reload prompt. Kept live: it changes as drafts are typed and cleared.
+  const [kept, setKept] = useState(() => hasAnyDraft());
+  useEffect(() => {
+    if (!newer) return;
+    const update = () => setKept(hasAnyDraft());
+    update();
+    window.addEventListener(DRAFT_CHANGED, update);
+    window.addEventListener("storage", update);
+    return () => {
+      window.removeEventListener(DRAFT_CHANGED, update);
+      window.removeEventListener("storage", update);
+    };
+  }, [newer]);
   if (!newer) return null;
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <span>Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.</span>
+      <span>
+        Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.
+        {kept ? " What you have written is kept: it comes back when the page reloads." : ""}
+      </span>
       <button className="btn" type="button" onClick={() => window.location.reload()}>
         Reload
       </button>
