@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { runLabel, type RunOrigin } from "@boss-man/shared";
 import { api, usd, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
@@ -155,6 +156,41 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
   );
 }
 
+/** The owner's emergency stop (BOS-837): ends every run going now, in every company, after a plain confirm. */
+function EndAllRuns({ count, onDone }: { count: number; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<{ ok: boolean; text: string } | null>(null);
+  const end = async () => {
+    const go = window.confirm(
+      `End all ${count} running run${count === 1 ? "" : "s"}, in every company? They stop now. Work they haven't committed is lost; commits they've already made are kept.`,
+    );
+    if (!go) return;
+    setBusy(true);
+    setSaid(null);
+    try {
+      const r = await api<{ cancelled: number }>("/api/runs/cancel-all", { method: "POST" });
+      setSaid({ ok: true, text: r.cancelled ? `Ended ${r.cancelled} run${r.cancelled === 1 ? "" : "s"}.` : "No runs were running, so nothing was ended." });
+      onDone();
+    } catch (err) {
+      setSaid({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <button type="button" className="btn" disabled={busy} onClick={() => void end()} style={{ color: "var(--red-ink)" }}>
+        {busy ? "Ending…" : "End all running runs"}
+      </button>
+      {said && (
+        <p role={said.ok ? "status" : "alert"} className={said.ok ? "muted" : "error"} style={{ margin: 0, fontSize: 14 }}>
+          {said.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function Runs({ companies }: { companies: Company[] }) {
   const active = usePoll((signal) => api<RunRow[]>("/api/runs", { signal }), 5_000, "active");
   const recent = usePoll((signal) => api<RunRow[]>("/api/runs/recent?limit=50", { signal }), 15_000, "recent");
@@ -170,7 +206,14 @@ export function Runs({ companies }: { companies: Company[] }) {
         <h2 id="running-h" style={{ fontSize: 18, fontWeight: 600 }}>
           Running now
         </h2>
-        {active.data?.length ? <RunTable rows={active.data} companies={companies} finished={false} /> : <p className="muted">No agents are running.</p>}
+        {active.data?.length ? (
+          <>
+            <RunTable rows={active.data} companies={companies} finished={false} />
+            <EndAllRuns count={active.data.length} onDone={() => (active.reload(), recent.reload())} />
+          </>
+        ) : (
+          <p className="muted">No agents are running.</p>
+        )}
       </section>
       <section aria-labelledby="recent-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <h2 id="recent-h" style={{ fontSize: 18, fontWeight: 600 }}>
