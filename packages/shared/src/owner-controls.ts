@@ -123,6 +123,8 @@ export const OWNER_CONTROLS = {
     "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // This host (BOS-924): the reported facts fold away behind a one-line header; the arrow opens them.
+    "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
