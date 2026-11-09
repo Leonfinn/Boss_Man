@@ -250,6 +250,8 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
+    /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
+    onMerged?: (ticketId: string) => Promise<unknown>;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -471,6 +473,11 @@ export function reviewService(
    * The work landed: done, unless a criterion can only be checked now that it is live (DR-024 #5). Then
    * the ticket goes back to its assignee to show those before it can close.
    */
+  async function announceMerged(ticketId: string) {
+    // The merge has landed; a failure to free a waiting ticket must not undo it. The release sweep catches it later.
+    await deps.onMerged?.(ticketId).catch(() => undefined);
+  }
+
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null, files?: string[]) {
     // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
     // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
@@ -480,6 +487,7 @@ export function reviewService(
       // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
       .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
+    await announceMerged(t.id);
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });
     if (commit) await tellCeoLiveFix(t, commit).catch(() => undefined);
@@ -1809,7 +1817,8 @@ export function reviewService(
       // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
       const mine = await closeAfterMerge(t, m.commit, causedByRunId, changed?.files.map((f) => f.path));
       for (const c of together) {
-        await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
+        await db.update(tickets).set({ mergeCommit: m.commit, lastActivityAt: new Date() }).where(eq(tickets.id, c.ticketId));
+        await announceMerged(c.ticketId);
         // A fix riding along on this merge is just as live (BOS-639).
         const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));
         if (rider) await tellCeoLiveFix(rider, m.commit).catch(() => undefined);
