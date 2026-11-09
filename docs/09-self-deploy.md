@@ -35,7 +35,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
    ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
-6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
+6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at any service that takes a JSON POST (ntfy needs a small relay, see `docs/06`).
 7. The server can write **one folder** and read **one folder**. It can never run anything on the host, and the host never executes anything from the request.
 8. At most **one deploy per target every 10 minutes**; the cron job runs every minute.
 
@@ -144,7 +144,7 @@ A server update rolls only the server copies. It never starts, stops or recreate
 `host.conf`, a root-owned file (shell `KEY=value` lines):
 
 ```sh
-WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
 WEBHOOK_ON_SUCCESS=0   # 1 = also post when a deploy succeeds
 ```
 
@@ -154,7 +154,7 @@ On a failure the script POSTs `Content-Type: application/json`:
 { "result": "failed", "message": "…", "from_commit": "…", "to_commit": "…", "at": "2026-10-20T12:03:00Z" }
 ```
 
-Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test and a Home Assistant automation are in `docs/06`.
+Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test is in `docs/06`.
 
 ## Decisions in Boss Man
 
@@ -373,7 +373,7 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
    - `python3` and `flock` on root's cron PATH;
    - `git ls-remote` from cron, over https or with the deploy key (whichever `origin` uses);
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
-3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
+3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any restore of the service it points at.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
 
 ## Why a runner update can be refused, and what the status shows (BOS-364)
