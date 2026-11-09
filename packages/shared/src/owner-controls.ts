@@ -43,6 +43,8 @@ export const OWNER_CONTROLS = {
     "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
+    // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
+    "Show fewer",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
@@ -53,7 +55,7 @@ export const OWNER_CONTROLS = {
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
-    "Show all done tasks", "Run now",
+    "Show all done tasks", "Run now", "Discard draft",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
@@ -61,7 +63,7 @@ export const OWNER_CONTROLS = {
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Mark urgent", "Marked urgent", "Edit steps", "Save steps",
+    "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
@@ -76,15 +78,20 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
-  Plan: ["Refresh"],
+  Plan: [
+    "Refresh",
+    // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
+    // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
+    "What's holding work up …", "Show all …", "Show fewer",
+  ],
   Wiki: [
     "Show older versions", "Loading",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
-    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page",
+    "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature",
+    "Save summary", "Delete feature", "Discard draft",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",

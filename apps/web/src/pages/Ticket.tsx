@@ -13,6 +13,7 @@ import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
+import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
 import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
@@ -292,7 +293,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraftRaw] = useState<string | null>(null);
+  // Kept in this browser as it is typed (BOS-773), so a reload doesn't lose an edited description.
+  const editDraftKey = `ticket-edit/${id}/body`;
+  const setDraft = (text: string | null) => {
+    setDraftRaw(text);
+    if (text === null) return;
+    keepDraftText(editDraftKey, text);
+  };
+  const startEdit = () => setDraft(readDraft(editDraftKey) || (t?.body ?? ""));
   const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
@@ -359,7 +368,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     if (draft === null) return;
     await patch({ body: withAttachments(draft, img.attached).trim() || null });
     img.clear();
-    setDraft(null);
+    clearDraft(editDraftKey);
+    setDraftRaw(null);
   };
   // Too long for a description: put the text in a .txt file, link it in the description, so the agent can open it.
   const saveDraftAsFile = async (long: string) => {
@@ -367,7 +377,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       const markdown = await img.uploadText(long, "description.txt");
       await patch({ body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() });
       img.clear();
-      setDraft(null);
+      clearDraft(editDraftKey);
+      setDraftRaw(null);
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     }
@@ -658,7 +669,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 )}
               </h2>
               {draft === null && (
-                <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={() => setDraft(t.body ?? "")}>
+                <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={startEdit}>
                   Edit
                 </button>
               )}
@@ -673,6 +684,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )
             ) : (
               <>
+                {readDraft(editDraftKey) && (
+                  <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+                    Draft restored. It stays in this browser until you save or discard it.{" "}
+                    <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(editDraftKey); setDraftRaw(t?.body ?? ""); }}>
+                      Discard draft
+                    </button>
+                  </p>
+                )}
                 <OwnerMessageBox
                   id="t-body"
                   label="Description, in Markdown"
@@ -694,7 +713,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLongToSend(draft, img.attached)} onClick={() => void saveDraft()}>
                     Save description
                   </button>
-                  <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>
+                  <button type="button" className="btn" onClick={() => { img.clear(); setDraftRaw(null); }}>
                     Cancel
                   </button>
                 </div>

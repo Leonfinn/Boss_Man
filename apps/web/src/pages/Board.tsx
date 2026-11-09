@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -7,6 +7,7 @@ import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { away } from "../server-watch";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
@@ -141,16 +142,84 @@ type NewFeatureInput = { title: string; description: string | null; planWithCeo:
 /** What the add form was opened for: a feature, or a task (optionally inside one feature). */
 type Adding = { mode: "feature" | "task"; featureId: string };
 
+/**
+ * The New task / New feature form, one draft per project and form type (BOS-773): a reload or the
+ * "please reload" prompt must not take what the owner wrote. The draft goes only once the task or
+ * feature is created, or the owner presses Discard; Cancel keeps it on purpose.
+ */
+type FormDraft = { mode: "feature" | "task"; title: string; body: string; risk: Risk | "none"; assignee: string; feature: string; plan: boolean; goal: GoalLink; criteria: string; after: number[]; attached: string[] };
+
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
-function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
+function AddForm({ companyId, projectId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; projectId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "", after: new Set<number>() };
+  const draftKey = (mode: "feature" | "task") => `new-${mode}/${companyId}/${projectId}`;
+  // Restoring is worked out once, before the first save, or the save would write the blank form over it.
   const [mode, setMode] = useState(initial.mode);
-  const [form, setForm] = useState(blank);
+  const [restored, setRestored] = useState(() => readDraftJson<FormDraft>(draftKey(initial.mode)));
+  const [form, setForm] = useState(() => (restored ? { ...blank, ...restored, goal: restored.goal ?? blank.goal, after: new Set(restored.after ?? []) } : blank));
   const img = useImageAttach(companyId);
+  // A restored draft keeps its attached files: they are already uploaded, so their links go back with it.
+  // After the first render, so it is this form's attachment state and not the hook's opening order.
+  useEffect(() => {
+    if (restored?.attached?.length) img.setAttached(restored.attached);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  // Set while switching tabs: the save effect must not run for the swapped-over form, or the tab
+  // being left could save its text under the key of the one being opened.
+  const reading = useRef(false);
   const isFeature = mode === "feature";
-  const leaving = () => img.clear();
+  // What the form holds that is worth keeping; an untouched form has no draft at all.
+  const settingsTouched = form.assignee !== "" || form.risk !== "none" || form.plan !== blank.plan || !!form.goal.objectiveId || !!form.goal.milestoneId;
+  const filled = () => !!(form.title.trim() || form.body.trim() || form.criteria.trim() || settingsTouched || img.attached.length);
+  // Kept as it is typed, under the key for the form on screen; switching tab moves to that one's own draft.
+  useEffect(() => {
+    // A tab swap just settled the new form and its draft; writing again would put a blank (or the old
+    // tab's text) under the new key. switchMode already saved the tab being left.
+    if (reading.current) {
+      reading.current = false;
+      return;
+    }
+    if (!filled()) {
+      clearDraft(draftKey(mode));
+      window.dispatchEvent(new Event(DRAFT_CHANGED));
+      return;
+    }
+    saveFormDraft(draftKey(mode), { ...form, mode, after: [...form.after], attached: img.attached } satisfies FormDraft);
+    setSaved(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, form, img.attached]);
+  // Both tabs keep their own draft (one per project and form type): moving between them saves and swaps.
+  const switchMode = (next: "feature" | "task") => {
+    if (next === mode) return;
+    if (!filled()) {
+      clearDraft(draftKey(mode));
+      window.dispatchEvent(new Event(DRAFT_CHANGED));
+    } else {
+      saveFormDraft(draftKey(mode), { ...form, mode, after: [...form.after], attached: img.attached } satisfies FormDraft);
+    }
+    // The tab being left is saved above; the form below is the one being opened. Skip the save
+    // effect for it, or it would re-save the old text (or a blank) under this tab's key.
+    reading.current = true;
+    const other = readDraftJson<FormDraft>(draftKey(next));
+    setMode(next);
+    setError(null);
+    setRestored(other);
+    setSaved(false);
+    setForm(other ? { ...blank, ...other, goal: other.goal ?? blank.goal, after: new Set(other.after ?? []) } : blank);
+    img.setAttached(other?.attached ?? []);
+  };
+  const discardDraft = () => {
+    clearDraft(draftKey(mode));
+    window.dispatchEvent(new Event(DRAFT_CHANGED));
+    setForm(blank);
+    img.clear();
+    setRestored(null);
+    setSaved(false);
+    setError(null);
+  };
   // Plan first follows the risk level: high and critical work is planned and approved first.
   const planFirst = form.risk === "high" || form.risk === "critical";
   const body = () => withAttachments(form.body, img.attached).trim();
@@ -175,9 +244,13 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
             .filter((x) => x.line)
             .map((x): Criterion => (x.on ? { text: x.line, after: "merge" } : x.line)),
         });
+      // Created: the draft goes, or a reload would offer to create it again. A failed create keeps it.
+      clearDraft(draftKey(mode));
+      window.dispatchEvent(new Event(DRAFT_CHANGED));
+      img.clear();
       onClose();
     } catch (err) {
-      setError((err as Error).message);
+      setError(`${(err as Error).message} What you wrote is still here: it wasn't saved as a task.`);
     } finally {
       setBusy(false);
     }
@@ -188,8 +261,12 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
     setBusy(true);
     try {
       await onGrill({ kind: mode, title: form.title.trim(), description: body() || null });
+      // Handed to the CEO: the CEO's conversation now holds it, and the draft must not create it twice.
+      clearDraft(draftKey(mode));
+      window.dispatchEvent(new Event(DRAFT_CHANGED));
+      img.clear();
     } catch (err) {
-      setError((err as Error).message);
+      setError(`${(err as Error).message} What you wrote is still here: it wasn't handed to the CEO.`);
       setBusy(false);
     }
   };
@@ -216,11 +293,19 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
     >
       <div role="radiogroup" aria-label="What are you adding?" style={{ display: "flex", gap: 8 }}>
         {(["feature", "task"] as const).map((m) => (
-          <button key={m} type="button" role="radio" aria-checked={mode === m} className={`btn${mode === m ? " primary" : ""}`} onClick={() => setMode(m)}>
+          <button key={m} type="button" role="radio" aria-checked={mode === m} className={`btn${mode === m ? " primary" : ""}`} onClick={() => switchMode(m)}>
             {m === "feature" ? "New feature" : "New task"}
           </button>
         ))}
       </div>
+      {restored && (
+        <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+          Draft restored. It's kept in this browser until you add it or discard it.{" "}
+          <button type="button" className="link" style={{ padding: 0 }} onClick={discardDraft}>
+            Discard draft
+          </button>
+        </p>
+      )}
       <div className="field">
         <label htmlFor="nt-title">Title</label>
         <input id="nt-title" autoFocus required maxLength={200} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
@@ -355,7 +440,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
             Let the CEO question me first
           </button>
         )}
-        <button className="btn" type="button" onClick={() => { leaving(); onClose(); }}>
+        <button className="btn" type="button" onClick={onClose}>
           Cancel
         </button>
         <span className="muted" style={{ fontSize: 13 }}>
@@ -589,6 +674,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         <AddForm
           key={adding.n}
           companyId={current.companyId}
+          projectId={current.id}
           initial={adding}
           agents={company?.agents ?? []}
           features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")}

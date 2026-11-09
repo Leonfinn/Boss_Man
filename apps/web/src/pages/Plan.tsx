@@ -188,12 +188,12 @@ export function Causes({ plan }: { plan: PlanData }) {
   return (
     <section className="card" aria-labelledby="causes-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div className="pl-causes-head">
-        <button type="button" className="pl-causes-toggle" aria-expanded={!rolled} aria-controls="causes-body" onClick={toggleRolled}>
-          <span className="pl-arrow" aria-hidden="true">{rolled ? "▸" : "▾"}</span>
-          <h2 id="causes-h" style={{ fontSize: 17, fontWeight: 600 }}>
+        <h2 id="causes-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          <button type="button" className="pl-causes-toggle" aria-expanded={!rolled} aria-controls="causes-body" onClick={toggleRolled}>
+            <span className="pl-arrow" aria-hidden="true">{rolled ? "▸" : "▾"}</span>
             What's holding work up ({total})
-          </h2>
-        </button>
+          </button>
+        </h2>
       </div>
       <div id="causes-body" hidden={rolled} style={rolled ? { display: "none" } : { display: "flex", flexDirection: "column", gap: 10 }}>
       <ul className="pl-causes" id="causes-list">

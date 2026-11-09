@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NewBuildBanner } from "../src/App";
 import { mainScriptOf, newerBuild } from "../src/new-build";
+import { clearAllDrafts, saveDraft } from "../src/drafts";
 
 // An open tab kept running the old screens after an update, so a new card's commands showed as raw text (BOS-550).
 
@@ -48,5 +49,15 @@ describe("noticing newer screens on the server (BOS-550)", () => {
     expect(screen.getByRole("status").textContent).toMatch(/has been updated since this page was opened/);
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalled();
+  });
+
+  it("says the owner's text is kept when this browser holds a draft, so the prompt doesn't warn them off (BOS-773)", () => {
+    saveDraft("new-task/c1/p1", "half a task");
+    render(<NewBuildBanner newer />);
+    expect(screen.getByRole("status").textContent).toMatch(/What you have written is kept/);
+    cleanup();
+    clearAllDrafts();
+    render(<NewBuildBanner newer />);
+    expect(screen.getByRole("status").textContent).not.toMatch(/kept/);
   });
 });
