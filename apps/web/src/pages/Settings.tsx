@@ -2395,7 +2395,7 @@ export function RunLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; reason: string | null; pending: number; applying: boolean } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -2475,6 +2475,11 @@ export function CheckQueueSetting() {
             Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB of memory each).
             {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
             {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}
+          </p>
+        )}
+        {d.runner && (d.runner.runnerCount ?? 0) > 1 && (
+          <p className="muted" style={{ fontSize: 14 }} data-testid="check-runner-shared-host">
+            This machine runs {d.runner.runnerCount} runners (one per company). Each is sized from the machine's whole memory, not a share of it, so together they can be promised more than the machine has. If several companies run checks at once, keep the number low.
           </p>
         )}
       </div>

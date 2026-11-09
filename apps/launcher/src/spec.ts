@@ -117,9 +117,15 @@ export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(comp
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
 const GIB = 1024 ** 3;
-/** A runner's memory: this much for the agents' own work, plus one allowance per check slot (a full check peaks at about 3 GB). One slot = 4 GB, as before. */
-export const RUNNER_BASE_BYTES = 1 * GIB;
+/**
+ * A runner's memory: this much for everything the company's agents run at once (they all live in the one runner; the live runner
+ * needed 16 GB with one check slot), plus one allowance per check slot (a full check peaks at about 3 GB).
+ * So 1 slot = 16 GB, 2 = 19 GB, 3 = 22 GB (13 GB plus 3 GB a slot). It is always cut down to what the host has (see HOST_RESERVE_BYTES).
+ */
+export const RUNNER_BASE_BYTES = 13 * GIB;
 export const RUNNER_PER_SLOT_BYTES = 3 * GIB;
+/** The least a runner is given, even on a small host (the old default). */
+export const RUNNER_MIN_BYTES = 4 * GIB;
 /** Memory kept back on the host for the server, database and proxy when sizing a runner from the host's total. */
 export const HOST_RESERVE_BYTES = 2 * GIB;
 
@@ -142,11 +148,11 @@ const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
 export function planChecks(cfg: LauncherConfig): ChecksPlan {
   if (cfg.requestedSlots === undefined) return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null };
   const want = cfg.requestedSlots;
-  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES) : Infinity;
-  const ceiling = Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling);
+  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_MIN_BYTES) : Infinity;
+  const ceiling = Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
   const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - RUNNER_BASE_BYTES) / RUNNER_PER_SLOT_BYTES)) : Infinity;
   const slots = Math.min(want, cfg.envSlotsCap ?? Infinity, fits);
-  const memoryBytes = Math.max(Math.min(RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES * slots, ceiling), RUNNER_BASE_BYTES);
+  const memoryBytes = Math.min(RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES * slots, ceiling);
   let reason: string | null = null;
   if (slots < want) {
     if (cfg.envSlotsCap !== undefined && slots === cfg.envSlotsCap) reason = `The host's .env caps it at ${slots} (BOSSMAN_CHECK_SLOTS).`;

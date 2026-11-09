@@ -1384,6 +1384,8 @@ export async function buildApp(opts: AppOptions) {
             memoryBytes: lc.memoryBytes,
             // Only meaningful once the launcher has been sent the setting; before that it is the .env value.
             reason: lc.requested === slots ? lc.reason : null,
+            // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
+            runnerCount: lc.runners.length,
             pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,
             applying: hold?.kind === "settings",
           }

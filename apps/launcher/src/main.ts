@@ -65,7 +65,9 @@ const cfg: LauncherConfig = {
   ...(env.BOSSMAN_CHECK_SLOTS?.trim() ? { envSlotsCap: parseCheckSlots(env.BOSSMAN_CHECK_SLOTS) } : {}),
   ...(env.BOSSMAN_RUNNER_MEMORY?.trim() ? { envMemoryCap: parseMemory(env.BOSSMAN_RUNNER_MEMORY) } : {}),
   ...(hostMemoryBytes() ? { hostMemoryBytes: hostMemoryBytes() } : {}),
-  ...(savedSlots() ? { requestedSlots: savedSlots() } : {}),
+  // Nothing saved yet: the default setting (1) sizes the runner when the host has no .env slot or memory value (the cleaned-up
+  // state), so a runner made before the server's first push is not left on the old 4 GB. With .env values, they apply as before.
+  ...(savedSlots() ? { requestedSlots: savedSlots() } : env.BOSSMAN_CHECK_SLOTS?.trim() || env.BOSSMAN_RUNNER_MEMORY?.trim() ? {} : { requestedSlots: 1 }),
   opencodeSessionDays: parseOpencodeSessionDays(env.BOSSMAN_OPENCODE_SESSION_DAYS),
   pnpmStoreDir: parsePnpmStoreDir(env.PNPM_STORE_DIR),
   cpus: parseCpus(env.BOSSMAN_RUNNER_CPUS),
