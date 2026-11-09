@@ -309,6 +309,21 @@ export function taskSummary(f: Feature): string {
   return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
 }
 
+/** The "On portal" tick on a list row (BOS-957): saves at once, and says why a feature is held off when it is. */
+function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+  const reason = f.portal?.reason ?? null;
+  const hint = !f.portalVisible && (reason === "security" || reason === "sensitive") ? `kept off: ${reason}` : reason === "needs public summary" ? "needs public summary" : null;
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
+        <input type="checkbox" aria-label={`On portal: ${f.title}`} checked={f.portalVisible} onChange={(e) => onPatch(f.id, { portalVisible: e.target.checked })} />
+        <span className="muted" style={{ fontSize: 12 }}>On portal</span>
+      </label>
+      {hint && <small className="muted" style={{ fontSize: 11 }}>{hint}</small>}
+    </span>
+  );
+}
+
 function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: (id: string, body: Record<string, unknown>) => void }) {
   const summary = taskSummary(f);
   const foldable = f.tickets.items.length > 0;
@@ -323,8 +338,10 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
             </button>
           )}
           <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
-          {f.portalVisible && <span className="tag">portal</span>}
         </span>
+      </td>
+      <td style={{ whiteSpace: "nowrap" }}>
+        <PortalTick f={f} onPatch={onPatch} />
       </td>
       <td>
         <select className="mini" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
@@ -370,7 +387,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
     </tr>
     {foldable && (
       <tr id={`feature-tasks-${f.id}`} hidden={!open}>
-        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
+        <td colSpan={8 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
           <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
             {f.tickets.items.map((t) => (
               <li key={t.id}>
@@ -428,13 +445,16 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
     setFold(next);
     saveFeatureOpen(next);
   };
-  const cols = 7 + (d?.drivers.length ?? 0);
+  const cols = 8 + (d?.drivers.length ?? 0);
   return (
     <>
       <header className="page-head">
         <div>
           <h1>Features</h1>
           <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
+          <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+          </p>
         </div>
       </header>
       {!company ? (
@@ -479,6 +499,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <thead>
                   <tr>
                     <th>Feature</th>
+                    <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
@@ -622,11 +643,15 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // the box is being edited, and it goes once the server has taken the summary.
   const summaryDraftKey = `feature-summary/${id}`;
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
+  // The public title is saved with the summary, so the owner is not left with a summary that still shows the internal
+  // title to visitors (BOS-991).
+  const publicTitleDraftKey = `feature-public-title/${id}`;
+  const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveSummary = (summary: string) =>
-    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
-      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), data.reload()),
+    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
+      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
   if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
@@ -825,6 +850,11 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
         </label>
+        {f.portal?.reason === "needs public summary" && <p className="muted" style={{ fontSize: 13 }}>Held off the portal until you write a public summary below: visitors see the public summary and its first line, not the internal title or description.</p>}
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
+          Keep off the portal (sensitive)
+        </label>
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.
@@ -837,8 +867,18 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           Public roadmap
         </h2>
         <p className="muted" style={{ fontSize: 13 }}>
-          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap.
+          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap. Visitors to the feedback portal see the public summary as the description and its first line as the title, or the public title below when you write one; they never see this feature's internal title.
         </p>
+        <div className="field">
+          <label htmlFor="f-public-title">Public title (optional)</label>
+          <input
+            id="f-public-title"
+            maxLength={200}
+            placeholder="Shown to visitors; leave empty to use the public summary's first line"
+            value={publicTitleDraft ?? f.publicTitle ?? ""}
+            onChange={(e) => setPublicTitleDraft(e.target.value)}
+          />
+        </div>
         <div className="field">
           <label htmlFor="f-public-summary">Public summary</label>
           <DraftTextarea
@@ -851,7 +891,12 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>
+          <button
+            type="button"
+            className="btn small"
+            disabled={(summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")) && (publicTitleDraft === null || publicTitleDraft.trim() === (f.publicTitle ?? ""))}
+            onClick={() => saveSummary(summaryDraft ?? f.publicSummary ?? "")}
+          >
             Save summary
           </button>
           <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>

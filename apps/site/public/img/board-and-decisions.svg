@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 760" width="1160" height="760" role="img" aria-labelledby="bd-title bd-desc">
+  <title id="bd-title">The board and Decisions: tickets sit in six columns; a ticket that needs you becomes a card in Decisions; the menu badge counts only the cards that need you now</title>
+  <desc id="bd-desc">The board has six columns: Backlog, Ready, In progress, Blocked, Review and Done. The Review column has two lanes, Awaiting review and Approved, merging. A separate lane called Your review holds tickets from any column that are waiting on you; its cards have a Review and approve button for a sign-off, or an Answer in Decisions button for a question. Each ask also becomes a card in the Decisions queue, such as a Permission, an Approval or a Question. Cards that need you now sit at the top, and the Decisions menu badge counts only those. Cards in the group called Waiting, nothing to do yet are not counted. They are there because you already answered and the agent is checking, or because the ticket is back with an agent after a failed merge check or a review that was sent back.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="bd-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="bd-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#c8282f"/></marker>
+  </defs>
+  <rect width="1160" height="760" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">The board shows every ticket. Decisions collects what needs your answer.</text>
+
+  <!-- board columns -->
+  <text x="0" y="52" class="d" font-size="18" fill="#17202c">1. The board: six columns</text>
+  <!-- Backlog -->
+  <rect x="0" y="64" width="178" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="64" width="178" height="34" rx="10" fill="#17202c"/><rect x="0" y="86" width="178" height="12" fill="#17202c"/>
+  <text x="14" y="87" class="d" font-size="16" fill="#eef2f6">Backlog</text>
+  <text x="14" y="122" class="b" font-size="13" fill="#17202c">Written, not started.</text>
+  <rect x="14" y="140" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/><rect x="14" y="174" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <!-- Ready -->
+  <rect x="196" y="64" width="178" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="196" y="64" width="178" height="34" rx="10" fill="#17202c"/><rect x="196" y="86" width="178" height="12" fill="#17202c"/>
+  <text x="210" y="87" class="d" font-size="16" fill="#eef2f6">Ready</text>
+  <text x="210" y="122" class="b" font-size="13" fill="#17202c">An agent can take it.</text>
+  <rect x="210" y="140" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <!-- In progress -->
+  <rect x="392" y="64" width="178" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="392" y="64" width="178" height="34" rx="10" fill="#17202c"/><rect x="392" y="86" width="178" height="12" fill="#17202c"/>
+  <text x="406" y="87" class="d" font-size="16" fill="#eef2f6">In progress</text>
+  <text x="406" y="122" class="b" font-size="13" fill="#17202c">An agent is working.</text>
+  <rect x="406" y="140" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/><rect x="406" y="174" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <!-- Blocked -->
+  <rect x="588" y="64" width="178" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="588" y="64" width="178" height="34" rx="10" fill="#17202c"/><rect x="588" y="86" width="178" height="12" fill="#17202c"/>
+  <text x="602" y="87" class="d" font-size="16" fill="#eef2f6">Blocked</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="602" y="122">Waiting on something:</text><text x="602" y="140">a ticket, or your answer.</text></g>
+  <rect x="602" y="160" width="150" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <!-- Review -->
+  <rect x="784" y="64" width="178" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="784" y="64" width="178" height="34" rx="10" fill="#17202c"/><rect x="784" y="86" width="178" height="12" fill="#17202c"/>
+  <text x="798" y="87" class="d" font-size="16" fill="#eef2f6">Review</text>
+  <rect x="796" y="108" width="154" height="54" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <text x="806" y="128" class="bb" font-size="13" fill="#17202c">Awaiting review</text><text x="806" y="148" class="b" font-size="12" fill="#3d4757">Agent asked for review</text>
+  <rect x="796" y="170" width="154" height="54" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+  <text x="806" y="190" class="bb" font-size="13" fill="#17202c">Approved, merging</text><text x="806" y="210" class="b" font-size="12" fill="#3d4757">Boss Man merges it</text>
+  <!-- Done -->
+  <rect x="980" y="64" width="180" height="170" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="980" y="64" width="180" height="34" rx="10" fill="#17202c"/><rect x="980" y="86" width="180" height="12" fill="#17202c"/>
+  <text x="994" y="87" class="d" font-size="16" fill="#eef2f6">Done</text>
+  <text x="994" y="122" class="b" font-size="13" fill="#17202c">Merged or closed.</text>
+  <rect x="994" y="140" width="152" height="26" rx="6" fill="#ffffff" stroke="#c3cbd6"/>
+
+  <!-- your review lane -->
+  <g stroke="#c8282f" stroke-width="2.5" fill="none" marker-end="url(#bd-arr)">
+    <path d="M89 292 V240"/><path d="M285 292 V240"/><path d="M481 292 V240"/><path d="M677 292 V240"/><path d="M873 292 V240"/>
+  </g>
+  <rect x="0" y="296" width="1160" height="70" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="16" y="322" class="d" font-size="18" fill="#17202c">Your review</text>
+  <text x="16" y="346" class="b" font-size="14" fill="#17202c">Tickets from any column that wait on you. A strip at the top of the board counts them.</text>
+  <rect x="780" y="310" width="178" height="42" rx="8" fill="#c8282f"/><text x="869" y="336" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">Review and approve</text>
+  <rect x="970" y="310" width="176" height="42" rx="8" fill="#17202c"/><text x="1058" y="336" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">Answer in Decisions</text>
+
+  <path d="M1058 370 V418 H770" fill="none" stroke="#c8282f" stroke-width="3" marker-end="url(#bd-arr)"/>
+  <text x="780" y="402" class="b" font-size="13" fill="#3d4757">A question or a sign-off is also a card here</text>
+
+  <!-- decisions queue -->
+  <text x="0" y="408" class="d" font-size="18" fill="#17202c">2. The Decisions queue: one card per ask</text>
+  <rect x="0" y="424" width="760" height="326" rx="14" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+
+  <rect x="16" y="440" width="728" height="152" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="32" y="466" class="d" font-size="17" fill="#17202c">Needs you now</text>
+  <text x="728" y="466" class="bb" font-size="14" text-anchor="end" fill="#c8282f">3 cards</text>
+  <rect x="32" y="478" width="696" height="32" rx="6" fill="#eef2f6"/><text x="44" y="499" class="bb" font-size="13" fill="#17202c">Permission</text><text x="150" y="499" class="b" font-size="13" fill="#17202c">An agent wants to run a command it is not yet allowed to</text>
+  <rect x="32" y="516" width="696" height="32" rx="6" fill="#eef2f6"/><text x="44" y="537" class="bb" font-size="13" fill="#17202c">Approval</text><text x="150" y="537" class="b" font-size="13" fill="#17202c">A finished ticket is waiting for your sign-off</text>
+  <rect x="32" y="554" width="696" height="32" rx="6" fill="#eef2f6"/><text x="44" y="575" class="bb" font-size="13" fill="#17202c">Question</text><text x="150" y="575" class="b" font-size="13" fill="#17202c">An agent needs your answer to carry on</text>
+
+  <rect x="16" y="608" width="728" height="130" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="32" y="634" class="d" font-size="17" fill="#17202c">Waiting, nothing to do yet</text>
+  <text x="728" y="634" class="bb" font-size="14" text-anchor="end" fill="#3d4757">2 cards, not counted</text>
+  <rect x="32" y="646" width="696" height="38" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="44" y="670" class="b" font-size="13" fill="#17202c">You answered, and the agent is checking the card is still needed</text>
+  <rect x="32" y="690" width="696" height="38" rx="6" fill="#ffffff" stroke="#c3cbd6"/><text x="44" y="714" class="b" font-size="13" fill="#17202c">The ticket is back with an agent: a failed merge check or a sent-back review</text>
+
+  <!-- sidebar -->
+  <text x="800" y="466" class="d" font-size="18" fill="#17202c">3. The menu badge</text>
+  <rect x="800" y="480" width="360" height="190" rx="12" fill="#17202c"/>
+  <text x="820" y="512" class="b" font-size="15" fill="#c3cbd6">Projects</text>
+  <rect x="812" y="530" width="336" height="44" rx="8" fill="#2a3646"/>
+  <text x="832" y="558" class="bb" font-size="16" fill="#eef2f6">Decisions</text>
+  <circle cx="1114" cy="552" r="15" fill="#f0b75c"/><text x="1114" y="558" class="bb" font-size="16" text-anchor="middle" fill="#17202c">3</text>
+  <text x="820" y="604" class="b" font-size="15" fill="#c3cbd6">Runs</text>
+  <text x="820" y="640" class="b" font-size="13" fill="#f0b75c">Counts the cards that need you now.</text>
+  <text x="820" y="658" class="b" font-size="13" fill="#f0b75c">The waiting group is left out.</text>
+  <path d="M746 552 H808" fill="none" stroke="#c8282f" stroke-width="3.5" marker-end="url(#bd-arr)"/>
+  <rect x="800" y="690" width="360" height="48" rx="10" fill="#ffffff" stroke="#17202c" stroke-width="2"/>
+  <text x="816" y="712" class="bb" font-size="14" fill="#17202c">Page heading: "3 decisions to do · 2 waiting"</text>
+  <text x="816" y="729" class="b" font-size="12" fill="#3d4757">Same numbers as the badge.</text>
+</svg>

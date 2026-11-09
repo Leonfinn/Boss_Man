@@ -44,13 +44,15 @@ if [ -n "$chrome" ] && command -v node >/dev/null && addr=$("$here/browser-check
   node -e '
     const s = require("http").createServer((q, r) => r.end("<script>document.title = String(typeof navigator.clipboard)</script>"));
     s.listen(0, "0.0.0.0", () => console.log(s.address().port));
-    setTimeout(() => process.exit(0), 60000);' >"$t/port" &
+    setTimeout(() => process.exit(0), 300000);' >"$t/port" &
   srv=$!
   for _ in $(seq 50); do [ -s "$t/port" ] && break; sleep 0.1; done
   port=$(cat "$t/port"); host=${addr#http://}; host=${host%:1/}
-  title() { "$chrome" --headless --no-sandbox --disable-gpu --virtual-time-budget=3000 --dump-dom "$1" 2>/dev/null | sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p'; }
-  [ "$(title "http://127.0.0.1:$port/")" = "object" ] || fail "demo: clipboard missing on localhost"
-  [ "$(title "http://$host:$port/")" = "undefined" ] || fail "demo: clipboard present on $host"
+  # A cold Chrome can take over a minute to start on a shared CI runner (it outlived the server's old 60 s exit there,
+  # leaving an empty title): skip its background networking and first-run work, and give each load its own bound.
+  title() { timeout 120 "$chrome" --headless --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-component-update --virtual-time-budget=3000 --dump-dom "$1" 2>/dev/null | sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p' || true; }
+  got=$(title "http://127.0.0.1:$port/"); [ "$got" = "object" ] || fail "demo: clipboard missing on localhost (title '${got}')"
+  got=$(title "http://$host:$port/"); [ "$got" = "undefined" ] || fail "demo: clipboard present on $host (title '${got}')"
   kill "$srv" 2>/dev/null || true
   echo "demo: clipboard object on localhost, undefined on $host"
 fi

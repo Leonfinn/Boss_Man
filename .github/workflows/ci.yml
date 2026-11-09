@@ -78,6 +78,9 @@ jobs:
           # ships Chrome); Playwright's own Chromium is the fallback when none is there.
           if [ -x /usr/bin/google-chrome ]; then /usr/bin/google-chrome --version; else playwright install --with-deps chromium; fi
       - name: Web tests in a real browser, none skipped
+        env:
+          # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
+          BOSSMAN_SCRATCH: ${{ runner.temp }}
         run: |
           pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
           node -e '
@@ -106,6 +109,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
+        with:
+          # Under /opt, which the merge-check fence lets a check run programs from (apps/runner/src/fence.ts SYSTEM_RO);
+          # the default ~/setup-pnpm is outside it, so clone-fence.test.ts got "pnpm: Permission denied" (BOS-323).
+          dest: ${{ runner.tool_cache }}/pnpm
       - uses: actions/setup-node@v7
         with:
           node-version: 22

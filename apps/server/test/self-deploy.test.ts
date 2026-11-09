@@ -751,8 +751,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
       expect(r.statusCode).toBeGreaterThanOrEqual(400);
       expect(r.json().message ?? r.body).toContain("trial");
-      // After the trial (900 s soak + 120 s margin), still on B: the runner card appears by itself.
-      vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
+      // After the trial (the host's 900 s window), still on B: the runner card appears by itself (BOS-953: no margin).
+      vi.setSystemTime(new Date("2026-11-03T01:16:01Z"));
       await c.selfDeploy.sync();
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
     });
@@ -763,11 +763,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       vi.stubEnv("BOSSMAN_SOAK_SECONDS", "9999");
       try {
         const { c } = await deployedInTrial({ soak_seconds: "60" });
-        // 60 s window + 120 s margin from 01:01:00 = 01:04:00; the env value would hold it for hours.
-        vi.setSystemTime(new Date("2026-11-03T01:03:30Z"));
+        // 60 s window from 01:01:00 = 01:02:00 (BOS-953: the window itself, no extra margin); the env value would hold it for hours.
+        vi.setSystemTime(new Date("2026-11-03T01:01:30Z"));
         await c.selfDeploy.sync();
         expect(await runnerCards(c, B)).toHaveLength(0);
-        vi.setSystemTime(new Date("2026-11-03T01:04:30Z"));
+        vi.setSystemTime(new Date("2026-11-03T01:02:30Z"));
         await c.selfDeploy.sync();
         expect(await runnerCards(c, B)).toHaveLength(1);
       } finally {
@@ -789,8 +789,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("trial");
       const r = await c.req("POST", `/api/decisions/${early!.id}/answer`, { answer: "Update runners" });
       expect(r.statusCode).toBeGreaterThanOrEqual(400);
-      // After 300 s + 120 s the hold is over and the button works again.
-      vi.setSystemTime(new Date("2026-11-03T01:08:30Z"));
+      // After the host's 300 s window the hold is over and the button works again (BOS-953: the window itself, no margin).
+      vi.setSystemTime(new Date("2026-11-03T01:06:30Z"));
       await c.selfDeploy.sync();
       expect((await c.req("POST", "/api/self-deploy/update-runners")).json().decisionId).toBeTruthy();
     });
@@ -858,8 +858,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const msg = (await c.req("POST", "/api/self-deploy/update-runners")).json().message;
       expect(msg).toContain("2-minute trial");
       expect(msg).not.toContain("15-minute");
-      // The hold ends at 120 s soak + 120 s margin, not at the old 900 s + 120 s.
-      vi.setSystemTime(new Date("2026-11-03T01:05:01Z"));
+      // The hold ends at the host's 120 s window (BOS-953: no extra margin), not at the old 900 s.
+      vi.setSystemTime(new Date("2026-11-03T01:03:01Z"));
       await c.selfDeploy.sync();
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
     });
@@ -867,6 +867,74 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     it("falls back to 15 minutes when an older host reports no trial length", async () => {
       const { c } = await deployedInTrial();
       expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("15-minute trial");
+    });
+
+    // BOS-953: the trial ends as soon as the standby colour is stopped, or the window has passed, whichever is first.
+    const coloursWith = (self: "blue" | "green", other: boolean): { enabled: true; self: string; colours: Array<{ colour: string; up: boolean; role: string | null; commit: string | null; startedAt: string | null }> } => ({
+      enabled: true,
+      self,
+      colours: [self, self === "blue" ? "green" : "blue"].map((colour) => ({ colour, up: colour === self ? true : other, role: colour === self ? "leader" : "standby", commit: null, startedAt: null })),
+    });
+    /** A second copy of the same service over the box the app already set up, with a controlled colour probe. */
+    const withColours = (c: Awaited<ReturnType<typeof setup>>, colours: () => Promise<ReturnType<typeof coloursWith>>) =>
+      selfDeployService(c.db, { dir: c.dir, notify: async () => ({}), colours, log: () => {} });
+
+    it("shows the time the trial ends while it is really running (BOS-953)", async () => {
+      const { c } = await deployedInTrial();
+      // Still inside the 15 minutes, standby up: the trial is running and names 01:16.
+      const svc = withColours(c, async () => coloursWith("green", true));
+      vi.setSystemTime(new Date("2026-11-03T01:05:00Z"));
+      const o = await svc.overview();
+      expect(o.trial).toBeTruthy();
+      expect(Date.parse(o.trial!.endsAt)).toBe(Date.parse("2026-11-03T01:16:00Z"));
+      const msg = (await svc.updateRunners() as { error?: string }).error ?? "";
+      expect(msg).toContain("Runners can be updated from");
+      expect(msg).toContain("in about 11 minutes");
+    });
+
+    it("ends the trial at once once the standby colour is stopped, before the 15 minutes are up (BOS-953)", async () => {
+      const { c } = await deployedInTrial();
+      vi.setSystemTime(new Date("2026-11-03T01:10:00Z"));
+      // BLUE is the standby here (green is live) and it is already "Not running": the trial is over.
+      const stopped = withColours(c, async () => coloursWith("green", false));
+      expect((await stopped.overview()).trial).toBeNull();
+      expect((await stopped.updateRunners() as { decisionId?: string }).decisionId).toBeTruthy();
+      // The other colour still up: the trial is not over.
+      const running = withColours(c, async () => coloursWith("green", true));
+      expect((await running.overview()).trial).toBeTruthy();
+    });
+
+    it("ends the trial when 15 minutes have passed with a deployed result (BOS-953)", async () => {
+      const { c } = await deployedInTrial();
+      const svc = withColours(c, async () => coloursWith("green", true));
+      vi.setSystemTime(new Date("2026-11-03T01:15:59Z"));
+      expect((await svc.overview()).trial).toBeTruthy();
+      vi.setSystemTime(new Date("2026-11-03T01:16:00Z"));
+      expect((await svc.overview()).trial).toBeNull();
+    });
+
+    it("still ends the trial 15 minutes on after a later deploy was refused for the rate limit (BOS-953)", async () => {
+      const { c } = await deployedInTrial();
+      const svc = withColours(c, async () => coloursWith("green", true));
+      // A rate-limited refusal overwrote the host's status file; the older update's trial must still end on time.
+      await c.status({ id: "", target: "server", result: "rejected", message: "Rejected: only one server deploy every 10 minutes. Try again in 4 minute(s).", from_commit: B, to_commit: C, ended: "2026-11-03T01:08:00Z" });
+      vi.setSystemTime(new Date("2026-11-03T01:16:00Z"));
+      await svc.sync();
+      expect((await svc.overview()).trial).toBeNull();
+      expect(await runnerCards(c, B)).toHaveLength(1);
+    });
+
+    it("counts the rate-limit wait down from the real time and says you can deploy now once it is over (BOS-953)", async () => {
+      const c = (ctx = await setup());
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:20:00Z"));
+      const svc = withColours(c, async () => coloursWith("green", true));
+      // Refused at 01:11 with "try again in 4 minutes": the wait ends 01:15.
+      await c.status({ id: "", target: "server", result: "rejected", message: "Rejected: only one server deploy every 10 minutes. Try again in 4 minute(s).", from_commit: A, to_commit: B, ended: "2026-11-03T01:11:00Z" });
+      expect((await svc.overview()).deployWait).toMatchObject({ until: "2026-11-03T01:15:00.000Z" });
+      // A later state replaces the refusal: no wait line.
+      await c.status({ id: "", target: "server", result: "deployed", message: "Switched in.", from_commit: A, to_commit: B, ended: "2026-11-03T01:14:00Z" });
+      expect((await svc.overview()).deployWait).toBeNull();
     });
 
     // BOS-384 (Freddy): a server-path withdraw frees its dedupe key, so a later offer for that commit is not dropped.
