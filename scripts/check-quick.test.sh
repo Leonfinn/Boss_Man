@@ -78,7 +78,8 @@ grep -q "^FAIL  secrets and private-details scan" "$t/out" || fail "scan FAIL li
 # The owner's list arrives in the environment, reaches the scan as a private file, and is gone from the environment and the disk after.
 run 0 "scan list" env BOSSMAN_SCAN_DENYLIST="ip	192.0.2.77" SCAN_FILE_NOTE="$t/scanfile"
 logged "scanenv file=set content=ip	192.0.2.77, raw=" "list reaches the scan as a file, not the environment"
-[ -n "$(cat "$t/scanfile")" ] && [ ! -e "$(cat "$t/scanfile")" ] || fail "list file left behind"
+[ -n "$(cat "$t/scanfile")" ] || fail "list file path not recorded"
+[ ! -e "$(cat "$t/scanfile")" ] || fail "list file left behind"
 run 0 "no list" env
 logged "scanenv file= content= raw=" "no list, no file"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
