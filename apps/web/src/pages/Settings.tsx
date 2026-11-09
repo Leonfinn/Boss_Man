@@ -11,6 +11,8 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
+import { clearDraft, readDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
@@ -1651,7 +1653,19 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
   type Rules = { text: string; by: string | null; at: string | null; max: number };
   const [rules, setRules] = useState<Rules | null>(null);
   const [failed, setFailed] = useState(false);
-  const [draft, setDraft] = useState<string | null>(null);
+  // What the editor box shows, kept in this browser as it is typed (DR-045). Opening the editor and
+  // having a kept draft are separate: a kept draft is never sent by itself, only with the Save button.
+  // Cancel keeps the draft (DR-045); the explicit "Discard draft" is the only thing that clears it.
+  const draftKey = `standing-rules/${company.id}`;
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(() => readDraft(draftKey));
+  // Whether a draft is kept, re-read whenever the store changes so the notice and the Edit button agree.
+  const [kept, setKept] = useState(() => readDraft(draftKey));
+  const cancel = () => {
+    setOpen(false);
+    setKept(readDraft(draftKey));
+    setShown(readDraft(draftKey));
+  };
   const act = useAction();
   useEffect(() => {
     let live = true;
@@ -1672,9 +1686,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
         <p className="muted">Couldn't load the standing rules.</p>
       ) : !rules ? (
         <p className="muted">Loading…</p>
-      ) : draft !== null ? (
+      ) : open ? (
         <>
-          <textarea aria-label="Standing rules" value={draft} onChange={(e) => setDraft(e.target.value)} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
+          <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
             <button
               type="button"
@@ -1682,9 +1696,12 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
               disabled={act.busy}
               onClick={() =>
                 void act.run(async () => {
-                  const saved = await api<Rules>(url, { method: "PUT", body: { text: draft } });
+                  const saved = await api<Rules>(url, { method: "PUT", body: { text: shown } });
                   setRules(saved);
-                  setDraft(null);
+                  setOpen(false);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Saved.";
                 })
@@ -1692,7 +1709,7 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             >
               Save
             </button>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(null)}>
+            <button type="button" className="btn" disabled={act.busy} onClick={cancel}>
               Cancel
             </button>
           </div>
@@ -1710,7 +1727,15 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
             {rules.at ? ` on ${when(rules.at)}` : ""}.
           </p>
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => setDraft(rules.text)}>
+            {kept && (
+              <p className="muted" role="status" style={{ fontSize: 13, margin: 0 }}>
+                Draft restored: what you were writing is kept in this browser.{" "}
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(draftKey); setKept(""); setShown(rules.text); }}>
+                  Discard draft
+                </button>
+              </p>
+            )}
+            <button type="button" className="btn" disabled={act.busy} onClick={() => { setShown(readDraft(draftKey) || rules.text); setOpen(true); }}>
               Edit
             </button>
             {rules.text ? (
@@ -1723,6 +1748,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                   void act.run(async () => {
                     const saved = await api<Rules>(url, { method: "PUT", body: { text: "" } });
                     setRules(saved);
+                    clearDraft(draftKey);
+                    setKept("");
+                    setShown("");
                     onChanged();
                     return "Cleared.";
                   });
@@ -1739,6 +1767,9 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
                 void act.run(async () => {
                   const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
                   setRules(saved);
+                  clearDraft(draftKey);
+                  setKept("");
+                  setShown(saved.text);
                   onChanged();
                   return "Undone.";
                 })

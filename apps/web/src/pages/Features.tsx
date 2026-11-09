@@ -17,7 +17,8 @@ import {
   type ScoredFeatures,
 } from "../api";
 import { usePoll } from "../hooks";
-import { readDraftJson, useFormDraft } from "../drafts";
+import { clearDraft, readDraftJson, useFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 
@@ -549,12 +550,15 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
     if (!readDraftJson<{ title: string; description: string }>(`feature-edit/${id}`)) setFields(seed);
     setEditing(true);
   };
+  // The public summary is kept in this browser as it is typed (DR-045); the draft is used only while
+  // the box is being edited, and it goes once the server has taken the summary.
+  const summaryDraftKey = `feature-summary/${id}`;
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveSummary = (summary: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
-      () => (setError(null), setSummaryDraft(null), data.reload()),
+      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), data.reload()),
       (err: Error) => setError(err.message),
     );
   if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
@@ -624,7 +628,9 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             )}
             <div className="field">
               <label htmlFor="f-desc">Description</label>
-              <textarea id="f-desc" rows={6} maxLength={20_000} value={fields.description} onChange={(e) => setFields({ ...fields, description: e.target.value })} />
+              {/* The edit form (title and description) is kept by useFormDraft above, so this box only displays
+                  its text: a second draft here could restore a different description over the form's. */}
+              <DraftTextarea draftKey={null} noDraft="the edit form keeps title and description with useFormDraft, so this box only shows them" id="f-desc" rows={6} maxLength={20_000} value={fields.description} onChange={(text) => setFields({ ...fields, description: text })} />
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button
@@ -767,7 +773,14 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
         </p>
         <div className="field">
           <label htmlFor="f-public-summary">Public summary</label>
-          <textarea id="f-public-summary" rows={4} maxLength={2000} value={summaryDraft ?? f.publicSummary ?? ""} onChange={(e) => setSummaryDraft(e.target.value)} />
+          <DraftTextarea
+            draftKey={summaryDraftKey}
+            id="f-public-summary"
+            rows={4}
+            maxLength={2000}
+            value={summaryDraft ?? f.publicSummary ?? ""}
+            onChange={setSummaryDraft}
+          />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>

@@ -14,6 +14,7 @@ import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
 import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
@@ -71,7 +72,7 @@ function Fold({ title, hint, open, className, children }: { title: string; hint?
 }
 
 /** The ticket's acceptance criteria with how the author reported each, plus the owner's editor. */
-function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
   return (
@@ -90,22 +91,31 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
         <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion to check before merge has the author's pass or fail; the reviewer has been told that. The "on a real host" ones are checked after merge and don't hold up the review.</p>
       )}
       <CriteriaEdit
+        draftKey={`ticket-criteria/${t.id}`}
         key={criteria.map((c) => `${criterionText(c)}|${isAfterMerge(c) ? 1 : 0}`).join("\n")}
         initial={criteria}
         busy={busy}
-        save={(next) => patch({ acceptanceCriteria: next })}
+        save={(next) => {
+          // Clear only once the server has taken it; a failed save keeps the lines.
+          void patch({ acceptanceCriteria: next }).then((ok) => ok && clearDraft(`ticket-criteria/${t.id}`));
+        }}
       />
     </Fold>
   );
 }
 
-/** One non-empty line per criterion; saving nothing clears them. */
-function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (next: Criterion[]) => void; busy: boolean }) {
-  const [text, setText] = useState(criteriaText(initial).join("\n"));
+/** One non-empty line per criterion; saving nothing clears them. The typing is kept in this browser (DR-045). */
+function CriteriaEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: Criterion[]; save: (next: Criterion[]) => void; busy: boolean }) {
+  const [text, setText] = useState(() => readDraft(draftKey) || criteriaText(initial).join("\n"));
   // Which lines are only checked once the work is live, by their position in the list.
   const [after, setAfter] = useState<Set<number>>(() => new Set(initial.flatMap((c, i) => (isAfterMerge(c) ? [i] : []))));
   const [open, setOpen] = useState(initial.length === 0);
-  const next = () => setText((p) => (p ? `${p}\n` : ""));
+  const next = () =>
+    setText((p) => {
+      const v = p ? `${p}\n` : "";
+      keepDraftText(draftKey, v);
+      return v;
+    });
   // Built from the current lines in order, so a tick on line 2 follows line 2 even as lines are edited.
   const built = (): Criterion[] =>
     text
@@ -120,13 +130,14 @@ function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (ne
       <label htmlFor="t-criteria" style={{ fontWeight: 600 }}>
         Acceptance criteria, one per line
       </label>
-      <textarea
+      <DraftTextarea
+        draftKey={draftKey}
         id="t-criteria"
         rows={4}
         maxLength={2_000}
         placeholder={"Health check returns 200\nMigration is expand-only"}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
       />
       <small className="muted">Up to 10; leave empty to set none. The agent must report pass or fail for each before merge when it asks for review.</small>
@@ -167,36 +178,47 @@ function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (ne
 }
 
 /** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
-function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const steps = (t.ownerSetup ?? "").trim();
   return (
     <Fold title="After it goes live, you'll need to" hint={steps ? steps.split("\n").filter(Boolean).length + " step" + (steps.split("\n").filter(Boolean).length === 1 ? "" : "s") : undefined}>
-      <OwnerSetupEdit key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v })} />
+      <OwnerSetupEdit draftKey={`ticket-owner-setup/${t.id}`} key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v }).then((ok) => ok ?? false)} />
     </Fold>
   );
 }
 
-/** One step per line; saving nothing clears them. */
-function OwnerSetupEdit({ initial, save, busy }: { initial: string; save: (v: string) => void; busy: boolean }) {
-  const [text, setText] = useState(initial);
-  const [open, setOpen] = useState(!initial);
+/** One step per line; saving nothing clears them. The typing is kept in this browser (DR-045). */
+function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: string; save: (v: string) => Promise<boolean>; busy: boolean }) {
+  const [text, setText] = useState(() => readDraft(draftKey) || initial);
+  // What Save should send: the box's text, unless it still shows a kept draft from before this edit.
+  const shown = readDraft(draftKey);
+  const [open, setOpen] = useState(!initial && !shown);
   return open ? (
     <div className="field">
       <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
         What you have to do, one step per line
       </label>
-      <textarea
+      <DraftTextarea
+        draftKey={draftKey}
         id="t-owner-setup"
         rows={3}
         maxLength={4_000}
         placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
       />
       <small className="muted">In plain words, by the buttons you'd click, one step per line. Boss Man shows this as a card only once the change is actually running. Leave empty if there's nothing for you to do.</small>
       <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-        <button type="button" className="btn primary" disabled={busy || text === initial} onClick={() => save(text.trim())}>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={busy || text === initial}
+          onClick={() => {
+            // Clear only once the server has taken the steps; a failed save keeps them.
+            void save(text.trim()).then((ok) => ok && clearDraft(draftKey));
+          }}
+        >
           Save steps
         </button>
         {initial && (
@@ -288,6 +310,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
+  // The send-back box is kept in this browser as it is typed (DR-045), and cleared once the server takes it.
+  const reviewSummaryKey = `ticket-review-summary/${id}`;
   const [lesson, setLesson] = useState("");
   const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -318,8 +342,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     try {
       await api(`/api/tickets/${id}`, { method: "PATCH", body });
       ticket.reload();
+      return true;
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
+      return false;
     }
   };
   const [blocking, setBlocking] = useState<{ until: string; reason: string } | null>(null);
@@ -446,6 +472,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     try {
       const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim(), ...(lesson.trim() ? { lesson: lesson.trim() } : {}) } : {}) } });
       setSummary("");
+      clearDraft(reviewSummaryKey);
       setLesson("");
       setSendingBack(false);
       if (r.landing) {
@@ -578,7 +605,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <>
                   <div className="field">
                     <label htmlFor="review-summary">What should the agent change?</label>
-                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
+                    <DraftTextarea draftKey={reviewSummaryKey} id="review-summary" rows={3} autoFocus value={summary} onChange={setSummary} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
                   </div>
                   <div className="field">
                     {/* A lesson learned goes to a CEO decision (BOS-105), so it only reaches the brief if the CEO approves it; the owner is told the outcome. */}

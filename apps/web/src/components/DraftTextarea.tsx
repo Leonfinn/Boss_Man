@@ -6,7 +6,8 @@
 //
 // `draftKey` names the box and is required on purpose: either a string (the box is remembered), or
 // null together with `noDraft="<why>"` for the rare box that must not be kept (say, a password).
-import { useDraft } from "../drafts";
+import { useEffect, useRef } from "react";
+import { readDraft, saveDraft } from "../drafts";
 
 type Props = {
   draftKey: string | null;
@@ -14,23 +15,37 @@ type Props = {
   noDraft?: string;
   value: string;
   onChange: (text: string) => void;
-} & Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "defaultValue" | "onChange">;
+} & Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "defaultValue" | "onChange"> & {
+  /** React 19 takes `ref` as a prop; declared here so a caller can focus or measure the box. */
+  ref?: React.Ref<HTMLTextAreaElement>;
+};
 
 /**
- * A textarea whose text is kept in this browser between reloads. Controlled like any textarea, but
- * it starts from the kept draft (ignoring the first `value` when a draft exists) and writes it on
- * every change. Clear it with `clearDraft(draftKey)` once the text has been sent.
+ * A textarea whose text is kept in this browser between reloads. It stays a controlled box (the
+ * parent's `value` is what shows, so clearing it after a send or Cancel is respected), and it writes
+ * to the draft on every change. When it mounts with nothing in `value` but a kept draft exists, it
+ * hands that draft to the parent once, so the owner sees it and it is never sent by itself (a send
+ * still needs a button press). Clear the draft with `clearDraft(draftKey)` once the text is sent.
  */
 export function DraftTextarea({ draftKey, noDraft, value, onChange, ...rest }: Props) {
   if (draftKey === null && !noDraft) throw new Error('DraftTextarea needs a draftKey, or noDraft="<why>" when it keeps none');
-  // The hook holds the text when there is a key; without one it is the plain controlled box.
-  const [kept, setKept] = useDraft(draftKey, value);
+  // Restore a kept draft into the parent once, on mount (or when the key changes to another box).
+  const restored = useRef<string | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  useEffect(() => {
+    if (!draftKey || restored.current === draftKey) return;
+    restored.current = draftKey;
+    const kept = readDraft(draftKey);
+    if (kept) onChangeRef.current(kept);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey]);
   return (
     <textarea
       {...rest}
-      value={draftKey ? kept : value}
+      value={value}
       onChange={(e) => {
-        if (draftKey) setKept(e.target.value);
+        if (draftKey) saveDraft(draftKey, e.target.value);
         onChange(e.target.value);
       }}
     />

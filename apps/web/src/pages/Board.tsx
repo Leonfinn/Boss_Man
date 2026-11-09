@@ -8,6 +8,7 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
@@ -335,13 +336,15 @@ function AddForm({ companyId, projectId, initial, agents, features, goals, tiers
       {!isFeature && (
         <div className="field">
           <label htmlFor="nt-criteria">Done when (one acceptance criterion per line)</label>
-          <textarea
+          <DraftTextarea
+            draftKey={null}
+            noDraft="the whole New task form keeps one draft, so this box's text is saved under the form's key"
             id="nt-criteria"
             rows={3}
             maxLength={2_000}
             placeholder={"Health check returns 200\nNo criteria is fine"}
             value={form.criteria}
-            onChange={(e) => setForm({ ...form, criteria: e.target.value })}
+            onChange={(text) => setForm({ ...form, criteria: text })}
             style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
           />
           <small className="muted">Optional, up to 10. The agent reports pass or fail against each before merge when it asks for review.</small>
