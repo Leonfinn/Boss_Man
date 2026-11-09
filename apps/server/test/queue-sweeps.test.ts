@@ -421,7 +421,7 @@ describe("stale blockers (R21)", () => {
     // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615). That wake
     // then waits 25 hours with no run finishing, so the no-progress alert (BOS-593) rightly wakes the CEO
     // with a "decision" card too; neither is what this test is about.
-    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision"), ne(wakes.reason, "ceo reply")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {

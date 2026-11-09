@@ -799,6 +799,13 @@
       "when": 1794190100000,
       "tag": "0131_watchdog_on_by_default",
       "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1794217897492,
+      "tag": "0132_phone_approve",
+      "breakpoints": true
     }
   ]
 }
