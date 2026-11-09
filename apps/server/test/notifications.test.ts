@@ -117,6 +117,31 @@ describe("notification ladder (R44)", () => {
     expect(t.json().message).toContain("403");
   });
 
+  it("proves the phone got the test push only when its Got it button is tapped (BOS-995)", async () => {
+    const c = await setup();
+    await c.req("PUT", "/api/notification-settings", SETTINGS);
+    expect((await c.req("POST", "/api/notification-settings/test")).statusCode).toBe(200);
+    const sent = c.pushed.at(-1)!.body as { actions: Array<{ label: string; url: string; body: string }> };
+    const act = sent.actions.find((a) => a.label === "Got it")!;
+    expect(act.url).toBe("https://bossman.example.ts.net/api/phone/got-it");
+    const token = (JSON.parse(act.body) as { token: string }).token;
+    // Sent, but not confirmed: nothing says a phone received it.
+    let st = (await c.req("GET", "/api/notification-settings")).json();
+    expect(st.phoneTest.confirmedAt).toBeNull();
+    expect(JSON.stringify(st)).not.toContain(token);
+    const tap = (t: string) => c.app.inject({ method: "POST", url: "/api/phone/got-it", headers: { "content-type": "application/json" }, payload: JSON.stringify({ token: t }) });
+    expect((await tap(randomBytes(32).toString("base64url"))).statusCode).toBe(404);
+    expect((await tap(token)).statusCode).toBe(200);
+    st = (await c.req("GET", "/api/notification-settings")).json();
+    expect(st.phoneTest.confirmedAt).not.toBeNull();
+    // One use only.
+    expect((await tap(token)).statusCode).toBe(404);
+    // A new test starts unconfirmed again, and the old link is dead.
+    await c.req("POST", "/api/notification-settings/test");
+    expect((await c.req("GET", "/api/notification-settings")).json().phoneTest.confirmedAt).toBeNull();
+    expect((await tap(token)).statusCode).toBe(404);
+  });
+
   it("marks a decision's notification read once the decision is answered", async () => {
     const c = await setup();
     const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Ship the beta?", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question" } }).returning();

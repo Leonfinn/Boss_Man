@@ -92,6 +92,19 @@ function SettingsForm() {
   useEffect(() => {
     void api<NotifySettings>("/api/notification-settings").then((s) => (setSaved(s), setForm(toForm(s))), (err: Error) => setNote({ ok: false, text: err.message }));
   }, []);
+  // After a test send, look for the phone's "Got it" tap every 5 seconds, for up to 15 minutes.
+  const [watching, setWatching] = useState(false);
+  useEffect(() => {
+    if (!watching) return;
+    const stop = setTimeout(() => setWatching(false), 15 * 60_000);
+    const every = setInterval(() => {
+      void api<NotifySettings>("/api/notification-settings").then((s) => {
+        setSaved((prev) => (prev ? { ...prev, phoneTest: s.phoneTest } : prev));
+        if (s.phoneTest?.confirmedAt) setWatching(false);
+      }, () => {});
+    }, 5000);
+    return () => (clearTimeout(stop), clearInterval(every));
+  }, [watching]);
   if (!form) return note ? <p className="error">{note.text}</p> : null;
   const set = (patch: Partial<Form>) => setForm({ ...form, ...patch });
   const act = async (fn: () => Promise<string>) => {
@@ -128,6 +141,9 @@ function SettingsForm() {
   const test = () =>
     act(async () => {
       await api("/api/notification-settings/test", { method: "POST" });
+      const s = await api<NotifySettings>("/api/notification-settings");
+      setSaved((prev) => (prev ? { ...prev, phoneTest: s.phoneTest } : prev));
+      setWatching(true);
       return `Your ntfy server accepted it. If it doesn't appear on the phone within a few seconds, check the phone app is subscribed at ${phoneAddress ?? "the ntfy address (the NTFY_BASE_URL line in your .env file)"}.`;
     });
   const copyAddress = () => {
@@ -277,6 +293,13 @@ function SettingsForm() {
           </button>
         )}
       </div>
+      {saved?.ntfy && saved.phoneTest && (
+        <p role="status" data-testid="phone-test-status" style={{ fontSize: 14 }}>
+          {saved.phoneTest.confirmedAt
+            ? `Phone confirmed at ${new Date(saved.phoneTest.confirmedAt).toLocaleString()}.`
+            : `Last test: sent at ${new Date(saved.phoneTest.sentAt).toLocaleString()}, not confirmed on a phone. Tap "Got it" on the test notification to confirm.`}
+        </p>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}

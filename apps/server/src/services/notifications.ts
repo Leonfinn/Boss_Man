@@ -3,6 +3,7 @@
 // hours and each agent's hourly cap lower it rather than drop it, and every one links to its
 // evidence. Pages and asks also go to the owner's phone through their own ntfy server, so
 // Boss Man only ever sends outbound requests and is never exposed at the router.
+import { createHash, randomBytes } from "node:crypto";
 import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
@@ -70,6 +71,10 @@ export const appUrl = (publicUrl: string, link: string) => `${publicUrl.replace(
 export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, pushLevels: ["page", "ask"], publicUrl: null };
 
 const KEY = "notifications";
+const PHONE_TEST_KEY = "notifications.phone-test";
+const PHONE_TEST_TTL_MS = 15 * 60_000;
+type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null };
+const hashTestToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 /** Cuts text to fit in `max` bytes of UTF-8, without splitting a character. */
 export function fitBytes(text: string, max: number): string {
@@ -292,10 +297,42 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         .where(ids === "all" ? isNull(notifications.readAt) : and(inArray(notifications.id, ids), isNull(notifications.readAt)));
     },
 
-    /** Sends a test push with the current settings and says how it went. */
+    /**
+     * Sends a test push with the current settings. With a public https address it carries a "Got it" button: a
+     * random one-use link (only its hash is kept, 15 minutes) whose tap proves the phone received the push.
+     */
     async test() {
       const s = await getSettings();
-      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device.", link: "#/notifications", level: "page" });
+      const t = now();
+      const actions: PushAction[] = [];
+      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null };
+      if (s.publicUrl && new URL(s.publicUrl).protocol === "https:") {
+        const token = randomBytes(32).toString("base64url");
+        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString() };
+        actions.push({ action: "http", label: "Got it", url: `${s.publicUrl.replace(/\/$/, "")}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
+      }
+      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device." + (actions.length ? " Tap Got it to confirm." : ""), link: "#/notifications", level: "page", actions });
+      await db.insert(settings).values({ key: PHONE_TEST_KEY, value: rec }).onConflictDoUpdate({ target: settings.key, set: { value: rec } });
+    },
+
+    /** The last test push: when it was sent and whether the phone tapped Got it (null: none sent yet). */
+    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null } | null> {
+      const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
+      const r = row?.value as PhoneTestRecord | undefined;
+      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt } : null;
+    },
+
+    /** A tap on Got it. True only for the live, unused link of the last test; the link then stops working. */
+    async confirmTest(token: unknown): Promise<boolean> {
+      if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) return false;
+      const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
+      const r = row?.value as PhoneTestRecord | undefined;
+      const t = now();
+      if (!r || !r.tokenHash || r.confirmedAt || !r.expiresAt || new Date(r.expiresAt) <= t || r.tokenHash !== hashTestToken(token)) return false;
+      const next: PhoneTestRecord = { ...r, confirmedAt: t.toISOString() };
+      // Compare-and-set on the unconfirmed record, so two taps can't both win.
+      const res = await db.update(settings).set({ value: next }).where(and(eq(settings.key, PHONE_TEST_KEY), sql`${settings.value}->>'confirmedAt' is null`)).returning({ key: settings.key });
+      return res.length > 0;
     },
   };
 }
