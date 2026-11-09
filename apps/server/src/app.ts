@@ -2290,8 +2290,10 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id/portal", async (req) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable() }).partial().parse(req.body);
-      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}) });
+      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable() }).partial().parse(req.body);
+      // BOS-967: the back link must be a full https address, or empty for none.
+      if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
+      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
     });
     // Only these three types, found by their first bytes: the portal is public, so no SVG.
     const logoType = (b: Buffer) =>
