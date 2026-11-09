@@ -152,12 +152,24 @@ jobs:
         run: docker build -f apps/launcher/Dockerfile -t boss-man-launcher:current .
       - name: Build the netguard image
         run: docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
-      - name: Runner image has Claude Code, git and the runner
+      - name: Runner image has git, OpenCode and the runner, and NO Anthropic code (DR-050)
         run: |
-          docker run --rm --entrypoint claude boss-man-runner:ci --version
+          # The runner image may be published, so it must carry no Anthropic code: no @anthropic-ai package,
+          # no claude binary, no CLAUDE_CODE_EXECUTABLE pointing at an install. Claude comes from the pack
+          # on first start (apps/runner/claude-pack), installed into a volume, never baked in.
           docker run --rm --entrypoint git boss-man-runner:ci --version
-          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
-      - name: Canary - a Claude session works inside the image, with no network (R52)
+          docker run --rm --entrypoint opencode boss-man-runner:ci --version
+          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000'
+          # Fail if any @anthropic-ai package or a claude binary is anywhere the image would carry it.
+          if docker run --rm --entrypoint sh boss-man-runner:ci -c 'find / -path /proc -prune -o \( -path "*node_modules/@anthropic-ai*" -o -name claude -type f \) -print -quit 2>/dev/null' | grep -q .; then
+            echo "the runner image contains Anthropic code or a claude binary (DR-050)"; exit 1
+          fi
+          if docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -n "$CLAUDE_CODE_EXECUTABLE"'; then
+            echo "the runner image sets CLAUDE_CODE_EXECUTABLE; the runner must set it from the ready pack (DR-050)"; exit 1
+          fi
+          # The pinned pack source is present (root-owned, read-only) for the installer to read.
+          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -f /opt/bossman-claude-pack/package-lock.json'
+      - name: Canary - OpenCode and Codex sessions work inside the image, with no network (R52)
         run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true boss-man-runner:ci node_modules/.bin/tsx src/canary-main.ts
       - name: Server image ships the separate migrate step
         run: docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f dist/migrate.js && DATABASE_URL= node dist/migrate.js 2>&1 | grep -q "DATABASE_URL is required"'

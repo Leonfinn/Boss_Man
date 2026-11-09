@@ -70,6 +70,21 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       const r = await call<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
       return r.status === 201 && r.json ? r.json.Id : fail(r, "Creating the runner failed");
     },
+    /**
+     * Waits for a container to stop and returns how it ended: its exit code, or null when it didn't stop
+     * within `timeoutMs` (the caller then kills it). Used for the one-shot Claude pack installer (BOS-972).
+     */
+    async wait(id: string, timeoutMs: number): Promise<{ stopped: boolean; exitCode: number | null }> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const r = await call<{ StatusCode?: number; Running?: boolean }>("POST", `/containers/${encodeURIComponent(id)}/wait?condition=not-running`);
+        // The wait endpoint blocks until the container stops, but a daemon restarted mid-wait answers early.
+        const running = await call<{ State?: { Running?: boolean; ExitCode?: number } }>("GET", `/containers/${encodeURIComponent(id)}/json`);
+        const state = running.status === 200 && running.json?.State;
+        if (state && state.Running === false) return { stopped: true, exitCode: typeof state.ExitCode === "number" ? state.ExitCode : (r.json?.StatusCode ?? null) };
+        if (Date.now() >= deadline) return { stopped: false, exitCode: null };
+      }
+    },
     async start(id: string) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/start`);
       if (r.status !== 204 && r.status !== 304) fail(r, "Starting the runner failed");

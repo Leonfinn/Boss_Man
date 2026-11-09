@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writ
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
+import { ensurePack } from "./claude-pack.js";
 import { COMPANY_LABEL, companyDir, containerName, containerSpec, LABEL, listLabel, runnerImage, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
@@ -178,6 +179,10 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
+    // The Claude pack (DR-050): install it into the shared named volume before the runner starts. It never
+    // blocks the runner: a failure means Claude is absent on this runner, and OpenCode and Codex keep working.
+    const packReady = await ensurePack(docker, cfg, slug, (msg) => console.error(JSON.stringify({ at: new Date().toISOString(), msg, slug })));
+    if (!packReady) console.error(JSON.stringify({ at: new Date().toISOString(), msg: `Claude Code will be absent on ${slug}'s runner until its pack can install`, slug }));
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
     const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug));

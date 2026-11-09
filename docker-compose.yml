@@ -43,10 +43,18 @@ x-runner: &runner
   restart: unless-stopped
   profiles: ["runners"]
   depends_on:
-    - server
+    server:
+      condition: service_started
+    # Start after the installer has *begun*, not after it finished: a host with no internet must still get
+    # OpenCode and Codex working (the runner reports Claude absent until the pack is ready). The runner reads
+    # the ready pack lazily on each start, so an install finishing later is picked up on the next restart.
+    claude-pack:
+      condition: service_started
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+    # The Claude pack volume (DR-050): mounted read-only below; the runner points Claude Code at a ready folder.
+    BOSSMAN_CLAUDE_PACK: /opt/bossman-claude
     # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
     BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
     # Days the runner keeps OpenCode sessions before deleting them (BOS-616): empty = 14, 0 = never.
@@ -67,6 +75,31 @@ x-runner: &runner
   cpus: ${BOSSMAN_RUNNER_CPUS:-0}
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
+
+  # The Claude pack (DR-050, BOS-972): the runner image holds no Anthropic code, so Claude Code and
+  # its ACP adapter are installed on first start into a named volume the runner then mounts read-only.
+  claude-pack:
+    image: boss-man-runner:current
+    build:
+      context: .
+      dockerfile: apps/runner/Dockerfile
+    profiles: ["runners"]
+    # One-shot: installs the pack (npm ci + version check + canary + READY marker) and exits. Re-running
+    # it on an update is cheap: a ready folder is left alone and a new lockfile installs beside the old.
+    restart: "no"
+    command: ["node_modules/.bin/tsx", "src/claude-pack-main.ts"]
+    environment:
+      BOSSMAN_CLAUDE_PACK: /opt/bossman-claude
+      BOSSMAN_CLAUDE_PACK_SOURCE: /opt/bossman-claude-pack
+    depends_on:
+      - server
+    # It reaches npm (honouring the host's proxy/extra CA), so it needs a network; it mounts no company data.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - claude-pack:/opt/bossman-claude
+    mem_limit: ${BOSSMAN_CLAUDE_PACK_MEMORY:-2g}
+    pids_limit: 512
 
 services:
   db:
@@ -206,6 +239,8 @@ services:
       - app-co-workspaces:/home/node/workspaces
       - app-co-runner-data:/home/node/runner-data
       - app-co-claude:/home/node/.claude
+      # The installed Claude pack, read-only (DR-050): the installer above writes it, the runner only reads.
+      - claude-pack:/opt/bossman-claude:ro
 
 secrets:
   master_key:
@@ -223,3 +258,5 @@ volumes:
   app-co-workspaces:
   app-co-runner-data:
   app-co-claude:
+  # The Claude pack (DR-050): one install per stack, written by the claude-pack installer and read by runners.
+  claude-pack:
