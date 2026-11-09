@@ -11,7 +11,7 @@ export function isLanHost(hostname: string): boolean {
   return PRIVATE_V4.some((r) => r.test(h) && /^\d+\.\d+\.\d+\.\d+$/.test(h)) || h === "localhost" || h.endsWith(".local") || h.endsWith(".lan");
 }
 
-/** https, ssh and local paths anywhere; plain http only to a LAN host, such as a Gitea at http://192.168.68.67:3003. */
+/** https, ssh and local paths anywhere; plain http only to a LAN host, such as a Gitea at http://192.0.2.10:3003. */
 export function repoUrlAllowed(u: string): boolean {
   if (/^(https:\/\/|ssh:\/\/|git@|file:\/\/|\/)/.test(u)) return true;
   if (!u.startsWith("http://")) return false;

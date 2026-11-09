@@ -9,6 +9,7 @@ type Runners = ReturnType<typeof runnersService>;
 
 // Runner events received and not yet stored (the one being stored included), across every socket on this process (BOS-410). A
 // slow database makes these pile up in memory; the memory sampler logs the count.
+// lost on restart, harmless because it is only a live gauge of this process's in-flight stores, not a value anything reads later.
 let ingestWaiting = 0;
 export const runnerIngestWaiting = () => ingestWaiting;
 

@@ -82,6 +82,7 @@ function webpClaimedSize(bytes: Uint8Array): { width: number; height: number } |
 
 const decodeFor: Record<PictureType, (b: ArrayBuffer) => Promise<Pixels>> = { "image/png": pngDecode, "image/jpeg": jpegDecode, "image/webp": webpDecode };
 
+// lost on restart, harmless because the wasm programs are loaded again on the first use after a restart; a second server loads its own.
 let ready: Promise<void> | undefined;
 /** Loads every wasm program once; concurrent calls share the one promise. */
 function init(): Promise<void> {

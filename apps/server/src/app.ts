@@ -148,7 +148,7 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
-  /** The portal's own address for share links, e.g. http://192.168.68.67:3111; without it links use the owner's address. */
+  /** The portal's own address for share links, e.g. http://192.0.2.10:3111; without it links use the owner's address. */
   portalUrl?: string;
   /** Rate limits on the public feedback portal; tests lower them. */
   portalLimits?: Partial<PortalLimits>;
@@ -1712,7 +1712,7 @@ export async function buildApp(opts: AppOptions) {
             .string()
             .trim()
             .max(500)
-            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.168.68.67:3003/you/repo.git.")
+            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.0.2.10:3003/you/repo.git.")
             .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
