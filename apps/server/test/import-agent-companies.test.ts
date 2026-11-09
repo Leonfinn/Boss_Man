@@ -1,8 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+
+// No real DNS: the package's git address (github.com) must resolve public so the network guard doesn't flag it (BOS-953).
+// The import's guard lookup races a 3 s timeout and fails closed, so a real lookup that stalls under load would refuse the
+// import at random; mocked, the answer is the same on every run and on every host.
+vi.mock("node:dns/promises", () => ({
+  lookup: async (host: string) => {
+    if (host === "github.com") return [{ address: "140.82.121.4", family: 4 }];
+    throw new Error("ENOTFOUND");
+  },
+}));
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -114,7 +124,12 @@ describe("Paperclip issues (docs/11, step 5)", () => {
     const pre = (await req("POST", "/api/companies/import/preview", { zip: withIssues })).json();
     expect(pre.counts).toMatchObject({ tickets: 3, projects: 2, wikiPages: 4 });
     expect(pre.warnings).toEqual(expect.arrayContaining(['1 tickets had no project in Paperclip; they\'re in a new project, "Imported tickets".', 'Skipped 1 "continuation-summary" documents: they were Paperclip\'s working notes between runs.']));
-    const id = (await req("POST", "/api/companies/import", { zip: withIssues })).json().companyId as string;
+    // Check the import itself before using its id (BOS-927): without this, an import that failed for any
+    // reason surfaced only as "id: Invalid UUID" from the export below, hiding the real error.
+    const imported = await req("POST", "/api/companies/import", { zip: withIssues });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const id = imported.json().companyId as string;
+    expect(id, imported.body).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
 
     const { unzipSync, strFromU8 } = await import("fflate");
     const exported = await req("GET", `/api/companies/${id}/export?wiki=1&tickets=all`);

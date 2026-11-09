@@ -17,7 +17,7 @@ export function runResult(outcome: string | null): "succeeded" | "failed" | "oth
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
-export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
+export function dashboardService(db: Db, deps: { now?: () => Date; decisions?: { queueTally: (opts: { companyId: string }) => Promise<{ open: number; waiting: number }> } } = {}) {
   const now = deps.now ?? (() => new Date());
   /**
    * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the
@@ -67,10 +67,17 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
       // Of the tickets in review, those every reviewer has approved: only the merge (or the owner's sign-off) is left (BOS-667).
       const inReviewIds = count("review") ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))).map((r) => r.id) : [];
       const approved = (await passedReviewTickets(db, inReviewIds)).size;
-      const [waiting] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(decisions)
-        .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner")));
+      const [waiting] = deps.decisions
+        ? []
+        : await db
+            .select({ n: sql<number>`count(*)::int` })
+            .from(decisions)
+            .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner")));
+      // "Need your answer" is the Decisions menu's own figure (BOS-969): the cards the owner can act
+      // on now, from the same function that count comes from, so the home screen can't disagree with it.
+      // Without that function (a test of this screen alone), the plain open owner-tier count stands in.
+      const decisionsWaiting = deps.decisions ? (await deps.decisions.queueTally({ companyId })).open : (waiting?.n ?? 0);
+
       // Money is what API credit and pay-as-you-go cost. Subscription use isn't money spent, so
       // it's counted in tokens instead (R67), even though its cost events carry a list price.
       const [spent] = await db
@@ -151,7 +158,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
           approvedToMerge: approved,
           open: states.reduce((n, s) => n + (s.state === "done" ? 0 : s.n), 0),
           blocked: count("blocked"),
-          decisionsWaiting: waiting?.n ?? 0,
+          decisionsWaiting,
           monthCostMicros: Number(spent?.micros ?? 0),
           monthSubscriptionTokens: { input: Number(tokens?.input ?? 0), output: Number(tokens?.output ?? 0) },
           // Subscription runs this month, and how many ended before tokens were recorded.

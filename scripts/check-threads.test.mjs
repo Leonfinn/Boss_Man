@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MAX, cgroupCpus, checkThreads } from "./check-threads.mjs";
+import { DEFAULT_MAX, cgroupCpus, cgroupFreeMemory, checkThreads } from "./check-threads.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // files: path -> contents; anything else reads as missing (no cgroup limit, no proof file).
@@ -44,6 +44,29 @@ test("the slot count comes from check-all's proof file when BOSSMAN_CHECK_SLOTS 
   assert.equal(checkThreads({ env: { CHECK_ALL_PAIR_PROOF: "/p" }, cpus: 6, readFile: fs(files) }), 2);
   // A pair-measurement note (not a number) means no slot count: one slot.
   assert.equal(checkThreads({ env: { CHECK_ALL_PAIR_PROOF: "/p" }, cpus: 6, readFile: fs({ "/p": "passed on 3 Nov" }) }), 4);
+});
+
+const GB = 1024 ** 3;
+const mem = (limit, current, inactive) => fs({
+  "/sys/fs/cgroup/memory.max": `${limit}\n`,
+  "/sys/fs/cgroup/memory.current": `${current}\n`,
+  ...(inactive === undefined ? {} : { "/sys/fs/cgroup/memory.stat": `anon 1\ninactive_file ${inactive}\n` }),
+});
+
+test("free cgroup memory caps the workers (about 1.2 GB each, shared across slots), never below 1", () => {
+  assert.equal(cgroupFreeMemory(fs()), undefined);
+  assert.equal(cgroupFreeMemory(fs({ "/sys/fs/cgroup/memory.max": "max\n", "/sys/fs/cgroup/memory.current": "5\n" })), undefined);
+  assert.equal(cgroupFreeMemory(mem(16 * GB, 10 * GB)), 6 * GB);
+  assert.equal(cgroupFreeMemory(mem(16 * GB, 10 * GB, 4 * GB)), 10 * GB); // reclaimable cache is free
+  const env = { BOSSMAN_CHECK_SLOTS: "2" };
+  assert.equal(checkThreads({ env, cpus: 12, readFile: mem(16 * GB, 1 * GB) }), 4); // plenty free: CPU rule
+  assert.equal(checkThreads({ env, cpus: 12, readFile: mem(16 * GB, 11 * GB) }), 2); // 5 GB / 2 slots / 1.2 GB
+  assert.equal(checkThreads({ env, cpus: 12, readFile: mem(16 * GB, 15 * GB + GB / 2) }), 1); // nearly full
+  assert.equal(checkThreads({ env, cpus: 12, readFile: mem(16 * GB, 16 * GB) }), 1); // full: still 1
+  // v1 files work too, and an unreadable limit leaves today's rule.
+  const v1 = fs({ "/sys/fs/cgroup/memory/memory.limit_in_bytes": `${8 * GB}`, "/sys/fs/cgroup/memory/memory.usage_in_bytes": `${4 * GB}` });
+  assert.equal(checkThreads({ env: {}, cpus: 12, readFile: v1 }), 3);
+  assert.equal(checkThreads({ env, cpus: 12, readFile: fs() }), 4);
 });
 
 test("run as a script it prints the number", () => {
