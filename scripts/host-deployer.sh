@@ -491,8 +491,11 @@ host_extra_facts() {
         ((${#lines[@]})) || lines=("git ls-remote exited with status $rc")
         # "ssh: Could not resolve hostname <host>: Name or service not known": the host is replaced, so a VPN-only
         # name can't leak, and the message after it stays (it says what to do).
+        # Only substitute the host when there is one: an empty $ohost (a local-path origin) would make the sed
+        # expression an empty regex, which GNU sed refuses.
+        local sedh=""; [[ -n $ohost ]] && sedh="s#$ohost#<code host>#g; "
         why="$(printf '%s\n' "${lines[@]}" | grep -v '^[[:space:]]*$' | grep -v '^Warning:' | head -n 1 | cut -c1-200 \
-          | sed -E "s#$ohost#<code host>#g; s#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+#<address>#g; s/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/<user>@<host>/g; s/[A-Za-z0-9_-]{20,}/<key>/g" || true)"
+          | sed -E "${sedh}s#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+#<address>#g; s/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/<user>@<host>/g; s/[A-Za-z0-9_-]{20,}/<key>/g" || true)"
         [[ -n $why ]] || why="git ls-remote exited with status $rc"
       fi
       rm -f "$errf" 2>/dev/null || true
@@ -636,7 +639,11 @@ host_extra_facts() {
       # and is counted below).
       if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
       notrun=$((notrun + 1))
-      stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": ${cexit//[^0-9-]/}, \"since\": $(jstr "$csince")}"; ssep2=", "
+      # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
+      # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
+      # host.json. The server accepts a string and the flatten step skips an empty one.
+      local cexit_s="${cexit//[^0-9-]/}"
+      stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
     done <"$listing"
     rm -f "$listing" 2>/dev/null || true
     checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"stopped\": [$stopping]}"; csep=", "

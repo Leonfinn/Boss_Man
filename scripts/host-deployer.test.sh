@@ -183,6 +183,9 @@ fi
 # inspect -f <format> <ids...>: the exit code, and the restart policy, per container id.
 if [[ $1 == inspect && $2 == -f && $3 == '{{.State.ExitCode}}' ]]; then
   shift 3
+  # FAKE_INSPECT_EMPTY mimics inspect printing nothing (the container was removed between ps and inspect, or inspect
+  # was denied). The report must still be valid JSON (Rod's review of BOS-986 round 2).
+  [[ -n ${FAKE_INSPECT_EMPTY:-} ]] && exit 0
   for id in "$@"; do
     case $id in
       bbb|ccc|ddd|ggg) echo 0 ;;
@@ -232,6 +235,15 @@ node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=
 # A worker that exited 0 with a normal restart policy is still named, not hidden as a finished one-shot.
 FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==3)process.exit(1)' "$D/outbox/host.json" || fail "only the migrate/netguard one-shots and the standby colour should be ignored"
+# When inspect returns nothing for every container (removed between ps and inspect, or inspect denied), `exit` must
+# still be a string so host.json stays valid JSON and the panel keeps every other fact (Rod's must-fix).
+FAKE_INSPECT_EMPTY=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (empty inspect) exited non-zero"; }
+node -e '
+const h=require(process.argv[1]);
+const c=h.checks.container_status;
+if(!c||!Array.isArray(c.stopped))process.exit(2);
+if(!c.stopped.every(s=>typeof s.exit==="string")){console.error(JSON.stringify(c.stopped));process.exit(3)};
+' "$D/outbox/host.json" || fail "an empty inspect must leave a valid host.json with string exits: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"

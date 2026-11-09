@@ -145,6 +145,14 @@ describe("host facts settings record (BOS-419)", () => {
     expect(flat["repo.probeWhy"]).toContain("Connection timed out");
   });
 
+  it("keeps the panel readable when inspect returned no exit code (BOS-986)", async () => {
+    // The deployer now emits `exit` as a string, empty when inspect returned nothing. The name stays whole and the
+    // empty exit is left out rather than shown as "exit ".
+    const dir = await withHost({ ...REPORT, checks: { container_status: { total: 18, notRunning: 1, unhealthy: 0, stopped: [{ name: "bm-worker-1", status: "exited", exit: "", since: "2 hours ago" }] } } });
+    const flat = flattenHostRecord((await hostFactsService({ dir }).read())!);
+    expect(flat["check.container_status.stopped.names"]).toBe("bm-worker-1 (exited, 2 hours ago)");
+  });
+
   it("still reads a report from an older deployer with no names and no reason (BOS-986)", async () => {
     const dir = await withHost({ ...REPORT, checks: { container_status: { total: 18, notRunning: 2, unhealthy: 0 } } });
     const flat = flattenHostRecord((await hostFactsService({ dir }).read())!);
