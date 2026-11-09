@@ -238,6 +238,21 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     expect(await c().open(t.id)).toEqual([]);
     expect((await c().state(t.id))[0]).toMatchObject({ replyReminders: 2 });
   });
+  it("words a 90-minute wait as \"90 minutes\", never \"1 hours\" (BOS-887)", async () => {
+    const t = await c().ticket("Checkout error states");
+    // A live run takes the message, then ends; no sweep runs yet, so the first sweep sees the message 90 minutes old.
+    const run = await c().started(c().worker.id);
+    await c().db.update(runs).set({ ticketId: t.id }).where(eq(runs.id, run.id));
+    await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Any update on the checkout copy?" });
+    await c().db.update(runs).set({ endedAt: c().now() }).where(eq(runs.id, run.id));
+    await c().db.delete(wakes);
+    await c().age(t.id, 90);
+    expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 1 });
+    const note = (await wakesFor(c().worker.id, t.id)).find((w) => w.reason === "woken by owner")?.note;
+    expect(note, "the agent is told how long the message has waited").toContain("90 minutes");
+    expect(note).not.toContain("1 hours");
+  });
+
   it("keeps a message to an unassigned ticket as a note: nobody is chased", async () => {
     const t = await c().ticket("Nobody on it", { assigneeAgentId: undefined });
     await c().db.delete(wakes);

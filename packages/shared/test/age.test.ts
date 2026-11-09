@@ -7,6 +7,7 @@ const D = 24 * H;
 
 describe("ageWords: one way to say how long ago something was (BOS-887)", () => {
   it("counts minutes under two hours, with a singular at one", () => {
+    expect(ageWords(59_000)).toBe("1 minute");
     expect(ageWords(0)).toBe("1 minute");
     expect(ageWords(MIN)).toBe("1 minute");
     expect(ageWords(2 * MIN)).toBe("2 minutes");
@@ -26,7 +27,7 @@ describe("ageWords: one way to say how long ago something was (BOS-887)", () => 
     expect(ageWords(47 * H)).toBe("47 hours");
     expect(ageWords(2 * D)).toBe("2 days");
     expect(ageWords(2 * D + 23 * H)).toBe("2 days");
-    expect(ageWords(30 * D)).toBe("30 days");
+    expect(ageWords(9 * D)).toBe("9 days");
   });
 
   it("treats a clock slightly ahead of now as a minute, never 0 or negative", () => {
