@@ -16,11 +16,18 @@ const dayAndTime = (iso: string) => {
 
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
+/** A rate in % an hour: one decimal under 10% (0.3% and 1.5% must not read as 0% and 2%). */
+const rateText = (perHour: number) => {
+  const p = perHour * 100;
+  return `about ${p >= 10 ? Math.round(p) : Number(p.toFixed(1))}% an hour`;
+};
+
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
 function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
   if (!f || f.perHour === null) return null;
-  const rate = `about ${pct(f.perHour)} an hour`;
-  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} at the recent rate (${rate})`] : [false, `Won't run out before it resets, at the recent rate (${rate})`];
+  // The rate the date was worked out from, so the two always agree (BOS-1012).
+  const rate = `at ${rateText(f.runsOutPerHour ?? f.perHour)}`;
+  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} ${rate}, if the week so far keeps on as it has`] : [false, `Won't run out before it resets ${rate}, at the week's pace so far`];
   return (
     <span className={warn ? undefined : "muted"} style={{ fontSize: 12, color: warn ? "var(--amber-ink)" : undefined }}>
       {text}
