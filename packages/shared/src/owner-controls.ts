@@ -71,7 +71,7 @@ export const OWNER_CONTROLS = {
   Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
-  Runs: ["End all running runs", "Ending…"],
+  Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: ["Refresh"],
   Wiki: [
