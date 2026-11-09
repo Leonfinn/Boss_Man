@@ -168,6 +168,7 @@ describe.skipIf(!browser)("board scroll area runs from the menu to the window ed
         const scroll = document.querySelector(".board-scroll") as HTMLElement;
         const heading = document.querySelector(".page-head h1") as HTMLElement;
         const s = scroll.getBoundingClientRect();
+        const firstLane = scroll.querySelector(".lane") as HTMLElement;
         return {
           scrollRight: s.right,
           windowWidth: window.innerWidth,
@@ -177,6 +178,8 @@ describe.skipIf(!browser)("board scroll area runs from the menu to the window ed
           navPosition: getComputedStyle(nav).position,
           // The heading does not move when the menu opens: the board's gutter follows the page.
           headingLeft: heading.getBoundingClientRect().left,
+          // The first lane lands on the heading, behind the drawer and its 24px of page padding.
+          firstLaneLeft: firstLane.getBoundingClientRect().left,
         };
       });
       // At 724px the expanded menu is a drawer fixed over the page, so the scroller still runs to the
@@ -185,6 +188,7 @@ describe.skipIf(!browser)("board scroll area runs from the menu to the window ed
       expect(m.navWidth).toBeGreaterThan(150);
       expect(Math.abs(m.scrollRight - m.windowWidth)).toBeLessThanOrEqual(2);
       expect(m.headingLeft).toBe(64);
+      expect(Math.abs(m.firstLaneLeft - m.headingLeft)).toBeLessThanOrEqual(1);
     } finally {
       await page.close();
     }
