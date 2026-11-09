@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -74,6 +74,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
 
   const commands: Array<Extract<RunnerCommand, { type: "run.start" }> & { company: string }> = [];
   const messages: Array<Extract<RunnerCommand, { type: "run.message" }>> = [];
+  const decides: Array<Extract<RunnerCommand, { type: "permission.decide" }>> = [];
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
@@ -84,6 +85,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
       built.runners.connect(reg.runnerId, (cmd) => {
         if (cmd.type === "run.start") commands.push({ ...cmd, company: name });
         if (cmd.type === "run.message") messages.push(cmd);
+        if (cmd.type === "permission.decide") decides.push(cmd);
         return true;
       });
     await db.insert(settings).values({ key: `runner-slug:${c.id}`, value: slug }).onConflictDoUpdate({ target: settings.key, set: { value: slug } });
@@ -106,7 +108,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -550,6 +552,28 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(c.commands).toHaveLength(1); // not stopped, not restarted
     const list = (await c.maint()) as { runsList: unknown[] };
     expect(list.runsList).toHaveLength(1);
+  });
+
+  it("a permission request raised during a wrap-up can still be answered and reaches the run, so the drain can't deadlock", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const run = c.commands[0]!;
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
+    // The run asks for permission to finish its step, while the wrap-up holds new work everywhere.
+    const [runnerRow] = await c.db.select().from(runners).where(eq(runners.companyId, a.id));
+    const requestId = "req-wrap-1";
+    await c.runners.ingest(runnerRow!, { seq: 9001, at: new Date().toISOString(), event: { type: "run.permission_request", runId: run.runId, requestId, title: "Run a command", kind: "execute", rawInput: { command: "rm -rf /tmp/opencode/probe" }, optionKinds: ["allow_once", "reject_once"] } as never });
+    const [card] = await c.db.select().from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open")));
+    expect(card, "a card is raised during the wrap-up").toBeTruthy();
+    // Answering it gets the verdict to the run, so it can go on and wrap up.
+    const answer = (card!.options as string[])[0]!;
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer })).statusCode).toBe(200);
+    expect(c.decides.find((d) => d.runId === run.runId && d.requestId === requestId)?.verdict).toBe("allow");
+    // The wrap-up is still on: answering a card did not quietly start the world again.
+    expect(await getHold(c.db)).toMatchObject({ kind: "wrapup" });
   });
 
   it("a real update asked for during a wrap-up takes the hold over and swaps as usual", async () => {
