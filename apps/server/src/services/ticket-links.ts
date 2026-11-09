@@ -10,6 +10,8 @@ export class WorkError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Which field a 409 is about, so the page can offer a reload for it (BOS-905). */
+    readonly field?: string,
   ) {
     super(message);
   }
