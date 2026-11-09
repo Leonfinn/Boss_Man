@@ -2190,31 +2190,40 @@ function deployerLine(v: SelfDeployView): string {
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
-/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213); the server reads them the same way. */
-const MERGE_SUBJECT = /^Merge "(.*)" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i;
+/** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213). */
+const MERGE_SUBJECT = /^Merge "(.*)" \(([^)]*)\)$/;
+/** A ticket id, as the brackets of a merge subject hold it (BOS-883); anything else in them is not one. */
+const TICKET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The titles of the merges waiting to go live, newest first (BOS-875). Non-merge commits and untitled ones are left out. */
-function waitingMerges(commits: { subject?: string }[] | undefined): string[] {
+/**
+ * The merges waiting to go live, newest first (BOS-875), each with the ticket id from its subject's brackets, or null
+ * when they hold no ticket id (BOS-883). Non-merge commits and untitled ones are left out.
+ */
+function waitingMerges(commits: { subject?: string }[] | undefined): { title: string; ticketId: string | null }[] {
   return (commits ?? []).flatMap((c) => {
     const m = c.subject?.match(MERGE_SUBJECT);
-    return m?.[1] ? [m[1]] : [];
+    if (!m?.[1]) return [];
+    const id = m[2] ?? "";
+    return [{ title: m[1], ticketId: TICKET_ID.test(id) ? id : null }];
   });
 }
 
-/** What is waiting to go live, by ticket title, so the owner needn't read commit hashes (BOS-875). Nothing when no merges are waiting. */
+/** What is waiting to go live, by ticket title, each opening its ticket (BOS-875, BOS-883). Nothing when no merges are waiting. */
 function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefined }) {
-  const titles = waitingMerges(commits);
-  if (!titles.length) return null;
-  const shown = titles.slice(0, 10);
+  const changes = waitingMerges(commits);
+  if (!changes.length) return null;
+  const shown = changes.slice(0, 10);
   return (
     <div style={{ fontSize: 14 }}>
-      <p style={{ margin: 0 }}>{titles.length === 1 ? "1 change waiting:" : `${titles.length} changes waiting:`}</p>
+      <p style={{ margin: 0 }}>{changes.length === 1 ? "1 change waiting:" : `${changes.length} changes waiting:`}</p>
       <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-        {shown.map((title, i) => (
-          <li key={`${i}:${title}`}>{title}</li>
+        {shown.map((c, i) => (
+          <li key={`${i}:${c.title}`}>
+            {c.ticketId ? <a href={`#/tickets/${c.ticketId}`}>{c.title}</a> : c.title}
+          </li>
         ))}
       </ul>
-      {titles.length > shown.length && <p style={{ margin: "4px 0 0" }}>and {titles.length - shown.length} more</p>}
+      {changes.length > shown.length && <p style={{ margin: "4px 0 0" }}>and {changes.length - shown.length} more</p>}
     </div>
   );
 }
