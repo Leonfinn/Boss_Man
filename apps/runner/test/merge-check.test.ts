@@ -103,8 +103,11 @@ describe("two branches that each pass alone (F6)", () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "b.txt", "b\n");
     const counter = path.join(tmp("bm-mc-count-"), "runs");
-    const promise = ws.merge(spec, "main", "Merge B", {}, { commands: [`echo x >> ${counter}; sleep 1`] });
-    await new Promise((r) => setTimeout(r, 700));
+    const promise = ws.merge(spec, "main", "Merge B", {}, { commands: [`echo x >> ${counter}; sleep 2`] });
+    // Move main only once the check is running: a fixed delay lost the race on a busy runner
+    // (the merge's own git calls ran past it, so the check ran on the moved main).
+    for (let i = 0; i < 300 && !existsSync(counter); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(existsSync(counter)).toBe(true);
     // An empty commit changes main's sha but not its tree.
     const noop = git(o.url, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", "main^{tree}", "-p", "main", "-m", "noop");
     git(o.url, "update-ref", "refs/heads/main", noop);
