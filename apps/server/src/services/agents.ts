@@ -536,21 +536,35 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       if (ctx.type === "standing_rules") return this.applyStandingRules(companyId, ctx.byAgentId, ctx.text);
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
+        // Check the skills again before hiring, so a throw still means nobody was hired: a card can sit
+        // open while a skill is deleted, and the caller reopens it and says so (BOS-889 review).
+        await checkSkills(companyId, ctx.proposal.skills ?? []);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);
         // The skills go on before the new agent can be woken, so its first run starts with them (BOS-889).
+        // A give that still fails after the hire never throws: the agent exists, so a retry would hire a
+        // duplicate. The failures are flagged to the owner instead, the way hireTeam does it.
         const failures: string[] = [];
         for (const sk of ctx.proposal.skills ?? []) {
           if (!give) {
-            failures.push(`${sk} (skills can't be given here)`);
+            failures.push(`${hired.name} didn't get ${sk} (skills can't be given here)`);
             continue;
           }
           try {
             await give(hired.id, sk);
           } catch (err) {
-            failures.push(`${sk}: ${(err as Error).message}`);
+            failures.push(`${hired.name} didn't get ${sk}: ${(err as Error).message}`);
           }
         }
-        if (failures.length) throw new AgentError(409, `${hired.name} was hired but didn't get ${failures.join("; ")}. Give the skill to them on the Skills page.`);
+        if (failures.length) {
+          await notify({
+            companyId,
+            agentId: ctx.byAgentId,
+            level: "flag",
+            title: `Hired ${hired.name}, but they didn't get every skill`,
+            body: `${failures.join("\n")}\n\nGive the skills on the Skills page, so they're there before ${hired.name}'s next run.`,
+            link: "#/skills",
+          });
+        }
         await opts.assignPlanned?.(companyId, hired, ctx.proposal.forTickets ?? []);
         return hired;
       }

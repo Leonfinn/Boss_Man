@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agentSkills, agents, decisions, fundingSources, notifications, projects, settings, tickets } from "../src/db/schema.js";
+import { activity, agentSkills, agents, decisions, fundingSources, notifications, projects, settings, skills, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -22,7 +22,7 @@ async function setup() {
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer", template: "engineer" })).json() as { id: string };
   const funding = (await req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
@@ -347,6 +347,33 @@ describe("the CEO assigns tickets, including to a planned hire", () => {
     expect(held).toBe(2);
     const list = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json() as Array<{ name: string; agents: Array<{ name: string }> }>;
     expect(list.filter((s) => s.agents.some((a) => a.name === "Ada")).map((s) => s.name).sort()).toEqual(["copy", "triage"]);
+    await client.close();
+  });
+
+  it("refuses a hire whose skill was deleted before approval, and no duplicate is hired on a retry (BOS-889 review)", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    // The skill is added straight to the library, then deleted by its id while the card sits open.
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
+    const triage = (await c.db.select({ id: skills.id }).from(skills).where(eq(skills.name, "triage")))[0]!;
+    await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Ada", template: "qa", reason: "r", skills: ["triage"] }) });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    // The skill goes away while the card sits open. The answer is refused and nobody is hired, so the
+    // card can be answered again without hiring a second Ada.
+    await c.req("DELETE", `/api/companies/${c.company.id}/skills/${triage.id}`);
+    expect(await c.db.select().from(skills).where(eq(skills.name, "triage"))).toEqual([]);
+    const failed = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" });
+    expect(failed.json().message).toContain("Nobody was hired");
+    expect(failed.json().message).toContain("There's no skill or pack called triage in the library.");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+    expect(await c.db.select().from(agents).where(eq(agents.name, "Ada"))).toEqual([]);
+
+    // Nothing was hired, so a second answer after the skill is back hires exactly one Ada.
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" })).statusCode).toBeLessThan(300);
+    const adas = await c.db.select().from(agents).where(eq(agents.name, "Ada"));
+    expect(adas).toHaveLength(1);
+    expect(await c.db.select().from(agentSkills).where(eq(agentSkills.agentId, adas[0]!.id))).toHaveLength(1);
     await client.close();
   });
 
