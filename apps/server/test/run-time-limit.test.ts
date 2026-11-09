@@ -95,4 +95,11 @@ describe("run time limit", () => {
     expect((await ctx.limit(null)).statusCode).toBe(200);
     expect((await ctx.limit(0)).statusCode).toBe(400);
   });
+
+  it("only the signed-in owner can change the limit: a call with no owner session is refused", async () => {
+    ctx = await setup();
+    const res = await ctx.app.inject({ method: "PATCH", url: `/api/companies/${ctx.company.id}`, payload: { maxRunMinutes: 5 } });
+    expect(res.statusCode).toBe(401);
+    expect((await ctx.db.select().from(companies).where(eq(companies.id, ctx.company.id)))[0]!.maxRunMinutes).toBeNull();
+  });
 });
