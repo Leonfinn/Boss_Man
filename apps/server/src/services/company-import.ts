@@ -345,8 +345,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
     const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
     // The company's policy is floored against the default; each project's override against the company's
-    // (BOS-818). The default has no review kinds, so the company's own policy is what shows the security
-    // review a project override would otherwise drop.
+    // (BOS-818). The default has a security review at high and critical (BOS-824); the company's own
+    // policy adds whatever else it has, which is what a project override would otherwise drop.
     const floored = (policy: ReviewPolicy, project?: { name: string; floor: ReviewPolicy }) => {
       const r = noLooserThan(policy, project?.floor);
       if (r.tightened.length)
