@@ -1,5 +1,5 @@
 {
-  "id": "1f770545-3dd5-48ac-b47c-7689d027b55d",
+  "id": "c47cf77d-e75a-4cf8-b7d6-0a78e9918852",
   "prevId": "873e7a18-5f01-4a42-84e9-019044040b89",
   "version": "7",
   "dialect": "postgresql",
@@ -1552,12 +1552,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 30
-        },
-        "max_run_minutes": {
-          "name": "max_run_minutes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         },
         "advice_timeout_minutes": {
           "name": "advice_timeout_minutes",
@@ -5969,6 +5963,259 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.review_hold_waits": {
+      "name": "review_hold_waits",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "hold_id": {
+          "name": "hold_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blocker_ticket_id": {
+          "name": "blocker_ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "blocker_decision_id": {
+          "name": "blocker_decision_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "review_hold_waits_hold": {
+          "name": "review_hold_waits_hold",
+          "columns": [
+            {
+              "expression": "hold_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "review_hold_waits_hold_id_review_holds_id_fk": {
+          "name": "review_hold_waits_hold_id_review_holds_id_fk",
+          "tableFrom": "review_hold_waits",
+          "tableTo": "review_holds",
+          "columnsFrom": [
+            "hold_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "review_hold_waits_blocker_ticket_id_tickets_id_fk": {
+          "name": "review_hold_waits_blocker_ticket_id_tickets_id_fk",
+          "tableFrom": "review_hold_waits",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "blocker_ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "review_hold_waits_blocker_decision_id_decisions_id_fk": {
+          "name": "review_hold_waits_blocker_decision_id_decisions_id_fk",
+          "tableFrom": "review_hold_waits",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "blocker_decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "review_hold_waits_one_blocker": {
+          "name": "review_hold_waits_one_blocker",
+          "value": "num_nonnulls(\"review_hold_waits\".\"blocker_ticket_id\", \"review_hold_waits\".\"blocker_decision_id\") = 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.review_holds": {
+      "name": "review_holds",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "review_request_id": {
+          "name": "review_request_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reviewer_agent_id": {
+          "name": "reviewer_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "release_at": {
+          "name": "release_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'open'"
+        },
+        "closed_by": {
+          "name": "closed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_at": {
+          "name": "closed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "woken_at": {
+          "name": "woken_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "review_holds_one_open": {
+          "name": "review_holds_one_open",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"review_holds\".\"status\" = 'open'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "review_holds_ticket": {
+          "name": "review_holds_ticket",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "review_holds_ticket_id_tickets_id_fk": {
+          "name": "review_holds_ticket_id_tickets_id_fk",
+          "tableFrom": "review_holds",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "review_holds_review_request_id_review_requests_id_fk": {
+          "name": "review_holds_review_request_id_review_requests_id_fk",
+          "tableFrom": "review_holds",
+          "tableTo": "review_requests",
+          "columnsFrom": [
+            "review_request_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "review_holds_reviewer_agent_id_agents_id_fk": {
+          "name": "review_holds_reviewer_agent_id_agents_id_fk",
+          "tableFrom": "review_holds",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "reviewer_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.review_requests": {
       "name": "review_requests",
       "schema": "",
@@ -6646,12 +6893,6 @@
         "cancel_requested_at": {
           "name": "cancel_requested_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stop_reason": {
-          "name": "stop_reason",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
