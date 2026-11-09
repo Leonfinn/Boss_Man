@@ -519,7 +519,7 @@ function gcloudWords(args: Word[]): Word[] {
   // short flag is boolean, so `gcloud compute instances -q delete i` must keep `delete` (BOS-571 review).
   const valued = new Set([
     "--project", "--account", "--configuration", "--filter", "--format", "--impersonate-service-account", "--billing-project",
-    "--subscription", "--output", "--query", "--resource-group", "-g", "-s", "--location", "-l", "--only-show-errors",
+    "--subscription", "--output", "--query", "--resource-group", "-g", "-s", "--location", "-l",
     "-n", "--name", "-o", "--sub",
   ]);
   const out: Word[] = [];
@@ -1022,14 +1022,16 @@ export function commandRisks(command: string | string[]): Risk[] {
           // gcloud GROUP … delete: strip the global options and look for `delete` among the command's own words (BOS-571).
           const words = gcloudWords(args);
           if (words.some((a) => a.dynamic)) return destroys("runs a gcloud command only known when it runs");
-          if (words.some((a) => a.text === "delete")) return destroys("deletes cloud resources (gcloud … delete)");
+          // A bare `delete` anywhere (even where an option was thought to take it as a value) is never a value in
+          // gcloud, so flag it: a wrong entry in the value list can then only over-flag, never miss a delete.
+          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (gcloud … delete)");
           return;
         }
         if (prog === "az") {
           // az GROUP … delete: same shape as gcloud (BOS-571).
           const words = gcloudWords(args);
           if (words.some((a) => a.dynamic)) return destroys("runs an az command only known when it runs");
-          if (words.some((a) => a.text === "delete")) return destroys("deletes cloud resources (az … delete)");
+          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (az … delete)");
           return;
         }
         if (prog === "aws") {

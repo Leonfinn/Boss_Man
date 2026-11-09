@@ -736,6 +736,9 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "gcloud compute instances -q delete i-1",
     "az vm delete -g g -n v",
     "az --subscription s group delete -n g",
+    // --only-show-errors takes no value in az, so it must not hide the `delete` after it (BOS-571 review).
+    "az vm --only-show-errors delete -g g -n v",
+    "gcloud compute instances --quiet delete i-1",
     "terraform destroy",
     "terraform apply -destroy",
     "pulumi destroy",
@@ -841,6 +844,7 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "gcloud config set project p",
     "az account show",
     "az vm list -g g",
+    "az vm list --only-show-errors -g g",
     // wrappers that run a harmless program.
     "sg docker -c ls",
     "sg docker id",
