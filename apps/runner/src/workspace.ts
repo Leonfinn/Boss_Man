@@ -57,6 +57,12 @@ export const REVIEW_INSTALL_TIMEOUT_MS = 5 * 60_000;
  * here, git's helpers and all, and the run starts with the copy it has.
  */
 export const RUN_START_FETCH_TIMEOUT_MS = 60_000;
+/**
+ * Every other fetch from upstream (BOS-893): making a ticket's copy, a reviewer's copy, a review's base and the merge
+ * gate's migration check. A stalled connection would otherwise leave that step hanging until the run is killed, with
+ * nothing saying it was git. The fetch runs in its own process group, so its transport helper goes with it too.
+ */
+export const FETCH_TIMEOUT_MS = 60_000;
 
 /** Runs a command in its own process group, killed whole at the timeout; output kept to the last 4 KB. Never rejects on exit. */
 function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; timedOut: boolean; output: string }> {
@@ -281,6 +287,9 @@ export class Workspaces {
   /** How long the run-start refresh's upstream fetch may take (BOS-853); see RUN_START_FETCH_TIMEOUT_MS. */
   runStartFetchTimeoutMs = RUN_START_FETCH_TIMEOUT_MS;
 
+  /** How long every other upstream fetch may take (BOS-893); see FETCH_TIMEOUT_MS. */
+  fetchTimeoutMs = FETCH_TIMEOUT_MS;
+
   /**
    * Where a fenced merge check lives (BOS-323), set at start-up when the runner can fence: its own
    * home, shared by every fenced check (caches, harness state), and the pnpm store it installs from.
@@ -412,8 +421,11 @@ export class Workspaces {
     return urls[0]!;
   }
 
-  /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
-  private async fetchOrigin(repo: string, auth: Record<string, string>, tags = false, timeoutMs?: number) {
+  /**
+   * Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did.
+   * Always time-limited (BOS-893), so a stalled network can't hang the step: every caller says how long it may take.
+   */
+  private async fetchOrigin(repo: string, auth: Record<string, string>, timeoutMs: number, tags = false) {
     await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*", ...(tags ? ["+refs/tags/*:refs/tags/*"] : [])], { cwd: repo, env: auth, timeoutMs });
     // Every fetch keeps the agents' view current; a failure there never fails the caller (a merge, a check).
     await this.writeOriginView(repo).catch((err: unknown) => console.warn(`[runner] couldn't update ${repo}'s origin view (BOS-853): ${firstLine(err)}`));
@@ -495,7 +507,7 @@ export class Workspaces {
    */
   private async refreshCopy(projectId: string, repo: string, dir: string, auth: Record<string, string>) {
     try {
-      await this.fetchOrigin(repo, auth, true, this.runStartFetchTimeoutMs);
+      await this.fetchOrigin(repo, auth, this.runStartFetchTimeoutMs, true);
     } catch (err) {
       console.warn(`[runner] couldn't refresh project ${projectId} from upstream at run start; the copy keeps the origin/main it has (BOS-853): ${firstLine(err)}`);
       // The view may not exist yet (a copy made before BOS-853): it's made from what the shared repo has.
@@ -744,7 +756,7 @@ export class Workspaces {
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
 
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       await this.git(["worktree", "prune"], { cwd: repo });
       // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
       await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
@@ -833,7 +845,7 @@ export class Workspaces {
           await this.syncBranch(repo, dev, spec.ticketId);
         }
       } else {
-        await this.fetchOrigin(repo, auth);
+        await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
         const branch = branchFor(spec.ticketId);
         commit = await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo }).catch(() =>
           this.git(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { cwd: repo }).catch(() => {
@@ -1022,7 +1034,7 @@ export class Workspaces {
   private async reviewBase(repo: string, dir: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
     if (!baseRef) return { base: recorded };
     try {
-      await this.fetchOrigin(repo, gitAuthEnv(secrets));
+      await this.fetchOrigin(repo, gitAuthEnv(secrets), this.fetchTimeoutMs);
       const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
       // Where the branch split from main's current tip, however far main has moved since. Run in the
       // ticket's folder: a clone's own commits live in the clone, not the shared repo, which has only
@@ -1170,7 +1182,7 @@ export class Workspaces {
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       // Fetch from the recorded address (BOS-332), never `origin` from config, which an agent can repoint to take the token.
       // A failed fetch isn't fatal: the check then reads the refs it already has, as before.
-      await this.fetchOrigin(repo, auth).catch(() => undefined);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs).catch(() => undefined);
       return checkMigrations((args) => this.gitCode(args, { cwd: repo }), repo, { branch: branchFor(spec.ticketId), target, others });
     });
   }
@@ -1582,7 +1594,7 @@ export class Workspaces {
 
   /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
   private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
-    await this.fetchOrigin(repo, auth);
+    await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
     const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
@@ -1642,7 +1654,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
       // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
       if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
@@ -1714,7 +1726,7 @@ export class Workspaces {
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       const dir = this.ticketDir(spec.ticketId);
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
       const refs = async (ref: string, firstParent = false) => {
@@ -1803,7 +1815,7 @@ export class Workspaces {
     const checks = await this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       await this.cloneIfMissing(spec, auth);
-      await this.fetchOrigin(repo, auth);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
       const ref = `refs/remotes/origin/${spec.baseRef}`;
       const files = (await this.git(["ls-tree", "--name-only", ref], { cwd: repo })).split("\n").filter(Boolean);
       const texts = new Map<string, string | null>();

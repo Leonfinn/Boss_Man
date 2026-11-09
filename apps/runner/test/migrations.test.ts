@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseNameStatus, numberOf } from "../src/migrations.js";
 import { Workspaces } from "../src/workspace.js";
 
@@ -125,6 +125,25 @@ describe("checking a ticket's migration numbers (BOS-219)", () => {
     git(w.path, "add", ".");
     git(w.path, "commit", "-qm", "docs only");
     expect(await ws.migrations(spec, "main", [])).toEqual({ needed: false, reason: "This ticket adds no migration, so no number is at risk." });
+  });
+
+  it("gives the clash check's fetch a time limit, and carries on with the refs it has when it times out (BOS-893)", async () => {
+    const { ws, spec } = await ticket(3, "new_table", 3000);
+    const origin = (ws as unknown as { fetchOrigin: (...args: [string, Record<string, string>, number, boolean?]) => Promise<void> }).fetchOrigin;
+    const seen: Array<number | undefined> = [];
+    const spy = vi.spyOn(ws as unknown as { fetchOrigin: (...args: [string, Record<string, string>, number, boolean?]) => Promise<void> }, "fetchOrigin").mockImplementation((async (...args: [string, Record<string, string>, number, boolean?]) => {
+      seen.push(args[2]);
+      if (seen.length === 1) throw new Error(`git fetch timed out after ${Math.round(args[2] / 1000)} s and was stopped`);
+      return origin.apply(ws, args);
+    }));
+    try {
+      expect(await ws.migrations(spec, "main", [])).toEqual({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeGreaterThan(0);
+      expect(seen[0]).toBeLessThanOrEqual(120_000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("says it couldn't tell, rather than failing, for a branch or repo it can't read", async () => {
