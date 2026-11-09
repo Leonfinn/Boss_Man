@@ -764,6 +764,13 @@
       "when": 1794173684408,
       "tag": "0126_deploy_tag",
       "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1794183744367,
+      "tag": "0127_default_security_review",
+      "breakpoints": true
     }
   ]
 }

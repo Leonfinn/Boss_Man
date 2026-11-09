@@ -70,7 +70,7 @@ describe("reviewer lists", () => {
       ...DEFAULT_REVIEW_POLICY,
       medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo" },
       high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a } },
-      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: b, kinds: { adversarial: "ceo" } },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: b, kinds: { ...DEFAULT_REVIEW_POLICY.critical.kinds, adversarial: "ceo" } },
     };
     const r = noLooserThan(loose, floor);
     expect(r.policy).toEqual({
@@ -79,9 +79,9 @@ describe("reviewer lists", () => {
       high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a, security: [a, b] } },
     });
     expect(r.tightened).toEqual(["a reviewer other than the CEO for medium-risk work", "the security review of high-risk work"]);
-    // A kind the policy already has keeps its own reviewer; the default floor has no kinds to add.
+    // A kind the policy already has keeps its own reviewer; the default floor adds its security review (BOS-824).
     expect(noLooserThan({ ...floor, high: { ...floor.high, kinds: { security: "ceo" } } }, floor).tightened).toEqual([]);
-    expect(noLooserThan(loose).policy.high.kinds).toEqual({ infra: a });
+    expect(noLooserThan(loose).policy.high.kinds).toEqual({ infra: a, security: "ceo" });
     expect(loose.medium.reviewer).toBe("ceo");
   });
 });

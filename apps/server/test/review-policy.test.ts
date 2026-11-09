@@ -399,7 +399,7 @@ describe("review policy API", () => {
     expect(row!.p.critical.kinds).toEqual({ security: "ceo" });
     expect(row!.p.medium.kinds).toBeUndefined();
     // The migration only changes the default for new rows; stored policies are not rewritten (DR-041).
-    const migration = readFileSync(new URL("../drizzle/0125_default_security_review.sql", import.meta.url), "utf8");
+    const migration = readFileSync(new URL("../drizzle/0127_default_security_review.sql", import.meta.url), "utf8");
     expect(migration).toMatch(/^ALTER TABLE "companies" ALTER COLUMN "review_policy" SET DEFAULT /);
     expect(migration).not.toMatch(/\bUPDATE\b/i);
     // A high-risk ticket in a new company asks for the security review beside the code review.

