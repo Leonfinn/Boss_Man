@@ -28,7 +28,7 @@ async function setup() {
   const dir = await mkdtemp(path.join(tmpdir(), "bm-closed-"));
   await mkdir(path.join(dir, "inbox"));
   await mkdir(path.join(dir, "outbox"));
-  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [] }));
+  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [], deployer: { scriptSha: "1".repeat(64), repoSha: "1".repeat(64) } }));
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: dir });
   const cookie = await signedInOwner(db);
