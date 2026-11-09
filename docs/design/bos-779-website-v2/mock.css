@@ -172,14 +172,13 @@ a { color: inherit; text-underline-offset: 3px; }
 .install .need li { padding-left: 34px; position: relative; }
 .install .need li::before { content: ""; position: absolute; left: 2px; top: 6px; width: 8px; height: 14px; border: solid var(--amber-deep); border-width: 0 3px 3px 0; transform: rotate(45deg); }
 .install .actions { margin-top: 40px; display: flex; gap: 16px 28px; flex-wrap: wrap; align-items: center; }
-/* Boss Man on the corner of the steps card (the owner's preferred spot). To blend him in rather than stick him on:
-   the white sticker halo is removed from the drawing, so his own outline is the edge; he sits in a round badge,
-   like the app's agent portraits, filled with a pale tint of the section's amber; the badge has the card's own
-   1px border and a ring of the page colour where it crosses the card's corner; no drop shadow; and the circle
-   crops his collar cleanly instead of the picture's cut-off bottom. */
+/* Boss Man on the corner of the steps card (the owner's preferred spot), blended the same way as the hero drawing,
+   which the owner preferred to a round badge: no white sticker halo (his own outline is the edge), a soft amber
+   glow behind him, colours eased a little, and the picture's cut-off collar faded out instead of ending in a line. */
 .route { background: var(--paper); border-radius: 20px; padding: 36px 40px; box-shadow: 0 0 0 1px var(--line-light); position: relative; }
-.route .boss { position: absolute; right: -28px; top: -60px; width: 136px; height: 136px; border-radius: 50%; overflow: hidden; background: radial-gradient(circle at 50% 40%, #fdf4e3, #f7e3bf); box-shadow: 0 0 0 1px var(--line-light), 0 0 0 8px var(--board); }
-.route .boss img { position: absolute; left: 7%; top: 9%; width: 86%; max-width: none; filter: saturate(0.9); }
+.route .boss { position: absolute; right: -40px; top: -72px; width: 150px; height: 150px; }
+.route .boss::before { content: ""; position: absolute; inset: -26%; border-radius: 50%; background: radial-gradient(closest-side, rgba(240, 183, 92, 0.42), rgba(240, 183, 92, 0.16) 55%, rgba(240, 183, 92, 0) 100%); }
+.route .boss img { position: relative; width: 100%; filter: saturate(0.86) brightness(0.97); -webkit-mask-image: linear-gradient(#000 78%, transparent 97%); mask-image: linear-gradient(#000 78%, transparent 97%); }
 .route h3 { padding-right: 96px; }
 .route h3 { margin-bottom: 18px; }
 .route ol { padding: 0; list-style: none; counter-reset: s; display: grid; gap: 2px; }
@@ -225,7 +224,7 @@ a { color: inherit; text-underline-offset: 3px; }
   .arrows { display: none; }
   .out { grid-template-columns: repeat(3, 1fr); }
   .install { grid-template-columns: 1fr; gap: 56px; }
-  .route .boss { right: -16px; }
+  .route .boss { right: 8px; }
 }
 
 /* Phone */
@@ -275,7 +274,7 @@ a { color: inherit; text-underline-offset: 3px; }
   .out { grid-template-columns: 1fr; }
   .route { padding: 28px 22px; }
   .route { margin-top: 24px; }
-  .route .boss { right: 12px; top: -48px; width: 104px; height: 104px; box-shadow: 0 0 0 1px var(--line-light), 0 0 0 6px var(--board); }
+  .route .boss { right: 4px; top: -56px; width: 112px; height: 112px; }
   .route h3 { padding-right: 104px; }
   .install .actions .btn { width: 100%; }
   .foot .wrap { grid-template-columns: 1fr; }
