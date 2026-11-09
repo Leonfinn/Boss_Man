@@ -1,0 +1,241 @@
+// Projects and the setup wizard (R16, R56–R58), owner only. Moved out of app.ts unchanged (BOS-298 step 15).
+// The caller passes its owner scope, so requireOwner and the app's error handler still apply:
+// this registers routes on that instance rather than through app.register, which would add a new scope.
+// The board and a project's ticket routes stay in app.ts with the other ticket routes.
+import type { FastifyInstance } from "fastify";
+import { and, count, desc, eq, gte, isNull, ne, sql } from "drizzle-orm";
+import { z } from "zod";
+import { NO_CHECK, STANDARD_CHECKS, SYSTEM_STATES, findCredential, parseRepoUrl, repoUrlAllowed, usdToMicros, type DetectResult } from "@boss-man/shared";
+import type { Db } from "../db/client.js";
+import { agents, companies, costEvents, fundingSources, projects, runners as runnersTable, runs as runsTable, secretGrants, tickets } from "../db/schema.js";
+import type { gitHostService } from "../services/git-hosts.js";
+import type { launcherService } from "../services/launcher.js";
+import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
+import { monthStartUtc, projectSpendMicros } from "../services/project-spend.js";
+import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
+import type { runnersService } from "../services/runners.js";
+import type { secretsService } from "../services/secrets.js";
+import type { setupService } from "../services/setup.js";
+import { WorkError, type workService } from "../services/work.js";
+
+const Uuid = z.string().uuid();
+const IdParam = z.object({ id: Uuid });
+const State = z.enum(SYSTEM_STATES);
+const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: State, wipLimit: z.number().int().positive().nullable().optional() });
+
+export function projectRoutes(
+  owner: FastifyInstance,
+  db: Db,
+  deps: {
+    work: ReturnType<typeof workService>;
+    launch: ReturnType<typeof launcherService>;
+    gitHosts: ReturnType<typeof gitHostService>;
+    setup: ReturnType<typeof setupService>;
+    runners: ReturnType<typeof runnersService>;
+    secretsSvc: ReturnType<typeof secretsService>;
+    /** The company review-policy check, bound to the db (app.ts uses it for the company routes too). */
+    checkPolicy: (companyId: string, body: unknown) => ReturnType<typeof checkPolicyIn>;
+    /** Notes new scope for the CEO's next run; app.ts uses it for objectives and milestones too. */
+    teamCheck: (companyId: string, what: string) => Promise<void>;
+    now?: () => Date;
+  },
+) {
+  const { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck } = deps;
+
+  /** The project's own policy, or null when it uses the company's. */
+  owner.get("/api/projects/:id/review-policy", async (req, reply) => {
+    const [p] = await db.select({ policy: projects.reviewPolicy }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    return p ? { policy: p.policy } : reply.code(404).send({ error: "not_found" });
+  });
+  owner.put("/api/projects/:id/review-policy", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
+    if (!proj) return reply.code(404).send({ error: "not_found" });
+    const p = await checkPolicy(proj.companyId, req.body);
+    if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
+    await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
+    return { policy: p };
+  });
+  owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
+    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
+    return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
+  });
+
+  owner.get("/api/companies/:id/projects", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
+  });
+
+  owner.post("/api/companies/:id/projects", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
+    const p = await work.createProject(id, body.name, body.columns);
+    await teamCheck(id, `created a project, "${p.name}" (${p.id})`);
+    return reply.code(201).send(p);
+  });
+
+  owner.patch("/api/projects/:id", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const b = z
+      .object({
+        name: z.string().trim().min(1).max(80),
+        repoUrl: z
+          .string()
+          .trim()
+          .max(500)
+          .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.168.68.67:3003/you/repo.git.")
+          .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
+          .nullable(),
+        defaultBranch: z.string().trim().min(1).max(200),
+        verifyCommand: z.string().trim().min(1).max(1000).nullable(),
+        deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
+        ticketCostCapUsd: z.number().positive().nullable(),
+        starred: z.boolean(),
+        monthlyCapUsd: z.number().positive().nullable(),
+        archived: z.boolean(),
+        landing: z.enum(["merge", "pull_request"]),
+        gitHost: z.enum(["github", "gitea"]).nullable(),
+        gitApiBase: z
+          .string()
+          .trim()
+          .max(500)
+          .refine((u) => /^https:\/\//.test(u) || (u.startsWith("http://") && repoUrlAllowed(u)), "Give the API's https:// address, or http:// on a LAN address.")
+          .nullable(),
+      })
+      .partial()
+      .parse(req.body);
+    const { ticketCostCapUsd, monthlyCapUsd, archived, ...fields } = b;
+    // Archiving hides the project from agents, so work still open in it would be stranded.
+    if (archived) {
+      const [open] = await db.select({ n: count() }).from(tickets).where(and(eq(tickets.projectId, id), ne(tickets.systemState, "done")));
+      if (open!.n) return reply.code(409).send({ error: "open_tickets", message: `This project has ${open!.n} open task${open!.n === 1 ? "" : "s"}. Finish or cancel ${open!.n === 1 ? "it" : "them"} before archiving.` });
+    }
+    if (archived !== undefined) Object.assign(fields, { archivedAt: archived ? new Date() : null, ...(archived ? { starred: false } : {}) });
+    // A new repo address finds its host (R59), unless the owner set one with it.
+    if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
+      const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
+      Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
+    }
+    // The owner set this git address themselves, so its private address is meant (a LAN git server); the guard keeps it (BOS-708).
+    if (fields.repoUrl !== undefined) Object.assign(fields, { allowPrivate: !!fields.repoUrl });
+    const [p] = await db
+      .update(projects)
+      .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
+      .where(eq(projects.id, id))
+      .returning();
+    // A new repo address (or archiving) changes which git host the company's runner may reach.
+    if (p && (fields.repoUrl !== undefined || archived !== undefined)) void launch.syncAllow(p.companyId);
+    return p ?? reply.code(404).send({ error: "not_found" });
+  });
+
+  // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
+  owner.get("/api/projects/:id/spend", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [p] = await db.select({ cap: projects.ticketCostCapMicros, monthlyCap: projects.monthlyCapMicros }).from(projects).where(eq(projects.id, id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    const t = deps.now ? deps.now() : new Date();
+    const monthStart = monthStartUtc(t);
+    const month = await projectSpendMicros(db, id, monthStart);
+    const all = await projectSpendMicros(db, id);
+    const sum = sql<string>`sum(${costEvents.costMicros})`;
+    const top = await db
+      .select({ id: tickets.id, title: tickets.title, micros: sum })
+      .from(costEvents)
+      .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
+      .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
+      .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
+      .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
+      .groupBy(tickets.id, tickets.title)
+      .orderBy(desc(sum))
+      .limit(10);
+    // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
+    const tokenSum = (since?: Date) =>
+      db
+        .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)` })
+        .from(runsTable)
+        .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
+        .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
+        .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
+    const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
+    return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
+  });
+
+  // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
+  owner.get("/api/setup-progress", async () => setup.progress());
+  owner.put("/api/setup-progress", async (req) => setup.save(z.object({ dismissed: z.boolean(), step: z.number().int().min(0).max(10), companyId: Uuid.nullable() }).partial().parse(req.body)));
+  owner.get("/api/companies/:id/setup-checklist", async (req, reply) => (await setup.checklist(IdParam.parse(req.params).id)) ?? reply.code(404).send({ error: "not_found" }));
+
+  // Is the company's git token good for this repo (R58, R56)? One read of the repo, with its permissions.
+  owner.post("/api/projects/:id/check-git-token", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [p] = await db.select().from(projects).where(eq(projects.id, id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    const a = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+    if (!a || (p.gitHost !== "github" && p.gitHost !== "gitea") || !p.gitApiBase) return { ok: false, canPush: false, message: "Boss Man doesn't know this project's git host yet; save its repo address first." };
+    const token = (await secretsSvc.resolveCompanyEnv(p.companyId, "check")).GIT_TOKEN;
+    if (!token) return { ok: false, canPush: false, message: "The company has no GIT_TOKEN yet." };
+    try {
+      return await gitHosts.checkAccess({ kind: p.gitHost, apiBase: p.gitApiBase, owner: a.owner, repo: a.repo }, token);
+    } catch (err) {
+      return { ok: false, canPush: false, message: `Couldn't reach the host: ${(err as Error).message}` };
+    }
+  });
+
+  // Does the company's Claude setup-token work (R58)? Only Claude Code can tell, so the runner
+  // runs one tiny prompt with it, which uses a little of the subscription allowance.
+  owner.post("/api/companies/:id/check-claude", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+    if (!c) return reply.code(404).send({ error: "not_found" });
+    const [grant] = await db.select({ id: secretGrants.id }).from(secretGrants).where(and(eq(secretGrants.companyId, id), eq(secretGrants.envName, "CLAUDE_CODE_OAUTH_TOKEN")));
+    if (!grant) return { ok: false, message: "The company has no Claude setup-token yet." };
+    const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
+    if (!runner || !runners.isConnected(runner.id)) return { ok: false, message: "The company's runner isn't connected, and the check runs there." };
+    try {
+      return await runners.request<{ ok: boolean; message: string }>(runner.id, (requestId) => ({ type: "credential.check", requestId }), 2 * 60_000);
+    } catch (err) {
+      return { ok: false, message: `The runner couldn't run the check: ${(err as Error).message}` };
+    }
+  });
+
+  // Merge check presets (R57): the runner proposes checks from the repo, alongside the standard ones.
+  owner.post("/api/projects/:id/check-presets", async (req, reply) => {
+    const { id } = IdParam.parse(req.params);
+    const [p] = await db.select().from(projects).where(eq(projects.id, id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    const base = { standard: STANDARD_CHECKS, none: NO_CHECK };
+    if (!p.repoUrl) return { ...base, detected: [], tools: null, error: "Set the project's git repo first." };
+    const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, p.companyId));
+    if (!runner || !runners.isConnected(runner.id)) return { ...base, detected: [], tools: null, error: "The company's runner isn't connected, so it can't look at the repo." };
+    try {
+      const r = await runners.request<DetectResult>(runner.id, (requestId) => ({ type: "workspace.detect", requestId, projectId: p.id, repoUrl: p.repoUrl!, baseRef: p.defaultBranch }), 2 * 60_000);
+      return { ...base, detected: r.checks, tools: r.tools, error: null };
+    } catch (err) {
+      return { ...base, detected: [], tools: null, error: `The runner couldn't read the repo: ${(err as Error).message}` };
+    }
+  });
+
+  owner.put("/api/projects/:id/columns", async (req) => {
+    const { id } = IdParam.parse(req.params);
+    return work.setColumns(id, z.array(Column).parse(req.body));
+  });
+
+  // The project brief: a wiki page the CEO writes from the code. One open brief ticket at a time.
+  const briefStatus = async (projectId: string) => {
+    const [p] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!p) return null;
+    const b = await findBrief(db, p.companyId, p.id);
+    return { p, exists: !!b, status: { slug: briefSlug(p.id), exists: !!b, commit: b?.commit ?? null, branch: b?.branch ?? null, updatedAt: b?.updatedAt ?? null, ticketId: (await openBriefTicket(db, p.id))?.id ?? null } };
+  };
+  owner.get("/api/projects/:id/brief", async (req, reply) => (await briefStatus(IdParam.parse(req.params).id))?.status ?? reply.code(404).send({ error: "not_found" }));
+  owner.post("/api/projects/:id/brief", async (req, reply) => {
+    const b = await briefStatus(IdParam.parse(req.params).id);
+    if (!b) return reply.code(404).send({ error: "not_found" });
+    const open = await openBriefTicket(db, b.p.id);
+    if (open) return open;
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, b.p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    if (!ceo) throw new WorkError(400, "This company has no CEO to write the brief. Add one first.");
+    const ticket = await work.createTicket(b.p.id, { title: b.exists ? BRIEF_TITLES[1]! : BRIEF_TITLES[0]!, body: briefTicketBody(b.p, b.exists), assigneeAgentId: ceo.id, noCode: true });
+    return reply.code(201).send(ticket);
+  });
+}
