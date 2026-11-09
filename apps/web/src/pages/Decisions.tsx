@@ -5,6 +5,7 @@ import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
@@ -347,20 +348,11 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
-/** How long ago a card was raised, in the same words the Plan page uses (BOS-804). */
-function raisedAgo(iso: string, now = Date.now()) {
-  const m = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60_000));
-  if (m < 1) return "just now";
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
-}
-
 /** The rank's age reason ("Raised just now", "Waiting 3 h", "Waiting 2 days"). The "Raised" line shows
  * the age in the Plan page's words now, so repeating it here contradicts it ("Raised 8 min ago · Raised
- * just now") and tells the owner nothing new (BOS-804). */
-const AGE_REASON = /^(Raised just now|Waiting \d+ (h|days?))$/;
-const otherReasons = (reasons: string[]) => reasons.filter((r) => !AGE_REASON.test(r));
+ * just now") and tells the owner nothing new (BOS-804). Hidden by the server's mark, not its wording, so
+ * a reworded reason can't show a second age (BOS-869). */
+const otherReasons = (d: Decision) => d.reasons.filter((r) => r !== d.ageReason);
 
 /** Current vs proposed harness, provider, model and paid from on a model-change card (BOS-128). */
 function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
@@ -939,7 +931,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       )}
                       <span>Raised <time dateTime={d.createdAt} title={when(d.createdAt)}>{raisedAgo(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
-                      {otherReasons(d.reasons).map((r) => (
+                      {otherReasons(d).map((r) => (
                         <span key={r}>{r}</span>
                       ))}
                     </div>

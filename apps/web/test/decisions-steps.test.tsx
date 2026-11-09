@@ -29,6 +29,7 @@ const card = (steps: string[]): Decision => ({
   score: 10,
   parts: { blocking: 0, urgency: 0, age: 10, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   context: { steps },
 });
