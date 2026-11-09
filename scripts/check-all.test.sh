@@ -28,7 +28,9 @@ run() {
 
 run 0 1 "success" 'echo x >>"$COUNT"'
 run 3 3 "EAGAIN retried, final rc kept" 'echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3'
-run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
+run 3 3 "agent that could not start under load retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t start claude-code-acp: x (EAGAIN)"; exit 3'
+run 3 1 "a plain run-ended error is not retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t set up the agent'"'"'s skills"; exit 3'
+run 3 3 "spawnSync form retried"'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
