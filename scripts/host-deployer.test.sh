@@ -119,6 +119,14 @@ has "$D/outbox/host.json" '"BOSSMAN_HOST_PORT": "3199"'
 hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
 hasnt "$D/outbox/host.json" 'PENPOT_BIND'
+# The ntfy add-on's own https address is reported (so the phone page can show it); anything else is not.
+printf 'NTFY_BASE_URL=https://box.example.ts.net:8443\n' >"$T/src/.env"
+host
+has "$D/outbox/host.json" '"ntfy": {"baseUrl": "https://box.example.ts.net:8443"}'
+printf 'NTFY_BASE_URL=https://user:pw@box.example.ts.net:8443/?x=1\n' >"$T/src/.env"
+host
+hasnt "$D/outbox/host.json" 'baseUrl'
+hasnt "$D/outbox/host.json" 'user:pw'
 rm -f "$T/src/.env"
 # BOS-770: every BOSSMAN_NETGUARD_ALLOW line in .env is reported in order, host:port entries only, so a duplicate
 # (Compose uses only the last) shows; a comment, a commented-out line and anything that isn't host:port are left out.

@@ -497,6 +497,11 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- the ntfy add-on's own address (NTFY_BASE_URL in .env): what the phone app must be pointed at. Only a plain https
+  # address is reported (no login part, query or #), so nothing secret can ride along.
+  local nbase
+  nbase="$(env_value NTFY_BASE_URL)"; nbase="${nbase%/}"
+  if [[ $nbase =~ ^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,100})?$ ]]; then out+="$sep\"ntfy\": {\"baseUrl\": $(jstr "$nbase")}"; fi
   # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
   # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
   # (any token that isn't host:port is dropped), and no other key is read.

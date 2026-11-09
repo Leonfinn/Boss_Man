@@ -42,6 +42,8 @@ const HostRecord = z.object({
   paths: z.object({ install: z.string(), src: z.string(), deployer: z.string() }).optional().catch(undefined),
   compose: z.object({ files: z.array(z.string()).default([]), bluegreen: z.boolean().default(false), liveColour: z.string().default("") }).optional().catch(undefined),
   network: z.object({ addresses: z.array(z.string()).default([]), ports: z.record(z.string(), z.string()).default({}) }).optional().catch(undefined),
+  /** The ntfy add-on's own https address (NTFY_BASE_URL), the one the phone app subscribes at. Absent: not reported. */
+  ntfy: z.object({ baseUrl: z.string().regex(/^https:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?(\/[A-Za-z0-9._~/-]{0,100})?$/) }).optional().catch(undefined),
   memory: z.object({ totalKb: z.number().int().nonnegative(), availableKb: z.number().int().nonnegative() }).optional().catch(undefined),
   addons: z.record(z.string(), z.string()).optional().catch(undefined),
   checks: z.record(z.string(), z.record(z.string(), z.union([z.number(), z.string()]))).optional().catch(undefined),
@@ -83,6 +85,7 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
     o["network.addresses"] = csv(r.network.addresses);
     for (const [k, v] of Object.entries(r.network.ports)) o[`network.port.${k}`] = v;
   }
+  if (r.ntfy) o["ntfy.baseUrl"] = r.ntfy.baseUrl;
   if (r.memory) { o["memory.totalKb"] = String(r.memory.totalKb); o["memory.availableKb"] = String(r.memory.availableKb); }
   for (const [k, v] of Object.entries(r.addons ?? {})) o[`addon.${k}`] = v;
   for (const [check, fields] of Object.entries(r.checks ?? {}))

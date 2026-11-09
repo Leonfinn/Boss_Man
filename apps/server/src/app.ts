@@ -1409,9 +1409,11 @@ export async function buildApp(opts: AppOptions) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
       }
     });
+    // The address the phone app must use for ntfy: the add-on's own NTFY_BASE_URL as the host reports it (null: not reported).
+    const phoneNtfyAddress = async () => (await hostFacts.value("ntfy.baseUrl").catch(() => null)) ?? null;
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s) };
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress() };
     });
     owner.put("/api/notification-settings", async (req) => {
       const b = NotifySettings.omit({ ntfy: true })
@@ -1429,7 +1431,7 @@ export async function buildApp(opts: AppOptions) {
           : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
       }
       const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved) };
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress() };
     });
     owner.post("/api/notification-settings/test", async (_req, reply) => {
       try {

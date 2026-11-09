@@ -124,7 +124,15 @@ function SettingsForm() {
       return "Saved.";
     });
   };
-  const test = () => act(async () => (await api("/api/notification-settings/test", { method: "POST" }), "Test sent. Check your phone."));
+  const phoneAddress = saved?.phoneAddress ? saved.phoneAddress.replace(/\/+$/, "") : null;
+  const test = () =>
+    act(async () => {
+      await api("/api/notification-settings/test", { method: "POST" });
+      return `Your ntfy server accepted it. If it doesn't appear on the phone within a few seconds, check the phone app is subscribed at ${phoneAddress ?? "the ntfy address (the NTFY_BASE_URL line in your .env file)"}.`;
+    });
+  const copyAddress = () => {
+    if (phoneAddress) void navigator.clipboard?.writeText(phoneAddress).then(() => setNote({ ok: true, text: "Address copied." }), () => setNote({ ok: false, text: "Couldn't copy. Select the address and copy it by hand." }));
+  };
   const row = { display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" } as const;
   const check = { display: "flex", gap: 6, alignItems: "center", minHeight: 32, fontSize: 14 } as const;
 
@@ -221,6 +229,45 @@ function SettingsForm() {
           </>
         )}
       </fieldset>
+
+      {saved?.ntfy && (
+        <section aria-labelledby="phone-setup-h" style={{ border: "1px solid var(--border, #8884)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <h3 id="phone-setup-h" style={{ fontSize: 15, fontWeight: 600 }}>
+            Set up your phone
+          </h3>
+          {phoneAddress ? (
+            <>
+              <p style={{ fontSize: 14 }}>In the ntfy app on your phone, the server address must be exactly:</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <code data-testid="phone-address" style={{ fontSize: 14, wordBreak: "break-all" }}>
+                  {phoneAddress}
+                </code>
+                <button className="btn" type="button" onClick={copyAddress}>
+                  Copy address
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="error" style={{ fontSize: 14 }}>
+              Boss Man can't work out the address your phone needs. Look for the NTFY_BASE_URL line in the .env file on your host: that https address is the one to use. (This page shows it once the host reports it, which can take a minute after the add-on is set up.)
+            </p>
+          )}
+          <ol style={{ fontSize: 14, margin: 0, paddingLeft: 20 }}>
+            <li>Tick "Use another server" in the ntfy app, and enter the address above. It is not Boss Man's own address: leaving off the port reaches Boss Man, not ntfy.</li>
+            <li>Subscribe to the topic shown above: {form.topic ? <code>{form.topic}</code> : "the Topic"}.</li>
+            <li>Log in with the phone's read-only ntfy user and its password, not the publish access token Boss Man uses.</li>
+          </ol>
+          {phoneAddress && (
+            <p style={{ fontSize: 14 }}>
+              To check the phone can reach ntfy, open{" "}
+              <a href={`${phoneAddress}/v1/health`} target="_blank" rel="noreferrer">
+                {phoneAddress}/v1/health
+              </a>{" "}
+              in the phone's browser. It should show <code>{`{"healthy":true}`}</code>. If it doesn't load, the phone isn't on your tailnet.
+            </p>
+          )}
+        </section>
+      )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <SaveButton {...sv} busy={busy} />
