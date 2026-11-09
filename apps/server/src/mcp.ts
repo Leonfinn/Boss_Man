@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { AGENT_TEMPLATES, ageWords, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, tickets as ticketsTable, wakes, workflowColumns } from "./db/schema.js";
@@ -1118,10 +1118,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             (r) => (r.context as { ladder?: { rung?: string } }).ladder?.rung !== "scrum_master",
           );
           if (!rows.length) return text("No decisions are waiting for you.");
-          const ago = (at: Date) => {
-            const mins = Math.max(1, Math.round((Date.now() - at.getTime()) / 60_000));
-            return mins >= 2880 ? `${Math.floor(mins / 1440)} days` : mins >= 120 ? `${Math.floor(mins / 60)} hours` : `${mins} min`;
-          };
+          const ago = (at: Date) => ageWords(Date.now() - at.getTime());
           // Newest first (BOS-164); one page at a time so a long queue doesn't come back as one
           // enormous tool result, with offset so the older cards stay reachable (BOS-149).
           const offset = input.offset ?? 0;

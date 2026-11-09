@@ -119,7 +119,6 @@ export type AlertClearingDeps = {
 };
 
 const hhmm = (d: Date) => d.toISOString().slice(11, 16);
-const ago = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 
 export function alertClearing(db: Db, deps: AlertClearingDeps) {
   const now = deps.now ?? (() => new Date());
