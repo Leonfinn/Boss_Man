@@ -101,4 +101,14 @@ describe("CEO reply lane", () => {
     const [w] = await c.db.select().from(wakes).where(eq(wakes.reason, "ceo reply"));
     expect(w).toMatchObject({ priority: 4, note: "A permission card is waiting." });
   });
+
+  it("DR-048 A: an idle CEO's card wake asking for the lane is queued as the reply wake, not the plain one", async () => {
+    const c = (ctx = await setup());
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", replyLane: true, note: "A permission card is waiting." });
+    const rows = await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id));
+    expect(rows.map((w) => w.reason)).toEqual(["ceo reply"]);
+    // Without the lane the plain wake is queued as before.
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision", note: "plain" });
+    expect((await c.db.select().from(wakes).where(eq(wakes.reason, "decision"))).length).toBe(1);
+  });
 });

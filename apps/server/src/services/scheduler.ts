@@ -1167,14 +1167,20 @@ export function schedulerService(
      * must reach the CEO soon (input.replyLane), would otherwise wait behind the CEO's one long run:
      * a steer is only read between its tool calls. So when the CEO has a work run open, the same
      * note also starts a short parallel run in the reply lane. The normal delivery still happens.
+     * When the CEO is idle and the caller asked for the lane (input.replyLane), the reply wake
+     * replaces the plain one (DR-048 part A): a runner-update hold stops a plain wake but lets a
+     * reply-lane wake through while any work run is live. Returns that wake's outcome when it
+     * replaced the plain one, so the caller queues nothing more.
      */
     async replyLane(agent: typeof agents.$inferSelect, input: Pick<WakeInput, "reason" | "ticketId" | "note" | "causedByRunId" | "replyLane">) {
-      if (agent.role !== "ceo" || agent.retiredAt) return;
+      if (agent.role !== "ceo" || agent.retiredAt) return undefined;
       const wanted = input.replyLane || (input.reason === "message" && !input.causedByRunId);
-      if (!wanted) return;
+      if (!wanted) return undefined;
       const [open] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.agentId, agent.id), isNull(runs.endedAt), isNull(runs.purpose))).limit(1);
-      if (!open) return;
-      await this.notify(agent.id, { reason: CEO_REPLY_REASON, ticketId: input.ticketId ?? null, priority: 4, note: input.note ?? null });
+      const swap = !open && !!input.replyLane && input.reason !== CEO_REPLY_REASON;
+      if (!open && !swap) return undefined;
+      const lane = await this.notify(agent.id, { reason: CEO_REPLY_REASON, ticketId: input.ticketId ?? null, priority: 4, note: input.note ?? null });
+      return swap ? lane : undefined;
     },
 
     /** replyLane() for a caller that has the agent's id, not its row. */
@@ -1187,7 +1193,8 @@ export function schedulerService(
     async wake(input: WakeInput) {
       const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
       if (!agent) throw new Error("No such agent.");
-      await this.replyLane(agent, input);
+      const swapped = await this.replyLane(agent, input);
+      if (swapped) return swapped;
       let depth = 0;
       let causedByAgentId: string | null = null;
       // Boss Man's own wakes (a resume after a restart, a watchdog sweep) are not an agent waking
@@ -1350,7 +1357,8 @@ export function schedulerService(
       // A note that joins a wake already waiting never reaches wake(), so the reply lane is offered here too.
       if (waiting) {
         const [ag] = await db.select().from(agents).where(eq(agents.id, agentId));
-        if (ag) await this.replyLane(ag, input);
+        const swapped = ag ? await this.replyLane(ag, input) : undefined;
+        if (swapped) return swapped;
       }
       if (!waiting) return this.wake({ ...input, agentId, ...(window > 0 && !urgent ? { defer: { until: new Date(t.getTime() + window), why: `waiting briefly for more "${input.reason}"` } } : {}) });
       // Each note waits the window again, up to answerBatchMaxMs after the first.
