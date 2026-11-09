@@ -293,10 +293,11 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck >/dev/null
           scripts/check-shell.sh
-      - name: Save the images for the join job (a one-day build file inside this repo's CI, never published)
+          scripts/test-shell.sh
+      - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
         run: |
           mkdir -p "$RUNNER_TEMP/img"
-          docker save boss-man-server:ci boss-man-runner:ci boss-man-launcher:current boss-man-netguard:current | gzip -1 > "$RUNNER_TEMP/img/images-${{ matrix.arch }}.tar.gz"
+          docker save boss-man-server:ci boss-man-launcher:current boss-man-netguard:current | gzip -1 > "$RUNNER_TEMP/img/images-${{ matrix.arch }}.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: images-${{ matrix.arch }}
@@ -326,15 +327,15 @@ jobs:
           # One architecture at a time, because both archives hold the same image names.
           for arch in amd64 arm64; do
             docker load < "$RUNNER_TEMP/in/images-$arch/images-$arch.tar.gz" >/dev/null
-            for img in boss-man-server:ci boss-man-runner:ci boss-man-launcher:current boss-man-netguard:current; do
+            for img in boss-man-server:ci boss-man-launcher:current boss-man-netguard:current; do
               name="${img%%:*}"
               docker tag "$img" "$reg/$name:$arch"
               docker push -q "$reg/$name:$arch"
             done
           done
-          for name in boss-man-server boss-man-runner boss-man-launcher boss-man-netguard; do
+          # The runner image joins once the Claude pack lands (it holds Claude Code today and must not leave the build machine).
+          for name in boss-man-server boss-man-launcher boss-man-netguard; do
             docker buildx imagetools create -t "$reg/$name:joined" "$reg/$name:amd64" "$reg/$name:arm64"
             docker buildx imagetools inspect "$reg/$name:joined" | tee "$RUNNER_TEMP/$name.txt"
             grep -q "linux/amd64" "$RUNNER_TEMP/$name.txt" && grep -q "linux/arm64" "$RUNNER_TEMP/$name.txt" || { echo "$name: joined image lacks an architecture"; exit 1; }
           done
-          scripts/test-shell.sh
