@@ -42,6 +42,7 @@ const profiles = (() => {
 type Page = {
   setContent: (html: string, opts?: { waitUntil?: "load" }) => Promise<void>;
   evaluate: <T>(fn: () => T) => Promise<T>;
+  screenshot: (opts: { path?: string; fullPage?: boolean }) => Promise<Buffer>;
   close: () => Promise<void>;
 };
 type Browser = {
@@ -71,6 +72,10 @@ afterAll(async () => {
   await browser?.close();
 });
 
+// Opt-in before/after proof (the ticket wants desktop and phone-width shots): with BOSSMAN_SCRATCH set,
+// save them there. Never a repo file; proofs don't go in the repo.
+const scratch = process.env.BOSSMAN_SCRATCH;
+
 type Measure = { trialVisible: boolean; waitVisible: boolean; trialFits: boolean; waitFits: boolean; pageScrolls: boolean; scrollWidth: number; innerWidth: number; trialText: string; waitText: string };
 
 const measure = (): Measure => {
@@ -99,6 +104,7 @@ describe.skipIf(!browser)("Updates trial line fits the window (BOS-953)", () => 
     const page = await browser!.newPage({ viewport: { width: 1280, height: 900 } });
     try {
       await page.setContent(HTML, { waitUntil: "load" });
+      if (scratch) await page.screenshot({ path: `${scratch}/trial-desktop.png`, fullPage: true });
       const m = (await page.evaluate(measure)) as Measure;
       expect(m.trialVisible).toBe(true);
       expect(m.waitVisible).toBe(true);
@@ -108,6 +114,22 @@ describe.skipIf(!browser)("Updates trial line fits the window (BOS-953)", () => 
       expect(m.waitFits).toBe(true);
       expect(m.pageScrolls).toBe(false);
       expect(m.scrollWidth).toBeLessThanOrEqual(m.innerWidth + 1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("phone 380: both lines wrap and stay inside the window", async () => {
+    const page = await browser!.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+    try {
+      await page.setContent(HTML, { waitUntil: "load" });
+      if (scratch) await page.screenshot({ path: `${scratch}/trial-phone-380.png`, fullPage: true });
+      const m = (await page.evaluate(measure)) as Measure;
+      expect(m.trialVisible).toBe(true);
+      expect(m.waitVisible).toBe(true);
+      expect(m.trialFits).toBe(true);
+      expect(m.waitFits).toBe(true);
+      expect(m.scrollWidth).toBeLessThanOrEqual(380 + 1);
     } finally {
       await page.close();
     }
