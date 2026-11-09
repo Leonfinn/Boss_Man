@@ -121,6 +121,8 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
+    // Ask every running agent to stop cleanly before an update (BOS-929).
+    "Ask agents to wrap up", "Cancel wrap-up", "Stop this run",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
     "Restart the server",
     // This host: confirm a fact only the owner can give.

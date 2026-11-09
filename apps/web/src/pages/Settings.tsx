@@ -2484,7 +2484,9 @@ export function CheckQueueSetting() {
 type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
 type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
 type Report = { live: LiveRow[]; update: UpdateRow | null };
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null };
+type WrapUpStatus = MaintenanceView & { on: true; kind: "wrapup"; minutes: number; notRespondingAfter: number; runsList: WrapUpRun[] };
 
 /** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
 function UpdateHistory({ r }: { r: UpdateRow }) {
@@ -2549,7 +2551,9 @@ export function RunnerUpdate() {
       )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
-          ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
+          ? m.kind === "wrapup"
+            ? "Agents were asked to wrap up. Press Cancel wrap-up (below) once you are done to let new work start again."
+            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" below.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>
@@ -2576,6 +2580,104 @@ export function RunnerUpdate() {
           {m.on ? "Cancel the update" : "Update runners (finish runs first)"}
         </button>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/**
+ * Settings → Server and runner → "Ask agents to wrap up" (BOS-929): a clean stop before an update. It is a mode of
+ * the runner-update hold, so while it is on nothing new starts. The panel names each run still going, and says when
+ * one is waiting for you to answer a request (so it isn't called stuck). Nothing is ever stopped for you; the 10-minute
+ * flag only offers a Stop for that one run.
+ */
+export function WrapUp() {
+  const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-wrapup");
+  const act = useAction();
+  const m = view.data;
+  if (!m) return null;
+  const on = m.on && m.kind === "wrapup";
+  const s = on ? (m as WrapUpStatus) : null;
+  const start = () =>
+    act.run(async () => {
+      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
+      view.reload();
+      return "Every running agent was asked to wrap up.";
+    });
+  const cancel = () =>
+    act.run(async () => {
+      await api("/api/maintenance/cancel", { method: "POST", body: {} });
+      view.reload();
+      return "Wrap-up cancelled: new runs start again.";
+    });
+  const stopOne = (run: WrapUpRun) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
+      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      view.reload();
+      return "Stopping that run.";
+    });
+  return (
+    <Section id="wrapup-h" title="Ask agents to wrap up">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Tells every running agent to finish the step it is on, save its work on the ticket, and stop cleanly, so an update or a runner rebuild can go ahead. Unlike "Stop all work", it also messages the agents that are running now, so they end by themselves and nothing they have not saved is lost. Press "Cancel wrap-up" once the update is done to let new work start again.
+      </p>
+      {s ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-testid="wrapup-on">
+          <p style={{ fontSize: 14 }}>
+            <span className="tag">Wrap-up on</span> {s.runsList.length === 0 ? "Every agent has stopped; nothing new starts until you cancel." : `Waiting for ${s.runsList.length} run${s.runsList.length === 1 ? "" : "s"}. Nothing new starts until you cancel.`}
+          </p>
+          {s.runsList.length > 0 && (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }} data-testid="wrapup-runs">
+              {s.runsList.map((run) => {
+                const waiting = !!run.waitingOn;
+                const late = !waiting && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                return (
+                  <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+                    <strong>{run.agent ?? "An agent"}</strong>
+                    <span className="muted">
+                      {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                    </span>
+                    {waiting ? (
+                      <span className="tag amber" title={run.waitingOn!.question}>
+                        Waiting for an answer
+                      </span>
+                    ) : late ? (
+                      <span className="tag red">Not responding</span>
+                    ) : (
+                      <span className="tag grey">Working</span>
+                    )}
+                    {(late || waiting) && (
+                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                        Stop this run
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="muted" style={{ fontSize: 13 }}>
+            After {s.notRespondingAfter} minutes a run that is still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+          </p>
+          <div>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void cancel()}>
+              Cancel wrap-up
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <button type="button" className="btn" disabled={act.busy || (m.on && m.kind !== "wrapup")} onClick={() => void start()}>
+            Ask agents to wrap up
+          </button>
+          {m.on && m.kind !== "wrapup" && (
+            <p className="muted" style={{ fontSize: 13 }}>
+              An update is already waiting for the runs above to finish.
+            </p>
+          )}
+        </div>
+      )}
       {act.view}
     </Section>
   );
@@ -3280,6 +3382,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <div key={company.id} style={{ display: "contents" }}>
             <Runner company={company} />
             <RunnerUpdate />
+            <WrapUp />
             <Devices />
           </div>
         ) : current.id === "transfer" ? (
