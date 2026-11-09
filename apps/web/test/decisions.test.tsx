@@ -425,7 +425,7 @@ describe("Allow always", () => {
     await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\./)).toBeTruthy());
   });
   it("shows the rule as a sentence before saving, defaults to this agent, and sends the scope picked", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const always = [{ label: "Always allow crawl4ai's md tool", what: "use crawl4ai's md tool" }];
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", always[0]!.label, "Deny"], context: { type: "permission", explain, always, alwaysAgent: { id: "a1", name: "Researcher" } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
@@ -435,7 +435,7 @@ describe("Allow always", () => {
     expect(screen.getByText("Always allow any agent to use crawl4ai's md tool.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
     await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Rules\./)).toBeTruthy());
-    const answerCall = (fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }]);
+    const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });
   it("says why a command has no always option", () => {
