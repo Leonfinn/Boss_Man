@@ -65,6 +65,8 @@ export const releaseLogService = (
     notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
     /** Tells the owner when a setup card Boss Man closes itself leaves its notice (BOS-740). */
     notifyOwner?: (n: NotifyInput) => Promise<unknown>;
+    /** Runs on every pass for each company, after the live commit is noted: lets after-merge checks that waited for go-live start (BOS-1021). */
+    afterLive?: (companyId: string) => Promise<unknown>;
     log?: (msg: string) => void;
   },
 ) => {
@@ -315,6 +317,8 @@ export const releaseLogService = (
         for (const row of rows) {
           const companyId = row.key.slice(SEEN_PREFIX.length);
           const seen = (row.value as Seen | undefined) ?? {};
+          // Checks that waited for go-live start now, whether or not the commit changed on this pass (BOS-1021).
+          await deps.afterLive?.(companyId).catch((err: Error) => log(`go-live checks for company ${companyId}: ${err.message}`));
           if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
           // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
           await saveSeen(companyId, { old: seen.new, new: seen.new });

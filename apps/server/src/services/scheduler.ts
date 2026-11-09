@@ -16,6 +16,7 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -238,14 +239,14 @@ export function schedulerService(
     const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "backlog" && t?.state !== "ready") return false;
     const waits = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     // A launch starts a ticket handed to it; the start check's backlog rule asks about a wake nobody
     // handed over, which a launch always is.
-    const waiting = waits.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    const waiting = waits.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (waiting.length) return false;
     const [col] = await db
       .select({ id: workflowColumns.id })
@@ -264,12 +265,12 @@ export function schedulerService(
   /** Why a launch did not start a ticket it was woken for, in words the agent can act on (BOS-254). */
   async function startRefusalFor(ticketId: string): Promise<string | null> {
     const deps = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    const waiting = deps.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (!waiting.length) return null;
     const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
     return `it still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished.`;
@@ -772,7 +773,7 @@ export function schedulerService(
         if (t.t.systemState === "in_progress")
           lines.push(
             "",
-            `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
+            `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If your ticket has to wait for another ticket, say so with update_ticket waitsOn (until merged, the default, or done), not only in a note: nothing acts on a note, and the link wakes you when that point is reached. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
           );
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
@@ -1905,13 +1906,13 @@ export function schedulerService(
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
       const deps = await db
-        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
+        .select({ ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status, decisionStatus: decisions.status })
         .from(ticketDependencies)
         .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
         .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
         .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(eq(ticketDependencies.blockedTicketId, ticketId));
-      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
+      if (deps.some((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
       // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
       // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
       // blocker; a later blocker that frees has a newer time and is news.
@@ -1962,6 +1963,16 @@ export function schedulerService(
       if (!t?.assigneeAgentId) return false;
       await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       return true;
+    },
+
+    /**
+     * After a ticket's branch merges (BOS-989): dependents that wait on it "until merged" are released the same
+     * way as when it is done, so their assignee is woken (BOS-603/742). A dependent waiting until done is left alone
+     * by releaseIfUnblocked, which still sees the blocker unfinished.
+     */
+    async onTicketMerged(ticketId: string, causedByRunId?: string | null) {
+      const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(and(eq(ticketDependencies.blockerTicketId, ticketId), eq(ticketDependencies.until, "merged")));
+      for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
     },
 
     /**

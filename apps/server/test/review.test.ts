@@ -8,6 +8,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
+import { SUPERSEDED_TEXT } from "../src/services/check-queue.js";
 import { activity, checkJobs, projects, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
@@ -358,6 +359,63 @@ describe("server-owned check queue (BOS-316)", () => {
       expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
       expect(c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase)).toEqual(["prepare"]);
       expect((await state(c)).systemState).toBe("review");
+    });
+
+    it("raises no card when the job was only dropped for a newer request (BOS-970)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "cancelled", reason: SUPERSEDED_TEXT });
+      expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${c.ticket.id}`))).toHaveLength(0);
+      expect((await state(c)).systemState).toBe("review");
+    });
+
+    // Ends the newest job that has not ended yet (finishJob takes the first row, which is the old one on a second attempt).
+    const finishOpenJob = async (c: Awaited<ReturnType<typeof setup>>, patch: Record<string, unknown>) => {
+      for (let i = 0; i < 40; i++) {
+        const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+        const open = rows.filter((r) => !r.endedAt).pop();
+        if (open) { await c.db.update(checkJobs).set({ endedAt: new Date(), ...patch }).where(eq(checkJobs.id, open.id)); return open; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error("no open job was queued");
+    };
+    const cards = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
+
+    it("still raises the card when the job was cancelled for any other reason (BOS-970)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const res = approve(c);
+      await finishJob(c, { state: "cancelled", reason: "Stopped by the owner." });
+      expect((await res).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(await cards(c)).toHaveLength(1);
+    });
+
+    it("raises one card when the job dropped for a newer request is itself dropped without a successor (BOS-970)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const first = approve(c);
+      await finishOpenJob(c, { state: "cancelled", reason: SUPERSEDED_TEXT });
+      expect((await first).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(await cards(c)).toHaveLength(0);
+      const second = approve(c);
+      await finishOpenJob(c, { state: "stuck", reason: "The runner went away." });
+      expect((await second).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(await cards(c)).toHaveLength(1);
+    });
+
+    it("closes an open retry card when the next merge check passes (BOS-970)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      const first = approve(c);
+      await finishOpenJob(c, { state: "stuck", reason: "The runner went away." });
+      expect((await first).json()).toMatchObject({ outcome: "check_stuck" });
+      expect(await cards(c)).toHaveLength(1);
+      const second = approve(c);
+      await finishOpenJob(c, { state: "passed", exitCode: 0 });
+      expect((await second).json()).toMatchObject({ outcome: "merged" });
+      expect(await cards(c)).toHaveLength(0);
     });
 
     it("tries again with a fresh merge when main moved to a different tree", async () => {

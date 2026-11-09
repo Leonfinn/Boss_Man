@@ -2716,7 +2716,9 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
                         Waiting for an answer
                       </span>
                     ) : late ? (
-                      <span className="tag red">Not responding</span>
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
+                        Not responding
+                      </span>
                     ) : (
                       <span className="tag grey">Working</span>
                     )}
@@ -2731,8 +2733,11 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
             </ul>
           )}
           {s.runsList.length > 0 && (
-            <p className="muted" style={{ fontSize: 13 }}>
-              After {s.notRespondingAfter} minutes a run still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+            <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
+              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              {s.kind === "wrapup"
+                ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
+                : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}
             </p>
           )}
           <div>
@@ -2821,6 +2826,13 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
   return bits.length ? bits.join(" · ") : null;
 }
 
+/** The "Deployer script" line of Settings → This host (BOS-990). */
+export function deployerScriptLine(s: { state: string; since?: string }): string {
+  if (s.state === "current") return "current";
+  if (s.state === "behind") return `behind${s.since ? ` (since ${when(s.since)})` : ""}. A card in your queue has the copy steps.`;
+  return "unknown: this host's deployer is too old to report its version. A card in your queue has the copy steps.";
+}
+
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
 export function ThisHost() {
   const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
@@ -2858,6 +2870,11 @@ export function ThisHost() {
           ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
+      {d.deployerScript && d.deployerScript.state !== "none" && (
+        <p data-testid="deployer-script" style={{ fontSize: 14 }}>
+          <strong>Deployer script:</strong> {deployerScriptLine(d.deployerScript)}
+        </p>
+      )}
       {keys.length > 0 && (
         <div className="host-facts">
           <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>

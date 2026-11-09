@@ -516,6 +516,11 @@ table.features tr.group th { padding-top: 16px; font-family: var(--sans); font-s
 .feature-fold { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
 .feature-fold:hover { text-decoration: underline; }
 .feature-work { white-space: nowrap; }
+/* What visitors read as a feature's portal title, under its name (BOS-997). The title line is cut at two lines and the
+   "from the summary" note always shows under it, so a long summary can't stretch the table and the note is never lost. */
+.feature-visitors { font-size: 12px; white-space: normal; }
+.feature-visitors small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; }
+.feature-visitors small.muted { font-size: 11px; }
 .feature-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input.search { flex: 1; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); }
 

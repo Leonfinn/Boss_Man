@@ -48,7 +48,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …"],
+  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …"],
   Chat: ["Ask the CEO", "Send"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [

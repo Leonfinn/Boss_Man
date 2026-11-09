@@ -86,3 +86,12 @@ describe("portalTitle", () => {
     expect(portalTitle("  ", "   \n")).toBeNull();
   });
 });
+
+describe("QA: portalTitle never falls back to anything internal (BOS-991)", () => {
+  it("takes only the first line, handles CRLF, trims and caps it at 200 characters", () => {
+    expect(portalTitle(undefined, "First line.\r\nSecond line with internal detail.")).toBe("First line.");
+    expect(portalTitle("", "  \n  Real line after a blank one.")).toBe("Real line after a blank one.");
+    expect(portalTitle(null, "x".repeat(500))).toBe("x".repeat(200));
+    expect(portalTitle("  Padded  ", null)).toBe("Padded");
+  });
+});

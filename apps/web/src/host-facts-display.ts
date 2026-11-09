@@ -6,6 +6,8 @@ export type HostFactsView = {
   hostName: string | null;
   reportedAt: string | null;
   ownerFacts: string[];
+  /** BOS-990: whether the host's deployer script is the live version. Absent from an older server. */
+  deployerScript?: { state: "current" | "behind" | "unknown" | "none"; since?: string };
   facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
 };
 

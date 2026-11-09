@@ -35,7 +35,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
    ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
-6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
+6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at any service that takes a JSON POST (ntfy needs a small relay, see `docs/06`).
 7. The server can write **one folder** and read **one folder**. It can never run anything on the host, and the host never executes anything from the request.
 8. At most **one deploy per target every 10 minutes**; the cron job runs every minute.
 
@@ -47,7 +47,7 @@ Base: `/mnt/tank/apps/boss-man/deployer` in the worked example of [docs/06](06-i
 |---|---|---|---|
 | `$D/` | root:root 755 | owner | Not writable by the server. |
 | `$D/host-deployer.sh` | root:root 750 | owner, by hand | A **copy** of `scripts/host-deployer.sh`. Never a link into the checkout, so a merged PR cannot change what root runs. |
-| `$D/host.conf` | root:root 600 | owner, by hand | Webhook URL and options (below). The script refuses to start if it is not private. |
+| `$D/host.conf` | root:root 600 | owner, by hand | Optional. Webhook URL and options (below); without the file nothing is posted and the defaults apply. If the file exists, the script refuses to start unless it is private. |
 | `$D/inbox/` | 1000:1000 750 | server (uid 1000) | The only place the server writes. Bind-mounted read-write into the server. |
 | `$D/inbox/request.json` | 1000:1000 640 | server | One pending request. The host takes it by renaming it out of the folder. |
 | `$D/inbox/checked` | 1000:1000 640 | server | The merge commits Boss Man's merge gate checked, newest merges first, one 40-character hash per line (BOS-753). Written beside every server request and refreshed while one waits. The host reads it only when main has moved past the approved commit (step 4). Untrusted like the request: a plain file under 256 KB, and only hash lines are kept. |
@@ -141,10 +141,10 @@ A server update rolls only the server copies. It never starts, stops or recreate
 
 ## Failure webhook
 
-`host.conf`, a root-owned file (shell `KEY=value` lines):
+`host.conf`, an optional root-owned file (shell `KEY=value` lines; skip it if you want no webhook):
 
 ```sh
-WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
 WEBHOOK_ON_SUCCESS=0   # 1 = also post when a deploy succeeds
 ```
 
@@ -154,7 +154,7 @@ On a failure the script POSTs `Content-Type: application/json`:
 { "result": "failed", "message": "…", "from_commit": "…", "to_commit": "…", "at": "2026-10-20T12:03:00Z" }
 ```
 
-Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test and a Home Assistant automation are in `docs/06`.
+Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test is in `docs/06`.
 
 ## Decisions in Boss Man
 
@@ -373,12 +373,13 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
    - `python3` and `flock` on root's cron PATH;
    - `git ls-remote` from cron, over https or with the deploy key (whichever `origin` uses);
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
-3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
+3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any restore of the service it points at.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
 
 ## Why a runner update can be refused, and what the status shows (BOS-364)
 
 - Runners are rebuilt from the deployer's checkout, so a runner request is accepted only for the commit the checkout is on (the version the server runs). While a server swap runs, the deployer holds its lock and does not read the request; it is read on a later minute. If the server update was switched back in between (for example by the automatic switch-back during the standby window), the checkout is back on the old commit and the runner request is refused with a plain message. Nothing is broken; offer the runner update again once the server runs the version you want.
 - Boss Man shows that refusal as a quiet note ("Runner update not started"), not an alert, and withdraws a runner offer for a commit the server never reached.
+- **One runner card, only when it can be used (BOS-1010).** Every path that raises the runner card (the trial end, the BOS-947 replacement, the Settings button and a retry) goes through one function. It raises the card only when it can be acted on now: no server deploy approved or waiting for the host, running, in its trial, or in the host's "try again in N minutes" wait; until then it is held and raised by itself on the next pass once those clear. Raising a card withdraws every earlier open runner card in the same step, with the plain audit reason "Replaced by a newer runner update for <version>", and a pass clears any leftover duplicate already open when this shipped. When a server update is approved or starts while a runner card is open, that card is closed at once with a plain reason and a fresh one for the new live version follows after its trial. A press while it can't run (a race) gets the same plain reason and time as the panel, never a silent refusal. The runner card is routine: it is shown in the feed and the browser and is never pushed to the phone. (The owner's own Settings-button card is not folded away by another card.) All of this reads the host's own files, so it works on any Docker host, blue/green or single-colour, with no paths or names.
 - `server_status` `deploy.liveCommit` / `liveSince` come only from a finished **server** deploy (otherwise from the host's deployed commit, then the server's own commit). A refused or failed request never counts as live.
 - This is generic to any Docker host; nothing here depends on paths or names. Host-specific notes belong in the install guide for that host.

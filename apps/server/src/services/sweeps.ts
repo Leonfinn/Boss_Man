@@ -786,9 +786,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, stateNote: tickets.stateNote, blockedUntil: tickets.blockedUntil })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done')`,
+      .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done' and not (td.until = 'merged' and b.merge_commit is not null))`,
         // Only if the last blocker finished after the ticket last changed state: a ticket put back in backlog on purpose stays there.
-        sql`(select max(b.state_changed_at) from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id}) > ${tickets.stateChangedAt}`));
+        // A blocker waited on "until merged" finishes at its merge, which stamps its last activity (BOS-989).
+        sql`(select max(greatest(b.state_changed_at, case when td.until = 'merged' and b.merge_commit is not null then b.last_activity_at end)) from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id}) > ${tickets.stateChangedAt}`));
     const byCompany = new Map<string, string[]>();
     for (const { id, title, companyId, stateNote, blockedUntil } of rows) {
       if (await isBlocked(id)) continue;

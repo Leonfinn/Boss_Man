@@ -443,6 +443,13 @@ env_value() { # key: the value of KEY in the checkout's .env (environment first)
   v="${v%\"}"; v="${v#\"}"
   printf '%s' "$v"
 }
+# The sha256 of one file as 64 hex characters, or empty when it can't be read (BOS-990).
+file_sha256() {
+  local s
+  [[ -r $1 ]] && s="$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" || s=""
+  [[ $s =~ ^[0-9a-f]{64}$ ]] && printf '%s' "$s"
+  return 0
+}
 host_extra_facts() {
   local out="" sep=", "
   # --- repo access: how origin is reached and whether a read works. The URL itself is never reported (it can carry a token).
@@ -524,6 +531,9 @@ host_extra_facts() {
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
   out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
   out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
+  # --- BOS-990: the fingerprint (sha256) of the script this deployer is running from, and of the copy in the checkout
+  # (the version that is live). The server compares them: different means the host's copy needs the owner's copy step.
+  out+="$sep\"deployer\": {\"scriptSha\": $(jstr "$(file_sha256 "${BASH_SOURCE[0]:-$0}")"), \"repoSha\": $(jstr "$(file_sha256 "$REPO/scripts/host-deployer.sh")")}"
   # --- addresses and ports
   local addrs="" asep="" a n=0 ports="" psep="" k v
   while IFS= read -r a; do
@@ -535,6 +545,20 @@ host_extra_facts() {
     ports+="$psep$(jstr "$k"): $(jstr "$v")"; psep=", "
   done
   out+="$sep\"network\": {\"addresses\": [$addrs], \"ports\": {$ports}}"
+  # --- the ntfy add-on's own address (NTFY_BASE_URL in .env): what the phone app must be pointed at. Only a plain https
+  # address is reported (no login part, query or #), so nothing secret can ride along.
+  local nbase
+  nbase="$(env_value NTFY_BASE_URL)"; nbase="${nbase%/}"
+  # The ntfy container's name (found by its Compose service label) is reported too, so the phone page can print a
+  # `docker exec` command that fits this host. Only a plain container name is kept.
+  local nparts="" ncont=""
+  [[ $nbase =~ ^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,100})?$ ]] && nparts="\"baseUrl\": $(jstr "$nbase")"
+  if have_docker; then
+    ncont="$(dk ps --filter "label=com.docker.compose.service=ntfy" --format '{{.Names}}' | head -n1)" || ncont=""
+    [[ $ncont =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || ncont=""
+  fi
+  [[ -n $ncont ]] && nparts+="${nparts:+, }\"container\": $(jstr "$ncont")"
+  [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
   # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
   # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
   # (any token that isn't host:port is dropped), and no other key is read.
