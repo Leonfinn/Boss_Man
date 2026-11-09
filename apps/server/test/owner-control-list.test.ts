@@ -133,6 +133,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   // The Runs page's emergency stop, its own component in Runs.tsx (BOS-837).
   "pages/Runs.tsx>EndAllRuns": "Runs",
   // Settings' tabs (Settings.tsx TABS): each panel the Settings page shows, by the tab that shows it (BOS-442).
+  "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",
