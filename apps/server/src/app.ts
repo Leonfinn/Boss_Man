@@ -406,7 +406,8 @@ export async function buildApp(opts: AppOptions) {
       const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
       for (const r of live) {
         const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
-        if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
+        // steer (BOS-1016): an agent in one long step gets this now, inside its turn, not when the step ends.
+        if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false, steer: true });
       }
     },
     // BOS-988: the same message, only to the runs the drain has not told yet, answering with the ones it reached.
@@ -416,7 +417,7 @@ export async function buildApp(opts: AppOptions) {
         const [r] = await db.select({ companyId: runsTable.companyId }).from(runsTable).where(and(eq(runsTable.id, runId), isNull(runsTable.endedAt)));
         if (!r) continue;
         const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
-        if (runner && runners.send(runner.id, { type: "run.message", runId, text: `Message from Boss Man: ${text}`, interrupt: false })) reached.push(runId);
+        if (runner && runners.send(runner.id, { type: "run.message", runId, text: `Message from Boss Man: ${text}`, interrupt: false, steer: true })) reached.push(runId);
       }
       return reached;
     },

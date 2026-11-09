@@ -91,7 +91,8 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
     await db.insert(settings).values({ key: `runner-slug:${c.id}`, value: slug }).onConflictDoUpdate({ target: settings.key, set: { value: slug } });
     fake.runnersBySlug.set(slug, { current: false });
     const endRun = (runId: string) => built.runners.ingest(row!, { seq: ++seq, at: new Date().toISOString(), event: { type: "run.ended", runId, stopReason: "end_turn", error: null } });
-    const out = { id: c.id, ceo: ceo.id, name, endRun };
+    const event = (e: Parameters<typeof built.runners.ingest>[1]["event"]) => built.runners.ingest(row!, { seq: ++seq, at: new Date().toISOString(), event: e });
+    const out = { id: c.id, ceo: ceo.id, name, endRun, event };
     byName.set(name, out);
     return out;
   };
@@ -191,7 +192,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.scheduler.tick();
     await c.req("POST", "/api/maintenance/start", {});
     await c.req("POST", "/api/maintenance/start", {}); // already on: nobody is told twice
-    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false }]);
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false, steer: true }]);
   });
 
   it("asks the owner once at the deadline; each answer does what it says", async () => {
@@ -480,12 +481,14 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(c.commands).toHaveLength(1);
 
     // The button: every live work run gets exactly one wrap-up message, the same way the update tells them.
+    // steer (BOS-1016): an agent that can take it inside its running step gets it there.
     expect((await c.req("POST", "/api/maintenance/wrapup", {})).statusCode).toBe(200);
-    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP_ASKED}`, interrupt: false }]);
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP_ASKED}`, interrupt: false, steer: true }]);
     // Pressing it again does not tell them twice.
     await c.req("POST", "/api/maintenance/wrapup", {});
     expect(c.messages).toHaveLength(1);
-    expect(await c.maint()).toMatchObject({ on: true, kind: "wrapup", runs: 1, notRespondingAfter: 10 });
+    // A full check takes 30 to 50 minutes, so a run is only flagged after 30 (BOS-1016).
+    expect(await c.maint()).toMatchObject({ on: true, kind: "wrapup", runs: 1, notRespondingAfter: 30 });
 
     // Nothing new starts anywhere while wrap-up is on; the wake waits, and is not dropped.
     await c.wake(b);
@@ -534,6 +537,41 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     const waiting = (await c.maint()) as { runsList: Array<{ sinceWrapUpMinutes: number; waitingOn: { question: string } | null }> };
     expect(waiting.runsList[0]!.sinceWrapUpMinutes).toBeGreaterThanOrEqual(10);
     expect(waiting.runsList[0]!.waitingOn).toMatchObject({ question: "May I run the full test suite?" });
+  });
+
+  it("says when a run is inside a long step, and when the message has reached it (BOS-1016)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const runId = c.commands[0]!.runId;
+    type Row = { gotMessage: boolean; step: { title: string; sinceMinutes: number } | null };
+    const row = async () => ((await c.maint()) as { runsList: Row[] }).runsList[0]!;
+    const update = (u: Record<string, unknown>) => a.event({ type: "run.update", runId, update: u });
+
+    // A finished step, an owner chat message delivered before the ask: neither counts.
+    await update({ kind: "tool_call", title: "Read file", toolKind: "read", status: "pending" });
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "completed" });
+    await update({ kind: "message_delivered", text: "Message from Boss Man: an earlier note", fullLength: 37 });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await row()).toMatchObject({ gotMessage: false, step: null });
+
+    // A long command starts: the panel names it. Its updates carry no title, so the title comes from its start.
+    await update({ kind: "tool_call", title: "scripts/check-all.sh", toolKind: "execute", status: "pending" });
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "in_progress" });
+    expect(await row()).toMatchObject({ gotMessage: false, step: { title: "scripts/check-all.sh", sinceMinutes: 0 } });
+    c.advance(12 * MIN);
+    expect((await row()).step?.sinceMinutes).toBe(12);
+
+    // An owner chat message isn't the wrap-up; a Boss Man message steered in is.
+    await update({ kind: "message_delivered", text: "Message from the owner: hello", fullLength: 29 });
+    expect((await row()).gotMessage).toBe(false);
+    await update({ kind: "message_delivered", text: `Message from Boss Man: ${WRAP_UP_ASKED}`.slice(0, 4000), fullLength: 400, steered: true });
+    expect(await row()).toMatchObject({ gotMessage: true, step: { title: "scripts/check-all.sh" } });
+
+    // The step ends (the command was moved to the background): no step any more.
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "completed" });
+    expect((await row()).step).toBeNull();
   });
 
   it("never stops a run by itself, even well past the not-responding time", async () => {
