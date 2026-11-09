@@ -78,6 +78,9 @@ jobs:
           # ships Chrome); Playwright's own Chromium is the fallback when none is there.
           if [ -x /usr/bin/google-chrome ]; then /usr/bin/google-chrome --version; else playwright install --with-deps chromium; fi
       - name: Web tests in a real browser, none skipped
+        env:
+          # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
+          BOSSMAN_SCRATCH: ${{ runner.temp }}
         run: |
           pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
           node -e '
