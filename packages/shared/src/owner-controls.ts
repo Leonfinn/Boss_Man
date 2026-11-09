@@ -173,6 +173,7 @@ export const OWNER_FIELDS = {
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
+    "Offer an Approve button on simple agent questions",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
