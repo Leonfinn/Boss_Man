@@ -9,6 +9,8 @@ import type { Company } from "../src/api";
 import { Rules } from "../src/pages/Rules";
 import { Skills } from "../src/pages/Skills";
 import { Wiki } from "../src/pages/Wiki";
+import { Ticket } from "../src/pages/Ticket";
+import { Setup } from "../src/pages/Setup";
 import { DraftTextarea } from "../src/components/DraftTextarea";
 import { clearAllDrafts, readDraft, readDraftJson } from "../src/drafts";
 
@@ -136,5 +138,67 @@ describe("the wiki editor keeps a page draft (BOS-784)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     const again = await screen.findByLabelText(/Page text, in Markdown/) as HTMLTextAreaElement;
     await waitFor(() => expect(again.value).toBe("Hello, rewritten"));
+  });
+});
+
+describe("the ticket send-back box keeps what you type (BOS-784)", () => {
+  function showReviewTicket(post: (init?: RequestInit) => Response) {
+    const at = new Date().toISOString();
+    const ticket = { id: "t1", title: "Fix typo", systemState: "review", risk: "trivial", repoUrl: "https://github.com/Leonfinn/customer-app.git", defaultBranch: "main", branch: "bm/fix-typo", landing: "merge", verifyCommand: "pnpm test", ownerSignoff: false, projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", assigneeAgentId: "a1", createdAt: at, lastActivityAt: at, monitorAttempts: 0, monitorMax: 5 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/tickets/t1/review" && init?.method === "POST") return post(init);
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url === "/api/tickets/t1/reviews") return json([{ id: "r1", kind: "code", round: 1, seq: 0, status: "pending", reviewer: "Ada", notes: null, overruleReason: null }]);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    Element.prototype.scrollIntoView = () => {};
+    render(<Ticket id="t1" companies={[company]} />);
+  }
+
+  it("writes the draft as you type, and keeps it when the send fails, so it can be sent again", async () => {
+    showReviewTicket(() => {
+      throw new TypeError("Failed to fetch");
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Request changes" }));
+    const box = (await screen.findByLabelText("What should the agent change?")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Acceptance criteria: migration is expand-only fails." } });
+    expect(readDraft("ticket-review-summary/t1")).toBe("Acceptance criteria: migration is expand-only fails.");
+    fireEvent.click(screen.getByRole("button", { name: "Send it back" }));
+    await waitFor(() => expect(box.value).toBe("Acceptance criteria: migration is expand-only fails."));
+    expect(readDraft("ticket-review-summary/t1")).toBe("Acceptance criteria: migration is expand-only fails.");
+  });
+
+  it("clears the draft once the server takes the send-back", async () => {
+    showReviewTicket(() => json({ landing: { state: "running", startedAt: new Date().toISOString(), command: "pnpm test", startedBy: "you" } }));
+    fireEvent.click(await screen.findByRole("button", { name: "Request changes" }));
+    const box = (await screen.findByLabelText("What should the agent change?")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Please fix the failing criterion." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send it back" }));
+    await waitFor(() => expect(readDraft("ticket-review-summary/t1")).toBe(""));
+  });
+});
+
+describe("the setup mission box keeps what you type (BOS-784)", () => {
+  it("saves the draft as it is typed, and clears it once the company is saved", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/companies" && init?.method === "POST") return json({ company: { id: "c1", name: "App Co", mission: "Build it", paused: false, agents: [] } });
+        if (url === "/api/companies/c1" && init?.method === "PATCH") return json({ id: "c1", name: "App Co", mission: "Build it", paused: false, agents: [] });
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 0, companyId: "c1" } : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? [] : { standard: [], none: { id: "none", label: "Nothing", command: "", needs: [] }, detected: [], tools: null, error: null };
+        return json(body);
+      }),
+    );
+    render(<Setup companies={[{ id: "c1", name: "App Co", mission: null, paused: false, agents: [] }]} go={() => {}} onChanged={() => {}} />);
+    const box = (await screen.findByLabelText("What it's for")) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Build and run Boss Man itself" } });
+    expect(readDraft("setup-mission/c1")).toBe("Build and run Boss Man itself");
   });
 });
