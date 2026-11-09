@@ -6,6 +6,17 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
+/** One hour in milliseconds, for a rolling hourly cap (BOS-894). */
+export const HOUR_MS = HOUR;
+
+/**
+ * The earliest moment inside the last `n` hours before `now`: a cap counts rows with `at > this`
+ * (BOS-894). One place for every "since an hour ago" cut-off, so how a cap counts is changed once.
+ */
+export function sinceHours(now: Date, n = 1): Date {
+  return new Date(now.getTime() - n * HOUR);
+}
+
 export type AgeWordsOptions = {
   /** "1 min", "2 h", "3 days" instead of "1 minute", "2 hours", "3 days". */
   short?: boolean;
