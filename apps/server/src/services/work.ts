@@ -10,6 +10,7 @@ import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { derivedSignoff } from "./signoff.js";
+import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
@@ -294,6 +295,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
       // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
       const passed = await passedReviewTickets(db, inReview);
+      const holds = new Map<string, HoldView>();
+      for (const id of await heldTicketIds(db, inReview)) {
+        const v = await holdView(db, id);
+        if (v) holds.set(id, v);
+      }
       const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
       const mergeNote = (t: typeof tickets.$inferSelect) => {
         const phase = merging.get(t.id);
@@ -320,11 +326,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
         const waitingOnOwner = !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId;
         // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
-        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
+        // A reviewer's hold (BOS-808): passed, but kept from merging on purpose. Its own stage, apart from waiting for a reviewer or merging.
+        const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
         waitingOnOwner,
         reviewStage,
+        hold,
         mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
