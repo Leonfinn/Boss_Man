@@ -130,6 +130,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Board.tsx>ProjectBrief": "Config",
   "pages/Board.tsx>ArchiveProject": "Config",
   // Settings' tabs (Settings.tsx TABS): each panel the Settings page shows, by the tab that shows it (BOS-442).
+  "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",

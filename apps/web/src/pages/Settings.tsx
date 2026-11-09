@@ -5,6 +5,7 @@ import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
+import { setHold, useHold } from "../hold";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
@@ -2264,6 +2265,45 @@ export function RunLimits() {
 
 type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
 
+/**
+ * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
+ * stops new runs; ending the ones going is on the Runs page. Resume is on the banner every page shows while it's on.
+ */
+export function StopAllWork() {
+  const hold = useHold();
+  const act = useAction();
+  const paused = hold.data?.paused;
+  return (
+    <Section id="stop-all-h" title="Stop all work">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
+      </p>
+      {paused === true ? (
+        <p style={{ fontSize: 14 }} data-testid="stop-all-on">
+          <span className="tag red">On</span> All work is stopped.
+        </p>
+      ) : (
+        <div>
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy || paused !== false}
+            onClick={() =>
+              void act.run(async () => {
+                if (!window.confirm("Stop all work? Nothing new starts in any company until you press Resume. Runs already going finish by themselves.")) return;
+                await setHold(true);
+              })
+            }
+          >
+            Stop all work
+          </button>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 /** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
@@ -2951,6 +2991,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
+            <StopAllWork />
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />

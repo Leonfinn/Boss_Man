@@ -2687,6 +2687,8 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/scheduler/queue", async () => scheduler.queue());
     owner.post("/api/scheduler/tick", async () => scheduler.tick());
+    // Read by Settings → "Stop all work" and the every-page banner, so a reload shows the real hold (BOS-836).
+    owner.get("/api/kill-switch", async () => ({ paused: await scheduler.globallyPaused() }));
     owner.post("/api/kill-switch", async (req) => {
       const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
       await scheduler.setGlobalPause(paused);

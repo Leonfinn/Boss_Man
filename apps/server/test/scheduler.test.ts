@@ -113,9 +113,14 @@ describe("scheduler", () => {
   it("respects the global and company kill switches", async () => {
     ctx = await setup();
     await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    // The owner's Settings switch and banner read the real hold (BOS-836): off before anyone set it, owner-only.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    expect((await ctx.app.inject({ method: "GET", url: "/api/kill-switch" })).statusCode).toBe(401);
     await ctx.req("POST", "/api/kill-switch", { paused: true });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: true });
     expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
     await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
