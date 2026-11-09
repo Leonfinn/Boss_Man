@@ -13,6 +13,7 @@ These are mock-ups, not the site: the build goes into `apps/site` using its own 
 - `scripts/shot.cjs`: logs in to the throwaway server and takes a screenshot (whole screen, a region or one element).
 - `scripts/render.cjs`: renders a mock-up at 1440, 840 and 390 px, full page, and warns if a page scrolls sideways.
 - `scripts/dehalo.cjs`: removes the white sticker halo round a cut-out drawing, so its own outline is its edge. Makes `img/hero-clean.png` from `hero.webp` and `img/boss-head-clean.png` from `boss-mark-256.png`. The build should ship these cleaned files.
+- `scripts/crop.cjs`: cuts a region out of a screenshot (used for the board close-up).
 - `scripts/zoom.cjs`: a close-up of one element of a mock-up at one width.
 
 Images and fonts are not in the repo. To open the mock-ups, make `img/` and `fonts/` folders next to the HTML:
@@ -29,7 +30,7 @@ With the web app built (`apps/web`: `vite build`) and from `apps/server`:
 3. Start a throwaway server on that folder: `PORT=3779 HOST=127.0.0.1 BOSSMAN_PGLITE_DIR=/tmp/<you>-site/pg BOSSMAN_MASTER_KEY=$(openssl rand -base64 32) BOSSMAN_INSECURE_COOKIES=1 BOSSMAN_LEADER_LOCK=0 BOSSMAN_WEB_DIR=$PWD/../web/dist node_modules/.bin/tsx src/main.ts`. Dismiss the setup checklist once (PUT `/api/setup-progress` with `{"dismissed":true}`).
 4. With `DEMO_PASSWORD` set as in step 1, from `scripts/`:
    - `board-wide.png`: `node shot.cjs "#/board/<project id>" board-wide.png 1920 1080 2`
-   - `board-crop.png`: `CLIP=480,355,1320,560 node shot.cjs "#/board/<project id>" board-crop.png 1920 1080 2`
+   - `board-crop.png`: `node crop.cjs board-wide.png board-crop.png 264 355 1536 560 2` (Backlog to Your review; the close-up must start at Backlog, the board's first column)
    - `card-phone.png`: `EL='li:has-text("How many contact form")' node shot.cjs "#/decisions" card-phone.png 390 844 3`
    - `card-wide.png`: the same with `1100 1000 2`
    - `agents-crop.png`: `CLIP=270,613,1150,430 node shot.cjs "#/agents" agents-crop.png 1440 1000 2`
