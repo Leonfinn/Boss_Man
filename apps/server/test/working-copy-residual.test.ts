@@ -76,7 +76,7 @@ describe("a dropped CEO wake can't leave a permission card with nobody woken (fi
     expect(d).toMatchObject({ tier: "ceo", status: "open" });
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
     // Old code woke the CEO with no ticketId, so this wake counted against the ticketless limit.
-    expect(w).toMatchObject({ reason: "decision", priority: 3, ticketId: ctx.ticket.id });
+    expect(w).toMatchObject({ reason: "ceo reply", priority: 4,ticketId: ctx.ticket.id });
     expect(w!.status).not.toBe("dropped");
   });
 
@@ -98,7 +98,7 @@ describe("a dropped CEO wake can't leave a permission card with nobody woken (fi
                 if (bp !== "values") return typeof bv === "function" ? (bv as (...a: unknown[]) => unknown).bind(bt) : bv;
                 return (vals: unknown) => {
                   const row = vals as { reason?: string; status?: string };
-                  return (bt as unknown as { values: (x: unknown) => unknown }).values(row.reason === "decision" ? { ...row, status: "dropped", statusReason: "refused by the scheduler" } : vals);
+                  return (bt as unknown as { values: (x: unknown) => unknown }).values(row.reason === "decision" || row.reason === "ceo reply" ? { ...row, status: "dropped", statusReason: "refused by the scheduler" } : vals);
                 };
               },
             });
@@ -116,7 +116,7 @@ describe("a dropped CEO wake can't leave a permission card with nobody woken (fi
     expect(c.ladder.hops.at(-1)).toMatchObject({ to: "owner" });
     expect(c.ladder.hops.at(-1)!.why).toContain("wake was dropped");
     expect(c.triedFirst).toContain("wake was dropped");
-    const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "decision")));
+    const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "ceo reply")));
     expect(w).toMatchObject({ status: "dropped" });
     expect((await ctx.db.select().from(activity).where(eq(activity.kind, "watchdog"))).at(-1)!.summary).toContain("wake was dropped");
     // The owner is told now, not when the 5-minute sweep happens to run.
