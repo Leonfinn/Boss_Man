@@ -1241,14 +1241,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {!asking && ownWords[d.id] === undefined && advice?.state !== "advised" && (
                           <details className="advice">
                             <summary>Not enough detail?</summary>
-                            <div className="field">
-                              <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
-                              <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
-                            </div>
-                            <div className="actions">
-                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
-                                Ask the CEO for advice
-                              </button>
+                            <div className="advice-row">
+                              <div className="field">
+                                <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
+                                <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
+                              </div>
+                              <div className="actions">
+                                <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
+                                  Ask the CEO for advice
+                                </button>
+                              </div>
                             </div>
                           </details>
                         )}
