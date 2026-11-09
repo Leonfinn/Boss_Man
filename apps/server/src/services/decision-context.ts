@@ -8,5 +8,7 @@ import { decisions } from "../db/schema.js";
  * `.set({ context: mergeContext({ ladder }) })`. A key with an `undefined` value is left out of the patch.
  */
 export function mergeContext(patch: Record<string, unknown>) {
-  return sql`coalesce(${decisions.context}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`;
+  // Bracketed: in Postgres `-` binds tighter than `||`, so a caller's `${mergeContext(..)} - 'key'` would
+  // otherwise strip the key from the patch instead of from the card.
+  return sql`(coalesce(${decisions.context}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb)`;
 }

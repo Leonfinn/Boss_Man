@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { companies, decisions } from "../src/db/schema.js";
 import { mergeContext } from "../src/services/decision-context.js";
@@ -47,6 +47,16 @@ describe("mergeContext", () => {
     await db.update(decisions).set({ context: mergeContext({ withdrawn: { by: "ceo" } }) }).where(eq(decisions.id, id)); // writer B lands
     await db.update(decisions).set({ context: mergeContext({ ladder: { rung: "owner" }, seen: Object.keys(stale).length }) }).where(eq(decisions.id, id)); // writer A lands
     expect((await row()).context).toEqual({ type: "question", withdrawn: { by: "ceo" }, ladder: { rung: "owner" }, seen: 1 });
+  });
+
+  it("can have keys removed from the whole card (the failed to-do reopen), not from the patch", async () => {
+    const { db, id, row } = await card({ type: "owner_todo", settled: { by: "ceo" }, advice: { state: "handled" } });
+    await db.update(decisions).set({ context: sql`${mergeContext({ lastFailure: { note: "n" } })} - 'settled' - 'advice'` }).where(eq(decisions.id, id));
+    expect((await row()).context).toEqual({ type: "owner_todo", lastFailure: { note: "n" } });
+    // and when the patch itself carries the advice, it survives while settled goes
+    await db.update(decisions).set({ context: { type: "owner_todo", settled: { by: "ceo" }, advice: { state: "handled" } } }).where(eq(decisions.id, id));
+    await db.update(decisions).set({ context: sql`${mergeContext({ advice: { state: "reissued" } })} - 'settled'` }).where(eq(decisions.id, id));
+    expect((await row()).context).toEqual({ type: "owner_todo", advice: { state: "reissued" } });
   });
 });
 
