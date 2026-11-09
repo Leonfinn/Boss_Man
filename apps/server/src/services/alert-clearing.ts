@@ -5,6 +5,7 @@
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
 import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
 import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -249,7 +250,7 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       const note = [...new Set(reasons)].join(", and ");
       const [done] = await db
         .update(decisions)
-        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: { ...(row.context as object), withdrawn: { by: "system", note, at: t.toISOString() } } })
+        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note, at: t.toISOString() } }) })
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;
