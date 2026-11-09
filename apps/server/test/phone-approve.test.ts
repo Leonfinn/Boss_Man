@@ -27,7 +27,15 @@ async function setup(opts: { listen?: boolean } = {}) {
   let clock = new Date("2026-11-02T12:00:00Z");
   const pushed: Pushed[] = [];
   let pushFails = false;
+  // BOS-944: the anonymous read of the topic. 401 = private (the bundled deny-all server); 200 = anyone can read.
+  let topicStatus: number | "throw" = 401;
+  const polls: Array<{ url: string; auth: string | null }> = [];
   const fakeFetch = (async (input: URL | string, init?: RequestInit) => {
+    if (init?.method === "GET") {
+      polls.push({ url: String(input), auth: new Headers(init.headers).get("authorization") });
+      if (topicStatus === "throw") throw new Error("connect ECONNREFUSED");
+      return new Response("", { status: topicStatus });
+    }
     pushed.push({ url: String(input), body: JSON.parse(String(init?.body)) });
     return new Response("{}", { status: pushFails ? 500 : 200 });
   }) as typeof fetch;
@@ -70,7 +78,7 @@ async function setup(opts: { listen?: boolean } = {}) {
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, req, company, worker, pushed, logged, ask, sync, tap, lastMessage, mcp, setClock: (d: Date) => (clock = d), clock: () => clock, failPushes: (v: boolean) => (pushFails = v), setLeading: (v: boolean) => (leading = v) };
+  return { ...built, db, req, company, worker, pushed, polls, setTopic: (v: number | "throw") => (topicStatus = v), logged, ask, sync, tap, lastMessage, mcp, setClock: (d: Date) => (clock = d), clock: () => clock, failPushes: (v: boolean) => (pushFails = v), setLeading: (v: boolean) => (leading = v) };
 }
 
 const httpActions = (p: Pushed | undefined) => ((p?.body.actions ?? []) as Array<{ action: string }>).filter((a) => a.action === "http");
@@ -104,6 +112,43 @@ describe("rule 0: Approve only through the owner's private channel", () => {
     expect((await c.sync()).token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     await c.req("PUT", "/api/notification-settings", { ...SETTINGS, approveButtons: false });
     expect((await c.req("GET", "/api/notification-settings")).json().approve).toEqual({ on: false, why: "switched off" });
+  });
+
+  it("BOS-944: a topic anyone can read keeps Approve off, and Settings say why", async () => {
+    const c = await setup();
+    expect(c.polls.length).toBeGreaterThan(0);
+    expect(c.polls[0]).toEqual({ url: "https://ntfy.example.ts.net/bossman/json?poll=1", auth: null });
+    c.setTopic(200);
+    c.setClock(new Date(c.clock().getTime() + 120_000)); // past the short cache
+    expect((await c.req("GET", "/api/notification-settings")).json().approve).toEqual({ on: false, why: "anyone can read your ntfy topic" });
+    await c.ask();
+    const { push, token } = await c.sync();
+    expect(push).toBeDefined();
+    expect(token).toBeNull();
+  });
+
+  it("BOS-944: only 401 or 403 counts as private; an unreachable or odd answer keeps it off", async () => {
+    const c = await setup();
+    const status = async () => {
+      c.setClock(new Date(c.clock().getTime() + 120_000));
+      return (await c.req("GET", "/api/notification-settings")).json().approve;
+    };
+    c.setTopic(403);
+    expect(await status()).toEqual({ on: true });
+    c.setTopic(404);
+    expect((await status()).on).toBe(false);
+    c.setTopic("throw");
+    expect((await status()).on).toBe(false);
+    c.setTopic(401);
+    expect(await status()).toEqual({ on: true });
+  });
+
+  it("BOS-944: the poll is cached for a short time", async () => {
+    const c = await setup();
+    await c.req("GET", "/api/notification-settings");
+    const n = c.polls.length;
+    await c.req("GET", "/api/notification-settings");
+    expect(c.polls.length).toBe(n);
   });
 
   it("the gate is checked again at redeem: switching it off kills a live link", async () => {
@@ -548,5 +593,48 @@ describe("rule 8: rate limit, ntfy URL and retention", () => {
     expect(r.phoneApprove).toBe(2);
     expect(await c.db.select().from(approveTokens)).toEqual([]);
     expect(await c.db.select().from(phoneActionHits)).toEqual([]);
+  });
+});
+
+describe("QA (BOS-248): token lifetime edges and isolation between cards", () => {
+  it("a link works one millisecond before its 15 minutes are up and is refused at exactly 15 minutes", async () => {
+    const c = await setup();
+    const d1 = await c.ask();
+    const { token: t1 } = await c.sync();
+    const start = c.clock().getTime();
+    c.setClock(new Date(start + 15 * 60_000 - 1));
+    expect((await c.tap({ token: t1 })).json().outcome).toBe("approved");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d1.id)))[0]!.answer).toBe("Yes");
+
+    const d2 = await c.ask({ question: "Use Cloudflare instead?" });
+    const { token: t2 } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 15 * 60_000));
+    expect((await c.tap({ token: t2 })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d2.id)))[0]!.status).toBe("open");
+  });
+
+  it("an expired, unanswered link is also refused on a re-tap and never answers the card", async () => {
+    const c = await setup();
+    const d = await c.ask();
+    const { token } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 20 * 60_000));
+    for (let i = 0; i < 2; i++) expect((await c.tap({ token })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+  });
+
+  it("one card's link answers only that card", async () => {
+    const c = await setup();
+    const a = await c.ask({ question: "Question A?" });
+    const { token: ta } = await c.sync();
+    const b = await c.ask({ question: "Question B?" });
+    const { token: tb } = await c.sync();
+    expect(ta).not.toBe(tb);
+    expect((await c.tap({ token: ta })).json().outcome).toBe("approved");
+    const rows = await c.db.select().from(decisions);
+    expect(rows.find((r) => r.id === a.id)!.status).not.toBe("open");
+    expect(rows.find((r) => r.id === b.id)!.status).toBe("open");
+    // B's own link still works, once.
+    expect((await c.tap({ token: tb })).json().outcome).toBe("approved");
+    expect((await c.tap({ token: tb })).json().outcome).toBe("already_answered");
   });
 });
