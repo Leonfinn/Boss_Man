@@ -47,7 +47,7 @@ Base: `/mnt/tank/apps/boss-man/deployer` in the worked example of [docs/06](06-i
 |---|---|---|---|
 | `$D/` | root:root 755 | owner | Not writable by the server. |
 | `$D/host-deployer.sh` | root:root 750 | owner, by hand | A **copy** of `scripts/host-deployer.sh`. Never a link into the checkout, so a merged PR cannot change what root runs. |
-| `$D/host.conf` | root:root 600 | owner, by hand | Webhook URL and options (below). The script refuses to start if it is not private. |
+| `$D/host.conf` | root:root 600 | owner, by hand | Optional. Webhook URL and options (below); without the file nothing is posted and the defaults apply. If the file exists, the script refuses to start unless it is private. |
 | `$D/inbox/` | 1000:1000 750 | server (uid 1000) | The only place the server writes. Bind-mounted read-write into the server. |
 | `$D/inbox/request.json` | 1000:1000 640 | server | One pending request. The host takes it by renaming it out of the folder. |
 | `$D/inbox/checked` | 1000:1000 640 | server | The merge commits Boss Man's merge gate checked, newest merges first, one 40-character hash per line (BOS-753). Written beside every server request and refreshed while one waits. The host reads it only when main has moved past the approved commit (step 4). Untrusted like the request: a plain file under 256 KB, and only hash lines are kept. |
@@ -141,7 +141,7 @@ A server update rolls only the server copies. It never starts, stops or recreate
 
 ## Failure webhook
 
-`host.conf`, a root-owned file (shell `KEY=value` lines):
+`host.conf`, an optional root-owned file (shell `KEY=value` lines; skip it if you want no webhook):
 
 ```sh
 WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'

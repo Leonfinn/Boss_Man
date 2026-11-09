@@ -482,7 +482,7 @@ To see whether your copy is current:
 diff $D/host-deployer.sh /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh && echo same
 ```
 
-**4. The config file, with the alert webhook.** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with that of any service that accepts a JSON `POST` (this file is optional: leave `WEBHOOK_URL` out and no webhook is sent):
+**4. The config file, with the alert webhook (optional: skip this step if you want no webhook).** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with that of any service that accepts a JSON `POST` (this file is optional: leave `WEBHOOK_URL` out and no webhook is sent):
 
 ```sh
 cat > $D/host.conf <<'EOF'
