@@ -282,13 +282,49 @@ function AddFeature({ companyId, areas, onAdded }: { companyId: string; areas: A
 type Sort = "priority" | "demand" | "newest";
 const ACTIVE: FeatureStatus[] = ["idea", "considering", "planned", "in_progress"];
 
-function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+// (BOS-956) Each feature's tasks are folded behind the arrow and the choice stays in this browser,
+// like the "This host" fold (BOS-924). Every read and write is wrapped: private browsing can refuse
+// localStorage, and the list must still work when it does.
+const FEATURE_OPEN_KEY = "bossman.features.open";
+function readFeatureOpen(): { open: boolean; ids: string[] } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FEATURE_OPEN_KEY) ?? "") as { open?: unknown; ids?: unknown };
+    return { open: saved.open === true, ids: Array.isArray(saved.ids) ? saved.ids.filter((x): x is string => typeof x === "string") : [] };
+  } catch {
+    return { open: false, ids: [] };
+  }
+}
+function saveFeatureOpen(state: { open: boolean; ids: string[] }) {
+  try {
+    localStorage.setItem(FEATURE_OPEN_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+/** The WORK column in plain words: done of all tasks (cancelled ones count for neither), and any blocked. */
+export function taskSummary(f: Feature): string {
+  const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
+  if (!live.length) return "–";
+  const done = live.filter((t) => t.state === "done").length;
+  const blocked = live.filter((t) => t.state === "blocked").length;
+  return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
+}
+
+function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+  const summary = taskSummary(f);
+  const foldable = f.tickets.items.length > 0;
   return (
     <>
     <tr>
       <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220 }}>
-        <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
-        {f.portalVisible && <span className="tag" style={{ marginLeft: 6 }}>portal</span>}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          {foldable && (
+            <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
+              <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            </button>
+          )}
+          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          {f.portalVisible && <span className="tag">portal</span>}
+        </span>
       </td>
       <td>
         <select className="mini" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
@@ -322,20 +358,33 @@ function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drive
       <td className="mono">
         <b>{f.priority.toFixed(1)}</b>
       </td>
-      <td className="mono muted" style={{ whiteSpace: "nowrap" }}>{f.tickets.total ? `${f.tickets.done}/${f.tickets.total} tasks` : "–"}</td>
+      <td className="mono muted" style={{ whiteSpace: "nowrap" }}>
+        {foldable ? (
+          <button type="button" className="feature-fold feature-work" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} onClick={onToggle}>
+            {summary}
+          </button>
+        ) : (
+          summary
+        )}
+      </td>
     </tr>
-    {f.tickets.items.length > 0 && (
-      <tr>
-        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 20 }}>
+    {foldable && (
+      <tr id={`feature-tasks-${f.id}`} hidden={!open}>
+        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
           <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
             {f.tickets.items.map((t) => (
               <li key={t.id}>
                 <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <span className={`tag ${t.state === "done" ? "green" : t.state === "blocked" ? "amber" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
                 <span className="muted">{t.assignee ?? "unassigned"}</span>
               </li>
             ))}
           </ul>
+          {hasSubfeatures && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              {f.title} has its own tasks too: open it to see them.
+            </p>
+          )}
         </td>
       </tr>
     )}
@@ -355,8 +404,20 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [fold, setFold] = useState(readFeatureOpen);
   const [error, setError] = useState<string | null>(null);
   const patch = (id: string, body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(data.reload, (err: Error) => setError(err.message));
+  const isOpen = (id: string) => fold.open || fold.ids.includes(id);
+  const setFeatureOpen = (id: string, open: boolean) => {
+    const next = { ...fold, ids: open ? [...fold.ids.filter((x) => x !== id), id] : fold.ids.filter((x) => x !== id) };
+    setFold(next);
+    saveFeatureOpen(next);
+  };
+  const setAllOpen = (open: boolean) => {
+    const next = { open, ids: open ? (data.data?.features ?? []).map((f) => f.id) : [] };
+    setFold(next);
+    saveFeatureOpen(next);
+  };
   const d = data.data;
   const areas = settings.data?.areas ?? [];
   const order = (a: Feature, b: Feature) => (sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt));
@@ -393,6 +454,9 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
               </label>
+              <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!fold.open)}>
+                {fold.open ? "Collapse all" : "Expand all"}
+              </button>
               <a href={`#/feedback/${company.id}`} style={{ marginLeft: "auto" }}>
                 Feedback inbox
               </a>
@@ -434,11 +498,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                       </tr>
                     )}
                     {g.features.flatMap((f) => [
-                      <FeatureRow key={f.id} f={f} drivers={d.drivers} maxDemand={d.maxDemand} onPatch={patch} />,
+                      <FeatureRow key={f.id} f={f} drivers={d.drivers} maxDemand={d.maxDemand} hasSubfeatures={shown.some((s) => s.parentId === f.id)} open={isOpen(f.id)} onToggle={() => setFeatureOpen(f.id, !isOpen(f.id))} onPatch={patch} />,
                       ...shown
                         .filter((s) => s.parentId === f.id)
                         .sort(order)
-                        .map((s) => <FeatureRow key={s.id} f={s} sub drivers={d.drivers} maxDemand={d.maxDemand} onPatch={patch} />),
+                        .map((s) => <FeatureRow key={s.id} f={s} sub drivers={d.drivers} maxDemand={d.maxDemand} hasSubfeatures={false} open={isOpen(s.id)} onToggle={() => setFeatureOpen(s.id, !isOpen(s.id))} onPatch={patch} />),
                     ])}
                   </tbody>
                 ))}
