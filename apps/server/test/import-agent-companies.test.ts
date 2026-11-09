@@ -141,6 +141,28 @@ describe("Paperclip issues (docs/11, step 5)", () => {
   });
 });
 
+describe("skipped secret names give advice the owner can act on (BOS-884)", () => {
+  const withSecrets = (...env: string[]) => {
+    const lines = FILES[".paperclip.yaml"]!.split("\n");
+    const inEnv = (l: string) => ["GIT_TOKEN", "umami_username"].some((n) => l.trim().startsWith(`${n}:`));
+    const kept = lines.filter((l, i) => !inEnv(l) && !(i > 0 && /^\s+kind: "secret"$/.test(l) && inEnv(lines[i - 1]!)));
+    // The env block ends at the first line that isn't indented under it ("projects:").
+    const end = kept.findIndex((l) => l.startsWith("projects:"));
+    const files: Record<string, string> = { ...FILES, ".paperclip.yaml": [...kept.slice(0, end), ...env.flatMap((n) => [`        ${n}:`, '          kind: "secret"']), ...kept.slice(end)].join("\n") };
+    return Buffer.from(zipSync(Object.fromEntries(Object.entries(files).map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
+  };
+  it("says a name whose upper-case twin is imported is already imported, and suggests a valid name for one that still breaks the rule", async () => {
+    const req = await setup();
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: withSecrets("git_token", "GIT_TOKEN", "umami-user", "2fa_code") })).json();
+    expect(pre.secrets.map((s: { name: string }) => s.name)).toEqual(["GIT_TOKEN"]);
+    expect(pre.warnings).toEqual(expect.arrayContaining([expect.stringContaining("git_token (already imported as GIT_TOKEN: change scripts to read GIT_TOKEN)")]));
+    expect(pre.warnings.join("\n")).not.toContain("add it as GIT_TOKEN");
+    expect(pre.warnings).toEqual(expect.arrayContaining([expect.stringContaining("umami-user (add it as UMAMI_USER)"), expect.stringContaining("2fa_code (add it as X2FA_CODE)")]));
+    const suggestions = ["UMAMI_USER", "X2FA_CODE"];
+    for (const s of suggestions) expect(s).toMatch(/^[A-Z][A-Z0-9_]{0,63}$/);
+  });
+});
+
 describe("agent pictures in an Agent Companies export", () => {
   it("takes a real PNG beside AGENTS.md as the avatar, and ignores a file that only claims to be one", async () => {
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwAEhgGAcwq9lwAAAABJRU5ErkJggg==", "base64");
