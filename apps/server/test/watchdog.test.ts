@@ -545,6 +545,10 @@ describe("the hourly cap (BOS-58)", () => {
     expect(st.pausedUntil).not.toBeNull();
     expect(st.trippedReason).toContain("more than 2 actions");
     expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
+    // BOS-1015: the Scrum Master is the problem, so the card starts at the CEO and is not the owner's.
+    const [tripCard] = (await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"));
+    expect(tripCard).toMatchObject({ tier: "ceo" });
+    expect((tripCard!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
     // The trip is the Page-level problem: the owner is paged straight away, once.
     const pages = (await ctx.db.select().from(notifications)).filter((n) => n.level === "page");
     expect(pages.map((n) => n.title)).toEqual(["The watchdog paused itself for an hour"]);

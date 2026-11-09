@@ -774,8 +774,8 @@ export async function buildApp(opts: AppOptions) {
     raise: (input) => decisionsSvc.raise(input),
     assign: (ticketId, agentId) => work.updateTicket(ticketId, { assigneeAgentId: agentId }),
     restoreState: (ticketId, state) => work.updateTicket(ticketId, { state, overLimit: true }),
-    // A trip means the Scrum Master is the problem: straight to the owner.
-    alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+    // A trip means the Scrum Master is the problem: it skips that rung and goes to the CEO, and reaches the owner only on escalation (BOS-1015).
+    alert: (companyId, question) => alerts.raise({ companyId, kind: "watchdog_trip", question, from: "ceo", why: "the Scrum Master is the one that tripped", dedupeKey: `watchdog-trip:${companyId}:${Math.floor(Date.now() / 3_600_000)}` }),
     alertCeo: (input) => alerts.raise(input),
     // The idle-capacity rules (BOS-659): how many of the company's run slots are busy, and its limit.
     capacity: async (companyId) => {

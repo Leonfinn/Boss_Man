@@ -221,7 +221,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (have.has(depId)) continue;
       const rows = await db
         .insert(decisions)
-        .values({ companyId: s.companyId, kind: "stale_blocker", question: s.question, options: s.options, recommendedOption: s.recommended, dedupeKey: `stale:${depId}`, context: s.ctx })
+        .values({ companyId: s.companyId, kind: "stale_blocker", question: s.question, options: s.options, recommendedOption: s.recommended, dedupeKey: `stale:${depId}`, tier: "ceo", context: s.ctx })
         .onConflictDoNothing()
         .returning({ id: decisions.id });
       raised += rows.length;
@@ -813,6 +813,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           options: ["Got it"],
           recommendedOption: "Got it",
           dedupeKey: `unblocked-catchup:${companyId}`,
+          tier: "ceo",
           context: { type: "question" },
         })
         .onConflictDoNothing();

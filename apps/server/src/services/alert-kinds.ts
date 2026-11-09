@@ -91,6 +91,10 @@ export const ALERT_KINDS = {
   looks_stuck: {
     topRung: "ceo",
   },
+  // app.ts, the watchdog's trip notice (BOS-1015): the Scrum Master paused itself. It starts at the CEO.
+  watchdog_trip: {
+    topRung: "ceo",
+  },
   // sweeps.ts longTicketlessRuns: a run with no ticket going for a long time.
   ticketless_run: {
     topRung: "ceo",

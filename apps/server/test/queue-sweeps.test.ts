@@ -626,6 +626,7 @@ describe("stale blockers (R21)", () => {
     const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
     expect(open).toHaveLength(1);
     expect(open[0]!.question).toContain("Get certs");
+    expect(open[0]!.tier).toBe("ceo"); // BOS-1015: the CEO chases or reassigns first
   });
 
   it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
