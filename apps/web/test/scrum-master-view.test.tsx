@@ -19,6 +19,11 @@ describe("watchdog health line (BOS-60)", () => {
     expect(healthLine({ ...on, openFlags: 1 }, now).text).toContain("1 issue being handled");
     expect(healthLine({ ...on, openFlags: 0 }, now).text).toContain("no open issues");
   });
+  it("says the last check in age.ts's words, floored like the rest of the page (BOS-888)", () => {
+    // Four and a bit minutes: the line used to round to 5.
+    expect(healthLine({ ...on, lastSweepAt: "2026-10-27T09:55:40Z" }, now).text).toContain("last check 4 min ago");
+    expect(healthLine({ ...on, lastSweepAt: "2026-10-27T08:00:00Z" }, now).text).toContain("last check 2h ago");
+  });
   it("is clear when off, tripped, or not checking", () => {
     expect(healthLine({ ...on, settings: { enabled: false } }, now).text).toBe("Watchdog: off");
     expect(healthLine({ ...on, settings: { enabled: false }, trippedAt: "2026-10-27T09:00:00Z" }, now)).toMatchObject({ tone: "red", text: expect.stringContaining("stopped itself") });

@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { ageLabel } from "../age";
 import { usePoll } from "../hooks";
 
 export type WatchdogHealthData = { settings: { enabled: boolean; recordOnly?: boolean }; lastSweepAt: string | null; trippedAt: string | null; pausedUntil?: string | null; trippedReason: string | null; openFlags: number };
@@ -10,12 +11,13 @@ export function healthLine(h: WatchdogHealthData, now = Date.now()): { text: str
   if (!h.settings.enabled) return h.trippedAt ? { text: "Watchdog: stopped itself (safety cap hit). Turn it back on in Settings.", tone: "red" } : { text: "Watchdog: off", tone: "" };
   if (h.pausedUntil && new Date(h.pausedUntil).getTime() > now) return { text: `Watchdog: paused after hitting its hourly limit, back in ${mins(new Date(h.pausedUntil).getTime() - now)} min. Nothing to do.`, tone: "amber" };
   // A sweep runs every 5 minutes; a quarter of an hour without one means it isn't running.
-  const ago = h.lastSweepAt ? mins(now - new Date(h.lastSweepAt).getTime()) : null;
-  const check = ago === null ? "no check yet" : ago < 1 ? "last check just now" : `last check ${ago} min ago`;
+  const lastSweep = h.lastSweepAt ? new Date(h.lastSweepAt).getTime() : null;
+  const late = lastSweep !== null && now - lastSweep > 15 * 60_000;
+  const check = lastSweep === null ? "no check yet" : ageLabel(now - lastSweep) === "just now" ? "last check just now" : `last check ${ageLabel(now - lastSweep)}`;
   const handled = h.openFlags === 0 ? "no open issues" : `${h.openFlags} issue${h.openFlags === 1 ? "" : "s"} being handled`;
   // Record only (BOS-166): it is watching, but it reaches nobody, so the line says so.
-  if (h.settings.recordOnly) return { text: `Watchdog: record only (not acting) · ${check} · ${handled}`, tone: ago !== null && ago > 15 ? "amber" : "" };
-  return { text: `Watchdog: ${check} · ${handled}`, tone: ago !== null && ago > 15 ? "amber" : "green" };
+  if (h.settings.recordOnly) return { text: `Watchdog: record only (not acting) · ${check} · ${handled}`, tone: late ? "amber" : "" };
+  return { text: `Watchdog: ${check} · ${handled}`, tone: late ? "amber" : "green" };
 }
 
 /** The watchdog's health on the board; links to the Scrum Master's activity. */
