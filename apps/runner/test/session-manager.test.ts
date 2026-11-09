@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
@@ -307,10 +308,11 @@ describe("a coding tool that won't start", () => {
   it("ends that one run with a clear reason, once, and the process survives", async () => {
     const events: RunnerEvent[] = [];
     const stateFile = path.join(mkdtempSync(path.join(tmpdir(), "bm-state-")), "active-runs.json");
+    const adapterBins: Record<string, string> = { claude: path.join(tmpdir(), "bm-no-such-claude-acp") };
     const m = new SessionManager({
       mcpUrl: "http://127.0.0.1:1/mcp",
       stateFile,
-      adapterBins: { claude: path.join(tmpdir(), "bm-no-such-claude-acp") },
+      adapterBins,
       baseEnv: { PATH: process.env.PATH },
       resolveEnv: async () => ({}),
       emit: (e) => events.push(e),
@@ -331,5 +333,19 @@ describe("a coding tool that won't start", () => {
     expect(ended[0]).toMatchObject({ runId, stopReason: null });
     expect(String((ended[0] as { error: string }).error)).toMatch(/couldn't start claude.*not found/i);
     expect(JSON.parse(readFileSync(stateFile, "utf8"))).toEqual({ runs: [] });
+
+    // The runner stayed up: the same manager starts a second run with the fake harness, and it gets as far as a session.
+    adapterBins.claude = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-acp.mjs");
+    const second = randomUUID();
+    m.handle({ type: "run.start", runId: second, agentId: randomUUID(), agentKind: "claude", model: null, fundingSourceId: randomUUID(), cwd: mkdtempSync(path.join(tmpdir(), "bm-ws-")), prompt: "hi", mcpToken: "bm_sess_test" });
+    await new Promise<void>((resolve) => {
+      const t = setInterval(() => {
+        if (events.some((e) => e.type === "run.started" && e.runId === second)) {
+          clearInterval(t);
+          resolve();
+        }
+      }, 20);
+    });
+    expect(events.some((e) => e.type === "run.started" && e.runId === second)).toBe(true);
   }, 30_000);
 });
