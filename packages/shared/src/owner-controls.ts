@@ -227,7 +227,7 @@ export const OWNER_FIELDS = {
   ],
   "Reviews and CEO": [
     "Prefix", "Record only (rehearse)", "Scrum Master", "Ask after (days)", "Who runs it", "Minutes the CEO has", "Advice",
-    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Disk cap (GB)",
+    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Most minutes per run", "Disk cap (GB)",
     // The agent fence's mode (BOS-325).
     "Fence",
   ],

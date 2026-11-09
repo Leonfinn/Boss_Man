@@ -1,5 +1,5 @@
 {
-  "id": "f46af1ff-e26e-49b0-8e94-32d6de25edc8",
+  "id": "febcc488-b1e4-4a52-a5b2-d5574948fe7e",
   "prevId": "c47cf77d-e75a-4cf8-b7d6-0a78e9918852",
   "version": "7",
   "dialect": "postgresql",
@@ -1553,6 +1553,12 @@
           "notNull": true,
           "default": 30
         },
+        "max_run_minutes": {
+          "name": "max_run_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "advice_timeout_minutes": {
           "name": "advice_timeout_minutes",
           "type": "integer",
@@ -1597,7 +1603,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":true,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2,\"idleAgentMinutes\":15,\"spareCapacityMinutes\":20}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -6893,6 +6899,12 @@
         "cancel_requested_at": {
           "name": "cancel_requested_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stop_reason": {
+          "name": "stop_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

@@ -433,6 +433,56 @@ describe("R15: an agent card can't update the machine itself (DR-036, the 7 Nov 
   });
 });
 
+describe("R16: no 'Build and update runners' ask while an update is already pending (DR-046 part 2)", () => {
+  // The 8 Nov card (d8983eb1) asked the owner to rebuild the runners while a rebuild was already waiting to swap in.
+  const SETTINGS = "Open Settings → Server and runner → Updates and press Build and update runners.";
+  const deploy = (hold: SelfDeployFacts["hold"]) => ({ enabled: true, installDir: "/srv/bm/src", hold });
+  const r16 = (steps: string[], hold: SelfDeployFacts["hold"]) => lintOwnerSteps(steps, { selfDeploy: deploy(hold) }).refuse.filter((x) => x.rule === "R16");
+
+  it("refuses a step that asks for Build and update runners while a runner image update is pending", () => {
+    const f = r16([SETTINGS], { kind: "update", since: "2026-11-08T18:20:00.000Z" });
+    expect(f).toHaveLength(1);
+    expect(f[0]!.step).toBe(1);
+    // It names the wait, so the agent knows it is under way rather than broken.
+    expect(f[0]!.problem).toMatch(/already under way \(waiting for runs since 2026-11-08T18:20:00.000Z\)/);
+    expect(f[0]!.problem).toMatch(/swaps each runner onto the new image by itself/);
+  });
+
+  it("matches the button's words anywhere in the step, not only behind 'press'", () => {
+    for (const s of ["Go to Updates → Build and update runners.", "The override: Settings → Server and runner → Updates → Build and update runners."])
+      expect(r16([s], { kind: "update" }), s).toHaveLength(1);
+  });
+
+  it("passes when no update is pending (hold null), and on an install without the deployer", () => {
+    expect(r16([SETTINGS], null)).toEqual([]);
+    expect(r16([SETTINGS], undefined)).toEqual([]);
+    // Without self-deploy facts R16 isn't checked at all (an install with no Boss Man update of its own).
+    expect(lintOwnerSteps([SETTINGS]).refuse.filter((x) => x.rule === "R16")).toEqual([]);
+  });
+
+  it("does not refuse the button for a setting change, which is not an image update", () => {
+    expect(r16([SETTINGS], { kind: "settings", since: "2026-11-08T18:20:00.000Z" })).toEqual([]);
+  });
+
+  it("warns, never refuses, a look-only check of the runners Boss Man already shows", () => {
+    const check = [step("Check the runners are on the new image:", sh("docker ps", H))];
+    const r = lintOwnerSteps(check, { selfDeploy: deploy({ kind: "update" }) }, REHEARSED);
+    expect(r.refuse.filter((x) => x.rule === "R16")).toEqual([]);
+    expect(r.refuse.filter((x) => x.rule === "R15")).toEqual([]);
+    expect(r.warn.some((x) => /server_status and Settings → Server and runner/.test(x.problem))).toBe(true);
+  });
+
+  it("lets the CEO override with a reason, for a pending image that is itself broken", () => {
+    const r = checkAsk({ triedFirst: TRIED, steps: [SETTINGS], selfDeploy: deploy({ kind: "update" }) });
+    expect(r.error).toMatch(/already under way/);
+    // Not a non-CEO's to override.
+    expect(checkAsk({ triedFirst: TRIED, steps: [SETTINGS], lintOverride: "The pending image is broken.", selfDeploy: deploy({ kind: "update" }) }).error).toMatch(/Only the CEO/);
+    const ok = checkAsk({ triedFirst: TRIED, steps: [SETTINGS], lintOverride: "The pending image is broken, rebuild it now.", byCeo: true, selfDeploy: deploy({ kind: "update" }) });
+    expect(ok.error).toBeNull();
+    expect(ok.lint?.override?.findings).toEqual([expect.objectContaining({ step: 1, rule: "R16" })]);
+  });
+});
+
 describe("checkAsk with the lint", () => {
   const bad = ["Follow docs/06 for the folder."];
   it("returns the refusal with the step and the reason", () => {

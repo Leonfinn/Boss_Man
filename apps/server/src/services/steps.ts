@@ -59,7 +59,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -74,8 +74,16 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
 /** What the lint can be given: add-on facts for R9 (and the add-on this card sets up, whose steps are exempt),
  * the host facts for R6 (BOS-427) and the name the server runs on (BOS-774), the host a CEO-marked card is setting
  * up and that Boss Man has no record for yet (`newHost`, DR-046), the card's options, and the machine's own update
- * card for R15 (DR-036). Each may be absent, and then that rule only checks what it can without them. */
+ * card for R15 (DR-036) with the drain in progress (`selfDeploy.hold`, for R16, DR-046 part 2). Each may be absent,
+ * and then that rule only checks what it can without them. */
 export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
+
+/**
+ * The drain state R16 needs (DR-046 part 2): a runner image update or setting change that is waiting for runs to
+ * finish. It is `getHold`'s record, narrowed to what the lint reads: `kind` ("update", the default, or "settings")
+ * and when the wait started (`since`). `null` says Boss Man looked and found nothing pending.
+ */
+export type RunnerHold = { kind?: "update" | "settings"; since?: string; swapped?: Record<string, string> };
 
 /** R9: a step that relies on an add-on that isn't running is refused; one Boss Man can't see is warned about. */
 function addonFindings(step: number, text: string, addons: AddonFacts, setsUp: Addon | undefined, refuse: LintFinding[], warn: LintFinding[]) {
@@ -609,6 +617,11 @@ export function fillServerHost(steps: readonly string[], serverHost: string | nu
  * the machine that runs Boss Man to a commit (`updateCardFindings`). That job belongs to Boss Man's own "Main has
  * moved" card, which is pinned, kept current and cleared by itself; the refusal points the agent to it.
  *
+ * R16 (DR-046 part 2), only when `selfDeploy` is given and the host deployer is installed: a step that asks the
+ * owner to press Build and update runners while a runner image update is already waiting for runs is refused
+ * (`runnerUpdateFindings`), naming the wait; the CEO can let it through with a reason. A look-only check of the
+ * runners Boss Man already shows is only warned about, never refused.
+ *
  * `facts` is either the host facts array (R6 alone, the older call shape) or a `LintFacts` object carrying
  * `hosts`, `addons`, `setsUp` and `selfDeploy`. Each rule runs only when its facts are there.
  *
@@ -677,6 +690,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     warn.push(...host.warn);
     for (const c of code) refuse.push(...gitUmaskFindings(step, c));
     if (given.selfDeploy) updateCardFindings(step, code, given.selfDeploy, refuse);
+    runnerUpdateFindings(step, text, code, given, refuse, warn);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     for (const c of code) {
       const hit = INTERACTIVE.find(([re]) => re.test(c));
@@ -1173,6 +1187,9 @@ export type SelfDeployFacts = {
   installDir?: string;
   /** The commit that card offers, for the refusal to name; absent when none is open. */
   openCommit?: string;
+  /** The drain in progress (`getHold`), for R16 (DR-046 part 2): a runner image update already waiting for runs.
+   * `null` says Boss Man looked and found none pending. */
+  hold?: RunnerHold | null;
 };
 
 /** The scripts that bring the machine up to a commit or roll it back: they run from the install folder. */
@@ -1269,6 +1286,41 @@ export function updateCardFindings(step: number, commands: string[], facts: Self
 function updateCardHint(facts: SelfDeployFacts): string {
   const open = facts.openCommit ? `the open "Main has moved to ${facts.openCommit.slice(0, 8)}" card` : `Boss Man's own "Main has moved" card (one is raised when main moves past what runs)`;
   return `Updating the machine that runs Boss Man is Boss Man's own job: approve ${open}, which is pinned to the commit and clears itself once applied. Fix the steps to leave the update out, and raise this card again${facts.openCommit ? "" : " if it has another purpose"}. If the update card's steps are missing something, have the change make it into the server's step builder (self-deploy.ts) rather than around it.`;
+}
+
+/** The "Build and update runners" button, as a step names it (DR-046 part 2). Matched on the button's words in the
+ * whole step, so a sentence that opens the path to it ("Settings → Server and runner → Updates → Build and update
+ * runners") counts, not only one that says "press". */
+const REBUILD_BUTTON = /\bbuild and update runners\b/i;
+/** A command that only looks at what Boss Man already shows (DR-046 part 4): it reads containers or images and prints them. */
+const LOOK_ONLY_DOCKER = /\bdocker\s+(?:ps|images|inspect)\b/;
+
+/**
+ * R16 (DR-046 part 2): refuse a step that asks the owner to press Settings → Server and runner → Updates → Build and
+ * update runners while a runner image update is already under way. Boss Man raised that update itself and swaps each
+ * runner onto the new image as its company goes idle; asking the owner to press it again does nothing useful, and the
+ * second ask is what Brian's card d8983eb1 did. A pending setting change (`kind: "settings"`) is not an image update,
+ * so it doesn't refuse the button (the button only builds and swaps an image). A CEO can let it through with a reason
+ * for the rare case the pending image is itself broken, so this rule is overridable, not in `NOT_OVERRIDABLE`.
+ *
+ * The hold is only read when the host deployer is installed (`selfDeploy.enabled`), the same condition R15 uses: an
+ * install without one has no Boss Man update of its own to point at.
+ *
+ * A look-only host check that Boss Man already shows (`docker ps`, `docker images`) is warned about, never refused
+ * (DR-046 part 4): the card should point the owner at server_status or Settings → Server and runner instead.
+ */
+export function runnerUpdateFindings(step: number, text: string, commands: string[], facts: LintFacts, refuse: LintFinding[], warn: LintFinding[]): void {
+  if (!facts.selfDeploy?.enabled) return;
+  const hold = facts.selfDeploy.hold;
+  const pendingImage = !!hold && hold.kind !== "settings";
+  if (pendingImage && REBUILD_BUTTON.test(text)) {
+    const since = hold.since ? ` (waiting for runs since ${hold.since})` : "";
+    refuse.push({ step, rule: "R16", problem: `asks the owner to press Build and update runners, but a runner update is already under way${since}. Boss Man swaps each runner onto the new image by itself as its company goes idle; don't ask the owner to press it again. Leave the step out (say the update is in progress and will finish on its own), or the CEO can let it through with a reason if the pending image is itself broken` });
+    return;
+  }
+  if (commands.some((c) => LOOK_ONLY_DOCKER.test(c)) && /\brunners?\b/i.test(text)) {
+    warn.push({ step, rule: "warn", problem: "runs a look-only check of the runners that Boss Man already shows in server_status and Settings → Server and runner; point the owner there instead of asking them to paste the output back" });
+  }
 }
 
 // R14 too (DR-028): its fix is always the same subshell, so there is never a reason to let a bare git step through.
