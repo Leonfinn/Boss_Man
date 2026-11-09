@@ -388,7 +388,7 @@ function criteriaChecklist(criteria: readonly Criterion[], note: string | null):
   if (!criteria.length) return "";
   const lines = criterionLines(criteria, note);
   const after = criteria.some(isAfterMerge);
-  return `Acceptance criteria:\n${lines.join("\n")}\nIf a before-merge one fails, request changes and name it.${after ? " The after-merge ones are checked once the work is live; review can approve with those still unreported, and an answer on the ticket's owner card closes them." : ""}\n\n`;
+  return `Acceptance criteria:\n${lines.join("\n")}\nIf a before-merge one fails, request changes and name it.${after ? " The after-merge ones are checked once the work is live; review can approve with those still unreported, and an answer on the ticket's owner card raises their pass or fail (raise the card with criterion set to the check's number)." : ""}\n\n`;
 }
 
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
