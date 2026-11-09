@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
+import { probeGuard } from "./guard-probe.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
@@ -158,7 +159,19 @@ connection = new RunnerConnection({
 const interrupted = sessions.recoverInterrupted();
 if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
-connection.emit({ type: "runner.sandbox", report: sandbox });
+// The network guard proves itself: a connect to our own gateway must be refused at once (DR-049 point 2).
+// Reported with the sandbox report at start and every 5 minutes.
+const reportGuard = async () => {
+  try {
+    sandbox.guard = await probeGuard();
+    log(`network guard: ${sandbox.guard.state} (${sandbox.guard.reason}, ${sandbox.guard.ms} ms)`);
+  } catch (err) {
+    sandbox.guard = { state: "absent", reason: `probe failed: ${(err as Error).message}`.slice(0, 200), errno: null, ms: 0 };
+  }
+  connection.emit({ type: "runner.sandbox", report: sandbox });
+};
+await reportGuard();
+setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.

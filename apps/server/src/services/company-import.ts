@@ -383,7 +383,11 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       .insert(companies)
       .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), ...(pkg.company.standingRules ? { standingRules: pkg.company.standingRules, standingRulesBy: "import", standingRulesAt: new Date() } : {}), nextTicketNumber: Math.max(0, ...seen) + 1 })
       .returning();
-    const companyId = c!.id;
+    // companies.id is the database's own default (gen_random_uuid), so a missing row means the insert did not
+    // take at all, not that the id was blank. Say so plainly instead of dereferencing undefined and letting
+    // the caller read a generic failure or a company with no id (BOS-927).
+    if (!c) throw new ImportError(500, "The import could not create the company: the database returned no row for it, so nothing was saved. Try the import again.");
+    const companyId = c.id;
 
     for (const a of pkg.agents) {
       const [row] = await tx
