@@ -2189,3 +2189,25 @@ describe("rules judge: shred .., xargs behind a tool word, xargs/parallel delete
     "ls /tmp/a | parallel --tag echo ::: a b",
   ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
 });
+
+// QA (BOS-848): more ways to hide the real commands behind a `cat <<` that is not a heredoc, or to run what a cat/tee heredoc writes (BOS-728).
+describe("rules judge: heredoc-hiding variants (BOS-728, QA)", () => {
+  const judge = (cmd: string) => judgePermission("It runs a command.", cmd, "-home-node-workspaces-x", "-p", "/home/node/workspaces");
+  it.each([
+    `echo $'; cat <<A'\nrm -rf /etc\nA`,
+    `echo "x" # cat <<A\nrm -rf /etc\nA`,
+    `echo \\<<A\nrm -rf /etc\nA`,
+    `ls; echo ';cat <<A' && rm -rf /etc\nA`,
+    `source <(tee /dev/stdout <<'EOF'\nrm -rf /etc\nEOF\n)`,
+    `source /dev/stdin <<'EOF'\nrm -rf /etc\nEOF`,
+    `cat <<'EOF' | bash\nrm -rf /etc\nEOF`,
+    `cat <<'EOF' > /tmp/x.sh\nrm -rf /etc\nEOF\nbash /tmp/x.sh`,
+    `bash -c 'echo "cat <<A"'; rm -rf /etc`,
+    `x=$(cat <<'EOF'\nrm -rf /etc\nEOF\n); eval "$x"`,
+  ])("denies: %s", (cmd) => expect(judge(cmd).verdict).toBe("deny"));
+  it.each([
+    "cat <<'EOF' > /tmp/x\nplain notes\nEOF",
+    "echo 'cat <<A is how you write a heredoc'",
+    "git status # cat <<A",
+  ])("still allows: %s", (cmd) => expect(judge(cmd).verdict).toBe("allow"));
+});
