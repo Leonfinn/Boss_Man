@@ -58,4 +58,11 @@ describe("sinceHours: the one hourly cut-off for a rolling cap (BOS-894)", () =>
   it("takes the injected clock, so a test's fixed now gives a fixed cut-off", () => {
     expect(sinceHours(new Date(0)).toISOString()).toBe("1969-12-31T23:00:00.000Z");
   });
+
+  it("counts a row 59 min 59 s old and not one 60 min 1 s old, against the cap's `gt` cut-off", () => {
+    const inWindow = (at: Date) => at.getTime() > sinceHours(now).getTime();
+    expect(inWindow(new Date(now.getTime() - (59 * 60 + 59) * 1000))).toBe(true);
+    expect(inWindow(new Date(now.getTime() - (60 * 60 + 1) * 1000))).toBe(false);
+    expect(inWindow(new Date(now.getTime() - 60 * 60 * 1000))).toBe(false);
+  });
 });
