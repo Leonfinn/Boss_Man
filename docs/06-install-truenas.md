@@ -892,7 +892,7 @@ iPhones only get instant delivery from a self-hosted server if the server forwar
 
 ### Approve buttons
 
-ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when all of these hold: the ntfy server has a publish token; the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` from step 5 (any other `http://` address is refused, so the token never crosses an untrusted network in clear text); Boss Man's public URL is https; and **Approve buttons** haven't been switched off in Notifications. If one fails, Notifications says which.
 
 ### Moving off the Home Assistant webhook
 
