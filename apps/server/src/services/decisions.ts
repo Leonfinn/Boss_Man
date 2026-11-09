@@ -64,7 +64,7 @@ import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from 
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
@@ -920,9 +920,16 @@ export type RetroHook = {
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" | "standing_rules" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
+/** How long a card's question can be in an "unblocked" wake; the answer itself is never cut (BOS-951). */
+const UNBLOCKED_QUESTION_MAX = 200;
+/** Past this, the wake carries a short line instead: the whole answer is on the ticket's conversation (BOS-951). */
+const UNBLOCKED_TOTAL_MAX = 800;
+const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conversation.";
+
 /**
  * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
  * decision's dependency row is already gone by then, so its question and answer come in as `answered`.
+ * The question is cut, never the answer: the answer is what the agent has to act on (BOS-951).
  */
 export async function unblockedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
   const blockers = await db
@@ -939,15 +946,55 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
         .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
         .where(inArray(ticketArtifacts.ticketId, ids))
     : [];
+  const asked = (question: string) => `${question.replace(/\s+/g, " ").trim().slice(0, UNBLOCKED_QUESTION_MAX)}${question.length > UNBLOCKED_QUESTION_MAX ? "…" : ""}`;
   const lines = blockers.flatMap((b) => {
     if (b.id) {
       const outs = made.filter((m) => m.ticketId === b.id).map((m) => m.slug ?? m.title);
       return [`- "${b.title}" is done.${b.note ? ` Its note: ${b.note}` : ""}${outs.length ? ` It produced: ${outs.join(", ")}.` : ""}`];
     }
-    return b.question && b.answer ? [`- You asked "${b.question}"; the answer was: ${b.answer}`] : [];
+    return b.question && b.answer ? [`- You asked "${asked(b.question)}"; the answer was: ${b.answer}`] : [];
   });
-  if (answered) lines.push(`- You asked "${answered.question}"; the answer was: ${answered.answer}`);
-  return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
+  if (answered) lines.push(`- You asked "${asked(answered.question)}"; the answer was: ${answered.answer}`);
+  if (!lines.length) return undefined;
+  const text = `What you were waiting on:\n${lines.join("\n")}`;
+  // A short note is sent whole. A long one keeps its first 800 characters, which now leaves room for the answer
+  // because the question above is cut; the whole thing is on the ticket's conversation either way (BOS-951).
+  return text.length <= UNBLOCKED_TOTAL_MAX ? text : `${text.slice(0, UNBLOCKED_TOTAL_MAX)}\n\n${UNBLOCKED_POINTER}`;
+}
+
+/**
+ * The owner's answer to a card that was holding a ticket up, written on that ticket's conversation (BOS-951).
+ * The wake that follows is short, so this is where the assignee reads the whole answer and note. Attributed to
+ * the owner on the ticket, as it is their words. Returns the tickets it wrote to; it never throws into the
+ * answer path, as the answer is already saved by then.
+ */
+async function postAnswerOnTickets(
+  db: Db,
+  d: { companyId: string; question: string; answer: string | null },
+  ticketIds: string[],
+  who: string,
+  note: string | undefined,
+  log: (message: string) => void,
+  now: () => Date,
+) {
+  if (!ticketIds.length) return [];
+  const answer = (d.answer ?? "").trim();
+  if (!answer) return [];
+  const lines = [`${who} answered your card on this ticket: ${answer}`];
+  if (note?.trim()) lines.push("", "Their note:", note.trim());
+  lines.push("", `The card asked: ${d.question.replace(/\s+/g, " ").trim().slice(0, 300)}${d.question.length > 300 ? "…" : ""}`);
+  const text = lines.join("\n");
+  const wrote: string[] = [];
+  for (const ticketId of [...new Set(ticketIds)]) {
+    try {
+      await db.insert(ticketMessages).values({ companyId: d.companyId, ticketId, author: "owner", agentId: null, runId: null, delivery: null, text });
+      await record(db, { companyId: d.companyId, ticketId, kind: "message", summary: `The owner's answer was posted here: ${answer}` });
+      wrote.push(ticketId);
+    } catch (err) {
+      log(`answering decision was saved, but the owner's answer couldn't be posted on ticket ${ticketId}: ${(err as Error).message}`);
+    }
+  }
+  return wrote;
 }
 
 /**
@@ -1977,6 +2024,44 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /**
+     * One card by id, settled or not (BOS-951): after an answer it drops off the open list, and the owner
+     * and the CEO still need to read the question, the full answer and note. Null when the company doesn't hold it.
+     */
+    async cardById(id: string, companyId: string) {
+      const [row] = await db
+        .select({ d: decisions, raisedBy: agents.name })
+        .from(decisions)
+        .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
+        .where(and(eq(decisions.id, id), eq(decisions.companyId, companyId)));
+      if (!row) return null;
+      const d = row.d;
+      const about = await decisionTicketIds(db, d);
+      const ticketsAbout = about.length
+        ? await db
+            .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+            .from(tickets)
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .where(and(eq(tickets.companyId, companyId), inArray(tickets.id, about)))
+        : [];
+      return {
+        id: d.id,
+        kind: d.kind,
+        status: d.status,
+        question: d.question,
+        options: d.options as string[],
+        recommended: d.recommendedOption,
+        answer: d.answer,
+        answerNote: (d.context as { settled?: { note?: string | null } }).settled?.note ?? (d.context as { answerNote?: string | null }).answerNote ?? null,
+        answeredAt: d.answeredAt,
+        settledBy: (d.context as { settled?: { name?: string } }).settled?.name ?? null,
+        raisedBy: row.raisedBy ?? "Boss Man",
+        tickets: ticketsAbout.map((t) => ({ id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) })),
+        context: d.context,
+        createdAt: d.createdAt,
+      };
+    },
+
+    /**
      * The owner's queue (R20): every open decision with what it holds up, down the chain,
      * ranked by an explainable score. `includeAll` is the CEO's view (BOS-149): every open card
      * in the company, any tier, including lesson cards and cards still with the CEO or the
@@ -2724,6 +2809,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
         settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
       }
+      // The owner's own note is kept on the card too (BOS-951), so a card read by id after it drops off the queue
+      // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
+      const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
       // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
@@ -2740,7 +2828,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer,
           answeredAt: now(),
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || ctx.type === "review_stall" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
-          ...(extra.handled ? { context: mergeContext({ advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } }) } : settled ? { context: mergeContext({ settled }) } : {}),
+          ...(extra.handled
+            ? { context: mergeContext({ advice: { ...adviceOf(d.context), state: "handled", ...extra.handled }, ...(ownerNote ? { answerNote: ownerNote } : {}) }) }
+            : settled
+              ? { context: mergeContext({ settled }) }
+              : ownerNote
+                ? { context: mergeContext({ answerNote: ownerNote }) }
+                : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
@@ -2762,6 +2856,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!closed) return null;
       // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
       await markDecisionNotificationRead(db, id, now());
+
+      // The owner's answer goes on the conversation of every ticket the card was about (BOS-951): the wake
+      // that follows is short, so this is where the assignee reads the whole answer and note, whether the
+      // card was a plain question or a system one (a host check, a sign-off, a review loop).
+      if (!extra.settledBy) {
+        try {
+          await postAnswerOnTickets(db, { companyId: d.companyId, question: d.question, answer }, await decisionTicketIds(db, d), extra.by === "ceo" ? "The CEO" : "The owner", extra.note, log, now);
+        } catch (err) {
+          log(`answering decision ${id} was saved, but posting it on its tickets failed: ${(err as Error).message}`);
+        }
+      }
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
@@ -3020,9 +3125,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
         }
       }
-      // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
-      const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      // The activity line is cut at 300 characters, and the brief shows 100, so a long question is shortened here to
+      // keep the answer in it (BOS-951 criterion 3: the whats_new line shows the option chosen, not only the question).
+      const asked = d.question.length > 80 ? `${d.question.slice(0, 79)}…` : d.question;
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
       // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
