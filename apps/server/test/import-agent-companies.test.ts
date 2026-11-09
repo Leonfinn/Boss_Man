@@ -56,7 +56,8 @@ const FILES: Record<string, string> = {
 const zip = Buffer.from(zipSync(Object.fromEntries(Object.entries(FILES).map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
 
 async function setup() {
-  const { db, close } = await openPglite();
+  // BOS-855: its own database, never a parked pool copy. An import queues background wiki indexing that can still be running when the test ends, and on a pooled copy that work landed on (or raced the truncate of) the next test's database.
+  const { db, close } = await openPglite(undefined, { fresh: true });
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false });
   ctx = { close: async () => (await built.app.close(), await close()) };
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -116,7 +117,9 @@ describe("Paperclip issues (docs/11, step 5)", () => {
     const id = (await req("POST", "/api/companies/import", { zip: withIssues })).json().companyId as string;
 
     const { unzipSync, strFromU8 } = await import("fflate");
-    const out = unzipSync(new Uint8Array((await req("GET", `/api/companies/${id}/export?wiki=1&tickets=all`)).rawPayload));
+    const exported = await req("GET", `/api/companies/${id}/export?wiki=1&tickets=all`);
+    expect(exported.statusCode, exported.body.slice(0, 300)).toBe(200);
+    const out = unzipSync(new Uint8Array(exported.rawPayload));
     const tickets = strFromU8(out["tickets.jsonl"]!).trim().split("\n").map((l) => JSON.parse(l));
     const by = (t: string) => tickets.find((x) => x.title === t);
     expect(by("Launch the site")).toMatchObject({ state: "in_progress", project: "site", body: "Ship it.\n\nImported from ACM-1" });
@@ -145,7 +148,9 @@ describe("agent pictures in an Agent Companies export", () => {
     entries["acme/agents/builder/avatar.PNG"] = new Uint8Array(png);
     entries["acme/agents/boss/avatar.png"] = strToU8("<svg onload=alert(1)>not a png</svg>");
     const req = await setup();
-    const id = (await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(entries)).toString("base64") })).json().companyId as string;
+    const imported = await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(entries)).toString("base64") });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const id = imported.json().companyId as string;
     const team = ((await req("GET", "/api/companies")).json() as Array<{ id: string; agents: Array<{ id: string; name: string }> }>).find((c) => c.id === id)!.agents;
     const pic = await req("GET", `/api/agents/${team.find((a) => a.name === "Builder")!.id}/avatar`);
     expect(pic.statusCode).toBe(200);
