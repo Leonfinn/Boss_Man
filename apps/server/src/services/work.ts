@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { lineEvent } from "./merge-line.js";
@@ -80,6 +80,12 @@ type TicketPatch = {
   internal?: boolean;
   /** Write only if the ticket is still at this version (R81, BOS-897): checked in the UPDATE itself, so a change landing after the caller's read is not overwritten. */
   expectedVersion?: number;
+  /** The title the page loaded: refuse the edit if the stored one changed since (BOS-905). */
+  titleLoaded?: string | null;
+  /** The description the page loaded: refuse the edit if the stored one changed since (BOS-905). Absent means not checked. */
+  bodyLoaded?: string | null;
+  /** The acceptance criteria the page loaded: refuse the edit if the stored ones changed since (BOS-905). */
+  acceptanceCriteriaLoaded?: Criterion[];
 };
 
 /**
@@ -129,6 +135,37 @@ export function startRefusal(
     if (!handedOver) return "This ticket is still in the Backlog and nobody handed it to you, so you can't start it. Ask your CEO or the owner to put it on the board, or move it to Ready first.";
   }
   return null;
+}
+
+/** The text fields a page can edit, each one checked on its own so an unrelated change doesn't hold it up (BOS-905). */
+const EDIT_FIELDS = ["title", "body", "acceptanceCriteria"] as const;
+type EditField = (typeof EDIT_FIELDS)[number];
+export type EditConflict = { field: EditField; message: string };
+const FIELD_NOUN: Record<EditField, string> = { title: "title", body: "description", acceptanceCriteria: "acceptance criteria" };
+
+/** What was stored for a text field, as the page compares it. */
+function storedEditField(t: typeof tickets.$inferSelect, field: EditField): string | null {
+  if (field === "title") return t.title;
+  if (field === "body") return t.body ?? null;
+  return JSON.stringify(readCriteria(t.acceptanceCriteria));
+}
+
+/**
+ * A save that would overwrite someone else's change to the same field (BOS-905, BOS-298 step 13): the page
+ * sends what it loaded for each text field it edits, and a mismatch refuses the save with a 409. Only the
+ * edited field is compared, because the version moves on every state change and would refuse unrelated edits.
+ * A field sent without its loaded value (an older client, another caller) is not checked.
+ */
+export function editConflicts(t: typeof tickets.$inferSelect, patch: TicketPatch): EditConflict[] {
+  const loaded: Partial<Record<EditField, string | null>> = {
+    title: patch.title !== undefined && "titleLoaded" in patch ? (patch.titleLoaded ?? null) : undefined,
+    body: patch.body !== undefined && "bodyLoaded" in patch ? (patch.bodyLoaded ?? null) : undefined,
+    acceptanceCriteria: patch.acceptanceCriteria !== undefined && patch.acceptanceCriteriaLoaded !== undefined ? JSON.stringify(patch.acceptanceCriteriaLoaded) : undefined,
+  };
+  return EDIT_FIELDS.filter((f) => loaded[f] !== undefined && loaded[f] !== storedEditField(t, f)).map((field) => ({
+    field,
+    message: `The ${FIELD_NOUN[field]} was changed by someone else after you opened it, so your save was refused and nothing was overwritten. Your edit is still here. Reload the ticket to see the latest, then save again if you still want your change.`,
+  }));
 }
 
 export type WorkHooks = {
@@ -556,11 +593,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (!t) throw new WorkError(404, "No such ticket.");
       const expected = patch.expectedVersion;
       if (expected !== undefined && t.version !== expected) throw new WorkError(409, await staleVersionMessage(db, t.companyId, ticketId, expected));
+      // Someone else changed the text the page is saving: refuse it before anything is written (BOS-905).
+      const conflict = editConflicts(t, patch)[0];
+      if (conflict) throw new WorkError(409, conflict.message, conflict.field);
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, internal: _internal, expectedVersion: _v, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, expectedVersion: _v, titleLoaded: _tl, bodyLoaded: _bl, acceptanceCriteriaLoaded: _acl, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {

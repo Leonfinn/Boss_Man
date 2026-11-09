@@ -72,7 +72,7 @@ function Fold({ title, hint, open, className, children }: { title: string; hint?
 }
 
 /** The ticket's acceptance criteria with how the author reported each, plus the owner's editor. */
-function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
+function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (field: "body" | "acceptanceCriteria", body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
   return (
@@ -96,8 +96,8 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
         initial={criteria}
         busy={busy}
         save={(next) => {
-          // Clear only once the server has taken it; a failed save keeps the lines.
-          void patch({ acceptanceCriteria: next }).then((ok) => ok && clearDraft(`ticket-criteria/${t.id}`));
+          // Clear only once the server has taken it; a failed save keeps the lines (and a change since load is refused, BOS-905).
+          void patchLoaded("acceptanceCriteria", { acceptanceCriteria: next }).then((ok) => ok && clearDraft(`ticket-criteria/${t.id}`));
         }}
       />
     </Fold>
@@ -315,6 +315,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [lesson, setLesson] = useState("");
   const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // A text field someone else changed since this page loaded it (BOS-905): the save was refused and the owner's draft is kept.
+  const [conflict, setConflict] = useState<{ field: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
   const [draft, setDraftRaw] = useState<string | null>(null);
@@ -341,13 +343,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const patch = async (body: Record<string, unknown>) => {
     try {
       await api(`/api/tickets/${id}`, { method: "PATCH", body });
+      setConflict(null);
       ticket.reload();
       return true;
     } catch (err) {
-      setNote({ ok: false, text: (err as Error).message });
+      // Someone else changed the field that was being saved: keep the owner's draft and offer a reload (BOS-905).
+      if (err instanceof ApiError && err.status === 409 && err.field) setConflict({ field: err.field, text: err.message });
+      else setNote({ ok: false, text: (err as Error).message });
       return false;
     }
   };
+  /** Send the text field now, with the value this page loaded, so a change since is refused rather than overwritten (BOS-905). */
+  const patchLoaded = (field: "body" | "acceptanceCriteria", body: Record<string, unknown>) =>
+    patch({ ...body, ...(field === "body" ? { bodyLoaded: t?.body ?? null } : { acceptanceCriteriaLoaded: t?.acceptanceCriteria ?? [] }) });
   const [blocking, setBlocking] = useState<{ until: string; reason: string } | null>(null);
   const block = async () => {
     if (!blocking) return;
@@ -392,7 +400,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
   const saveDraft = async () => {
     if (draft === null) return;
-    await patch({ body: withAttachments(draft, img.attached).trim() || null });
+    // A refused save keeps the draft: a change to the description since this page loaded it is reported, not lost (BOS-905).
+    if (!(await patchLoaded("body", { body: withAttachments(draft, img.attached).trim() || null }))) return;
     img.clear();
     clearDraft(editDraftKey);
     setDraftRaw(null);
@@ -401,7 +410,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const saveDraftAsFile = async (long: string) => {
     try {
       const markdown = await img.uploadText(long, "description.txt");
-      await patch({ body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() });
+      if (!(await patchLoaded("body", { body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() }))) return;
       img.clear();
       clearDraft(editDraftKey);
       setDraftRaw(null);
@@ -764,7 +773,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </span>
           </label>
 
-          <DoneWhen t={t} patch={patch} busy={busy} />
+          <DoneWhen t={t} patchLoaded={patchLoaded} busy={busy} />
           {t.fixesLive?.trim() && (
             // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
             <p className="fixes-live" style={{ margin: 0 }}>
@@ -929,6 +938,22 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 decide
               )}
             </Fold>
+          )}
+          {conflict && (
+            <div className="card" role="alert" data-testid="edit-conflict" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ flex: "1 1 320px" }}>{conflict.text}</span>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  // The draft is kept; reloading brings in the latest so the owner can compare and save again.
+                  setConflict(null);
+                  ticket.reload();
+                }}
+              >
+                Reload the latest
+              </button>
+            </div>
           )}
           {note && (
             <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>

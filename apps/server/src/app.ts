@@ -50,7 +50,7 @@ import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
-import { DeployError, deploysService } from "./services/deploys.js";
+import { deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
@@ -93,6 +93,7 @@ import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
+import { serverAdminRoutes } from "./routes/server-admin.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
@@ -906,7 +907,7 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(400).send({ error: "invalid_request", message: i ? `${i.path.length ? `${i.path.join(".")}: ` : ""}${i.message}` : "The request isn't valid.", issues: err.issues });
     }
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
-    if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+    if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: err instanceof WorkError && err.field ? "conflict" : "rejected", message: err.message, ...(err instanceof WorkError && err.field ? { field: err.field } : {}) });
     const code = pgCode(err);
     if (code === "23505") return reply.code(409).send({ error: "already_exists" });
     if (code === "23503") return reply.code(422).send({ error: "unknown_reference" });
@@ -1679,6 +1680,10 @@ export async function buildApp(opts: AppOptions) {
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
       overLimit: z.boolean(),
+      // What the page loaded for a text field it is saving, so a change landing since is refused, not overwritten (BOS-905).
+      titleLoaded: z.string().max(200).nullable(),
+      bodyLoaded: z.string().max(OWNER_MESSAGE_MAX).nullable(),
+      acceptanceCriteriaLoaded: acceptanceCriteriaSchema,
     });
 
     owner.get("/api/companies/:id/projects", async (req) => {
@@ -2520,57 +2525,8 @@ export async function buildApp(opts: AppOptions) {
       return watchdog.undo(a.companyId, id, b).catch(watchdogErrors(reply));
     });
 
-    // Scheduling and kill switches (R30).
-    owner.post("/api/agents/:id/wake", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ ticketId: Uuid.optional(), note: z.string().max(5000).optional(), priority: z.number().int().min(1).max(5).optional() }).parse(req.body ?? {});
-      return reply.code(201).send(await scheduler.wake({ agentId: id, reason: "woken by owner", ...b }));
-    });
-    owner.get("/api/scheduler/queue", async () => scheduler.queue());
-    owner.post("/api/scheduler/tick", async () => scheduler.tick());
-    // Read by Settings → "Stop all work" and the every-page banner, so a reload shows the real hold (BOS-836).
-    owner.get("/api/kill-switch", async () => ({ paused: await scheduler.globallyPaused() }));
-    owner.post("/api/kill-switch", async (req) => {
-      const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
-      await scheduler.setGlobalPause(paused);
-      return { paused };
-    });
-    owner.post("/api/companies/:id/pause", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
-      await scheduler.setCompanyPause(id, paused);
-      return { paused };
-    });
-
-    // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
-    owner.get("/api/maintenance", async () => maintenance.status());
-    // The Settings → Runner update panel: the live state first, then the last update as history (BOS-465).
-    owner.get("/api/runner-report", async () => runnerReport.updatePanel());
-    owner.post("/api/maintenance/start", async (req, reply) => {
-      const { minutes } = z.object({ minutes: z.number().int().min(1).max(1440).optional() }).parse(req.body ?? {});
-      if (!launch.enabled) return reply.code(409).send({ error: "no_launcher", message: "Draining needs the launcher (BOSSMAN_LAUNCHER=1); without it runners are restarted by scripts/update-runner.sh --now." });
-      await maintenance.start({ minutes }); // leader-only
-      return maintenance.status();
-    });
-    owner.post("/api/maintenance/cancel", async () => ({ cancelled: await maintenance.cancel() })); // leader-only
-
-    // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
-    owner.get("/api/self-deploy", async () => selfDeploy.overview());
-    owner.post("/api/self-deploy/deploy-latest", async (_req, reply) => {
-      const r = await selfDeploy.deployLatest();
-      return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;
-    });
-
-    owner.post("/api/self-deploy/update-runners", async (_req, reply) => {
-      const r = await selfDeploy.updateRunners();
-      return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
-    });
-
-    // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
-    owner.post("/api/self-deploy/restart", async (_req, reply) => {
-      const r = await selfDeploy.restartServer();
-      return "error" in r ? reply.code(409).send({ error: "cannot_restart", message: r.error }) : r;
-    });
+    // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deploysSvc });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2670,41 +2626,6 @@ export async function buildApp(opts: AppOptions) {
       const { as, ...action } = b;
       return engagementsSvc.act(id, { companyId: as === "requester" ? e.requesterCompanyId : e.providerCompanyId, agentId: null }, action).catch(engagementErrors(reply));
     });
-
-    // Deploy targets and deploys (R14, R15).
-    const TargetInput = z.object({
-      name: z.string().trim().min(1).max(80),
-      kind: z.enum(["ssh", "docker", "git"]),
-      endpoint: z.string().trim().min(1).max(500),
-      isProduction: z.boolean().optional(),
-      requiresApproval: z.boolean().optional(),
-      /** DR-033: the tag to move after a successful deploy; null turns it off. Owner-only, like every target setting. */
-      liveTag: z.object({ projectId: Uuid, name: z.string().trim().min(1).max(100) }).nullable().optional(),
-    });
-    const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
-      if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
-      throw err;
-    };
-    owner.get("/api/companies/:id/deploy-targets", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
-      return targets.map((t) => {
-        const d = last.get(t.id);
-        return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
-      });
-    });
-    owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      return deploysSvc
-        .createTarget(id, TargetInput.parse(req.body))
-        .then((t) => reply.code(201).send(t))
-        .catch(deployErrors(reply));
-    });
-    owner.patch("/api/deploy-targets/:id", async (req, reply) =>
-      deploysSvc.updateTarget(IdParam.parse(req.params).id, TargetInput.partial().parse(req.body)).catch(deployErrors(reply)),
-    );
-    owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
-    owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
 
     // Review (R39): diffs, line comments back to the agent, and commit / PR prompts.
     const reviewErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
