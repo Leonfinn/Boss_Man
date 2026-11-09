@@ -4,6 +4,7 @@ import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
 import { windowLabel } from "@boss-man/shared";
+import { ageLabel } from "../age";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
 /** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
@@ -82,14 +83,8 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
-/** "3m ago", "2h ago", "4d ago": how old a cached reading is, in plain words. */
-const ago = (seconds: number | null) => {
-  if (seconds === null) return "";
-  if (seconds < 60) return "just now";
-  if (seconds < 3_600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h ago`;
-  return `${Math.round(seconds / 86_400)}d ago`;
-};
+/** "3 min ago", "2h ago", "4d ago": how old a cached reading is, in age.ts's words. */
+const ago = (seconds: number | null) => (seconds === null ? "" : ageLabel(seconds * 1000));
 
 /** "in 3 days", "in 5 hours": how long until the plan renews. */
 const until = (iso: string) => {

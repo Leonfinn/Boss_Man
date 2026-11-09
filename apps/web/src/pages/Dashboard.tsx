@@ -1,6 +1,7 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
 import { api, type Company, type RunRow } from "../api";
+import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
@@ -25,13 +26,9 @@ type DashboardData = {
   recentActivity: Array<{ id: string; title: string; link: string; level: string; agent: string | null; createdAt: string }>;
 };
 
-/** "just now", "5m ago", "3h ago", "2d ago". */
+/** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
 export function ago(iso: string, now = Date.now()) {
-  const s = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86_400)}d ago`;
+  return raisedAgo(iso, now);
 }
 
 const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));

@@ -13,7 +13,7 @@ export function healthLine(h: WatchdogHealthData, now = Date.now()): { text: str
   // A sweep runs every 5 minutes; a quarter of an hour without one means it isn't running.
   const lastSweep = h.lastSweepAt ? new Date(h.lastSweepAt).getTime() : null;
   const late = lastSweep !== null && now - lastSweep > 15 * 60_000;
-  const check = lastSweep === null ? "no check yet" : ageLabel(now - lastSweep) === "just now" ? "last check just now" : `last check ${ageLabel(now - lastSweep)}`;
+  const check = lastSweep === null ? "no check yet" : now - lastSweep < 60_000 ? "last check just now" : `last check ${ageLabel(now - lastSweep)}`;
   const handled = h.openFlags === 0 ? "no open issues" : `${h.openFlags} issue${h.openFlags === 1 ? "" : "s"} being handled`;
   // Record only (BOS-166): it is watching, but it reaches nobody, so the line says so.
   if (h.settings.recordOnly) return { text: `Watchdog: record only (not acting) · ${check} · ${handled}`, tone: late ? "amber" : "" };
