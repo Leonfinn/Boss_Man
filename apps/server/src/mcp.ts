@@ -2966,7 +2966,8 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
       try {
         switch (input.action) {
           case "list": {
-            const open = await watchdog.flags(companyId, { status: "open", limit: 50 });
+            // Only flags the actions below accept: the owner's waits, escalated and already-actioned ones are left out.
+            const open = await watchdog.actionableFlags(companyId, 50);
             return text(open.length ? JSON.stringify(open.map((f) => ({ flagId: f.id, ticketId: f.ticketId, title: f.ticketTitle, rule: f.rule, openedAt: f.openedAt, snoozedUntil: f.snoozedUntil, snoozeCount: f.snoozeCount, escalatedAt: f.escalatedAt, detail: f.detail }))) : "No open flags.");
           }
           case "nudge":

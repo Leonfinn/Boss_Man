@@ -5,12 +5,14 @@ import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { raisedAgo } from "../age";
 import { clearDraft, readDraft, saveDraft } from "../drafts";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
 import { SkillProposal } from "../components/SkillProposal";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 // A card's note and own-word answer are kept in this browser as they are typed (BOS-637): a
 // freeze or a reload must not cost the owner what they wrote. The cards arrive one at a time, so
@@ -20,6 +22,14 @@ const draftOwn = (id: string) => `decision/${id}/own-answer`;
 
 /** The answer sent when it is too long for the box: the text is in the .txt file the line links. */
 export const ANSWER_IN_FILE = "My answer is too long to type here, so it's in this file (open it to read it whole):";
+
+/**
+ * The ticket a card's own-word answer is written on, so a picture or file pasted into it (BOS-759)
+ * sits with that work: the ticket it blocks, else the one it holds up. Absent: the company's.
+ */
+export function cardTicketId(d: Decision): string | undefined {
+  return d.blocks[0]?.ticketId ?? d.about?.[0]?.ticketId ?? undefined;
+}
 
 /** Attaches an owner's text as a .txt file, for an answer too long for the box; returns its Markdown. */
 async function uploadText(companyId: string, ticketId: string | undefined, text: string) {
@@ -154,6 +164,12 @@ const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
  * block is shown on the approval card and on the to-do it leaves behind.
  */
 function DeployUpdateView({ u }: { u: DeployUpdate }) {
+  // (BOS-809) An update can list a dozen tickets; show the first three and "+N more" that expands, so a
+  // card doesn't fill the screen with the whole list (the same on every update card, open or closed).
+  const KEEP_TICKETS = 3;
+  const shownChanges = u.changes.slice(0, KEEP_TICKETS);
+  const hidden = u.changes.length - shownChanges.length;
+  const [allShown, setAllShown] = useState(false);
   return (
     <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
       <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
@@ -161,11 +177,18 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
       </p>
       {u.changes.length > 0 && (
         <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
-          {u.changes.map((c) => (
+          {(allShown ? u.changes : shownChanges).map((c) => (
             <li key={c.ticketId} style={{ overflowWrap: "anywhere" }}>
               <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
             </li>
           ))}
+          {hidden > 0 && (
+            <li>
+              <button type="button" className="linkish" onClick={() => setAllShown((v) => !v)}>
+                {allShown ? "Show fewer" : `+${hidden} more`}
+              </button>
+            </li>
+          )}
           {u.more > 0 && (
             <li className="muted">
               and {u.more} more. <a href="#/board">See all the tickets</a>.
@@ -312,17 +335,24 @@ function kindOf(d: Decision) {
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
-/** The score in words: what each part added. */
+/** The score in words: what each part added. A zero score tells the owner nothing, so it says nothing (BOS-804). */
 function why(d: { score: number; parts: { blocking: number; liveRun: number; urgency: number; age: number } }) {
+  if (Math.round(d.score) === 0) return null;
   const n = (x: number) => Math.round(x * 10) / 10;
   const bits = [
     d.parts.liveRun ? `${n(d.parts.liveRun)} for a paused agent` : null,
     d.parts.blocking ? `${n(d.parts.blocking)} for the tasks it blocks` : null,
     d.parts.urgency ? `${n(d.parts.urgency)} for being due soon` : null,
-    `${n(d.parts.age)} for waiting`,
+    d.parts.age ? `${n(d.parts.age)} for waiting` : null,
   ].filter(Boolean);
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
+
+/** The rank's age reason ("Raised just now", "Waiting 3 h", "Waiting 2 days"). The "Raised" line shows
+ * the age in the Plan page's words now, so repeating it here contradicts it ("Raised 8 min ago · Raised
+ * just now") and tells the owner nothing new (BOS-804). Hidden by the server's mark, not its wording, so
+ * a reworded reason can't show a second age (BOS-869). */
+const otherReasons = (d: Decision) => d.reasons.filter((r) => r !== d.ageReason);
 
 /** Current vs proposed harness, provider, model and paid from on a model-change card (BOS-128). */
 function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
@@ -461,6 +491,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     setOwnWords(({ [id]: _, ...rest }) => rest);
     clearDraft(draftOwn(id));
   };
+  // Pictures and files pasted or picked into an answer in the owner's own words (BOS-759). `answering`
+  // is the card whose box is open, so an upload goes to that card's ticket.
+  const answering = useRef<string | undefined>(undefined);
+  const img = useImageAttach(companies[0]?.id, undefined, { ticketIdOf: () => answering.current });
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
   // A model-change card being edited before approval.
@@ -553,13 +587,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     inFlight.current.add(d.id);
     setBusy(d.id);
     setAttaching(d.id);
+    answering.current = cardTicketId(d);
     try {
       // Attach it to the ticket the card is about, so it sits with the work; else the company, which agents still open.
       const ticketId = d.context?.type === "risk_review" ? d.context.ticketId ?? undefined : d.context?.blockerTicketId ?? undefined;
-      const markdown = await uploadText(d.companyId, ticketId || undefined, long);
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: `${ANSWER_IN_FILE}\n\n${markdown}`, custom: true } });
+      const markdown = await uploadText(d.companyId, ticketId || cardTicketId(d), long);
+      // Anything pasted into the box goes with the file too, so nothing the owner attached is lost.
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: withAttachments(`${ANSWER_IN_FILE}\n\n${markdown}`, img.attached), custom: true } });
       setAnswered((a) => ({ ...a, [d.id]: ANSWER_IN_FILE }));
       forgetOwn(d.id);
+      img.clear();
       setErrors(({ [d.id]: _, ...rest }) => rest);
       setNotices(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -570,20 +607,30 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       setAttaching(null);
     }
   };
+  // Sends an answer in the owner's own words; it needs some text or an attachment (BOS-759).
+  const sendOwn = (d: Decision) => {
+    const text = ownWords[d.id]?.trim() ?? "";
+    if (!text && !img.attached.length) return;
+    void answer(d, text, { custom: true });
+  };
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     const isAlways = d.context?.always?.some((a) => a.label === option) ?? false;
     // A second click can land before React re-renders the disabled button: refuse it here too.
     if (inFlight.current.has(d.id)) return;
     inFlight.current.add(d.id);
     setBusy(d.id);
+    // An own-word answer carries its pictures and files on the end, as a message does (BOS-759). Only
+    // for this card: the box sends what is shown, and the server refuses a custom answer anywhere else.
+    const answerText = extra.custom && ownWords[d.id] !== undefined ? withAttachments(option.trim(), img.attached).trim() : option;
     try {
       const note = notes[d.id]?.trim();
       const reasonLink = reasonLinks[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: answerText, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(isAlways ? { alwaysScope: d.context?.alwaysAgent ? (alwaysScopes[d.id] ?? "agent") : "company" } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
-      // The card is answered, so its kept note and answer are done with.
+      // The card is answered, so its kept note and answer are done with, and the attachments went with it.
       forgetNote(d.id);
       forgetOwn(d.id);
+      img.clear();
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
@@ -641,44 +688,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )}
       </header>
       {banner}
-      {shownNotices.length > 0 && (
-        // (BOS-739) A card Boss Man closed by itself while the owner may have been mid-way: the notice
-        // stands where the card was, with its steps kept read-only, for a couple of hours.
-        <section aria-label="Updates closed while you were doing them" style={{ display: "grid", gap: 10, marginBottom: 16 }}>
-          {shownNotices.map((n) => (
-            <article key={n.id} className="banner" data-closed-notice={n.notice.why} style={{ background: "var(--amber-soft)", color: "var(--ink)", border: "1px solid var(--amber)", borderRadius: 10, padding: "12px 14px" }}>
-              <p style={{ fontWeight: 700, margin: 0 }}>
-                <span className="tag amber">Closed for you</span> {n.question.split("\n")[0]}
-              </p>
-              <p style={{ margin: "6px 0 0" }}>{n.notice.text}</p>
-              {n.notice.newer && (
-                <p style={{ margin: "6px 0 0" }}>
-                  <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
-                </p>
-              )}
-              {(() => {
-                // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
-                const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
-                return steps?.length ? (
-                  <details style={{ marginTop: 6 }}>
-                    <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
-                    <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
-                      {steps.map((s, i) => (
-                        <li key={i}><StepText text={s} /></li>
-                      ))}
-                    </ol>
-                    {n.context.check && (
-                      <p className="muted" style={{ fontSize: 13 }}>
-                        How to check it worked: <StepText text={n.context.check} />
-                      </p>
-                    )}
-                  </details>
-                ) : null;
-              })()}
-            </article>
-          ))}
-        </section>
-      )}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">
@@ -687,41 +696,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
             {withTeam.map((a) => (
               <li key={a.id}>
                 {a.question} <span className="muted">· with {a.holder} since {when(a.since)}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      {advised.length > 0 && (
-        <details className="sub">
-          <summary>Settled or withdrawn by the team in the last 30 days ({advised.length})</summary>
-          <ul>
-            {advised.map((a) => (
-              <li key={a.id}>
-                <TicketRefs about={a.about} />
-                {a.question}{" "}
-                <span className="muted">
-                  ·{" "}
-                  {a.withdrawn
-                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}${a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}`
-                    : a.settled
-                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
-                      : a.advice?.state === "reissued"
-                        ? "replaced by a clearer decision"
-                        : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
-                </span>
-                {a.settled?.command && (
-                  <pre className="muted">
-                    <code>{a.settled.command}</code>
-                  </pre>
-                )}
-                {a.advice?.replacedBy && (
-                  <>
-                    {" "}
-                    <a href="#/decisions">See the new one in the list</a>
-                  </>
-                )}
               </li>
             ))}
           </ul>
@@ -775,15 +749,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
-                  <div className="score" title={why(d)}>
-                    <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
-                      {Math.round(d.score)}
-                    </b>
-                    <div className="parts" aria-hidden="true">
-                      <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
-                      <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
-                      <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
-                    </div>
+                  <div className="score" title={why(d) ?? undefined}>
+                    {Math.round(d.score) > 0 && (
+                      <>
+                        <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
+                          {Math.round(d.score)}
+                        </b>
+                        <div className="parts" aria-hidden="true">
+                          <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
+                          <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
+                          <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div className="body">
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
@@ -941,7 +919,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </div>
                     )}
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled or withdrawn by the team" with what it asked.</p>}
-                    <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
+                    {why(d) && <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>}
                     <div className="meta">
                       {d.blocks.length > 0 && (
                         <span>
@@ -951,9 +929,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           ))}
                         </span>
                       )}
-                      <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
+                      <span>Raised <time dateTime={d.createdAt} title={when(d.createdAt)}>{raisedAgo(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
-                      {d.reasons.map((r) => (
+                      {otherReasons(d).map((r) => (
                         <span key={r}>{r}</span>
                       ))}
                     </div>
@@ -1210,8 +1188,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             style={{ display: "flex", flexDirection: "column", gap: 8 }}
                             onSubmit={(e) => {
                               e.preventDefault();
-                              const text = ownWords[d.id]!.trim();
-                              if (text) void answer(d, text, { custom: true });
+                              sendOwn(d);
                             }}
                           >
                             <div className="field">
@@ -1225,6 +1202,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 placeholder={d.recommendedOption ?? undefined}
                                 value={ownWords[d.id] ?? ""}
                                 onChange={(text) => editOwn(d.id, text)}
+                                onPaste={(e) => {
+                                  // A pasted picture or file is attached, unless text was copied with it (BOS-759).
+                                  answering.current = cardTicketId(d);
+                                  img.onPaste(e);
+                                }}
                                 onKeyDown={(e) => {
                                   if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
                                     e.preventDefault();
@@ -1233,8 +1215,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 }}
                                 textareaStyle={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
                                 onSendAsFile={(long) => answerAsFile(d, long)}
-                                attaching={attaching === d.id}
-                              />
+                                attaching={attaching === d.id || img.busy}
+                                error={img.error}
+                              >
+                                {img.attached.length > 0 && <ImagePreviews attached={img.attached} onRemove={img.remove} />}
+                              </OwnerMessageBox>
                               {d.recommendedOption && !ownWords[d.id] && (
                                 <button type="button" className="use-suggestion" onClick={() => editOwn(d.id, d.recommendedOption!)}>
                                   Use suggestion
@@ -1242,10 +1227,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               )}
                             </div>
                             <div className="actions">
-                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim() || tooLongToSend(ownWords[d.id] ?? "")}>
+                              {img.button}
+                              <button type="submit" className="btn primary" disabled={busy === d.id || img.busy || (!ownWords[d.id]?.trim() && !img.attached.length) || tooLongToSend(ownWords[d.id] ?? "", img.attached)}>
                                 Send my answer
                               </button>
-                              <button type="button" className="btn" onClick={() => forgetOwn(d.id)}>
+                              <button type="button" className="btn" onClick={() => { answering.current = undefined; img.clear(); forgetOwn(d.id); }}>
                                 Back to the options
                               </button>
                             </div>
@@ -1254,14 +1240,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {!asking && ownWords[d.id] === undefined && advice?.state !== "advised" && (
                           <details className="advice">
                             <summary>Not enough detail?</summary>
-                            <div className="field">
-                              <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
-                              <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
-                            </div>
-                            <div className="actions">
-                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
-                                Ask the CEO for advice
-                              </button>
+                            <div className="advice-row">
+                              <div className="field">
+                                <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
+                                <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
+                              </div>
+                              <div className="actions">
+                                <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
+                                  Ask the CEO for advice
+                                </button>
+                              </div>
                             </div>
                           </details>
                         )}
@@ -1297,6 +1285,113 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           )}
         </>
       )}
+      {/* (BOS-809) Outside the empty-queue ternary on purpose: a closed notice (kept steps, the link to
+          the newer card) and the settled/withdrawn history must still show when nothing else is open. */}
+      <ClosedGroup notices={shownNotices} advised={advised} />
     </>
+  );
+}
+
+/** The one line a closed card shows while folded: what closed it, and where to follow it. */
+function closedLineFor(n: ClosedNoticeCard): string {
+  const head = n.question.split("\n")[0] ?? "";
+  if (n.notice.why === "newer" && n.notice.newer) return n.notice.newer.label;
+  if (n.notice.commit) return `Main has moved to ${shortSha(n.notice.commit)}`;
+  return head;
+}
+
+/**
+ * (BOS-809) Everything on the queue that is done with: cards Boss Man closed by itself (a newer update
+ * covers them, BOS-739) and cards the team settled or withdrew in the last 30 days. One collapsed
+ * "Closed (N)" fold at the bottom, one line each, so the open cards come first and the whole screen is
+ * not taken by the steps of cards that need nothing. A line opens to show its kept steps (read-only).
+ * These are not counted in "N decisions waiting".
+ */
+function ClosedGroup({ notices, advised }: { notices: ClosedNoticeCard[]; advised: AdvisedDecision[] }) {
+  const count = notices.length + advised.length;
+  if (!count) return null;
+  return (
+    <details className="sub closed-covers" style={{ marginTop: 16 }}>
+      <summary>Closed ({count})</summary>
+      <ul style={{ listStyle: "none", padding: 0, margin: "8px 0 0", display: "flex", flexDirection: "column", gap: 6 }}>
+        {advised.map((a) => (
+          <li key={a.id} data-closed-card>
+            <details>
+              <summary className="covered-line">
+                <span className="muted">Closed for you</span> · {a.question.split("\n")[0]}{" "}
+                <span className="muted">
+                  ·{" "}
+                  {a.withdrawn
+                    ? `withdrawn by ${a.withdrawn.by}`
+                    : a.settled
+                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}`
+                      : a.advice?.state === "reissued"
+                        ? "replaced by a clearer decision"
+                        : "handled by the CEO"}
+                </span>
+              </summary>
+              <div className="closed-body" style={{ padding: "8px 0 0 12px", fontSize: 14 }}>
+                <TicketRefs about={a.about} />
+                {a.withdrawn ? (
+                  <p style={{ margin: "4px 0 0" }}>{a.withdrawn.note}{a.withdrawn.notice ? ` (${a.withdrawn.notice})` : ""}</p>
+                ) : a.settled ? (
+                  <p style={{ margin: "4px 0 0" }}>{a.settled.note ?? "no reason given"}</p>
+                ) : (
+                  <p style={{ margin: "4px 0 0" }}>{a.advice?.summary ?? "done"}</p>
+                )}
+                {a.settled?.command && (
+                  <pre className="muted">
+                    <code>{a.settled.command}</code>
+                  </pre>
+                )}
+                {a.advice?.replacedBy && (
+                  <p style={{ margin: "4px 0 0" }}>
+                    <a href="#/decisions">See the new one in the list</a>
+                  </p>
+                )}
+              </div>
+            </details>
+          </li>
+        ))}
+        {notices.map((n) => {
+          // A hand-apply card keeps its steps as `handSteps`; a hand-apply to-do as `steps` (BOS-739).
+          const steps = n.context.handSteps?.length ? n.context.handSteps : n.context.steps;
+          const label = closedLineFor(n);
+          return (
+            <li key={n.id} data-closed-card>
+              <details>
+                <summary className="covered-line">
+                  <span className="muted">Closed for you</span> · {label}
+                  {n.notice.newer && <span className="muted"> · covered by a newer card ›</span>}
+                </summary>
+                <div className="closed-body" style={{ padding: "8px 0 0 12px", fontSize: 14 }}>
+                  <p style={{ margin: "0 0 4px" }}>{n.notice.text}</p>
+                  {n.notice.newer && (
+                    <p style={{ margin: "0 0 4px" }}>
+                      <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                    </p>
+                  )}
+                  {steps?.length ? (
+                    <details>
+                      <summary className="muted">These steps are kept to read; there is nothing to press.</summary>
+                      <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                        {steps.map((s, i) => (
+                          <li key={i}><StepText text={s} /></li>
+                        ))}
+                      </ol>
+                      {n.context.check && (
+                        <p className="muted" style={{ fontSize: 13 }}>
+                          How to check it worked: <StepText text={n.context.check} />
+                        </p>
+                      )}
+                    </details>
+                  ) : null}
+                </div>
+              </details>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
   );
 }

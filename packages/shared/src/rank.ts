@@ -18,7 +18,9 @@ export type RankInput = {
 };
 
 export type RankParts = { blocking: number; urgency: number; age: number; liveRun: number };
-export type Rank = { score: number; parts: RankParts; reasons: string[]; dueDate: string | null };
+/** The rank reason that is only the card's age. Marked so a page can hide it by position, not by its
+ * wording (BOS-869): the page shows the age itself, and a reworded reason must not show twice. */
+export type Rank = { score: number; parts: RankParts; reasons: string[]; ageReason: string; dueDate: string | null };
 
 /** P1 work counts four times as much as unlinked work. */
 export function objectiveWeight(priority: number | null): number {
@@ -79,12 +81,13 @@ export function rankDecision(input: RankInput, now: Date): Rank {
   const hours = Math.max(0, (now.getTime() - input.createdAt.getTime()) / 3_600_000);
   // One point a day, up to a week, so old rows rise without swamping real blockers.
   const age = round1(Math.min(7, hours / 24));
-  reasons.push(hours < 1 ? "Raised just now" : hours < 48 ? `Waiting ${Math.floor(hours)} h` : `Waiting ${Math.floor(hours / 24)} days`);
+  const ageReason = hours < 1 ? "Raised just now" : hours < 48 ? `Waiting ${Math.floor(hours)} h` : `Waiting ${Math.floor(hours / 24)} days`;
+  reasons.push(ageReason);
 
   const liveRun = input.holdsLiveRun ? 5 : 0;
   if (liveRun) reasons.unshift("An agent is paused until you answer");
 
-  return { score: round1(blocking + urgency + age + liveRun), parts: { blocking, urgency, age, liveRun }, reasons, dueDate };
+  return { score: round1(blocking + urgency + age + liveRun), parts: { blocking, urgency, age, liveRun }, reasons, ageReason, dueDate };
 }
 
 /** A card that orders it relative to another: the card it depends on, and a short label for it. */

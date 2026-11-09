@@ -50,8 +50,10 @@ async function setup() {
 describe("progress contract settings", () => {
   it("defaults: 30 minutes to a status request, 60 to a flag, 2 hours for an unproven cause; on even with the watchdog off", () => {
     const s = readWatchdogSettings({});
-    expect(DEFAULT_WATCHDOG.enabled).toBe(false);
+    // On by default since BOS-762 (DR-041), but the progress contract runs whatever the switch says.
+    expect(DEFAULT_WATCHDOG.enabled).toBe(true);
     expect(s).toMatchObject({ progressContract: true, silentSteerMinutes: 30, silentFlagMinutes: 60, unprovenHours: 2 });
+    expect(readWatchdogSettings({ enabled: false })).toMatchObject({ enabled: false, progressContract: true });
   });
 });
 

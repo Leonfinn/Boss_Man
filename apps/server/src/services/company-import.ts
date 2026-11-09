@@ -30,7 +30,7 @@ export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
 const Uuidish = z.string().max(100);
-const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null), standingRules: opt(100_000) });
+const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null), standingRules: opt(100_000), watchdog: z.object({ enabled: z.boolean().optional() }).partial().optional() });
 const Agent = z.object({
   ref: Uuidish.optional(),
   name: z.string().trim().min(1).max(80),
@@ -360,11 +360,13 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // Tickets keep their numbers (a repeat gets a new one); tickets without one are numbered after the highest.
     const seen = new Set<number>();
     const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
-    // A package may tighten the owner's safeguards but never loosen them (BOS-754): approving engagements
-    // keeps its default (on), and each review policy keeps the default's owner sign-offs and plan approvals.
-    // The checklist says what the package asked for, so the owner can loosen it on purpose.
+    // A package may tighten the owner's safeguards but never loosen them (BOS-754, BOS-762): approving
+    // engagements keeps its default (on), each review policy keeps the default's owner sign-offs and plan
+    // approvals, and the watchdog starts on for a new company. The checklist says what the package asked
+    // for, so the owner can loosen it on purpose.
     const tightened: string[] = [];
     if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
+    if (pkg.company.watchdog?.enabled === false) tightened.push("Kept on: the Scrum Master watchdog, which checks the board for stuck work. The package had it switched off. To change it, use Settings → Watchdog.");
     const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
     // The company's policy is floored against the default; each project's override against the company's
     // (BOS-818). The default has a security review at high and critical (BOS-824); the company's own

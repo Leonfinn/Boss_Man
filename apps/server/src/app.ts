@@ -482,7 +482,7 @@ export async function buildApp(opts: AppOptions) {
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
-  const runsSvc = runsService(db, { runners, now: opts.now });
+  const runsSvc = runsService(db, { runners, now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built

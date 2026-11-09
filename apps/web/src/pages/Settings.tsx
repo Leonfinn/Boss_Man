@@ -2160,7 +2160,7 @@ function deployerLine(v: SelfDeployView): string {
 }
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
-function SelfDeploy({ go }: { go: (to: string) => void }) {
+export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const act = useAction();
   const v = view.data;
@@ -2181,6 +2181,7 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           type="button"
           className="btn"
           disabled={act.busy || v.pending || s?.result === "running"}
+          title="Updates the server only. If the update changed the runners, press Build and update runners afterwards."
           onClick={() =>
             act.run(async () => {
               try {
@@ -2230,6 +2231,9 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           Restart the server
         </button>
       </div>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Deploy latest updates the server only. If an update changed the runners, press Build and update runners afterwards.
+      </p>
       {act.view}
     </Section>
   );
