@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -34,6 +34,7 @@ type FeaturePatch = {
   milestoneId?: string | null;
   objectiveId?: string | null;
   portalVisible?: boolean;
+  keepOffPortal?: boolean;
   publicSummary?: string | null;
   showPublicly?: boolean;
 };
@@ -97,11 +98,31 @@ export function feedbackService(
     }
   }
 
+  /** The names the portal rule reads alongside a feature's own title and description: its area and the criteria it is scored on. */
+  async function portalFacts(companyId: string, areaId: string | null | undefined, driverScores: Record<string, number | null> | undefined) {
+    const area = areaId ? ((await db.select({ name: featureAreas.name }).from(featureAreas).where(eq(featureAreas.id, areaId)))[0]?.name ?? null) : null;
+    const ids = Object.keys(driverScores ?? {});
+    const criteria = ids.length ? (await db.select({ name: featureDrivers.name }).from(featureDrivers).where(and(eq(featureDrivers.companyId, companyId), inArray(featureDrivers.id, ids)))).map((d) => d.name) : [];
+    return { area, criteria };
+  }
+
+  /** The features that actually reach visitors: ticked on, and with a public summary (the portal shows internal title and description). */
+  async function livePortalFeatures(companyId: string) {
+    const rows = await db
+      .select({ id: features.id, title: features.title, description: features.description, status: features.status, releasedAt: features.releasedAt, publicSummary: features.publicSummary })
+      .from(features)
+      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+      .orderBy(asc(features.title));
+    return rows.filter((f) => !!f.publicSummary?.trim());
+  }
+
   /** Every feature of a company with its demand, priority and delivery, in one pass. */
   async function scored(companyId: string) {
     const s = await settings(companyId);
     const fs = await db.select().from(features).where(eq(features.companyId, companyId)).orderBy(asc(features.createdAt));
     const drivers = await db.select().from(featureDrivers).where(eq(featureDrivers.companyId, companyId)).orderBy(asc(featureDrivers.position), asc(featureDrivers.name));
+    const areas = fs.some((f) => f.areaId) ? await db.select({ id: featureAreas.id, name: featureAreas.name }).from(featureAreas).where(eq(featureAreas.companyId, companyId)) : [];
+    const areaName = new Map(areas.map((a) => [a.id, a.name]));
     const links = fs.length
       ? await db
           .select({ featureId: insights.featureId, importance: insights.importance, customerId: feedbackNotes.customerId, noteId: insights.noteId })
@@ -138,7 +159,10 @@ export function feedbackService(
         const scores = f.driverScores as Record<string, number | null>;
         const p = priorityScore({ demand: d.demand, maxDemand, demandWeight: s.demandWeight, drivers: drivers.map((x) => ({ weight: x.weight, value: scores[x.id] ?? null })), effort: f.effort });
         const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
-        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
+        const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
+        const portal = portalVerdict({ title: f.title, description: f.description, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
+        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }
@@ -226,6 +250,12 @@ export function feedbackService(
       await checkLinks(companyId, input);
       const publicSummary = input.publicSummary?.trim() || null;
       if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
+      const keepOffPortal = input.keepOffPortal ?? false;
+      // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
+      // The public-summary gate only holds it back from visitors; the tick stays on, so writing a summary later shows it.
+      const facts = await portalFacts(companyId, input.areaId, input.driverScores);
+      const verdict = portalVerdict({ title: input.title, description: input.description, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
+      const mayGoOn = !(verdict.reason === "sensitive" || verdict.reason === "security");
       const [f] = await db
         .insert(features)
         .values({
@@ -241,7 +271,8 @@ export function feedbackService(
           driverScores: input.driverScores ?? {},
           milestoneId: input.milestoneId ?? null,
           objectiveId: input.objectiveId ?? null,
-          portalVisible: input.portalVisible ?? false,
+          portalVisible: input.portalVisible ?? mayGoOn,
+          keepOffPortal,
           publicSummary,
           showPublicly: input.showPublicly ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
@@ -258,10 +289,13 @@ export function feedbackService(
       if ((patch.showPublicly ?? f.showPublicly) && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const driverScores = patch.driverScores ? { ...(f.driverScores as Record<string, number | null>), ...patch.driverScores } : undefined;
       if (driverScores) for (const [k, v] of Object.entries(driverScores)) if (v === null) delete driverScores[k];
+      // Marking a feature "keep off the portal (sensitive)" takes it off at once; clearing the mark leaves the tick alone.
+      const portalVisible = patch.keepOffPortal ? false : patch.portalVisible;
       const [u] = await db
         .update(features)
         .set({
           ...patch,
+          ...(portalVisible !== undefined ? { portalVisible } : {}),
           ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
           ...(driverScores ? { driverScores } : {}),
           ...(patch.status === "released" && f.status !== "released" ? { releasedAt: now() } : patch.status && patch.status !== "released" ? { releasedAt: null } : {}),
@@ -585,11 +619,7 @@ export function feedbackService(
     /** What a visitor sees: features shown on the portal, by stage, with their own votes. */
     async portalView(companyId: string, voter: string | null) {
       const cutoff = new Date(now().getTime() - 180 * 86_400_000);
-      const fs = await db
-        .select({ id: features.id, title: features.title, description: features.description, status: features.status, releasedAt: features.releasedAt })
-        .from(features)
-        .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
-        .orderBy(asc(features.title));
+      const fs = await livePortalFeatures(companyId);
       const mine = voter && fs.length
         ? await db
             .select({ featureId: insights.featureId, importance: insights.importance, comment: feedbackNotes.text, hasComment: sql<boolean>`${feedbackNotes.title} like 'Portal comment:%'` })
@@ -614,6 +644,8 @@ export function feedbackService(
     async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null }) {
       const [f] = await db.select().from(features).where(and(eq(features.id, input.featureId), eq(features.companyId, companyId), eq(features.portalVisible, true)));
       if (!f || f.status === "declined") throw new FeedbackError(404, "No such feature.");
+      // A feature kept off by the portal rule isn't public, so it can't be voted on even if someone has its id.
+      if (!(await livePortalFeatures(companyId)).some((x) => x.id === f.id)) throw new FeedbackError(404, "No such feature.");
       const comment = input.comment?.trim() || null;
       const [existing] = await db
         .select({ noteId: feedbackNotes.id })

@@ -2248,6 +2248,7 @@ export async function buildApp(opts: AppOptions) {
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
       showPublicly: z.boolean(),
     });
