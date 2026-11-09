@@ -270,6 +270,23 @@ describe("company import (docs/11, step 2)", () => {
     expect((await policyOf(ceoOnly)).medium.reviewer).toBe("ceo");
   });
 
+  it("previews the deep verify command too, and a project with no review override gets none invented by the flooring (BOS-818)", async () => {
+    const { req } = await setup();
+    const src = ((await req("POST", "/api/companies", { name: "Deep Co" })).json() as { company: { id: string } }).company.id;
+    const proj = (await req("POST", `/api/companies/${src}/projects`, { name: "Deep" })).json() as { id: string };
+    const deep = "pnpm build && ./scripts/deep.sh --all";
+    expect((await req("PATCH", `/api/projects/${proj.id}`, { name: "Deep", verifyCommand: "pnpm test", deepVerifyCommand: deep })).statusCode).toBe(200);
+    const zip = Buffer.from((await req("GET", `/api/companies/${src}/export`)).rawPayload).toString("base64");
+    const pre = (await req("POST", "/api/companies/import/preview", { zip })).json();
+    expect(pre.projects).toEqual([{ name: "Deep", verifyCommand: "pnpm test", deepVerifyCommand: deep }]);
+    const res = await req("POST", "/api/companies/import", { zip, name: "Deep Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId } = res.json() as { companyId: string };
+    const copy = ((await req("GET", `/api/companies/${companyId}/projects`)).json() as Array<{ id: string; name: string }>).find((p) => p.name === "Deep")!;
+    const body = (await req("GET", `/api/projects/${copy.id}/review-policy`)).json();
+    expect(body.policy).toBeNull();
+  });
+
   it("previews each tool server's host:port and refuses ones aimed at Boss Man's own services unless ticked", async () => {
     const { req } = await setup();
     const server = (name: string, url: string) => ({ name, url, transport: "http" });
