@@ -58,21 +58,38 @@ export const DEFAULT_REVIEW_POLICY: ReviewPolicy = {
   trivial: { planApprover: "none", reviewer: "ceo", ownerSignoff: false },
   low: { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false },
   medium: { planApprover: "ceo", reviewer: SENIOR_DEV, ownerSignoff: false },
-  high: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true },
-  critical: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true },
+  // A security review on the riskiest work is on from the start (BOS-824, DR-041: safe values are the
+  // defaults). "ceo" rather than SENIOR_DEV: the senior developer already does the code review here, and
+  // the owner names a security reviewer in Settings → Reviews. Existing companies keep their stored policy.
+  high: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true, kinds: { security: "ceo" } },
+  critical: { planApprover: "owner", reviewer: SENIOR_DEV, ownerSignoff: true, kinds: { security: "ceo" } },
 };
 
 /**
- * The policy with the owner's safeguards from `floor` kept on (BOS-754): at each tier where the floor
- * has the owner signing off or approving the plan, so does the result. Reviewers and review kinds stay
- * as given. For a policy that came from outside (an imported package), which may tighten the defaults
- * but never loosen them; the owner loosens a tier on purpose in Settings. `tightened` says what changed.
+ * The policy with the owner's safeguards from `floor` kept on (BOS-754, BOS-818): at each tier where the
+ * floor has the owner signing off or approving the plan, so does the result; a review kind the floor has
+ * is kept (with the floor's reviewer for it); and where the floor has someone other than the CEO doing
+ * the code review, a rule that hands it to the CEO gets the floor's reviewer back. Kinds and reviewers
+ * the policy adds or names itself stay as given: naming its own agent picks who reviews, it removes
+ * nothing. For a policy that came from outside (an imported package), which may tighten the floor but
+ * never loosen it; the owner loosens a tier on purpose in Settings. `tightened` says what changed.
  */
 export function noLooserThan(policy: ReviewPolicy, floor: ReviewPolicy = DEFAULT_REVIEW_POLICY): { policy: ReviewPolicy; tightened: string[] } {
   const tightened: string[] = [];
   const out = { ...policy };
   for (const tier of RISK_TIERS) {
     const rule = { ...policy[tier] };
+    // "ceo" is the one reviewer that adds nobody: the CEO already runs the work.
+    if (floor[tier].reviewer !== "ceo" && rule.reviewer === "ceo") {
+      rule.reviewer = floor[tier].reviewer;
+      tightened.push(`a reviewer other than the CEO for ${tier}-risk work`);
+    }
+    for (const kind of REVIEW_KINDS) {
+      const need = floor[tier].kinds?.[kind];
+      if (need === undefined || rule.kinds?.[kind] !== undefined) continue;
+      rule.kinds = { ...rule.kinds, [kind]: need };
+      tightened.push(`the ${kind} review of ${tier}-risk work`);
+    }
     if (floor[tier].ownerSignoff && !rule.ownerSignoff) {
       rule.ownerSignoff = true;
       tightened.push(`your sign-off on ${tier}-risk work`);

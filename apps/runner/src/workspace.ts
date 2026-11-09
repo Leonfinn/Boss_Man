@@ -24,8 +24,9 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, re
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
+import { GitConfigGuard } from "./git-config-guard.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
@@ -153,17 +154,30 @@ export class RepoLockTimeout extends Error {
 }
 
 /**
- * Settings for every git call the runner makes itself. A repo's own config can name a hook folder
- * or a filesystem monitor, and both run programs, so a shared repo could otherwise run code inside
- * the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ * Settings for every git call the runner makes itself. A repo's own config can name programs (a hook
+ * folder, a filesystem monitor, a credential helper, a signing program), so a shared repo could
+ * otherwise run code inside the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ * The main defence is GitConfigGuard (BOS-332), which keeps the repo config to an allowlist; these
+ * single-name overrides are the second layer, for the moment between its check and the git run.
+ * No global config (an agent without the fence can write the daemon's ~/.gitconfig), no system one,
+ * and no password prompt program (an empty GIT_ASKPASS beats core.askPass and SSH_ASKPASS).
  */
 export const SAFE_GIT_ENV = {
-  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_COUNT: "4",
   GIT_CONFIG_KEY_0: "core.hooksPath",
   GIT_CONFIG_VALUE_0: "/dev/null",
   GIT_CONFIG_KEY_1: "core.fsmonitor",
   GIT_CONFIG_VALUE_1: "false",
+  // An empty value clears the list of helpers read so far, and the repo config is read before this.
+  GIT_CONFIG_KEY_2: "credential.helper",
+  GIT_CONFIG_VALUE_2: "",
+  GIT_CONFIG_KEY_3: "commit.gpgSign",
+  GIT_CONFIG_VALUE_3: "false",
   GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_ASKPASS: "",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_SSH_COMMAND: "ssh",
 } as const;
 
 /**
@@ -225,6 +239,12 @@ export class Workspaces {
     return gitAuthorEnv(by);
   }
 
+  /** Keeps each config file the runner's git reads to the allowlist before the call (BOS-332). */
+  private guardInstance?: GitConfigGuard;
+  private get configGuard() {
+    return (this.guardInstance ??= new GitConfigGuard(this.baseEnv));
+  }
+
   /**
    * Whether the runner's own git in a ticket's clone runs inside the fence (BOS-323), set from the
    * runner's fence self-test at start-up. A clone's config, hooks and attributes are the agent's to
@@ -246,12 +266,131 @@ export class Workspaces {
    * its fenced git may read. It's the caller's, never read from the clone, whose alternates file the
    * agent can rewrite to point at another project.
    */
+  /**
+   * The runner's own git (BOS-332: never discovered from a folder, always told where the repo is, and
+   * the config it reads is kept to the allowlist first). Three kinds of call:
+   * - `cwd` alone: a bare repo of ours (repos/<id>.git), named with GIT_DIR.
+   * - `cwd` + `repo`: inside one of repo's copies. A worktree (a .git file) gets its admin folder found
+   *   from the repo's side (wtEnv); a clone (a real .git folder) gets GIT_DIR and GIT_COMMON_DIR both set
+   *   to that folder, so a planted .git/commondir can't send git elsewhere, and its own config is checked.
+   * - neither: only `init`/`clone`, which make a repo; run from the repos folder, which is no repo at all.
+   */
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[] } = {}) {
+    const repo = opts.repo ?? opts.cwd;
+    if (repo && !this.isRepoDir(repo)) throw new Error(`The runner's git only runs in one of its own repos, not ${repo} (BOS-332).`);
+    let place: Record<string, string>;
+    let clone = false;
+    if (opts.cwd && opts.repo) {
+      const kind = lstatSync(path.join(opts.cwd, ".git"), { throwIfNoEntry: false });
+      clone = kind?.isDirectory() ?? false;
+      if (clone) {
+        const gitDir = path.join(path.resolve(opts.cwd), ".git");
+        // As in worktreeAdminFor: git 2.39's ref store reads a commondir file even with GIT_COMMON_DIR set,
+        // so one planted in a clone (which never has one) would move HEAD and the refs to the agent's repo. Refused, not removed.
+        if (lstatSync(path.join(gitDir, "commondir"), { throwIfNoEntry: false })) throw new Error(`${opts.cwd} isn't a clone the runner can confirm: its .git has a commondir that points elsewhere (BOS-332).`);
+        await this.configGuard.check(path.join(gitDir, "config"));
+        place = { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_WORK_TREE: path.resolve(opts.cwd) };
+      } else {
+        await this.configGuard.check(path.join(opts.repo, "config"));
+        place = this.wtEnv(opts.repo, opts.cwd);
+      }
+    } else if (opts.cwd) {
+      await this.configGuard.check(path.join(opts.cwd, "config"));
+      place = { GIT_DIR: opts.cwd };
+    } else {
+      mkdirSync(this.reposRoot(), { recursive: true });
+      place = {};
+    }
+    const extra = { ...opts.env, ...place };
     // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
-    if (this.fenceCloneGit && opts.cwd && (isClone(opts.cwd) || (opts.repo && this.newCopiesAreClones()))) return this.fencedGit(args, opts.cwd, opts.repo, opts.env, opts.reads);
-    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
-    const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+    if (this.fenceCloneGit && opts.cwd && opts.repo && (clone || this.newCopiesAreClones())) return this.fencedGit(args, opts.cwd, opts.repo, extra, opts.reads);
+    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(extra) };
+    const { stdout } = await run("git", args, { cwd: opts.cwd ?? this.reposRoot(), env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
+  }
+
+  private reposRoot = () => path.join(this.root, "repos");
+  private isRepoDir = (p: string) => path.dirname(path.resolve(p)) === path.resolve(this.reposRoot()) && p.endsWith(".git");
+
+  /**
+   * git inside one of a repo's worktrees (a ticket folder, a review copy, a merge-check folder), told
+   * exactly where everything is (BOS-332): GIT_DIR is the worktree's admin folder in our repo, found
+   * from the repo's side; GIT_COMMON_DIR is the repo; GIT_WORK_TREE the folder. So the folder's .git
+   * file and the admin folder's commondir, which an agent can rewrite to point at a repo it made
+   * (with any config it likes), are never read, and the config is always the checked one.
+   */
+  private wtEnv(repo: string, dir: string): Record<string, string> {
+    return { GIT_DIR: this.worktreeAdminFor(repo, dir), GIT_COMMON_DIR: repo, GIT_WORK_TREE: path.resolve(dir) };
+  }
+
+  /**
+   * The admin folder of the worktree at `dir`: the one folder under <repo>/worktrees whose gitdir file names
+   * <dir>/.git. Unlike fence.ts's worktreeAdmin, the folder's own .git file isn't trusted: the agent working
+   * there can rewrite it. The admin folder is the daemon's choice of path; an agent can only break its own
+   * link (its git and ours then stop working there, with this error), never point us at another repo.
+   */
+  private worktreeAdminFor(repo: string, dir: string): string {
+    const dotGit = path.join(path.resolve(dir), ".git");
+    const root = path.join(repo, "worktrees");
+    const names = existsSync(root) ? readdirSync(root) : [];
+    const found = names.filter((n) => {
+      const admin = path.join(root, n);
+      try {
+        return lstatSync(admin).isDirectory() && path.resolve(admin, readFileSync(path.join(admin, "gitdir"), "utf8").trim()) === dotGit;
+      } catch {
+        return false;
+      }
+    });
+    if (found.length !== 1) throw new Error(`${dir} isn't a worktree of ${repo} that the runner can confirm (BOS-332).`);
+    const admin = path.join(root, found[0]!);
+    // GIT_COMMON_DIR covers the config and objects, but git 2.39's ref store still reads the admin folder's
+    // commondir file, so a rewritten one would make refs (HEAD's branch) resolve in the agent's own repo.
+    // A plain file leading back to this repo, or the call is refused; it is never repaired (it could be a symlink).
+    let common: string | null = null;
+    try {
+      if (lstatSync(path.join(admin, "commondir")).isFile()) common = path.resolve(admin, readFileSync(path.join(admin, "commondir"), "utf8").trim());
+    } catch {
+      common = null;
+    }
+    if (common !== path.resolve(repo)) throw new Error(`${dir} isn't a worktree of ${repo} that the runner can confirm: its admin folder points elsewhere (BOS-332).`);
+    return admin;
+  }
+
+  /** Where a repo's fetches and pushes go: the address the runner recorded, outside the repo, so no config can move it (BOS-332). */
+  private urlFile = (repo: string) => repo.replace(/\.git$/, ".url");
+
+  private recordUrl(repo: string, url: string) {
+    const file = this.urlFile(repo);
+    if (url && (!existsSync(file) || readFileSync(file, "utf8") !== url)) writeFileSync(file, url);
+  }
+
+  /**
+   * The recorded address. A repo cloned before BOS-332 has none until its next ensure; until then the
+   * config's remote.origin.url is used if it is a single value (the guard has already removed pushurl and
+   * url.*.insteadOf, which aren't on its allowlist), and that is logged.
+   */
+  private async remoteUrl(repo: string): Promise<string> {
+    const file = this.urlFile(repo);
+    if (existsSync(file)) return readFileSync(file, "utf8");
+    const urls = (await this.git(["config", "--get-all", "remote.origin.url"], { cwd: repo }).catch(() => "")).split("\n").filter(Boolean);
+    if (urls.length !== 1) throw new Error(`No recorded address for ${repo}, and its config doesn't name exactly one (BOS-332).`);
+    console.warn(`[runner] ${repo} has no recorded address yet; using its config's remote.origin.url until the next ensure (BOS-332)`);
+    return urls[0]!;
+  }
+
+  /** Fetches origin's branches from the recorded address into refs/remotes/origin, as `git fetch origin` did. */
+  private async fetchOrigin(repo: string, auth: Record<string, string>) {
+    await this.git(["fetch", "--quiet", await this.remoteUrl(repo), "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo, env: auth });
+  }
+
+  /**
+   * Pushes to the recorded address. A push by URL doesn't move refs/remotes/origin/<branch> as a push to
+   * `origin` did, so a pushed ref is recorded there by hand, as before.
+   */
+  private async pushOrigin(repo: string, commit: string, branch: string, auth: Record<string, string>) {
+    const pushed = await this.gitCode(["push", "--quiet", await this.remoteUrl(repo), `${commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
+    if (pushed.code === 0) await this.git(["update-ref", `refs/remotes/origin/${branch}`, commit], { cwd: repo });
+    return pushed;
   }
 
   /**
@@ -320,7 +459,8 @@ export class Workspaces {
   private async initClone(repo: string, tmp: string) {
     // Clones borrow objects the shared repo might otherwise prune once nothing there points at them.
     await this.git(["config", "gc.pruneExpire", "never"], { cwd: repo });
-    const url = await this.git(["config", "--get", "remote.origin.url"], { cwd: repo });
+    // The recorded address, not the config's (BOS-332): an agent may have pointed origin elsewhere.
+    const url = await this.remoteUrl(repo);
     rmSync(tmp, { recursive: true, force: true });
     mkdirSync(path.dirname(tmp), { recursive: true });
     await this.git(["init", "--quiet", tmp]);
@@ -412,6 +552,8 @@ export class Workspaces {
     // The clone's side of the fetch (upload-pack) reads the clone's config, so it's fenced too: it
     // may read the clone and the shared repo and write only its own temp folder. The shared repo's
     // side checks every object it takes.
+    // The upload-pack reads the clone's config without going through git(), so it's checked here (BOS-332).
+    if (lstatSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory()) await this.configGuard.check(path.join(dir, ".git", "config"));
     const tmp = this.fenceCloneGit ? this.scratch("upload-pack") : null;
     try {
       const uploadPack = tmp
@@ -447,7 +589,7 @@ export class Workspaces {
         if (!path.resolve(current).startsWith(tickets)) {
           throw new Error(`Branch ${branch} is checked out in ${current}, outside this runner's workspaces; release it there first.`);
         }
-        await this.git(["switch", "--detach", "--quiet"], { cwd: current });
+        await this.git(["switch", "--detach", "--quiet"], { cwd: current, repo });
       }
     }
     await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
@@ -475,7 +617,7 @@ export class Workspaces {
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
 
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       await this.git(["worktree", "prune"], { cwd: repo });
       // Branch reflogs are how the real start point of a branch moved onto another ticket's work is found later (BOS-687).
       await this.git(["config", "core.logAllRefUpdates", "true"], { cwd: repo });
@@ -534,11 +676,12 @@ export class Workspaces {
 
   private async cloneIfMissing(spec: Pick<WorkspaceSpec, "projectId" | "repoUrl">, auth: Record<string, string>) {
     const repo = this.repoDir(spec.projectId);
-    if (existsSync(path.join(repo, "HEAD"))) return;
+    if (existsSync(path.join(repo, "HEAD"))) return this.recordUrl(repo, spec.repoUrl);
     mkdirSync(path.dirname(repo), { recursive: true });
     await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
     // Remote branches go under refs/remotes, so fetching never touches the bossman/* branches.
     await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
+    this.recordUrl(repo, spec.repoUrl);
   }
 
   /**
@@ -563,7 +706,7 @@ export class Workspaces {
           await this.syncBranch(repo, dev, spec.ticketId);
         }
       } else {
-        await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+        await this.fetchOrigin(repo, auth);
         const branch = branchFor(spec.ticketId);
         commit = await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo }).catch(() =>
           this.git(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { cwd: repo }).catch(() => {
@@ -663,7 +806,7 @@ export class Workspaces {
       // The branch is all that's kept of a clone, so it must reach the shared repo before the clone goes.
       if (clone) await this.syncBranch(repo, dir, spec.ticketId);
       await this.git(["add", "-A"], { cwd: dir, repo });
-      const diff = await this.git(["diff", "--cached", "--binary", "HEAD"], { cwd: dir, repo });
+      const diff = await this.git(["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "HEAD"], { cwd: dir, repo });
       let savedPatch = false;
       if (diff) {
         mkdirSync(path.dirname(this.patchFile(spec.ticketId)), { recursive: true });
@@ -706,7 +849,9 @@ export class Workspaces {
     } else {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(repo)) throw new Error("This runner has no copy of that project's repo.");
-      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
+      // Raw blob bytes: --no-textconv, so a diff driver named in the config can't run; the config is checked first too.
+      await this.configGuard.check(path.join(repo, "config"));
+      const { stdout } = await run("git", ["show", "--no-textconv", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, GIT_DIR: repo, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
         throw new Error(`There's no ${rel} on that ticket's branch.`);
       });
       data = stdout as unknown as Buffer;
@@ -748,7 +893,7 @@ export class Workspaces {
   private async reviewBase(repo: string, dir: string, head: string, recorded: string, baseRef: string | undefined, secrets: Record<string, string | undefined>): Promise<{ base: string; tip?: string }> {
     if (!baseRef) return { base: recorded };
     try {
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: gitAuthEnv(secrets) });
+      await this.fetchOrigin(repo, gitAuthEnv(secrets));
       const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${baseRef}^{commit}`], { cwd: repo });
       // Where the branch split from main's current tip, however far main has moved since. Run in the
       // ticket's folder: a clone's own commits live in the clone, not the shared repo, which has only
@@ -778,14 +923,15 @@ export class Workspaces {
     try {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
       await this.git(["add", "-A"], { cwd: dir, env, repo });
-      const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env, repo });
+      // No external diff program or textconv driver: the diff is git's own (BOS-332).
+      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
             return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
           })
         : [];
-      const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env, repo });
+      const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
       return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
@@ -840,7 +986,7 @@ export class Workspaces {
       const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: this.authorEnv(by), repo });
       const turn = (last?.n ?? 0) + 1;
       await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir, repo });
-      const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir, repo });
+      const files = await this.git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", parent, commit], { cwd: dir, repo });
       return { turn, commit, files: files ? files.split("\n").length : 0 };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
@@ -858,14 +1004,14 @@ export class Workspaces {
     if (!to) throw new Error("No turn has changed anything yet.");
     const from = { commit: await this.git(["rev-parse", `${to.commit}^`], { cwd: this.repoDir(spec.projectId) }) };
     const cwd = this.repoDir(spec.projectId);
-    const numstat = await this.git(["diff", "--numstat", from.commit, to.commit], { cwd });
+    const numstat = await this.git(["diff", "--numstat", "--no-ext-diff", "--no-textconv", from.commit, to.commit], { cwd });
     const files = numstat
       ? numstat.split("\n").map((l) => {
           const [a, r, ...p] = l.split("\t");
           return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
         })
       : [];
-    const full = await this.git(["diff", from.commit, to.commit], { cwd });
+    const full = await this.git(["diff", "--no-ext-diff", "--no-textconv", from.commit, to.commit], { cwd });
     const truncated = Buffer.byteLength(full) > maxBytes;
     return { baseCommit: from.commit, head: to.commit, commits: [], files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, turn: { number: to.n, at: to.at } };
   }
@@ -893,7 +1039,10 @@ export class Workspaces {
       if (!existsSync(repo)) return { needed: null, reason: "This runner has no copy of the repository yet, so there was nothing to compare." };
       const dir = this.ticketDir(spec.ticketId);
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
-      return checkMigrations((args) => this.gitCode(args, { cwd: repo, env: auth }), repo, { branch: branchFor(spec.ticketId), target, others });
+      // Fetch from the recorded address (BOS-332), never `origin` from config, which an agent can repoint to take the token.
+      // A failed fetch isn't fatal: the check then reads the refs it already has, as before.
+      await this.fetchOrigin(repo, auth).catch(() => undefined);
+      return checkMigrations((args) => this.gitCode(args, { cwd: repo }), repo, { branch: branchFor(spec.ticketId), target, others });
     });
   }
 
@@ -1159,7 +1308,7 @@ export class Workspaces {
         if (problems.length) return { status: "migration_journal" as const, problems };
         const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
-        const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
+        const pushed = await this.pushOrigin(repo, commit, target, auth);
         if (pushed.code === 0) return { status: "merged", commit, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
@@ -1201,7 +1350,7 @@ export class Workspaces {
       const parents = (await this.git(["rev-list", "--parents", "-n", "1", phase.commit], { cwd: repo })).split(" ").slice(1);
       const same = parents[0] === tried.targetSha && parents[1] === tried.branchSha;
       const toPush = same ? phase.commit : await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
-      const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+      const pushed = await this.pushOrigin(repo, toPush, target, auth);
       if (pushed.code !== 0) {
         // Rejected: the target moved again (try once more) or the push is refused for good (the next prepare would say so).
         const again = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
@@ -1263,7 +1412,7 @@ export class Workspaces {
         // the record still names the commit the check really ran on.
         const same = checked.targetSha === tried.targetSha && checked.branchSha === tried.branchSha;
         const toPush = same ? checked.commit : commit;
-        const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+        const pushed = await this.pushOrigin(repo, toPush, target, auth);
         if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs }, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
         // Rejected: either the target moved again, or the push is refused for good (protected branch, bad token,
         // hook). The next round tells them apart: if the target sha is unchanged, it throws git's message.
@@ -1304,7 +1453,7 @@ export class Workspaces {
 
   /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
   private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
-    await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+    await this.fetchOrigin(repo, auth);
     const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
@@ -1346,6 +1495,10 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      // A clone's branch reaches the shared repo only when it's synced (BOS-343). Merge and push sync
+      // first; so must this check, or it merges a stale branch (BOS-832: false clashes, and real ones missed).
+      const dir = this.ticketDir(spec.ticketId);
+      if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
     });
@@ -1360,7 +1513,7 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       const head = await this.git(["rev-parse", "--verify", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo });
       // The caller checked this head; if the branch ref says otherwise, the answer would be about different code (BOS-734).
       if (expectHead && !head.startsWith(expectHead) && !expectHead.startsWith(head)) {
@@ -1432,7 +1585,7 @@ export class Workspaces {
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       const dir = this.ticketDir(spec.ticketId);
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.fetchOrigin(repo, auth);
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
       const refs = async (ref: string, firstParent = false) => {
@@ -1505,7 +1658,7 @@ export class Workspaces {
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
       if (tried.status !== "clean") return tried;
-      const pushed = await this.gitCode(["push", "--quiet", "origin", `${tried.branchSha}:refs/heads/${name}`], { cwd: repo, env: auth });
+      const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };
     });
@@ -1520,12 +1673,8 @@ export class Workspaces {
     const auth = gitAuthEnv(secrets);
     const checks = await this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
-      if (!existsSync(path.join(repo, "HEAD"))) {
-        mkdirSync(path.dirname(repo), { recursive: true });
-        await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
-        await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
-      }
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      await this.cloneIfMissing(spec, auth);
+      await this.fetchOrigin(repo, auth);
       const ref = `refs/remotes/origin/${spec.baseRef}`;
       const files = (await this.git(["ls-tree", "--name-only", ref], { cwd: repo })).split("\n").filter(Boolean);
       const texts = new Map<string, string | null>();
@@ -1541,6 +1690,96 @@ export class Workspaces {
       () => false,
     );
     return { checks, tools };
+  }
+
+  /**
+   * What a deploy's ref is (DR-033): after a fetch, the commit it names (a remote branch first, then a tag or
+   * sha), whether that commit is on origin's base branch, and the remote's branch names. Read-only. A ref
+   * that isn't git-shaped, or names nothing, gives commit null rather than an error: deploys of image tags go on.
+   */
+  async resolve(spec: { projectId: string; repoUrl: string; ref: string; baseRef: string }, secrets: Record<string, string | undefined> = {}): Promise<ResolveResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      await this.cloneIfMissing(spec, auth);
+      await this.git(["fetch", "--quiet", "--tags", "--force", "origin"], { cwd: repo, env: auth });
+      const branches = await this.remoteBranches(repo);
+      if (!DEPLOY_REF.test(spec.ref) || !DEPLOY_REF.test(spec.baseRef)) return { commit: null, onBase: false, branches, error: "That ref isn't a git branch, tag or commit." };
+      const candidates = [`refs/remotes/origin/${spec.ref}`, `refs/tags/${spec.ref}`, spec.ref];
+      let commit: string | null = null;
+      for (const c of candidates) {
+        const r = await this.gitCode(["rev-parse", "--verify", "--quiet", "--end-of-options", `${c}^{commit}`], { cwd: repo });
+        if (r.code === 0 && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(r.stdout)) {
+          commit = r.stdout;
+          break;
+        }
+      }
+      if (!commit) return { commit: null, onBase: false, branches, error: `${spec.ref} doesn't name a commit in the repository.` };
+      return { commit, onBase: await this.onBase(repo, commit, spec.baseRef), branches };
+    });
+  }
+
+  /** The remote's branch names, as fetched into refs/remotes/origin. */
+  private async remoteBranches(repo: string): Promise<string[]> {
+    const out = await this.git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"], { cwd: repo });
+    return out
+      .split("\n")
+      .map((l) => l.replace(/^refs\/remotes\/origin\//, ""))
+      .filter((b) => b && b !== "HEAD");
+  }
+
+  private async onBase(repo: string, commit: string, baseRef: string): Promise<boolean> {
+    const r = await this.gitCode(["merge-base", "--is-ancestor", commit, `refs/remotes/origin/${baseRef}`], { cwd: repo });
+    return r.code === 0;
+  }
+
+  /**
+   * Moves a deploy target's tag on origin to the commit a deploy shipped (DR-033). The daemon trusts nothing it
+   * is sent: under the repo lock it checks the name (check-ref-format, one component, not a branch on the
+   * remote) and that the commit is on the base branch, reads the tag's current value from the remote, and pushes
+   * `<commit>:refs/tags/<name>` with a lease on that value. The refspec is built here only; it always has a sha on
+   * the left, so it can never delete, and always refs/tags/ on the right, so it can never move a branch.
+   *
+   * A lease failure means someone else moved the tag between the read and the push. The tag is read once more:
+   * if it now points at this commit the result is "unchanged", otherwise "failed" and it stays where they put it.
+   */
+  async tag(spec: { projectId: string; repoUrl: string; name: string; commit: string; baseRef: string }, secrets: Record<string, string | undefined> = {}): Promise<TagResult> {
+    const auth = gitAuthEnv(secrets);
+    const refuse = (error: string): TagResult => ({ result: "refused", from: null, to: spec.commit, error });
+    const nameProblem = deployTagNameProblem(spec.name);
+    if (nameProblem) return refuse(nameProblem);
+    if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(spec.commit)) return refuse("The commit isn't a full sha.");
+    if (!DEPLOY_REF.test(spec.baseRef)) return refuse("The base branch name isn't valid.");
+    const ref = `refs/tags/${spec.name}`;
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      await this.cloneIfMissing(spec, auth);
+      const format = await this.gitCode(["check-ref-format", ref], { cwd: repo });
+      if (format.code !== 0) return refuse(`git refuses ${spec.name} as a tag name.`);
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const heads = await this.gitCode(["ls-remote", "--heads", "origin"], { cwd: repo, env: auth });
+      if (heads.code !== 0) return { result: "failed", from: null, to: spec.commit, error: `Couldn't list the remote's branches: ${heads.stderr.slice(0, 500)}` };
+      const branchNames = heads.stdout.split("\n").map((l) => l.split("\t")[1]?.replace(/^refs\/heads\//, "")).filter(Boolean);
+      if (branchNames.includes(spec.name)) return refuse(`${spec.name} is also a branch on the remote, so it can't be used as the deploy tag.`);
+      if (!(await this.onBase(repo, spec.commit, spec.baseRef))) return refuse(`${spec.commit.slice(0, 7)} isn't on ${spec.baseRef}, so the tag stays where it is.`);
+      const read = async (): Promise<string | null | Error> => {
+        const r = await this.gitCode(["ls-remote", "origin", ref], { cwd: repo, env: auth });
+        if (r.code !== 0) return new Error(r.stderr.slice(0, 500));
+        const line = r.stdout.split("\n").find((l) => l.split("\t")[1] === ref);
+        return line ? line.split("\t")[0]! : null;
+      };
+      const before = await read();
+      if (before instanceof Error) return { result: "failed", from: null, to: spec.commit, error: `Couldn't read the tag from the remote: ${before.message}` };
+      if (before === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
+      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, "origin", `${spec.commit}:${ref}`], { cwd: repo, env: auth });
+      if (pushed.code === 0) return { result: "moved", from: before, to: spec.commit };
+      const after = await read();
+      if (after === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
+      if (typeof after === "string" && after !== before) {
+        return { result: "failed", from: before, to: spec.commit, error: `Someone else moved ${spec.name} to ${after.slice(0, 7)} while Boss Man was moving it, so it was left there.` };
+      }
+      return { result: "failed", from: before, to: spec.commit, error: pushed.stderr.slice(0, 1000) || `git push exited with code ${pushed.code}` };
+    });
   }
 
   /**

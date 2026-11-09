@@ -64,10 +64,9 @@ export function nextFree(sets: MigrationSet[], from: number): number {
 /**
  * Checks a ticket's branch against the default branch and the other open branches, and answers
  * with the number to move to when one is taken. Never throws for a branch it can't read: a check
- * that can't say must not stop a ticket.
+ * that can't say must not stop a ticket. The caller fetches first, from the recorded address (BOS-332).
  */
 export async function checkMigrations(git: GitCode, repo: string, ref: { branch: string; target: string; others: string[] }): Promise<MigrationsResult> {
-  await git(["fetch", "--quiet", "origin"]).catch(() => null);
   const tip = async (name: string) => {
     for (const refname of [`refs/remotes/origin/${name}`, `refs/heads/${name}`]) {
       const r = await git(["rev-parse", "--verify", "--quiet", `${refname}^{commit}`]);

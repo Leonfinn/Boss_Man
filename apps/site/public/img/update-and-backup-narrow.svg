@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 2380" width="360" height="2380" role="img" aria-labelledby="ubn-title ubn-desc">
+  <title id="ubn-title">What happens when you update Boss Man: back up first, update, check, and the way back if something breaks</title>
+  <desc id="ubn-desc">Updating the server has five steps. One: Boss Man backs up the database to a file named bossman, with the date, ending in sql.gz, in the install folder, and stops if the file is empty or damaged; the newest 14 are kept. Two: it pulls the code, only as a straight step forward from what runs now. Three: it rebuilds and restarts the server, which is down for about a minute on a single server. Four: it waits up to two minutes for the server to report healthy. Five: the runners are updated only if their code changed, and the script asks first. The Deploy latest button on the web page does the same for the server only. If the health check fails, nothing is undone by itself. If only the new code is wrong, run scripts/deploy.sh with the rollback option: the old code comes back and the database is not touched. If the update damaged the data, restore the backup in five steps: test the backup on a throwaway database until it ends with OK, stop the server, keep a copy of the current data, replace the live database with the backup, and start Boss Man again. A restore loses everything written after the backup. Runners are updated separately, about once a week: build a new runner image, check it with a test session that has no network, drain so nothing new starts while runs in progress finish, then swap each company's runner when it is idle. scripts/update-runner.sh with the rollback option undoes it. Keep a copy of the master key off the machine, because a backup cannot restore your stored secrets without it.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="ubn-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="360" height="2380" fill="#ffffff"/>
+
+  <!-- 1 server -->
+  <circle cx="14" cy="30" r="14" fill="#c8282f"/><text x="14" y="35.5" class="bb" font-size="15" text-anchor="middle" fill="#ffffff">1</text>
+  <text x="38" y="37" class="d" font-size="21" fill="#17202c">Update the server</text>
+  <text x="0" y="66" class="b" font-size="15" fill="#3d4757">scripts/deploy.sh, or Deploy latest</text>
+  <text x="0" y="85" class="b" font-size="15" fill="#3d4757">on the web page (the server only).</text>
+
+  <rect x="0" y="100" width="360" height="100" rx="10" fill="#f0b75c"/>
+  <text x="16" y="130" class="d" font-size="20" fill="#17202c">Back up</text>
+  <g class="b" font-size="14" fill="#17202c"><text x="16" y="155">Saves the database to bossman-date.sql.gz.</text><text x="16" y="174">Stops if the file is empty or damaged.</text></g>
+  <path d="M180 204 V224" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+
+  <rect x="0" y="228" width="360" height="100" rx="10" fill="#17202c"/>
+  <text x="16" y="258" class="d" font-size="20" fill="#eef2f6">Pull the code</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="283">Only a straight step forward from</text><text x="16" y="302">what runs now.</text></g>
+  <path d="M180 332 V352" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+
+  <rect x="0" y="356" width="360" height="100" rx="10" fill="#17202c"/>
+  <text x="16" y="386" class="d" font-size="20" fill="#eef2f6">Restart</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="411">Rebuilds the server and restarts it.</text><text x="16" y="430">Down for about a minute.</text></g>
+  <path d="M180 460 V480" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+
+  <rect x="0" y="484" width="360" height="100" rx="10" fill="#17202c"/>
+  <text x="16" y="514" class="d" font-size="20" fill="#eef2f6">Health check</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="539">Waits up to 2 minutes for the server</text><text x="16" y="558">to report healthy.</text></g>
+  <path d="M180 588 V608" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+
+  <rect x="0" y="612" width="360" height="100" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="16" y="642" class="d" font-size="20" fill="#17202c">Runners</text>
+  <g class="b" font-size="14" fill="#3d4757"><text x="16" y="667">Updated only if their code changed.</text><text x="16" y="686">The script asks first.</text></g>
+
+  <!-- failure -->
+  <text x="0" y="760" class="d" font-size="21" fill="#17202c">If the health check fails,</text>
+  <text x="0" y="786" class="d" font-size="21" fill="#17202c">nothing is undone by itself.</text>
+  <text x="0" y="812" class="b" font-size="15" fill="#3d4757">Look at the logs first, then</text>
+  <text x="0" y="831" class="b" font-size="15" fill="#3d4757">pick by what is wrong.</text>
+
+  <rect x="0" y="852" width="360" height="270" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="20" y="886" class="d" font-size="20" fill="#17202c">The new code is wrong</text>
+  <text x="20" y="912" class="b" font-size="15" fill="#17202c">Put the old code back:</text>
+  <rect x="20" y="926" width="320" height="46" rx="10" fill="#17202c"/>
+  <text x="36" y="955" class="bb" font-size="16" fill="#eef2f6">scripts/deploy.sh --rollback</text>
+  <g class="b" font-size="15" fill="#17202c"><text x="20" y="1006">The old code is back and the</text><text x="20" y="1026">database is not touched, so</text><text x="20" y="1046">nothing written since is lost.</text></g>
+  <text x="20" y="1084" class="b" font-size="14" fill="#3d4757">Runners updated too? Undo that with</text>
+  <text x="20" y="1104" class="bb" font-size="14" fill="#17202c">scripts/update-runner.sh --rollback</text>
+
+  <rect x="0" y="1142" width="360" height="464" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2"/>
+  <text x="20" y="1176" class="d" font-size="20" fill="#17202c">The update damaged the data:</text>
+  <text x="20" y="1200" class="d" font-size="20" fill="#17202c">restore the backup</text>
+  <g>
+    <circle cx="32" cy="1233" r="12" fill="#c8282f"/><text x="32" y="1238" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">1</text>
+    <circle cx="32" cy="1307" r="12" fill="#c8282f"/><text x="32" y="1312" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">2</text>
+    <circle cx="32" cy="1363" r="12" fill="#c8282f"/><text x="32" y="1368" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">3</text>
+    <circle cx="32" cy="1439" r="12" fill="#c8282f"/><text x="32" y="1444" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">4</text>
+    <circle cx="32" cy="1495" r="12" fill="#c8282f"/><text x="32" y="1500" class="bb" font-size="14" text-anchor="middle" fill="#ffffff">5</text>
+  </g>
+  <g class="b" font-size="15" fill="#17202c">
+    <text x="56" y="1238">Test the backup you chose on</text><text x="56" y="1257">a throwaway database. It must</text><text x="56" y="1276">end with OK:.</text>
+    <text x="56" y="1312">Stop the server so nothing</text><text x="56" y="1331">writes.</text>
+    <text x="56" y="1368">Keep a copy of the current data,</text><text x="56" y="1387">in case the restore was the</text><text x="56" y="1406">wrong call.</text>
+    <text x="56" y="1444">Replace the live database with</text><text x="56" y="1463">the backup.</text>
+    <text x="56" y="1500">Start Boss Man again.</text>
+  </g>
+  <rect x="20" y="1522" width="320" height="64" rx="10" fill="#f0b75c"/>
+  <text x="36" y="1550" class="bb" font-size="16" fill="#17202c">A restore loses everything</text>
+  <text x="36" y="1571" class="bb" font-size="16" fill="#17202c">written after the backup.</text>
+
+  <!-- 2 runners -->
+  <line x1="0" y1="1636" x2="360" y2="1636" stroke="#c3cbd6" stroke-width="1.5"/>
+  <circle cx="14" cy="1672" r="14" fill="#c8282f"/><text x="14" y="1677.5" class="bb" font-size="15" text-anchor="middle" fill="#ffffff">2</text>
+  <text x="38" y="1679" class="d" font-size="21" fill="#17202c">Update the runners,</text>
+  <text x="38" y="1705" class="d" font-size="21" fill="#17202c">about once a week</text>
+  <g class="b" font-size="15" fill="#3d4757"><text x="0" y="1736">scripts/update-runner.sh, or Build and</text><text x="0" y="1755">update runners on the web page.</text></g>
+
+  <rect x="0" y="1780" width="360" height="90" rx="10" fill="#17202c"/>
+  <text x="16" y="1810" class="d" font-size="20" fill="#eef2f6">Build</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="1835">A new runner image with the</text><text x="16" y="1854">latest Claude Code.</text></g>
+  <path d="M180 1874 V1894" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+  <rect x="0" y="1898" width="360" height="90" rx="10" fill="#17202c"/>
+  <text x="16" y="1928" class="d" font-size="20" fill="#eef2f6">Check</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="1953">A test session with no network.</text><text x="16" y="1972">If it fails, nothing changes.</text></g>
+  <path d="M180 1992 V2012" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+  <rect x="0" y="2016" width="360" height="90" rx="10" fill="#17202c"/>
+  <text x="16" y="2046" class="d" font-size="20" fill="#eef2f6">Drain</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="2071">Nothing new starts; runs in</text><text x="16" y="2090">progress finish.</text></g>
+  <path d="M180 2110 V2130" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#ubn-ar)"/>
+  <rect x="0" y="2134" width="360" height="90" rx="10" fill="#17202c"/>
+  <text x="16" y="2164" class="d" font-size="20" fill="#eef2f6">Swap</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="16" y="2189">Each company's runner is swapped</text><text x="16" y="2208">when it is idle.</text></g>
+
+  <g class="b" font-size="15" fill="#3d4757">
+    <text x="0" y="2262">Keep a copy of secrets/master.key off</text><text x="0" y="2281">the machine: a backup cannot restore</text><text x="0" y="2300">your stored secrets without it.</text>
+    <text x="0" y="2332">Undo a runner update with</text><text x="0" y="2351">scripts/update-runner.sh --rollback.</text>
+  </g>
+</svg>
