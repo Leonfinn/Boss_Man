@@ -5,7 +5,10 @@ describe("review policy", () => {
   it("defaults parse and follow the owner's table", () => {
     expect(ReviewPolicySchema.parse(DEFAULT_REVIEW_POLICY)).toEqual(DEFAULT_REVIEW_POLICY);
     expect(ruleFor(DEFAULT_REVIEW_POLICY, null)).toEqual({ planApprover: "ceo", reviewer: "senior-dev", ownerSignoff: false });
-    expect(ruleFor(DEFAULT_REVIEW_POLICY, "critical")).toEqual({ planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true });
+    // BOS-824: a security review (the CEO until the owner names one) on high and critical work only.
+    expect(ruleFor(DEFAULT_REVIEW_POLICY, "critical")).toEqual({ planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true, kinds: { security: "ceo" } });
+    expect(ruleFor(DEFAULT_REVIEW_POLICY, "high").kinds).toEqual({ security: "ceo" });
+    for (const t of ["trivial", "low", "medium"] as const) expect(DEFAULT_REVIEW_POLICY[t].kinds).toBeUndefined();
   });
   it("rejects nonsense and lists named agents", () => {
     expect(ReviewPolicySchema.safeParse({ ...DEFAULT_REVIEW_POLICY, low: { ...DEFAULT_REVIEW_POLICY.low, reviewer: "owner" } }).success).toBe(false);
@@ -67,7 +70,7 @@ describe("reviewer lists", () => {
       ...DEFAULT_REVIEW_POLICY,
       medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo" },
       high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a } },
-      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: b, kinds: { adversarial: "ceo" } },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: b, kinds: { ...DEFAULT_REVIEW_POLICY.critical.kinds, adversarial: "ceo" } },
     };
     const r = noLooserThan(loose, floor);
     expect(r.policy).toEqual({
@@ -76,9 +79,38 @@ describe("reviewer lists", () => {
       high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a, security: [a, b] } },
     });
     expect(r.tightened).toEqual(["a reviewer other than the CEO for medium-risk work", "the security review of high-risk work"]);
-    // A kind the policy already has keeps its own reviewer; the default floor has no kinds to add.
+    // A kind the policy already has keeps its own reviewer; the default floor adds its security review (BOS-824).
     expect(noLooserThan({ ...floor, high: { ...floor.high, kinds: { security: "ceo" } } }, floor).tightened).toEqual([]);
-    expect(noLooserThan(loose).policy.high.kinds).toEqual({ infra: a });
+    expect(noLooserThan(loose).policy.high.kinds).toEqual({ infra: a, security: "ceo" });
     expect(loose.medium.reviewer).toBe("ceo");
+  });
+
+  it("restores the floor's reviewer and kinds at every tier, not just one, and is stable when run twice (BOS-818)", () => {
+    const a = "11111111-1111-4111-8111-111111111111";
+    const kindsAll = { security: a, infra: a, adversarial: "ceo" as const };
+    const withKinds = (tier: "medium" | "high" | "critical"): ReviewPolicy["high"] => ({ ...DEFAULT_REVIEW_POLICY[tier], kinds: kindsAll });
+    const floor: ReviewPolicy = { ...DEFAULT_REVIEW_POLICY, medium: withKinds("medium"), high: withKinds("high"), critical: withKinds("critical") };
+    // Every tier handed to the CEO with no kinds at all.
+    const bare: ReviewPolicy = {
+      trivial: DEFAULT_REVIEW_POLICY.trivial,
+      low: DEFAULT_REVIEW_POLICY.low,
+      medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo" },
+      high: { ...DEFAULT_REVIEW_POLICY.high, reviewer: "ceo" },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: "ceo" },
+    };
+    const r = noLooserThan(bare, floor);
+    for (const tier of ["medium", "high", "critical"] as const) {
+      expect(r.policy[tier].reviewer).toBe(DEFAULT_REVIEW_POLICY[tier].reviewer);
+      expect(r.policy[tier].kinds).toEqual(kindsAll);
+    }
+    // Trivial and low: the floor has the CEO there, so nothing is added or swapped.
+    expect(r.policy.trivial).toEqual(DEFAULT_REVIEW_POLICY.trivial);
+    expect(r.policy.low).toEqual(DEFAULT_REVIEW_POLICY.low);
+    expect(r.tightened.filter((t) => t.startsWith("a reviewer other than the CEO"))).toHaveLength(3);
+    expect(r.tightened.filter((t) => t.includes("review of"))).toHaveLength(9);
+    // Raising an already-raised policy changes nothing and says nothing.
+    expect(noLooserThan(r.policy, floor)).toEqual({ policy: r.policy, tightened: [] });
+    // The result still parses as a policy.
+    expect(ReviewPolicySchema.safeParse(r.policy).success).toBe(true);
   });
 });

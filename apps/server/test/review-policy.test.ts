@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
@@ -9,6 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, checkResults, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
+import { requestReviews } from "../src/services/review-kinds.js";
 import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
@@ -386,6 +388,24 @@ describe("review policy API", () => {
     expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, p)).statusCode).toBe(400);
     expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, { low: {} })).statusCode).toBe(400);
     expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
+  });
+
+  it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
+    const c = await setup();
+    // The column default, not just the constant: a company row made without a policy gets it.
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Bare Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    const [row] = res.rows;
+    expect(row!.p.high.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.critical.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.medium.kinds).toBeUndefined();
+    // The migration only changes the default for new rows; stored policies are not rewritten (DR-041).
+    const migration = readFileSync(new URL("../drizzle/0127_default_security_review.sql", import.meta.url), "utf8");
+    expect(migration).toMatch(/^ALTER TABLE "companies" ALTER COLUMN "review_policy" SET DEFAULT /);
+    expect(migration).not.toMatch(/\bUPDATE\b/i);
+    // A high-risk ticket in a new company asks for the security review beside the code review.
+    const t = await c.ticket({ risk: "high" });
+    const rows = await requestReviews(c.db, await c.row(t.id));
+    expect(rows.map((r) => [r.kind, r.reviewerAgentId]).sort()).toEqual([["code", c.senior.id], ["security", c.ceo.id]]);
   });
 
   it("makes the risk-tier help follow the company's policy", async () => {
