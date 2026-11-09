@@ -95,6 +95,39 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
 }
 
 /**
+ * How many of the criterion's words a piece of text must contain to count as being about it (BOS-963). Lower
+ * than readVerdicts' 60%: a card needn't restate a criterion, only plainly refer to its subject, and matching
+ * one wrongly is safe (the answer still needs a pass or fail word, and the criterion it names is the one on
+ * the card). Short criteria still need every word.
+ */
+const wordsNeeded = (want: readonly string[]) => (want.length <= 3 ? want.length : Math.max(3, Math.ceil(want.length * 0.4)));
+
+/** True when `text` carries enough of the criterion's own words to be about it (BOS-963). */
+export function mentionsCriterion(criterion: string, text: string): boolean {
+  const want = tokens(criterion);
+  if (!want.length) return false;
+  const bag = new Set(tokens(text));
+  return want.filter((w) => bag.has(w)).length >= wordsNeeded(want);
+}
+
+/** How many of the criterion's words `text` carries: used to name the closest one when none matches (BOS-963). */
+export const criterionOverlap = (criterion: string, text: string): number => {
+  const bag = new Set(tokens(text));
+  return tokens(criterion).filter((w) => bag.has(w)).length;
+};
+
+/**
+ * The after-merge criteria a card is about, matched by what the card asks and offers (BOS-963): a card raised
+ * to settle a live check names it in its question or its options, even when the wording differs from the
+ * criterion's, and that answer must record against that criterion. An empty list means the card doesn't name
+ * any after-merge criterion, so its answer settles nothing by itself.
+ */
+export function criteriaForCard(criteria: readonly Criterion[], question: string, options: readonly string[]): number[] {
+  const said = `${question}\n${options.join("\n")}`;
+  return criteria.flatMap((c, i) => (isAfterMerge(c) && mentionsCriterion(criterionText(c), said) ? [i] : []));
+}
+
+/**
  * The criteria the author gave no pass or fail verdict for; empty means the note covers them all.
  * `only` narrows it: "before" is the review gate (after-merge criteria never hold up a review), and
  * "after" is the done gate once the work has merged.
