@@ -536,8 +536,10 @@ function gcloudWords(args: Word[]): Word[] {
  * joined to it, -pi.bak), `code` when -e/-E was given (so the first operand is a file, not the script), and `end`
  * the index of that first operand. `joined` lists the other letters whose value is joined to them (-I, -M, -m),
  * so the switch cluster ends there; "0" and "l" take optional digits and more switches may follow (-0777pi).
+ * `valued` lists letters whose value may be joined OR given as the next word (-r lib / -rlib), so the word after them
+ * is not read as a switch cluster (BOS-571: a value like -rdate must not hide a later -i).
  */
-function inPlaceSwitches(args: Word[], joined: string): { inPlace: boolean; code: boolean; end: number } {
+function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE"): { inPlace: boolean; code: boolean; end: number } {
   let inPlace = false;
   let code = false;
   let i = 0;
@@ -553,7 +555,7 @@ function inPlaceSwitches(args: Word[], joined: string): { inPlace: boolean; code
         inPlace = true;
         break;
       }
-      if (c === "e" || c === "E") {
+      if (codeLetters.includes(c)) {
         code = true;
         if (j + 1 === t.length) i++;
         break;
@@ -563,6 +565,10 @@ function inPlaceSwitches(args: Word[], joined: string): { inPlace: boolean; code
         if (c === "0" && /[xX]/.test(t[j + 1] ?? "")) for (j++; /[0-9a-fA-F]/.test(t[j + 1] ?? ""); ) j++;
         else while (/[0-7]/.test(t[j + 1] ?? "")) j++;
         continue;
+      }
+      if (valued.includes(c)) {
+        if (j + 1 === t.length) i++;
+        break;
       }
       if (joined.includes(c)) break;
     }
@@ -946,14 +952,14 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (prog === "pulumi") {
           const verb = afterOptions(args, ["-C", "--cwd", "--stack", "-s"]).find((a) => !a.text.startsWith("-"));
           if (verb?.dynamic) return destroys("runs a pulumi command only known when it runs");
-          if (verb?.text === "destroy") return destroys("destroys the infrastructure it manages (pulumi destroy)");
+          if (verb?.text === "destroy" || verb?.text === "down" || verb?.text === "dn") return destroys("destroys the infrastructure it manages (pulumi destroy)");
           return;
         }
         if (prog === "helm") {
-          // uninstall (and its deprecated alias del) deletes the release's resources (BOS-571).
+          // uninstall (and its aliases del, delete, un) deletes the release's resources (BOS-571).
           const verb = afterOptions(args, ["-n", "--namespace", "--kube-context", "--kubeconfig"]).find((a) => !a.text.startsWith("-"));
           if (verb?.dynamic) return destroys("runs a helm command only known when it runs");
-          if (verb?.text === "uninstall" || verb?.text === "del") return destroys("deletes a release's resources (helm uninstall)");
+          if (verb && ["uninstall", "del", "delete", "un"].includes(verb.text)) return destroys("deletes a release's resources (helm uninstall)");
           return;
         }
         if (prog === "gcloud") {
@@ -1129,7 +1135,9 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (/^ruby[\d.]*$/.test(prog)) {
           // ruby reads a script from a file or -e code and edits its files in place with -i[SUFFIX]; its switches end
           // at the first word that isn't one (the script file, unless -e was given), as perl's do (BOS-571).
-          const edit = inPlaceSwitches(args, "0l");
+          // -r/-F/-I/-K/-C/-W/-T take a value (joined or the next word; -E is an encoding, not code), so their value
+          // must not be read as a switch cluster: `ruby -rdate -i …` and `ruby -Fe -i …` still see the -i.
+          const edit = inPlaceSwitches(args, "0l", "rFIEKCWT", "e");
           // Without -e the first word left is the script file; the rest are the files edited.
           if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (ruby -i)");
         }
