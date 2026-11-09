@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { goLiveWaitWords, type GoLiveWait, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -383,7 +383,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       let criterionIndexes: number[] | undefined;
       if (criterion !== undefined) {
         if (!blocksTicketId) return fail("criterion says which acceptance criterion this card settles, so it goes with blocksTicketId set to that ticket.");
-        const [owner] = await db.select({ criteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        const [owner] = await db.select({ criteria: tickets.acceptanceCriteria, wait: tickets.goLiveWait }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        // BOS-1021: the owner can't check what isn't running yet.
+        if (owner?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(owner.wait as GoLiveWait)}), so its after-merge checks can't pass and the owner is not asked. Boss Man wakes you when it is live; don't raise this card before then.`);
         const list = readCriteria(owner?.criteria);
         const at = typeof criterion === "number" ? criterion - 1 : list.findIndex((c) => criterionText(c).toLowerCase() === criterion.trim().toLowerCase());
         if (!(at >= 0 && at < list.length)) return fail(`No criterion ${JSON.stringify(criterion)} on this ticket. Its criteria are:${list.length ? list.map((c, i) => ` ${i + 1}. ${criterionText(c)}${isAfterMerge(c) ? " (checked after merge)" : ""}`).join(";") : " none"}. Pass its number or its exact text.`);
