@@ -177,7 +177,7 @@ g checkout -q -B pathpages origin/main; commit apps/web/src/pages/Plan.tsx
 run 0 "web page change runs the owner-controls list" env
 logged "$own" "web page"
 logged "pnpm --filter @boss-man/server typecheck" "web page typecheck"
-grep -q "^PASS  path-reading test test/owner-control-list.test.ts (apps/server changes)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
+grep -q "^PASS  path-reading test owner-control-list.test.ts (apps/server)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
 g checkout -q -B pathcomponents origin/main; commit apps/web/src/components/Sidebar.tsx
 run 0 "web component change runs it" env
 logged "$own" "web component"

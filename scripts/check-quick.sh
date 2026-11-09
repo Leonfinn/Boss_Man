@@ -158,7 +158,7 @@ if [ "${CHECK_QUICK_PHASE:-}" = heavy ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       name="$(node -p "require('./$d/package.json').name")"
-      step "path-reading test $f ($d changes)" pnpm --filter "$name" exec vitest related --run "$f"
+      step "path-reading test ${f##*/} ($d)" pnpm --filter "$name" exec vitest related --run "$f"
     done <<<"$(path_read_tests "$d")"
   done
   return "$failed"
