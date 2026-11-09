@@ -585,7 +585,7 @@ describe("attaching a picture or file to my own answer (BOS-759)", () => {
     vi.stubGlobal("fetch", fetch);
     render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
-    return { fetch, box: screen.getByLabelText("Your answer, in your own words") };
+    return { fetch, box: screen.getByLabelText("Your answer, in your own words") as HTMLTextAreaElement };
   };
   const send = () => screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement;
 
