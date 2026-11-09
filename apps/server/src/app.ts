@@ -2068,7 +2068,12 @@ export async function buildApp(opts: AppOptions) {
         return importErrors(reply)(err);
       }
       for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
-      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      // The company is already saved and its id is what the caller needs. A failure while raising the
+      // checklist card must not turn a successful import into an error reply with no company id (BOS-927):
+      // log it and still return the import's result.
+      await decisionsSvc
+        .raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" })
+        .catch((err) => app.log.error({ err, companyId: done.companyId }, "import checklist card failed"));
       if (launch.enabled)
         void launch.start(done.companyId).catch((err) =>
           notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
