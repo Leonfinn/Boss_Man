@@ -122,6 +122,8 @@
 <!-- 5. How the work goes: the art at full size -->
 <section class="band">
   <div class="wrap">
+    <!-- Review marker for the owner only, not part of the design: remove once the stages rethink (decision 7bc1d6dc) is drawn. -->
+    <p class="review-marker"><span class="flag">BEING REWORKED</span>This section is unchanged. I'm redesigning it after you answer the question about how a normal day goes.</p>
     <h2>How the work goes</h2>
     <ol class="week">
       <li><img src="img/boss-setup.webp" width="640" height="634" alt="Boss Man at a whiteboard, sketching how the work fits together."><p class="day">To start</p><h3>Set up the team</h3><p>Name your company and say what it is for. It starts with a CEO, and you hire the rest from 15 ready-made roles, such as Engineer, Product Manager and QA.</p></li>
@@ -195,8 +197,8 @@
       </ul>
       <div class="why">
         <h3>Why Linux?</h3>
-        <p>Its install and update scripts are written for Linux. Two of its safety features also use Linux itself: the agent fence, which keeps each agent inside its own folder, and the network guard, which keeps agents off your home network.</p>
-        <p>Other Docker setups, such as Docker Desktop on a Mac or Windows, may work, but nobody has tested them. You would need your own install scripts, and some safety features may be missing.</p>
+        <p>Boss Man runs on a 64-bit Linux machine with Docker. Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.</p>
+        <p><strong>Mac and Windows:</strong> Docker Desktop on Mac and Windows isn't supported yet. Both safety features should work on Docker Desktop 4.60 or newer, and we're testing it.</p>
         <p class="beta"><span class="flag">BETA</span>Ready-made images for x86 and ARM machines are planned for the beta.</p>
       </div>
       <div class="actions">
