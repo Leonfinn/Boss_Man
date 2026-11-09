@@ -14,7 +14,7 @@ import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
-import { goLiveWaitOf } from "./services/go-live-wait.js";
+import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
@@ -304,7 +304,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         throw err;
       }
       await noteRunTicket(ticketId);
-      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, ticketId));
+      const notLiveWarning = t ? await liveClaimWarning(db, t, body) : null;
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
@@ -312,7 +313,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       hint ??= await ownerActionHint(db, scope, ticketId, body);
       const links = await missingPageNote(db, scope.companyId, body);
-      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}`);
+      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}${notLiveWarning ? `\n\n${notLiveWarning}` : ""}`);
     },
   );
 
@@ -1056,6 +1057,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
       const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
+      const liveLine = await goLiveLine(db, t);
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
@@ -1067,6 +1069,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(holdLine ? [holdLine] : []),
         ...(ciLine ? [ciLine] : []),
+        ...(liveLine ? [liveLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
         "",
