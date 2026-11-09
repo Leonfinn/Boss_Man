@@ -2710,6 +2710,8 @@ type HostFactsView = {
   hostName: string | null;
   reportedAt: string | null;
   ownerFacts: string[];
+  /** BOS-990: whether the host's deployer script is the live version. Absent from an older server. */
+  deployerScript?: { state: "current" | "behind" | "unknown" | "none"; since?: string };
   facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
 };
 const OWNER_FACT_LABELS: Record<string, string> = {
@@ -2770,6 +2772,13 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
   return bits.length ? bits.join(" · ") : null;
 }
 
+/** The "Deployer script" line of Settings → This host (BOS-990). */
+export function deployerScriptLine(s: { state: string; since?: string }): string {
+  if (s.state === "current") return "current";
+  if (s.state === "behind") return `behind${s.since ? ` (since ${when(s.since)})` : ""}. A card in your queue has the copy steps.`;
+  return "unknown: this host's deployer is too old to report its version. A card in your queue has the copy steps.";
+}
+
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
 export function ThisHost() {
   const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
@@ -2802,6 +2811,11 @@ export function ThisHost() {
           ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
+      {d.deployerScript && d.deployerScript.state !== "none" && (
+        <p data-testid="deployer-script" style={{ fontSize: 14 }}>
+          <strong>Deployer script:</strong> {deployerScriptLine(d.deployerScript)}
+        </p>
+      )}
       {keys.length > 0 && (
         <div className="host-facts">
           <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>

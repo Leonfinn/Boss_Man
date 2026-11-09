@@ -40,6 +40,8 @@ const HostRecord = z.object({
   // none), and each is parsed loosely: a section in the wrong shape reads as absent, never as "no record at all".
   repo: z.object({ origin: z.string(), originHost: z.string().default(""), embeddedCredentials: z.boolean().default(false), probe: z.string(), probedAt: z.string().default("") }).optional().catch(undefined),
   paths: z.object({ install: z.string(), src: z.string(), deployer: z.string() }).optional().catch(undefined),
+  /** BOS-990: sha256 of the script the deployer runs from, and of the copy in the checkout (the live version). Empty = unreadable. */
+  deployer: z.object({ scriptSha: z.string().regex(/^[0-9a-f]{64}$/).or(z.literal("")).default(""), repoSha: z.string().regex(/^[0-9a-f]{64}$/).or(z.literal("")).default("") }).optional().catch(undefined),
   compose: z.object({ files: z.array(z.string()).default([]), bluegreen: z.boolean().default(false), liveColour: z.string().default("") }).optional().catch(undefined),
   network: z.object({ addresses: z.array(z.string()).default([]), ports: z.record(z.string(), z.string()).default({}) }).optional().catch(undefined),
   memory: z.object({ totalKb: z.number().int().nonnegative(), availableKb: z.number().int().nonnegative() }).optional().catch(undefined),
@@ -78,6 +80,7 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
     o["repo.embeddedCredentials"] = String(r.repo.embeddedCredentials);
   }
   if (r.paths) { o["paths.install"] = r.paths.install; o["paths.src"] = r.paths.src; o["paths.deployer"] = r.paths.deployer; }
+  if (r.deployer) { if (r.deployer.scriptSha) o["deployer.scriptSha"] = r.deployer.scriptSha; if (r.deployer.repoSha) o["deployer.repoSha"] = r.deployer.repoSha; }
   if (r.compose) { o["compose.files"] = csv(r.compose.files); o["compose.bluegreen"] = String(r.compose.bluegreen); o["compose.liveColour"] = r.compose.liveColour; }
   if (r.network) {
     o["network.addresses"] = csv(r.network.addresses);
@@ -196,5 +199,12 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return r?.netguardEnv ? { ...r.netguardEnv, reportedAt: r.writtenAt } : null;
   }
 
-  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
+  /** BOS-990: the deployer script's fingerprints from the host's last report. null = no report at all; an empty
+   * `scriptSha` = the host reported but its deployer is too old to say what script it runs. */
+  async function deployerScript(): Promise<{ scriptSha: string; repoSha: string; reportedAt: string } | null> {
+    const r = await read();
+    return r ? { scriptSha: r.deployer?.scriptSha ?? "", repoSha: r.deployer?.repoSha ?? "", reportedAt: r.writtenAt } : null;
+  }
+
+  return { read, hosts, serverHost, deployerScript, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
 }

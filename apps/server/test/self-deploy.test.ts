@@ -30,7 +30,8 @@ async function setup(opts: { deployer?: boolean } = {}) {
   await mkdir(path.join(dir, "inbox"));
   await mkdir(path.join(dir, "outbox"));
   // What the host recorded about itself (BOS-427): its name goes on every command block.
-  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [] }));
+  // BOS-990: it reports a deployer script that is the live version, so no "copy the deployer script" card is raised here.
+  await writeFile(path.join(dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [], deployer: { scriptSha: "1".repeat(64), repoSha: "1".repeat(64) } }));
   // The app uses a counting handle on the same database, so a test can prove a pass made no queries (BOS-414).
   const made: string[] = [];
   const logQuery = { logQuery: (sql: string) => made.push(sql) };
@@ -1369,6 +1370,80 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       await rm(path.join(c.dir, "outbox", "status.json"));
       expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ deployer: { reportedAt: null, late: true } });
       expect(await c.selfDeploy.deployLatest()).toEqual({ error: "The host deployer has not reported yet. Check that its cron job is running." });
+    });
+  });
+
+  // BOS-990: the host reports the sha of its own deployer script; one owner card while it is behind or unknown.
+  describe("deployer script version (BOS-990)", () => {
+    const OLD = "1".repeat(64);
+    const NEW = "2".repeat(64);
+    const PATHS = { install: "/srv/bm", src: "/srv/bm/src", deployer: "/srv/bm/deployer" };
+    // Each report also rewrites the offer file, so the poller sees a change and runs its pass (BOS-414).
+    const report = async (c: Awaited<ReturnType<typeof setup>>, deployer: unknown) => {
+      await writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: "2026-10-20T12:00:00Z", ownership: [], paths: PATHS, ...(deployer ? { deployer } : {}) }));
+      await c.available();
+    };
+    const cards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.todos()).filter((d) => d.dedupeKey === "self-deploy:deployer-script");
+    const ago = async (c: Awaited<ReturnType<typeof setup>>, ms: number) => {
+      const value = { state: "behind", since: new Date(Date.now() - ms).toISOString() };
+      await c.db.insert(settings).values({ key: "deployer_script_state", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      await c.available();
+    };
+
+    it("says current when the shas match, and raises nothing", async () => {
+      const c = (ctx = await setup());
+      await report(c, { scriptSha: NEW, repoSha: NEW });
+      await c.selfDeploy.sync();
+      expect(await c.selfDeploy.deployerScript()).toEqual({ state: "current" });
+      expect(await cards(c)).toHaveLength(0);
+    });
+
+    it("an old deployer that reports no version is unknown and gets the card once", async () => {
+      const c = (ctx = await setup());
+      await report(c, undefined);
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      expect((await c.selfDeploy.deployerScript()).state).toBe("unknown");
+      const [card] = await cards(c);
+      expect(await cards(c)).toHaveLength(1);
+      expect(card!.question).toContain("Your host's deployer script is older than the running version");
+      const steps = (card!.context as { steps: string[]; rollback: string }).steps.join("\n");
+      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh");
+      expect(steps).toContain('host="nas01" as="root"');
+      expect((card!.context as { rollback: string }).rollback).toContain("cp -p /srv/bm/deployer/host-deployer.sh.old /srv/bm/deployer/host-deployer.sh");
+    });
+
+    it("no report at all raises nothing", async () => {
+      const c = (ctx = await setup());
+      await rm(path.join(c.dir, "outbox", "host.json"));
+      await c.selfDeploy.sync();
+      expect((await c.selfDeploy.deployerScript()).state).toBe("none");
+      expect(await cards(c)).toHaveLength(0);
+    });
+
+    it("behind waits out the copy grace, then raises one card, and closes it when the shas match", async () => {
+      const c = (ctx = await setup());
+      await report(c, { scriptSha: OLD, repoSha: NEW });
+      await c.selfDeploy.sync();
+      const first = await c.selfDeploy.deployerScript();
+      expect(first.state).toBe("behind");
+      expect(first.since).toBeTruthy();
+      expect(await cards(c)).toHaveLength(0); // an update's own copy step is given a few minutes
+      await ago(c, 20 * 60_000);
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      expect(await cards(c)).toHaveLength(1);
+      await report(c, { scriptSha: NEW, repoSha: NEW });
+      await c.selfDeploy.sync();
+      expect(await cards(c)).toHaveLength(0);
+      expect(await c.selfDeploy.deployerScript()).toEqual({ state: "current" });
+      expect((await c.db.select().from(decisions).where(eq(decisions.dedupeKey, "self-deploy:deployer-script"))).length).toBe(0);
+    });
+
+    it("shows the line in Settings → This host's facts", async () => {
+      const c = (ctx = await setup());
+      await report(c, { scriptSha: OLD, repoSha: NEW });
+      expect((await c.req("GET", "/api/host-facts")).json()).toMatchObject({ deployerScript: { state: "behind" }, facts: { "deployer.scriptSha": { value: OLD }, "deployer.repoSha": { value: NEW } } });
     });
   });
 });

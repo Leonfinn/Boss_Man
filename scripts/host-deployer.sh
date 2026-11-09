@@ -443,6 +443,13 @@ env_value() { # key: the value of KEY in the checkout's .env (environment first)
   v="${v%\"}"; v="${v#\"}"
   printf '%s' "$v"
 }
+# The sha256 of one file as 64 hex characters, or empty when it can't be read (BOS-990).
+file_sha256() {
+  local s
+  [[ -r $1 ]] && s="$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" || s=""
+  [[ $s =~ ^[0-9a-f]{64}$ ]] && printf '%s' "$s"
+  return 0
+}
 host_extra_facts() {
   local out="" sep=", "
   # --- repo access: how origin is reached and whether a read works. The URL itself is never reported (it can carry a token).
@@ -486,6 +493,9 @@ host_extra_facts() {
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
   out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
   out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
+  # --- BOS-990: the fingerprint (sha256) of the script this deployer is running from, and of the copy in the checkout
+  # (the version that is live). The server compares them: different means the host's copy needs the owner's copy step.
+  out+="$sep\"deployer\": {\"scriptSha\": $(jstr "$(file_sha256 "${BASH_SOURCE[0]:-$0}")"), \"repoSha\": $(jstr "$(file_sha256 "$REPO/scripts/host-deployer.sh")")}"
   # --- addresses and ports
   local addrs="" asep="" a n=0 ports="" psep="" k v
   while IFS= read -r a; do
