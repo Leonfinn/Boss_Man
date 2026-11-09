@@ -189,6 +189,8 @@ export type Decision = {
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
+  /** The rank reason that is only the card's age; the card shows the age itself and hides this one (BOS-869). */
+  ageReason: string;
   dueDate: string | null;
   /** (BOS-551) For a card that needs your hands: its place in the do-this-next order, 1-based. */
   step?: number | null;

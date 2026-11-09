@@ -91,6 +91,11 @@ if FAKE_HEALTH=unhealthy BOSSMAN_HEALTH_TIMEOUT=1 PATH="$t/bin:$PATH" scripts/de
 grep -q "Last 20 lines of the server log" "$t/unhealthy.out" || { echo "FAIL: no log header in the rollback help"; exit 1; }
 grep -q "EACCES: permission denied" "$t/unhealthy.out" || { echo "FAIL: rollback help didn't show the server log"; exit 1; }
 grep -q "compose logs --no-color --tail 20 server" "$FAKE_LOG" || { echo "FAIL: didn't ask for 20 log lines"; exit 1; }
+# BOS-867: the restore help follows Guide 10: test the backup, keep a copy, stop at the first error.
+grep -q "scripts/restore-test.sh" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't ask to test the backup"; exit 1; }
+grep -q "before-restore-" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't keep a copy of the current data"; exit 1; }
+grep -q "ON_ERROR_STOP=1" "$t/unhealthy.out" || { echo "FAIL: restore load doesn't stop at the first error"; exit 1; }
+grep -q "To go back to the old code (does not touch the database)" "$t/unhealthy.out" || { echo "FAIL: the old-code rollback line changed"; exit 1; }
 # A restart (BOS-647): --force at the commit that runs recreates the server (an unchanged image would leave it running),
 # leaves the launcher alone and keeps the rollback record, so --rollback still goes back to the release before.
 git reset -q --hard "$one"; : >"$FAKE_LOG"

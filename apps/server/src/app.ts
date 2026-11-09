@@ -26,7 +26,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
-import { allowsPrivate, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
+import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
@@ -157,6 +157,8 @@ export type AppOptions = {
   serverHealth?: Partial<Pick<ServerHealthDeps, "rssMb" | "memoryLimit" | "stallsSince">>;
   /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
   launcher?: LauncherOptions;
+  /** DNS lookup for the network-guard page's "resolves to a private address" check (BOS-791); tests pass a made-up one. */
+  lookup?: HostLookup;
   /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
   deployerDir?: string;
   /** How long a runner update waits for runs to finish before asking the owner (default 30). */
@@ -264,7 +266,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
-  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
+  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
@@ -483,7 +485,7 @@ export async function buildApp(opts: AppOptions) {
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
-  const runsSvc = runsService(db, { runners, now: opts.now });
+  const runsSvc = runsService(db, { runners, now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built

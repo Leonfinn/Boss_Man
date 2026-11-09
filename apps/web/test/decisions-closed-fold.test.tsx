@@ -84,6 +84,7 @@ const openUpdate = (over: Partial<Decision> = {}): Decision => ({
   score: 40,
   parts: { blocking: 20, urgency: 10, age: 10, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   context: {
     type: "self_deploy",
