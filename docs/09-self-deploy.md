@@ -41,7 +41,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 
 ## Files on TrueNAS
 
-Base: `/mnt/NVME_Apps/Container_files/boss-man/deployer` (`$D` below).
+Base: `/mnt/tank/apps/boss-man/deployer` in the worked example of [docs/06](06-install-truenas.md) (`$D` below). Use your own install folder.
 
 | Path | Owner : mode | Written by | Purpose |
 |---|---|---|---|
