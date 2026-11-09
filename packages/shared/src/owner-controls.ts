@@ -43,6 +43,8 @@ export const OWNER_CONTROLS = {
     "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
+    // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
+    "Show fewer",
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
@@ -76,7 +78,12 @@ export const OWNER_CONTROLS = {
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
-  Plan: ["Refresh"],
+  Plan: [
+    "Refresh",
+    // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
+    // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
+    "What's holding work up …", "Show all …", "Show fewer",
+  ],
   Wiki: [
     "Show older versions", "Loading",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
