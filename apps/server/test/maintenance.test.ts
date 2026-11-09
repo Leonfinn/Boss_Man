@@ -684,3 +684,84 @@ describe("Ask agents to wrap up while an update waits (BOS-988)", () => {
     expect(c.messages).toHaveLength(1); // once per run, as before
   });
 });
+
+describe("QA: wrap-up during an update, the cases a regression would slip past (BOS-988)", () => {
+  it("a run that starts after the ask is told the wrap-up on the next pass, once, beside the update's own message", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(0); // nobody was running when the hold and the ask began
+    await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date(0) });
+    await c.maintenance.step();
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+    await c.maintenance.step();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(c.messages).toHaveLength(2);
+  });
+
+  it("chat and reply runs are never messaged", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(runs).values([
+      { id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: "chat", model: "m", startedAt: new Date(0) },
+      { id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: "reply", model: "m", startedAt: new Date(0) },
+    ]);
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    await c.maintenance.step();
+    expect(c.messages).toHaveLength(0);
+  });
+
+  it("during a setting-change hold the hold keeps its kind and the run is told the setting message, then the ask", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ kind: "settings" });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.kind).toBe("settings");
+    expect(c.messages.map((m) => m.text)).toEqual([`Message from Boss Man: ${WRAP_UP_SETTINGS}`, `Message from Boss Man: ${WRAP_UP_DURING_UPDATE}`]);
+  });
+
+  it("each run's 'asked N min ago' counts from when that run was told", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    c.advance(10 * MIN);
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    c.advance(4 * MIN);
+    const m = (await c.maint()) as { runsList: Array<{ sinceWrapUpMinutes: number }> };
+    expect(m.runsList.map((r) => r.sinceWrapUpMinutes)).toEqual([4]);
+  });
+
+  it("Cancel wrap-up: nothing to cancel says so; with no update it lifts the whole wrap-up hold; with an update but no ask it changes nothing", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: false });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect((await getHold(c.db))!.kind).toBe("wrapup");
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: true });
+    expect(await getHold(c.db)).toBeNull();
+    await c.maintenance.start();
+    expect((await c.req("POST", "/api/maintenance/cancel-wrap", {})).json()).toEqual({ cancelled: false });
+    expect((await getHold(c.db))!.kind).toBe("update");
+  });
+
+  it("after Cancel wrap-up the status drops the wrap-up list and the update is still on the banner", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start();
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await c.maint()).toMatchObject({ on: true, kind: "update", wrapAsked: true });
+    await c.req("POST", "/api/maintenance/cancel-wrap", {});
+    const after = (await c.maint()) as Record<string, unknown>;
+    expect(after).toMatchObject({ on: true, kind: "update" });
+    expect(after.wrapAsked).toBeUndefined();
+    expect(after.runsList).toBeUndefined();
+  });
+});
