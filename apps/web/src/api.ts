@@ -394,6 +394,10 @@ export type NotifySettings = {
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
   pushLevels: NotifyLevel[];
   publicUrl: string | null;
+  /** Phone Approve buttons (BOS-243): on unless switched off. */
+  approveButtons?: boolean;
+  /** Whether Approve buttons are actually offered, and if not why. */
+  approve?: { on: true } | { on: false; why: string };
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";

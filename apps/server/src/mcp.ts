@@ -47,6 +47,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
@@ -55,6 +56,7 @@ import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registe
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
 import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
+import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
@@ -313,7 +315,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo, stillNeeded, setsUp or doAfter, so write the summary so it can be approved without opening the card.",
       // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
@@ -329,6 +331,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         setsUp: z.enum(ADDONS).optional(),
         // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
         newHost: z.string().min(1).max(64).optional(),
+        approveSummary: z.string().max(SUMMARY_MAX).optional(),
         proof: z.string().max(300).optional(),
         // Ordering against other owner cards (BOS-551): the ids of the cards this one must be done after or before, each with a short label.
         doAfter: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
@@ -338,8 +341,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         resetsOnRestart: z.boolean().optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, proof, doAfter, doBefore, resetsOnRestart }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      // Stored cleaned, so the phone shows exactly what is stored (BOS-243 rule 2).
+      const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
+      if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
       if (ask.error) return fail(ask.error);
@@ -369,7 +375,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[] };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
@@ -1535,193 +1541,6 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
 
 }
 
-// shortcut: one run's record is held in memory and dropped when the run ends; lost on restart, harmless because a chat run dies with the restart (BOS-758).
-type RunTrace = { changes: string[]; tickets: string[] };
-const traces = new Map<string, RunTrace>();
-/** What a chat run changed and the tickets it touched (created or read), read by chat.ts under its reply. */
-export const runTrace = (runId: string): RunTrace => traces.get(runId) ?? { changes: [], tickets: [] };
-export function forgetRunTrace(runId: string) {
-  traces.delete(runId);
-}
-
-/**
- * The chat tools that never change anything: reads and lookups only (BOS-806). Every other tool in the
- * chat's list must have a case in changeTrace, so the "Done in this reply" line names what it changed.
- * chat.test.ts walks the live chat tool list against these two sets, so a new tool cannot be added
- * silently: it is either a read (add it here) or a change (add a case in changeTrace).
- */
-export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  "agent_instructions", "board", "devices", "features", "list_my_work", "model_options", "open_attachment",
-  "server_status", "sizing_guide", "tickets", "whats_new",
-]);
-
-/**
- * Every tool with a case in changeTrace, which may return null for its read actions (notes list,
- * roadmap list, review diff). Kept in step with the switch below by a guard there and by chat.test.ts.
- */
-export const TRACED_TOOLS: ReadonlySet<string> = new Set([
-  "notes", "create_ticket", "create_feature", "log_feedback", "set_ticket_state", "update_ticket", "set_ticket_risk",
-  "assign_ticket", "link_tickets", "set_milestone", "raise_decision", "withdraw_decision", "decisions", "nudge", "wiki",
-  "update_instructions", "rename_agent", "set_agent_picture", "standing_rules", "propose_hire", "propose_team",
-  "propose_model_change", "propose_rule", "attach_image", "ticket_reply", "notify_owner", "roadmap", "report_key_result",
-  "schedule_check", "clear_check", "request_check", "request_engagement", "engagement", "handoff", "deploy", "submit_plan",
-  "review", "request_note", "feedback", "skills", "pa_verdict", "runs",
-]);
-
-/**
- * A changing tool call, as one item for the "Done in this reply" line; null for a call that is not one
- * (a read action of a tool that also writes, such as notes list or roadmap list). `ref` names a ticket
- * by its BOS-style reference (BOS-806), so "created a ticket" also says which one; a created ticket's id
- * comes from the tool's own result (returnId), since create_ticket takes none.
- */
-async function changeTrace(name: string, input: Record<string, unknown>, ref: (id: string) => Promise<string | null>, returnId?: string): Promise<string | null> {
-  const s = (v: unknown, n = 60) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
-  const action = String(input.action ?? "");
-  const ticket = async (id: unknown) => {
-    const r = typeof id === "string" ? await ref(id) : null;
-    return r ? ` ${r}` : "";
-  };
-  // A name with no case below has no business being in TRACED_TOOLS; the test guard keeps them in step,
-  // and this stops an untraced tool from ever being silently counted as a change.
-  if (!TRACED_TOOLS.has(name)) return null;
-  switch (name) {
-    case "notes":
-      return action === "save" || action === "update" || action === "accept" ? `saved note "${s(input.title)}"` : action === "remove" || action === "decline" ? "removed a note" : null;
-    case "create_ticket":
-      return `created a ticket${await ticket(returnId)}`;
-    case "create_feature":
-      return `created a feature request "${s(input.title)}"`;
-    case "log_feedback":
-      return "filed feedback";
-    case "set_ticket_state":
-      return `moved a ticket${await ticket(input.ticketId)}`;
-    case "update_ticket":
-      return `updated a ticket${await ticket(input.ticketId)}`;
-    case "set_ticket_risk":
-      return "set a ticket's risk";
-    case "assign_ticket":
-      return `handed a ticket to ${s(input.agent)}`;
-    case "link_tickets":
-      return "made a ticket wait on another";
-    case "set_milestone":
-      return "put a ticket in a milestone";
-    case "raise_decision":
-      return "raised a decision for the owner";
-    case "withdraw_decision":
-      return "withdrew a decision";
-    case "decisions":
-      return ["answer", "withdraw", "escalate", "advise"].includes(action) ? "settled a decision" : null;
-    case "nudge":
-      return `nudged ${s(input.agent)}`;
-    case "wiki":
-      return action === "write" || action === "append"
-        ? `wrote the wiki page "${s(input.title || input.slug)}"`
-        : action === "restore"
-          ? `restored the wiki page "${s(input.slug)}"`
-          : action === "attach"
-            ? "attached something to a ticket"
-            : null;
-    case "update_instructions":
-      return `changed ${s(input.agent)}'s instructions`;
-    case "rename_agent":
-      return `renamed an agent to ${s(input.newName)}`;
-    case "set_agent_picture":
-      return "set an agent's picture";
-    case "standing_rules":
-      return action === "write" ? "changed the standing rules" : null;
-    case "propose_hire":
-      return `proposed hiring ${s(input.name)}`;
-    case "propose_team":
-      return "proposed a team";
-    case "propose_model_change":
-      return `proposed a model change for ${s(input.agent)}`;
-    case "propose_rule":
-      return "proposed a permission rule";
-    case "attach_image":
-      return "attached an image to a ticket";
-    // BOS-806: the tools a CEO chat run can call that change something and were left out of the line.
-    case "ticket_reply":
-      return "replied on a ticket";
-    case "notify_owner":
-      return `sent the owner a ${s(input.level) === "page" ? "page" : s(input.level) === "flag" ? "flag" : "note"}`;
-    case "roadmap":
-      return action === "add_objective" ? `added the objective "${s(input.title)}"` : action === "add_milestone" ? `added the milestone "${s(input.title)}"` : action === "set" ? "put a ticket in a milestone" : null;
-    case "report_key_result":
-      return "reported a key result";
-    case "schedule_check":
-      return "scheduled a check";
-    case "clear_check":
-      return "cleared a check";
-    case "request_check":
-      return "asked the runner for a check";
-    case "request_engagement":
-      return `asked ${s(input.providerCompany)} to do work`;
-    case "engagement":
-      return ["accept", "reject", "counter", "accept_counter", "withdraw", "sign_off", "request_revision", "deliver"].includes(action) ? "moved an engagement on" : null;
-    case "handoff":
-      return "wrote the handoff";
-    case "deploy":
-      return action === "request" ? `asked to deploy ${s(input.ref)}` : action === "report" ? "reported a deploy" : null;
-    case "submit_plan":
-      return "submitted the plan";
-    case "review":
-      return action === "submit"
-        ? `reviewed a ticket (${input.verdict === "approved" ? "approved" : "asked for changes"})`
-        : action === "sequence" || action === "overrule" || action === "retry_merge"
-          ? "arranged a ticket's reviews"
-          : null;
-    case "request_note":
-      return "asked for a lasting note";
-    case "feedback":
-      return ["log", "link", "create_feature", "mark", "size", "update_feature"].includes(action) ? "updated the feature requests" : null;
-    case "skills":
-      return ["give", "take", "propose", "review_verdict"].includes(action) ? "changed the skill library" : null;
-    case "pa_verdict":
-      return "marked a PA answer";
-    case "runs":
-      return action === "message" ? "messaged another run" : action === "stop" ? "stopped a run" : null;
-    default:
-      return null;
-  }
-}
-
-const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-
-/**
- * Records a chat run's changing calls, and every ticket id any of its tools returned (BOS-758), so the
- * reply can be checked against what the run actually did. Wraps the server's registerTool: only the
- * chat's server gets here, and a failed call (isError) records nothing.
- */
-function traceCalls(server: McpServer, db: Db, runId: string, companyId: string): McpServer {
-  const register = server.registerTool.bind(server);
-  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id. The lookup runs after the
-  // tool already succeeded: if it fails, the change is still made and still named, just without the number
-  // (BOS-820), so a failed lookup can never turn a good call into an error the agent would retry.
-  const refOf = async (id: string) => {
-    try {
-      const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
-      if (!t) return null;
-      return (await refsOf(db, companyId))(t).ref;
-    } catch {
-      return null;
-    }
-  };
-  server.registerTool = ((name: string, config: never, cb: (input: Record<string, unknown>, extra: never) => Promise<unknown>) =>
-    register(name, config, (async (input: Record<string, unknown>, extra: never) => {
-      const out = (await cb(input, extra)) as { isError?: boolean };
-      if (!out?.isError) {
-        const trace = traces.get(runId) ?? { changes: [], tickets: [] };
-        const returned = JSON.stringify(out).match(UUID_ANYWHERE) ?? [];
-        for (const id of returned) if (!trace.tickets.includes(id)) trace.tickets.push(id);
-        // A created ticket has no id in its input, so take the one the tool returned.
-        const change = await changeTrace(name, input, refOf, name === "create_ticket" ? returned[0] : undefined);
-        if (change && !trace.changes.includes(change)) trace.changes.push(change);
-        if (trace.changes.length || trace.tickets.length) traces.set(runId, trace);
-      }
-      return out;
-    }) as never)) as never;
-  return server;
-}
 
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";

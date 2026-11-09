@@ -219,6 +219,48 @@ many=(); for i in $(seq 1 15); do many+=("apps/server/src/m$i.ts"); done; commit
 run 0 "15 files is not broad" env
 logged "vitest related" "15 files"
 
+# A fresh tree with no node_modules (BOS-952: the server-owned check queue runs check-quick in a new worktree) installs the
+# packages first, before typecheck, the related tests and the web build; a tree that has node_modules does not.
+inst="pnpm install --frozen-lockfile --prefer-offline"
+g checkout -q -B fresh origin/main; commit apps/web/src/f.ts
+run 0 "fresh tree installs" env
+logged "$inst" "fresh tree"
+grep -q "^PASS  install packages (fresh tree, no node_modules)" "$t/out" || fail "fresh tree: no install PASS line: $(cat "$t/out")"
+[ "$(grep -n "^pnpm install" "$LOG" | head -n 1 | cut -d: -f1)" -lt "$(grep -n "^pnpm --filter @boss-man/web typecheck" "$LOG" | cut -d: -f1)" ] \
+  || fail "fresh tree: install did not come before typecheck: $(cat "$LOG")"
+logged "pnpm --filter @boss-man/web build" "fresh tree still builds"
+mkdir "$repo/node_modules"; echo node_modules >"$repo/.git/info/exclude"
+run 0 "tree with node_modules does not install" env
+notlogged "pnpm install" "node_modules present"
+logged "pnpm --filter @boss-man/web typecheck" "node_modules present"
+rm -rf "$repo/node_modules"
+# The install failing is reported, and the steps that need packages are skipped rather than queued for a slot.
+run 1 "failed install" env FAIL_ON=install
+grep -q "^FAIL  install packages" "$t/out" || fail "failed install: no FAIL line: $(cat "$t/out")"
+grep -q "^SKIP  typecheck, related tests, web build: the install failed" "$t/out" || fail "failed install: no SKIP line: $(cat "$t/out")"
+for s in typecheck "vitest related" build; do notlogged "$s" "failed install"; done
+grep -q "check-quick: FAILED" "$t/out" || fail "failed install: no FAILED summary: $(cat "$t/out")"
+# A change with no pnpm step (a shell script only) installs nothing.
+g checkout -q -B freshsh origin/main; commit scripts/only.sh
+run 0 "shell-only change does not install" env
+notlogged "pnpm install" "shell only"
+# The full check runs next (it installs itself): no install here.
+g checkout -q fresh
+run 0 "full check next does not install" env BOSSMAN_MERGE_CHECK=1 BOSSMAN_FULL_CHECK_NEXT=1
+notlogged "pnpm install" "full check next"
+# The install runs before the slot wait, so it never holds a check slot.
+if command -v flock >/dev/null; then
+  : >"$LOG"
+  hold_slot
+  (cd "$repo" && ./scripts/check-quick.sh >"$t/out" 2>&1) & cq=$!
+  wait_for_slot_wait "install before the slot"
+  logged "$inst" "install before the slot"
+  notlogged "typecheck" "install before the slot"
+  release_slot
+  rc=0; wait "$cq" || rc=$?
+  [ "$rc" -eq 0 ] || fail "install before the slot: rc $rc: $(cat "$t/out")"
+fi
+
 # Reuse (BOS-666): a pass on a clean tree is written to the slot log; the next run of the same tree and base reuses it.
 sl="$t/lock.slotlog"; npass() { grep -c " quick-pass " "$sl" || true; }
 g checkout -q -B reuse origin/main; commit apps/web/src/r.ts

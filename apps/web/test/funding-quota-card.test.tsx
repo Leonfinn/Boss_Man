@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { windowLabel } from "@boss-man/shared";
 import { Funding } from "../src/pages/Funding";
@@ -128,6 +128,20 @@ describe("Synthetic quota", () => {
     expect(screen.getByText(/in \d+ days?|in \d+ hours?/)).toBeTruthy();
     expect(screen.getByText(/This period: 2 readings, 400 → 850 \(\+450/)).toBeTruthy();
     expect(screen.getByText(/Checked 2 min ago · you've been warned at 80%/)).toBeTruthy();
+  });
+
+  // BOS-934: Synthetic spends paid top-up credit past the weekly allowance; its API doesn't report the balance.
+  it("offers the top-up credit choice on a Synthetic plan, says what each does, and that the balance can't be read", async () => {
+    synthetic({ used: 9932, limit: 10_000, renewsAt: null, measure: "weekly" });
+    expect(await screen.findByText("I have top-up credit")).toBeTruthy();
+    expect(screen.queryByText("I have extra usage")).toBeNull();
+    expect(screen.getByText(/Top-up credit: not shown\. Synthetic's API doesn't report the balance/)).toBeTruthy();
+    // The default holds as today, and says so.
+    expect(screen.getByText(/Routine work is held at 95% of the weekly allowance and nothing spends top-up credit/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Top-up credit"), { target: { value: "all" } });
+    expect(screen.getByText(/Nothing is held: once the weekly allowance is used, Synthetic pays for all work from your top-up credit/)).toBeTruthy();
+    expect(screen.getByText(/Boss Man can't stop before it runs out/)).toBeTruthy();
+    expect(screen.queryByText(/billed by Anthropic/)).toBeNull();
   });
 
   it("says the quota is unknown rather than showing an error", async () => {
