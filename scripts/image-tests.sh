@@ -104,7 +104,7 @@ test_no_anthropic() {
   if [[ -n "$hits" ]]; then
     if [[ "$XFAIL_NO_ANTHROPIC" == 1 ]]; then
       say "no-anthropic: EXPECTED FAIL (Claude pack not landed yet); found:"
-      sed 's/^/    /' <<<"$hits"
+      printf '    %s\n' "${hits//$'\n'/$'\n'    }"
       return 0
     fi
     fail "the runner image holds Anthropic code:"$'\n'"$hits"
