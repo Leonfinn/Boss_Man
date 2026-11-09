@@ -246,7 +246,8 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
         </div>
       )}
       <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+        {/* Sideways only (BOS-962 sweep, same as BOS-554): the command wraps, so it never needs to scroll vertically, and without overflow-y: hidden a one-pixel overflow would swallow the wheel. */}
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", overflowY: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
           <code>{command}</code>
         </pre>
         <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
@@ -576,13 +577,26 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
   const waitingCards = shown.filter((d) => !!d.waiting);
-  const open = shown.filter((d) => !answered[d.id]);
-  // (BOS-969) The heading takes its numbers from the same server tally as the menu badge, over the cards
-  // this page is showing, so the two always agree. The menu badge shows only "open": what needs the owner now.
-  const tallyQuery = `?open=${open.length}&waiting=${waitingCards.length}`;
-  const tallyPoll = usePoll((signal) => api<DecisionTally>(`/api/decisions/tally${tallyQuery}`, { signal }).catch(() => null), 10_000, "decisions-tally");
-  // Until the first answer arrives, the cards themselves stand in, so the heading is never blank.
-  const counts = tallyPoll.data ?? tally ?? { open: open.length, waiting: waitingCards.length };
+  // (BOS-969, BOS-996) The heading takes both numbers from the server tally, the same figure the menu
+  // badge shows; it sends no numbers of its own. The app already polls that tally for the badge and
+  // refreshes it on every answer, so the heading reads it from there and only asks itself if it is
+  // missing (the app's read failed). A card the owner answers here leaves the count straight away, so
+  // the heading never shows it as still to do while the page waits for its next read.
+  const viewQuery = filter ? `?companyId=${filter}` : "";
+  const tallyPoll = usePoll(
+    (signal) => (tally ? Promise.resolve(tally) : api<DecisionTally>(`/api/decisions/tally${viewQuery}`, { signal }).catch(() => null)),
+    10_000,
+    `decisions-tally-page-${filter ?? ""}`,
+  );
+  const answeredHere = shown.filter((d) => !!answered[d.id]);
+  const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
+  const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
+  // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
+  const counted = tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  const counts = {
+    open: Math.max(counted.open - answeredQueue, 0),
+    waiting: Math.max(counted.waiting - answeredWaiting, 0),
+  };
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
     if (inFlight.current.has(d.id)) return;

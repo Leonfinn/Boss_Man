@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { brotliCompressSync, gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { feedbackNotes, insights } from "../src/db/schema.js";
 import { buildPortalApp } from "../src/portal.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -106,6 +106,47 @@ describe("feedback portal", () => {
     expect((await v("POST", "/api/portal/ideas", { title: "Buy pills", text: "spam", website: "http://spam.example" })).statusCode).toBe(201);
     const ideas = (await t!.db.select().from(feedbackNotes).where(eq(feedbackNotes.source, "portal"))).filter((n) => n.title?.startsWith("Portal idea:"));
     expect(ideas).toEqual([expect.objectContaining({ title: "Portal idea: Offline mode", untrusted: true, state: "unprocessed" })]);
+  });
+
+  it("shows no way back until the owner sets an https address, then shows it top and bottom", async () => {
+    const c = await setup();
+    const { portalToken } = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true })).json();
+    const v = visitor(t!.app, portalToken);
+    expect((await v("GET", "/api/portal")).json().back).toBeNull();
+
+    // Only a full https address is accepted, with the message the owner sees.
+    for (const bad of ["example.com", "http://example.com", "javascript:alert(1)", "example.com/space here"]) {
+      const res = await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backUrl: bad });
+      expect(res.statusCode, bad).toBe(422);
+      expect(res.json().message).toBe("Enter a full web address that starts with https://");
+    }
+    expect((await v("GET", "/api/portal")).json().back).toBeNull();
+
+    // Save stays off for text alone: the text does nothing without an address.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backText: "Boss Man" });
+    expect((await v("GET", "/api/portal")).json().back).toBeNull();
+
+    // Set: the address and words come back. Like every visitor sees, the page draws the bar from this.
+    const set = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backUrl: "https://bossman.example/home", backText: "Boss Man" })).json();
+    expect(set).toMatchObject({ portalBackUrl: "https://bossman.example/home", portalBackText: "Boss Man" });
+    expect((await v("GET", "/api/portal")).json().back).toEqual({ url: "https://bossman.example/home", text: "Boss Man" });
+
+    // No words: the portal's own heading is used, so the link never reads "Back to " on its own.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backText: null });
+    expect((await v("GET", "/api/portal")).json().back).toEqual({ url: "https://bossman.example/home", text: "App Co: what's next" });
+
+    // Mild address, capitalised scheme, is fine.
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backUrl: "HTTPS://bossman.example/" })).statusCode).toBe(200);
+    expect((await v("GET", "/api/portal")).json().back.url).toBe("HTTPS://bossman.example/");
+
+    // Empty clears both, and the portal looks exactly as it did before the setting existed.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { backUrl: "", backText: "" });
+    expect((await v("GET", "/api/portal")).json().back).toBeNull();
+    expect((await c.req("GET", `/api/companies/${c.company.id}/feedback-settings`)).json()).toMatchObject({ portalBackUrl: null, portalBackText: null });
+
+    // A value that somehow got stored without https is never sent to a visitor.
+    await t!.db.execute(sql`update feedback_settings set portal_back_url = 'javascript:alert(1)', portal_back_text = 'Boss Man' where company_id = ${c.company.id}`);
+    expect((await v("GET", "/api/portal")).json().back).toBeNull();
   });
 
   it("limits how much one address can send", async () => {

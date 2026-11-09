@@ -735,6 +735,7 @@ export async function buildApp(opts: AppOptions) {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
+    onReview: (t) => scheduler.onTicketReview(t.id, null),
     onFeature: (id) => feedback.syncFeature(id),
     // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
     runningMerges: () => review.runningMerges(),
@@ -2190,16 +2191,12 @@ export async function buildApp(opts: AppOptions) {
       if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
       if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
       if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
-      // Moving a ticket to the state it is already in must not re-run what entering that state does (DR-010).
-      const [before] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
-      const sameState = before?.state === state;
-      const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
-      await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
+      // One move, one history line, and a review round only on a real move into review (DR-010, DR-047): moveTicket does all three.
+      const moved = await work.updateTicket(id, { state, moveReason: `Owner moved it to ${label}`, reviewRound: "new", ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       // Nobody should start work on a ticket the owner has parked or closed.
       if (state === "done" || state === "backlog" || state === "blocked")
         await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if (state === "review" && !sameState) await scheduler.onTicketReview(id, null);
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
@@ -2293,8 +2290,10 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id/portal", async (req) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable() }).partial().parse(req.body);
-      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}) });
+      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable() }).partial().parse(req.body);
+      // BOS-967: the back link must be a full https address, or empty for none.
+      if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
+      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
     });
     // Only these three types, found by their first bytes: the portal is public, so no SVG.
     const logoType = (b: Buffer) =>
@@ -2597,16 +2596,16 @@ export async function buildApp(opts: AppOptions) {
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
     // The number for the menu badge (BOS-969): how many cards need the owner now, and how many are
-    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above. The
-    // screen passes what it is showing by company (open, waiting) so its own heading agrees with it.
+    // folded into "Waiting, nothing to do yet", from the same rows and rule as the queue above.
+    // (BOS-996) The page heading reads the same figures; it no longer sends its own, and any open or
+    // waiting figures in the query are ignored, so the server's tally is the only source.
     owner.get("/api/decisions/tally", async (req) => {
       const q = z
-        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional(), open: z.coerce.number().int().min(0).max(10_000).optional(), waiting: z.coerce.number().int().min(0).max(10_000).optional() })
+        .object({ companyId: z.string().uuid().optional(), includeAll: z.string().optional() })
         .parse(req.query ?? {});
       return decisionsSvc.queueTally({
         ...(q.companyId ? { companyId: q.companyId } : {}),
         ...(q.includeAll ? { includeAll: true } : {}),
-        ...(q.open !== undefined && q.waiting !== undefined ? { visible: { open: q.open, waiting: q.waiting } } : {}),
       });
     });
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
