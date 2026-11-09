@@ -77,8 +77,11 @@ x-runner: &runner
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
 
+services:
   # The Claude pack (DR-050, BOS-972): the runner image holds no Anthropic code, so Claude Code and
   # its ACP adapter are installed on first start into a named volume the runner then mounts read-only.
+  # It is a top-level service, NOT part of the x-runner anchor above: runner-app-co depends on it, and a
+  # service can only depend on another real service (BOS-972, Dougal).
   claude-pack:
     image: boss-man-runner:current
     build:
@@ -104,7 +107,6 @@ x-runner: &runner
     mem_limit: ${BOSSMAN_CLAUDE_PACK_MEMORY:-2g}
     pids_limit: 512
 
-services:
   db:
     image: pgvector/pgvector:0.8.7-pg17-bookworm
     restart: unless-stopped
