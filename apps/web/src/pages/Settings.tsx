@@ -2160,7 +2160,7 @@ function deployerLine(v: SelfDeployView): string {
 }
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
-function SelfDeploy({ go }: { go: (to: string) => void }) {
+export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const act = useAction();
   const v = view.data;
