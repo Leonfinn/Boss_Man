@@ -1453,6 +1453,28 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         .then((rows) => rows.map((r) => ({ ...r.flag, ticketNumber: r.ticketNumber, ticketTitle: r.ticketTitle })));
     },
 
+    /**
+     * The open flags the Scrum Master can act on right now: the same test handedFlag and snooze apply
+     * (handed over, not escalated, not an owner's wait, no action used since the hand-off), so the
+     * list it is shown never offers a flag its own actions then refuse.
+     */
+    async actionableFlags(companyId: string, limit = 50) {
+      const rows = await db
+        .select({ flag: watchdogFlags, ticketNumber: tickets.number, ticketTitle: tickets.title })
+        .from(watchdogFlags)
+        .innerJoin(tickets, eq(tickets.id, watchdogFlags.ticketId))
+        .where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "open"), isNotNull(watchdogFlags.lastFlaggedAt), isNull(watchdogFlags.escalatedAt), ne(watchdogFlags.rule, "owner_decision_waiting")))
+        .orderBy(desc(watchdogFlags.openedAt));
+      const out = [];
+      for (const r of rows) {
+        const [used] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, r.flag.id), inArray(watchdogActions.kind, [...SM_ACTION_KINDS]), gte(watchdogActions.createdAt, r.flag.lastFlaggedAt!), notRecorded)).limit(1);
+        if (used) continue;
+        out.push({ ...r.flag, ticketNumber: r.ticketNumber, ticketTitle: r.ticketTitle });
+        if (out.length >= limit) break;
+      }
+      return out;
+    },
+
     async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number; excludeKind?: string }) {
       const rows = await db
         .select({ action: watchdogActions, actor: agents.name, ticketNumber: tickets.number })
