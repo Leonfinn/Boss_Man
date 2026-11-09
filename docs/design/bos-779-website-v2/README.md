@@ -8,10 +8,12 @@ These are mock-ups, not the site: the build goes into `apps/site` using its own 
 
 - `home.html`, `guide.html`: the two pages.
 - `mock.css`: tokens and the home page; `guide.css`: the guide template on top of it.
-- `scripts/seed.mts`: fills a new, empty PGlite folder with a made-up company (Fernleaf Plants) for screenshots. Never point it at real data.
-- `scripts/age.mts`, `scripts/age2.mts`: spread the made-up times so cards don't all say "just now", and put the stock question first.
+- `scripts/seed.mts`: fills a new, empty PGlite folder with a made-up website project (Fernleaf, Soo's sample data in BOS-778) for screenshots: tickets, decision cards, features with feedback, a roadmap and a feedback portal. Never point it at real data.
+- `scripts/age.mts`: spreads the made-up times so cards don't all say "just now", and puts the contact-form question first.
 - `scripts/shot.cjs`: logs in to the throwaway server and takes a screenshot (whole screen, a region or one element).
 - `scripts/render.cjs`: renders a mock-up at 1440, 840 and 390 px, full page, and warns if a page scrolls sideways.
+- `scripts/dehalo.cjs`: removes the white sticker halo round a cut-out drawing, so its own outline is its edge. Makes `img/hero-clean.png` from `hero.webp` and `img/boss-head-clean.png` from `boss-mark-256.png`. The build should ship these cleaned files.
+- `scripts/zoom.cjs`: a close-up of one element of a mock-up at one width.
 
 Images and fonts are not in the repo. To open the mock-ups, make `img/` and `fonts/` folders next to the HTML:
 
@@ -23,13 +25,15 @@ Images and fonts are not in the repo. To open the mock-ups, make `img/` and `fon
 With the web app built (`apps/web`: `vite build`) and from `apps/server`:
 
 1. `DEMO_PASSWORD=<any throwaway value> node_modules/.bin/tsx ../../docs/design/bos-779-website-v2/scripts/seed.mts /tmp/<you>-site/pg`
-2. `node_modules/.bin/tsx ../../docs/design/bos-779-website-v2/scripts/age.mts /tmp/<you>-site/pg`, then `age2.mts` the same way.
+2. `node_modules/.bin/tsx ../../docs/design/bos-779-website-v2/scripts/age.mts /tmp/<you>-site/pg`.
 3. Start a throwaway server on that folder: `PORT=3779 HOST=127.0.0.1 BOSSMAN_PGLITE_DIR=/tmp/<you>-site/pg BOSSMAN_MASTER_KEY=$(openssl rand -base64 32) BOSSMAN_INSECURE_COOKIES=1 BOSSMAN_LEADER_LOCK=0 BOSSMAN_WEB_DIR=$PWD/../web/dist node_modules/.bin/tsx src/main.ts`. Dismiss the setup checklist once (PUT `/api/setup-progress` with `{"dismissed":true}`).
 4. With `DEMO_PASSWORD` set as in step 1, from `scripts/`:
    - `board-wide.png`: `node shot.cjs "#/board/<project id>" board-wide.png 1920 1080 2`
-   - `board-crop.png`: `CLIP=500,325,1320,560 node shot.cjs "#/board/<project id>" board-crop.png 1920 1080 2`
-   - `card-phone.png`: `EL='li:has-text("At what stock level")' node shot.cjs "#/decisions" card-phone.png 390 844 3`
+   - `board-crop.png`: `CLIP=480,355,1320,560 node shot.cjs "#/board/<project id>" board-crop.png 1920 1080 2`
+   - `card-phone.png`: `EL='li:has-text("How many contact form")' node shot.cjs "#/decisions" card-phone.png 390 844 3`
    - `card-wide.png`: the same with `1100 1000 2`
-   - `agents-crop.png`: `CLIP=270,530,1150,430 node shot.cjs "#/agents" agents-crop.png 1440 1000 2`
+   - `agents-crop.png`: `CLIP=270,613,1150,430 node shot.cjs "#/agents" agents-crop.png 1440 1000 2`
+   - `roadmap-crop.png`: `CLIP=272,222,1130,580 node shot.cjs "#/roadmap" roadmap-crop.png 1440 1000 2`
+   - `portal-phone.png`: `node shot.cjs "portal.html#fernleafDemoPortalToken779abcdef" portal-phone.png 390 844 3` (the made-up portal link the seed sets)
 
-   The project id is in `GET /api/companies/<company id>/projects`; the seed prints the company id.
+   The seed prints the company and project ids.

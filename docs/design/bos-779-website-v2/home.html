@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Boss Man: run AI agents from a board, answer them from one queue</title>
+<title>Boss Man: AI agents that plan, build and review your software, on your own server</title>
+<meta name="description" content="Boss Man is free and self-hosted. Collect feedback, rank features and plan a roadmap, while AI agents write and review the code. Their questions come to one Decisions page.">
 <link rel="stylesheet" href="mock.css">
 </head>
 <body>
@@ -29,7 +30,7 @@
   <div class="wrap">
     <div class="hero-text">
       <h1>Your AI agents work through a board. You answer their questions from one queue.</h1>
-      <p class="lead">Boss Man is free software for running AI agents like a small company, on your own machine. Each agent has a job. They pick up tickets, write the code and check each other's work. When they need a decision, it comes to you with their recommendation attached.</p>
+      <p class="lead">Turn feedback into a ranked roadmap, and let AI agents plan, write and review the work on the board. When one needs your answer, a card arrives on your Decisions page with the options set out.</p>
       <div class="cta-col">
         <div class="actions">
           <a class="btn" href="#">Install Boss Man</a>
@@ -39,14 +40,14 @@
       </div>
     </div>
     <div class="stage">
-      <img class="mascot" src="img/hero.webp" alt="">
-      <div class="window board-shot"><img src="img/board-wide.png" width="1920" height="1080" alt="The Boss Man board for a sample shop. Tickets sit in columns from Backlog to Done; each shows the agent working on it. The Your review column is highlighted in amber and holds two tickets waiting for the owner."></div>
+      <div class="mascot"><img src="img/hero-clean.png" alt=""></div>
+      <div class="window board-shot"><img src="img/board-wide.png" width="1920" height="1080" alt="The Boss Man board for a sample website project. Tickets sit in columns from Backlog to Done; each shows the agent working on it and the feature it belongs to. The Your review column is highlighted in amber and holds two tickets waiting for the owner."></div>
       <figure class="card-shot">
         <span class="card-label">4 waiting on you</span>
-        <img src="img/card-phone.png" width="1074" height="1884" alt="A decision card on a phone: At what stock level should the low-stock banner show? Iris the developer recommends 5 or fewer, and the owner can tap that, another option, or write their own answer.">
+        <img src="img/card-phone.png" width="1074" height="1884" alt="A decision card on a phone: How many contact form messages can one visitor send an hour? Iris the developer recommends 5, and the owner can tap that, another option, or write their own answer.">
       </figure>
     </div>
-    <p class="caption">The board and the decision queue for Fernleaf Plants, a made-up shop. Real screenshots of Boss Man.</p>
+    <p class="caption">The board and Decisions for the Fernleaf website, a made-up project. Real screenshots of Boss Man.</p>
   </div>
 </section>
 
@@ -61,13 +62,13 @@
         <span class="pin" aria-hidden="true" style="left: calc(11.6% - 20px)">1</span>
         <span class="pin" aria-hidden="true" style="left: calc(27.7% - 20px)">2</span>
         <span class="pin" aria-hidden="true" style="left: calc(43.8% - 20px)">3</span>
-        <span class="pin" aria-hidden="true" style="left: calc(91.5% - 20px)">4</span>
+        <span class="pin" aria-hidden="true" style="left: calc(91.8% - 20px)">4</span>
       </div>
     </div>
     <p class="swipe muted">Swipe the board to see every column.</p>
     <ol class="notes">
       <li><h3>Ready to pick up</h3><p>Tickets wait here until an agent with the right job takes one.</p></li>
-      <li><h3>Being worked on</h3><p>Each card shows who has it and when it last moved. Risky work carries a flag.</p></li>
+      <li><h3>Being worked on</h3><p>Each card shows who has it, the feature it is for and when it last moved. Risky work carries a flag.</p></li>
       <li><h3>Stuck, and saying why</h3><p>A blocked ticket names what it is waiting for. The Scrum Master chases it before it goes stale.</p></li>
       <li><h3>Waiting for you</h3><p>Work that needs your sign-off turns amber. Nothing merges until you say so.</p></li>
     </ol>
@@ -78,9 +79,9 @@
 <section class="band dark">
   <div class="wrap">
     <h2>When an agent needs you, it asks once, in one place</h2>
-    <p class="intro muted">No digging through chat logs. Every question from every company lands in the Decisions queue, and the menu shows how many are waiting.</p>
+    <p class="intro muted">No digging through chat logs. Every question from every agent lands in the Decisions queue, and the menu shows how many are waiting.</p>
     <div class="queue">
-      <div class="window queue-shot"><picture><source media="(max-width: 640px)" srcset="img/card-phone.png"><img src="img/card-wide.png" width="1912" height="738" alt="A decision card from Iris the developer, linked to ticket FERN-8: At what stock level should the low-stock banner show? It shows what Iris tried first, her recommendation of 5 or fewer, and buttons for each answer."></picture></div>
+      <div class="window queue-shot"><picture><source media="(max-width: 640px)" srcset="img/card-phone.png"><img src="img/card-wide.png" width="1912" height="738" alt="A decision card from Iris the developer, linked to ticket FERN-8, Rate limit on the contact form: How many contact form messages can one visitor send an hour? It shows what Iris tried first, her recommendation of 5, and buttons for 5, 20, No limit or your own answer."></picture></div>
       <div>
         <ol class="parts">
           <li><span class="tag" aria-hidden="true">?</span><div><h3>The question, in plain words</h3><p>Linked to the ticket it holds up, so you can read the background if you want it.</p></div></li>
@@ -94,14 +95,36 @@
   </div>
 </section>
 
-<!-- 4. A week with Boss Man: the art at full size -->
+<!-- 4. Product management: feedback, priority, the roadmap and the public portal (owner's 9 Nov note) -->
+<section class="band pm">
+  <div class="wrap">
+    <h2>Feedback, features and a roadmap, next to the work</h2>
+    <p class="intro">Log what people ask for, link it to features, and Boss Man ranks them by demand and effort. Features sit on a Now, Next and Later roadmap, and move along as their tickets are done.</p>
+    <div class="pm-stage">
+      <div class="window roadmap-shot"><img src="img/roadmap-crop.png" width="2260" height="1160" alt="The Roadmap page for Fernleaf. Under the objective Twice as many sign-ups by spring, Changelog page and Faster home page are in Now, in progress. Sign-up that works on phones and Docs search are in Next, planned. Dark mode and Blog RSS feed are in Later. Each feature shows its priority score and how many of its tickets are done."></div>
+      <figure class="portal-shot">
+        <span class="card-label">Your public page</span>
+        <img src="img/portal-phone.png" width="1170" height="2532" alt="The feedback portal on a phone, titled Fernleaf: what's next. Under consideration lists Blog RSS feed and Dark mode, each with buttons for Nice to have, Important and Critical.">
+      </figure>
+    </div>
+    <p class="caption">The Roadmap page, and the feedback portal your users see. Real screenshots, made-up data.</p>
+    <ol class="pm-notes">
+      <li><p class="kicker">Feedback</p><h3>Every request in one place</h3><p>Paste in feedback, or let agents log what they hear. Link the part that asks for something to a feature, marked Nice to have, Important or Critical.</p></li>
+      <li><p class="kicker">Priority</p><h3>A score you can follow</h3><p>Each feature is scored on demand and on your own criteria, then divided by effort. A customer counts once per feature, so one loud voice cannot outweigh many quiet ones.</p></li>
+      <li><p class="kicker">Roadmap</p><h3>A roadmap tied to the tickets</h3><p>Put features in Now, Next or Later, under an objective or a dated milestone. A feature shows as in progress when its first ticket starts, and released when its tickets are done.</p></li>
+      <li><p class="kicker">Public roadmap</p><h3>A page for your users</h3><p>The feedback portal shows the features you choose as Under consideration, Planned or Released. Visitors vote, comment and suggest ideas, which arrive in Feedback marked "from outside". Anyone with its secret link can open it.</p></li>
+    </ol>
+  </div>
+</section>
+
+<!-- 5. How the work goes: the art at full size -->
 <section class="band">
   <div class="wrap">
-    <h2>What a week looks like</h2>
+    <h2>How the work goes</h2>
     <ol class="week">
-      <li><img src="img/boss-setup.webp" width="640" height="634" alt="Boss Man at a whiteboard, sketching how the work fits together."><p class="day">Monday</p><h3>Set up a company</h3><p>Name it and say what it is for. It starts with a CEO. Hire the rest from ready-made roles: developer, designer, QA, writer.</p></li>
-      <li><img src="img/boss-busy.webp" width="640" height="604" alt="Boss Man at his desk with tickets flying round him, holding a checklist."><p class="day">Tuesday to Thursday</p><h3>Hand over the work</h3><p>Write a ticket, or ask the CEO to plan a feature. Agents split it up, build it and review each other.</p></li>
-      <li><img src="img/boss-done.webp" width="640" height="605" alt="Boss Man giving two thumbs up beside a chart of finished work."><p class="day">Friday</p><h3>Make the calls</h3><p>Approve, choose or send back from the queue. Approved work is checked and merged for you.</p></li>
+      <li><img src="img/boss-setup.webp" width="640" height="634" alt="Boss Man at a whiteboard, sketching how the work fits together."><p class="day">To start</p><h3>Set up the team</h3><p>Name your company and say what it is for. It starts with a CEO, and you hire the rest from 15 ready-made roles, such as Engineer, Product Manager and QA.</p></li>
+      <li><img src="img/boss-busy.webp" width="640" height="604" alt="Boss Man at his desk with tickets flying round him, holding a checklist."><p class="day">Every day</p><h3>Hand over the work</h3><p>Write a ticket, make one from a feature, or ask the CEO to plan something larger. Agents build it on their own branches and review each other's changes.</p></li>
+      <li><img src="img/boss-done.webp" width="640" height="605" alt="Boss Man giving two thumbs up beside a chart of finished work."><p class="day">When work is ready</p><h3>Make the calls</h3><p>Answer the cards in Decisions. Boss Man runs your checks on approved work and merges it.</p></li>
     </ol>
   </div>
 </section>
@@ -109,20 +132,20 @@
 <!-- 5. Everything else: a reference list beside a real screen -->
 <section class="band" style="background: var(--paper)">
   <div class="wrap">
-    <h2>The rest of the company</h2>
+    <h2>Reviews, budgets, models and the rest</h2>
     <div class="more">
       <figure>
-        <div class="shot"><img src="img/agents-crop.png" width="2300" height="860" alt="The Agents page: Felix the QA engineer, Hana the writer, Iris the developer, Juno the designer and Owen the senior developer, each with a portrait, their open tasks and their model."></div>
+        <div class="shot"><img src="img/agents-crop.png" width="2300" height="774" alt="The Agents page: Hana the writer, Iris the developer, Juno the designer, Owen the senior developer and Priya the product manager, each with a portrait, their open tasks and their model."></div>
         <figcaption class="shot-cap muted">The Agents page. Each agent has a job, a model and its own instructions.</figcaption>
       </figure>
       <div>
         <dl class="facts-list">
           <div><dt>Reviews before merging</dt><dd>Work is checked against its "Done when" list before it merges. Risky work also waits for you.</dd></div>
           <div><dt>Budgets with a stop button</dt><dd>Spending caps per company, project or agent, and a switch that stops new runs at once.</dd></div>
-          <div><dt>Goals and a roadmap</dt><dd>Objectives you can measure, and a roadmap that shows what is blocked and by what.</dd></div>
-          <div><dt>More than one company</dt><dd>Each company has its own agents, workspace and secrets. One can ask another for work.</dd></div>
+          <div><dt>What holds work up</dt><dd>The Plan page shows which tickets wait on which, and what to move first.</dd></div>
           <div><dt>Your choice of models</dt><dd>Agents run Claude Code, Codex or OpenCode. Use a Claude or ChatGPT plan, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama.</dd></div>
           <div><dt>Add-ons when you want them</dt><dd>Phone notifications, remote access over Tailscale and a Penpot design tool.</dd></div>
+          <div><dt>More than one company</dt><dd>Each company has its own agents, runner and secrets, and one company can ask another for work.</dd></div>
         </dl>
         <p class="all"><a class="textlink" href="#">See everything in the guides</a></p>
       </div>
@@ -173,8 +196,8 @@
       </div>
     </div>
     <div class="route-wrap">
-    <img class="boss" src="img/boss-mark-256.png" alt="">
     <div class="route">
+      <span class="boss" aria-hidden="true"><img src="img/boss-head-clean.png" alt=""></span>
       <h3>The steps in the guide</h3>
       <ol>
         <li>Choose where Boss Man lives</li>
