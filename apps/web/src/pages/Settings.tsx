@@ -2395,7 +2395,7 @@ export function RunLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; reason: string | null; pending: number; applying: boolean } | null };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -2468,8 +2468,15 @@ export function CheckQueueSetting() {
         <label htmlFor="check-slots">Checks at once (1 to {d.maxSlots})</label>
         <input id="check-slots" type="number" min={1} max={d.maxSlots} value={v.slots} onChange={(e) => setEdit({ ...v, slots: e.target.value })} style={{ width: 80 }} />
         <p className="muted" style={{ fontSize: 14 }}>
-          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors.
+          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {d.runner && (
+          <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
+            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB of memory each).
+            {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
+            {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}
+          </p>
+        )}
       </div>
       {d.runnersTooOld.length > 0 && (
         <p style={{ fontSize: 14 }} data-testid="check-queue-old-runner">
@@ -2489,7 +2496,8 @@ export function CheckQueueSetting() {
               const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
               setEdit(null);
               view.reload();
-              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.` : "Saved.";
+              const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
+              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.${applied}` : `Saved.${applied}`;
             })
           }
         >

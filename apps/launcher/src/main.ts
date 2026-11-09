@@ -2,10 +2,10 @@
 //   BOSSMAN_DATA           host folder for company data, mounted at the same path here
 //   BOSSMAN_RUNNER_NETWORK the compose network runners join (default boss-man_default)
 //   BOSSMAN_RUNNER_URL     where runners reach the server (default ws://server:3100/api/runner/connect)
-//   BOSSMAN_RUNNER_MEMORY  memory limit per runner, e.g. 4g
+//   BOSSMAN_RUNNER_MEMORY  optional upper bound on a runner's memory, e.g. 8g. Normally unset: "Checks at once" in Settings sizes it (BOS-993)
 //   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
-//   BOSSMAN_CHECK_SLOTS         full checks a runner may run at once (default 1; each extra one needs about 3 GB of runner memory)
+//   BOSSMAN_CHECK_SLOTS         optional upper bound on the full checks a runner may run at once. Normally unset: "Checks at once" in Settings decides (BOS-993)
 //   BOSSMAN_OPENCODE_SESSION_DAYS  days a runner keeps OpenCode sessions (default 14, 0 = never delete)
 //   PNPM_STORE_DIR         shared pnpm store for every agent install, a folder under the workspaces volume (default: its .pnpm-store)
 //   BOSSMAN_RUNNER_CPUS    optional hard CPU cap per runner, e.g. 4 (default none)
@@ -21,7 +21,7 @@ import path from "node:path";
 import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, siblingsFromSysfs } from "./cpu-layout.js";
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
-import { launcher, launcherServer } from "./launcher.js";
+import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
 import { listLabel, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
@@ -29,6 +29,24 @@ const dataRoot = env.BOSSMAN_DATA;
 if (!dataRoot || !path.isAbsolute(dataRoot)) {
   console.error("Set BOSSMAN_DATA to an absolute host folder, mounted at the same path in this container.");
   process.exit(1);
+}
+/** The host's total memory (the container sees the host's /proc/meminfo), or undefined where it can't be read. */
+function hostMemoryBytes(): number | undefined {
+  try {
+    const kb = Number(/^MemTotal:\s+(\d+) kB/m.exec(readFileSync("/proc/meminfo", "utf8"))?.[1]);
+    return kb > 0 ? kb * 1024 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** The "Checks at once" the server last sent, kept in a file under the data folder (BOS-993). */
+function savedSlots(): number | undefined {
+  try {
+    const n = Number((JSON.parse(readFileSync(path.join(dataRoot!, CHECKS_FILE), "utf8")) as { slots?: unknown }).slots);
+    return Number.isInteger(n) && n >= 1 && n <= 16 ? n : undefined;
+  } catch {
+    return undefined;
+  }
 }
 const cpuPlan = planReserve(parseReservedThreads(env.BOSSMAN_RESERVED_THREADS), allowedThreads(), siblingsFromSysfs);
 console.log(JSON.stringify({ at: new Date().toISOString(), msg: "cpu reserve", on: cpuPlan.on, reason: cpuPlan.reason }));
@@ -43,6 +61,11 @@ const cfg: LauncherConfig = {
   pidsLimit: parsePids(env.BOSSMAN_RUNNER_PIDS),
   cpuShares: parseCpuShares(env.BOSSMAN_RUNNER_CPU_SHARES),
   checkSlots: parseCheckSlots(env.BOSSMAN_CHECK_SLOTS),
+  // BOS-993: "Checks at once" in Settings decides the slots and the memory; these .env values (when set) are only upper bounds.
+  ...(env.BOSSMAN_CHECK_SLOTS?.trim() ? { envSlotsCap: parseCheckSlots(env.BOSSMAN_CHECK_SLOTS) } : {}),
+  ...(env.BOSSMAN_RUNNER_MEMORY?.trim() ? { envMemoryCap: parseMemory(env.BOSSMAN_RUNNER_MEMORY) } : {}),
+  ...(hostMemoryBytes() ? { hostMemoryBytes: hostMemoryBytes() } : {}),
+  ...(savedSlots() ? { requestedSlots: savedSlots() } : {}),
   opencodeSessionDays: parseOpencodeSessionDays(env.BOSSMAN_OPENCODE_SESSION_DAYS),
   pnpmStoreDir: parsePnpmStoreDir(env.PNPM_STORE_DIR),
   cpus: parseCpus(env.BOSSMAN_RUNNER_CPUS),

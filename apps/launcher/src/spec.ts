@@ -48,6 +48,14 @@ export type LauncherConfig = {
   guardAllow?: string[];
   /** BOSSMAN_CHECK_SLOTS: full checks (merge gate and hand runs) a runner may run at once, 1 to 16. Unset = 1; the runner needs about 3 GB of its memory limit per extra slot. */
   checkSlots?: number;
+  /** BOS-993: the "Checks at once" the owner set in Settings, pushed by the server (PUT /checks). Unset = nothing pushed yet, so `checkSlots` and `memoryBytes` (from .env) apply as before. */
+  requestedSlots?: number;
+  /** BOS-993: BOSSMAN_CHECK_SLOTS as an upper bound, only when .env sets it. */
+  envSlotsCap?: number;
+  /** BOS-993: BOSSMAN_RUNNER_MEMORY as an upper bound, only when .env sets it. */
+  envMemoryCap?: number;
+  /** BOS-993: the host's total memory in bytes (from /proc/meminfo), when known. */
+  hostMemoryBytes?: number;
   /** BOSSMAN_OPENCODE_SESSION_DAYS: the runner deletes OpenCode sessions untouched this many days (BOS-616). Unset = the runner's default (14); 0 = never. */
   opencodeSessionDays?: number;
   /** PNPM_STORE_DIR: the shared pnpm store inside the runner, a folder under the workspaces volume (default: its .pnpm-store). */
@@ -108,9 +116,50 @@ export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.d
 export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
+const GIB = 1024 ** 3;
+/** A runner's memory: this much for the agents' own work, plus one allowance per check slot (a full check peaks at about 3 GB). One slot = 4 GB, as before. */
+export const RUNNER_BASE_BYTES = 1 * GIB;
+export const RUNNER_PER_SLOT_BYTES = 3 * GIB;
+/** Memory kept back on the host for the server, database and proxy when sizing a runner from the host's total. */
+export const HOST_RESERVE_BYTES = 2 * GIB;
+
+export type ChecksPlan = {
+  /** What the owner set in Settings (null before the server has sent it). */
+  requested: number | null;
+  /** The slots a runner made now gets. */
+  slots: number;
+  memoryBytes: number;
+  /** Why `slots` is lower than `requested`; null when it isn't. */
+  reason: string | null;
+};
+
+const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
+
+/**
+ * The runner's check slots and memory (BOS-993). The setting drives both; .env values are upper bounds and the host's
+ * memory limits what fits. With no setting pushed yet the .env values apply as before.
+ */
+export function planChecks(cfg: LauncherConfig): ChecksPlan {
+  if (cfg.requestedSlots === undefined) return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null };
+  const want = cfg.requestedSlots;
+  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES) : Infinity;
+  const ceiling = Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling);
+  const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - RUNNER_BASE_BYTES) / RUNNER_PER_SLOT_BYTES)) : Infinity;
+  const slots = Math.min(want, cfg.envSlotsCap ?? Infinity, fits);
+  const memoryBytes = Math.max(Math.min(RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES * slots, ceiling), RUNNER_BASE_BYTES);
+  let reason: string | null = null;
+  if (slots < want) {
+    if (cfg.envSlotsCap !== undefined && slots === cfg.envSlotsCap) reason = `The host's .env caps it at ${slots} (BOSSMAN_CHECK_SLOTS).`;
+    else if (cfg.envMemoryCap !== undefined && slots === fits && cfg.envMemoryCap <= hostCeiling) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
+    else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
+  }
+  return { requested: want, slots, memoryBytes, reason };
+}
+
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
 export function containerSpec(cfg: LauncherConfig, slug: string) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
+  const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = companyDir(cfg, slug);
   return {
@@ -119,7 +168,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,
       `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
-      ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : []),
+      ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
     ],
@@ -138,9 +187,9 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       PidsLimit: cfg.pidsLimit,
       // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
       Init: true,
-      Memory: cfg.memoryBytes,
+      Memory: plan.memoryBytes,
       // No swap on top of the limit, and the first to be killed if the host itself runs out (BOS-395).
-      MemorySwap: cfg.memoryBytes,
+      MemorySwap: plan.memoryBytes,
       OomScoreAdj: 500,
       // Priority, not a cap (BOS-412): when the host is busy the server and database win; when idle, runners use every core.
       CpuShares: cfg.cpuShares ?? DEFAULT_CPU_SHARES,
