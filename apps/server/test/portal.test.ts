@@ -19,10 +19,10 @@ async function setup() {
   const { cookie } = await signIn(t);
   const req = (method: "GET" | "POST" | "PATCH" | "DELETE", url: string, payload?: unknown) => t!.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json();
-  const shown = (await req("POST", `/api/companies/${company.id}/features`, { title: "Dark mode", description: "A dark theme.", portalVisible: true, status: "considering" })).json();
-  const planned = (await req("POST", `/api/companies/${company.id}/features`, { title: "CSV export", portalVisible: true, status: "planned" })).json();
+  const shown = (await req("POST", `/api/companies/${company.id}/features`, { title: "Dark mode", description: "A dark theme.", portalVisible: true, status: "considering", publicSummary: "A dark theme." })).json();
+  const planned = (await req("POST", `/api/companies/${company.id}/features`, { title: "CSV export", portalVisible: true, status: "planned", publicSummary: "Download your data." })).json();
   const hidden = (await req("POST", `/api/companies/${company.id}/features`, { title: "Secret project" })).json();
-  await req("POST", `/api/companies/${company.id}/features`, { title: "Shipped", portalVisible: true, status: "released" });
+  await req("POST", `/api/companies/${company.id}/features`, { title: "Shipped", portalVisible: true, status: "released", publicSummary: "Now live." });
   await req("POST", `/api/companies/${company.id}/features`, { title: "Nope", portalVisible: true, status: "declined" });
   return { req, company, shown, planned, hidden };
 }

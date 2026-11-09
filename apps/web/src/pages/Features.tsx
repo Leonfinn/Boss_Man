@@ -309,6 +309,21 @@ export function taskSummary(f: Feature): string {
   return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
 }
 
+/** The "On portal" tick on a list row (BOS-957): saves at once, and says why a feature is held off when it is. */
+function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+  const reason = f.portal?.reason ?? null;
+  const hint = !f.portalVisible && (reason === "security" || reason === "sensitive") ? `kept off: ${reason}` : reason === "needs public summary" ? "needs public summary" : null;
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
+        <input type="checkbox" aria-label={`On portal: ${f.title}`} checked={f.portalVisible} onChange={(e) => onPatch(f.id, { portalVisible: e.target.checked })} />
+        <span className="muted" style={{ fontSize: 12 }}>On portal</span>
+      </label>
+      {hint && <small className="muted" style={{ fontSize: 11 }}>{hint}</small>}
+    </span>
+  );
+}
+
 function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: (id: string, body: Record<string, unknown>) => void }) {
   const summary = taskSummary(f);
   const foldable = f.tickets.items.length > 0;
@@ -323,8 +338,10 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
             </button>
           )}
           <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
-          {f.portalVisible && <span className="tag">portal</span>}
         </span>
+      </td>
+      <td style={{ whiteSpace: "nowrap" }}>
+        <PortalTick f={f} onPatch={onPatch} />
       </td>
       <td>
         <select className="mini" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
@@ -370,7 +387,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
     </tr>
     {foldable && (
       <tr id={`feature-tasks-${f.id}`} hidden={!open}>
-        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
+        <td colSpan={8 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
           <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
             {f.tickets.items.map((t) => (
               <li key={t.id}>
@@ -428,13 +445,16 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
     setFold(next);
     saveFeatureOpen(next);
   };
-  const cols = 7 + (d?.drivers.length ?? 0);
+  const cols = 8 + (d?.drivers.length ?? 0);
   return (
     <>
       <header className="page-head">
         <div>
           <h1>Features</h1>
           <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
+          <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+          </p>
         </div>
       </header>
       {!company ? (
@@ -479,6 +499,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <thead>
                   <tr>
                     <th>Feature</th>
+                    <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
@@ -824,6 +845,11 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
+        </label>
+        {f.portal?.reason === "needs public summary" && <p className="muted" style={{ fontSize: 13 }}>Held off the portal until you write a public summary below: visitors see the public summary, not the internal description.</p>}
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
+          Keep off the portal (sensitive)
         </label>
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}

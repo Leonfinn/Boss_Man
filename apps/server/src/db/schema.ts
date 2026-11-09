@@ -1436,6 +1436,8 @@ export const features = pgTable(
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
+    keepOffPortal: boolean("keep_off_portal").notNull().default(false),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
     /** Off by default; nothing is published anywhere until a later public roadmap uses it. */

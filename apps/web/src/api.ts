@@ -486,8 +486,12 @@ export type Feature = {
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
+  keepOffPortal: boolean;
   publicSummary: string | null;
   showPublicly: boolean;
+  /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
+  portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
