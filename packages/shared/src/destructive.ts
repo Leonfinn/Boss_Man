@@ -513,9 +513,12 @@ function safeEditPath(w: Word): boolean {
  * when it runs is kept so it can be flagged (BOS-571).
  */
 function gcloudWords(args: Word[]): Word[] {
+  // az's short flags that take a value (gcloud has none at global level). Only these skip the next word: an unknown
+  // short flag is boolean, so `gcloud compute instances -q delete i` must keep `delete` (BOS-571 review).
   const valued = new Set([
     "--project", "--account", "--configuration", "--filter", "--format", "--impersonate-service-account", "--billing-project",
     "--subscription", "--output", "--query", "--resource-group", "-g", "-s", "--location", "-l", "--only-show-errors",
+    "-n", "--name", "-o", "--sub",
   ]);
   const out: Word[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -523,7 +526,7 @@ function gcloudWords(args: Word[]): Word[] {
     const t = a.text;
     if (t === "--") continue;
     if (t.startsWith("-")) {
-      if (valued.has(t) || /^-[a-zA-Z]$/.test(t)) i++; // its value is the next word
+      if (valued.has(t)) i++; // its value is the next word
       continue;
     }
     out.push(a);
@@ -781,10 +784,17 @@ export function commandRisks(command: string | string[]): Risk[] {
           // are matched by name (any unambiguous start, --delet) and after --, and by a word only known when it runs.
           const rm = (t: string) => t === "--" ? false : longOf(t, ["delete"]);
           const run = (t: string) => t === "--" ? false : longOf(t, ["to-command", "use-compress-program", "info-script", "new-volume-script"]);
-          // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone.
+          // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone. GNU tar also accepts
+          // the value as the next word (--checkpoint-action exec=CMD), so check both forms (BOS-571 review).
           const execAction = (t: string) => /^--check(point)?(-action)?=exec(=|$)/.test(t);
-          const shortRun = (t: string) => /^-[a-zA-Z]*I/.test(t);
-          if (args.some((a) => rm(a.text) || execAction(a.text))) return destroys("deletes files or runs a command while it archives (tar --delete)");
+          const execActionNext = (i: number) => {
+            const t = args[i]!.text;
+            if (!longOf(t, ["checkpoint-action"])) return false;
+            if (t.includes("=")) return false;
+            return /^exec(=|$)/.test(args[i + 1]?.text ?? "");
+          };
+          const shortRun = (t: string) => /^-[a-zA-Z]*I/.test(t) || (t === "--" ? false : /^[a-zA-Z]*I/.test(t));
+          if (args.some((a, i) => rm(a.text) || execAction(a.text) || execActionNext(i))) return destroys("deletes files or runs a command while it archives (tar --delete)");
           // A word only known when it runs could be that option, unless it is the value of -f or -C (tar czf "$OUT" dir).
           const valued = (i: number) => i > 0 && (/^(-[a-zA-Z]*[fC]|--file|--directory)$/.test(args[i - 1]!.text) || (i === 1 && /^[a-zA-Z]*f$/.test(args[0]!.text)));
           if (args.some((a) => run(a.text) || shortRun(a.text))) return destroys("runs a command while it archives (tar --to-command)");
@@ -897,9 +907,10 @@ export function commandRisks(command: string | string[]): Risk[] {
             const overwrite = before.some((o) => shortHas(o, "C") || longOf(o, ["force-create"]));
             if (unknownOpt || overwrite || before.some((o) => shortHas(o, "D")) || (del && force)) destroys("deletes or overwrites a branch that may not be merged (git branch -D/-C)");
           } else if (sub === "worktree") {
-            // Removing a worktree deletes its files, with -f or not (BOS-571).
+            // Removing a worktree deletes its files, with -f or not (BOS-571). prune only drops metadata of worktrees
+            // whose directories are already gone, so it is left alone.
             const op = afterOptions(rest.slice(1))[0];
-            if (op?.dynamic || op?.text === "remove" || op?.text === "prune") destroys("deletes a worktree's files (git worktree remove)");
+            if (op?.dynamic || op?.text === "remove") destroys("deletes a worktree's files (git worktree remove)");
           } else if (sub === "update-ref") {
             // -d deletes the ref, and with it the only pointer to the commits it held (BOS-571).
             if (unknownOpt || before.some((o) => shortHas(o, "d") || longOf(o, ["delete"]))) destroys("deletes a ref (git update-ref -d)");
@@ -908,10 +919,15 @@ export function commandRisks(command: string | string[]): Risk[] {
             const op = afterOptions(rest.slice(1))[0];
             if (op?.dynamic || op?.text === "expire" || op?.text === "delete") destroys("expires the reflogs that make resets recoverable (git reflog expire)");
           } else if (sub === "gc") {
-            // --prune=now/all reaches the unreachable objects a reset or branch -D left behind, so it can't be undone; an
-            // option only known when it runs could be that one. A plain gc, --auto and --quiet leave them alone (BOS-571).
-            const prunesNow = before.some((o) => /^--prun(e)?=(now|all)$/.test(o) || /^--prun(e)?$/.test(o));
+            // --prune=<date> reaches the unreachable objects a reset or branch -D left behind, so it can't be undone
+            // whatever the date (=now, =all, =1.second.ago); only --prune=never leaves them. A bare --prune prunes the
+            // default two weeks. An option only known when it runs could be that one. A plain gc, --auto and --quiet
+            // leave them alone (BOS-571).
+            const prunesNow = before.some((o) => /^--prun(e)?$/.test(o) || (/^--prun(e)?=/.test(o) && !/^--prun(e)?=never$/.test(o)));
             if (unknownOpt || prunesNow) destroys("discards unreachable commits for good (git gc --prune=now)");
+          } else if (sub === "prune") {
+            // The standalone `git prune` discards unreachable objects just as gc --prune does (BOS-571 review).
+            if (!before.some((o) => longOf(o, ["dry-run"]))) destroys("discards unreachable commits for good (git prune)");
           }
           return;
         }
