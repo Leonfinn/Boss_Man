@@ -1,8 +1,7 @@
 // Small helpers every MCP tool file shares (BOS-298 step 15): kept here so the tool files split out of
 // mcp.ts import them without importing mcp.ts back.
-
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { afterMergeLint, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
+import { afterMergeLint, isAfterMerge, readVerdicts, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, companies, projects, tickets, wakes } from "./db/schema.js";
 
@@ -84,3 +83,11 @@ export const fail = (t: string) => ({ content: [{ type: "text" as const, text: t
 export const cut = (s: string, n: number, how: (next: number) => string, offset = 0) =>
   s.length <= offset + n ? s.slice(offset) : `${s.slice(offset, offset + n)}\n\n… ${s.length - offset - n} more chars; ${how(offset + n)}`;
 export const CAP = 40_000;
+
+/** A reference like HOL-12 (any prefix: an old one still finds the number). */
+export const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
+
+/** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */
+export function criterionLines(criteria: readonly Criterion[], note: string | null): string[] {
+  return readVerdicts(criteria, note).map((r, i) => `- [${r.verdict ?? "not reported"}] ${r.criterion}${isAfterMerge(criteria[i]!) ? " (checked after merge; don't fail the review on it)" : ""}`);
+}
