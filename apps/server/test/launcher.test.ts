@@ -6,8 +6,8 @@ import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, notifications, settings } from "../src/db/schema.js";
-import { gitHostAddress, slugify, toolServerAddress } from "../src/services/launcher.js";
+import { companies, notifications, projects, settings } from "../src/db/schema.js";
+import { allowsPrivate, gitHostAddress, isLanHost, slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -62,6 +62,7 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const put = c.fake.calls.find((x) => x.method === "PUT")!;
     expect(put).toMatchObject({ path: "/runners/app-co", auth: `Bearer ${KEY}` });
+    // The token body stays { token, allow }: an older launcher refuses any other key (BOS-708).
     expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
     // The token the launcher got is the runner's real one.
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
@@ -71,15 +72,54 @@ describe("runners through the launcher (R55)", () => {
     expect(status).toMatchObject({ registered: true, connected: false, launcher: { slug: "app-co", container: { state: "running", guard: "on" } } });
   });
 
+  it("starts a runner against an old launcher that refuses extra fields, and its token still works (BOS-708, Dougal's blocker)", async () => {
+    // An older launcher accepts only { token, allow } on PUT /runners/<slug> and 400s anything else, and its /allow route
+    // ignores the private field. The server must not lose the rotated token to that 400.
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const running = new Set<string>();
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, path: url.pathname, body });
+      const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      const slug = url.pathname.split("/")[2];
+      if (method === "GET" && url.pathname === "/runners") return json(200, []);
+      if (method === "PUT" && url.pathname.endsWith("/allow")) return json(200, { slug, allow: (body as { allow: string[] }).allow });
+      if (method === "PUT") {
+        const keys = Object.keys(body as object);
+        if (keys.some((k) => k !== "token" && k !== "allow")) return json(400, { error: "Only { token, allow } is accepted." });
+        running.add(slug!);
+        return json(200, { slug, id: "abc" });
+      }
+      if (method === "DELETE") return json(200, { slug, removed: running.delete(slug!) });
+      return json(404, { error: "unknown" });
+    }) as typeof globalThis.fetch;
+    const keyFile = path.join(mkdtempSync(path.join(tmpdir(), "bm-key-")), "key");
+    writeFileSync(keyFile, `${KEY}\n`);
+    const { db, close } = await openPglite();
+    const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, fetch, launcher: { url: "http://launcher:3105", keyFile } });
+    ctx = { ...built, db, close, req: undefined as never, fake: undefined as never };
+    const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+    const { company } = (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "Old Co" } })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(calls.some((x) => x.method === "PUT" && x.path === "/runners/old-co")).toBe(true));
+    const put = calls.find((x) => x.method === "PUT" && x.path === "/runners/old-co")!;
+    // The token went in a body the old launcher accepts.
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
+    // No 400 was ever seen for that runner, and the token that was handed over still authenticates.
+    expect(await built.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
+  });
+
   it("reconnects with a new token, restarts and stops, keeping the slug after a rename", async () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.method === "PUT")).toHaveLength(1));
-    const first = (c.fake.calls.find((x) => x.method === "PUT")!.body as { token: string }).token;
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.method === "PUT" && x.path === "/runners/app-co")).toHaveLength(1));
+    const first = (c.fake.calls.find((x) => x.method === "PUT" && x.path === "/runners/app-co")!.body as { token: string }).token;
     await c.req("PATCH", `/api/companies/${company.id}`, { name: "Apps Ltd" });
 
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).json()).toEqual({ slug: "app-co" });
-    const second = (c.fake.calls.filter((x) => x.method === "PUT")[1]!.body as { token: string }).token;
+    const second = (c.fake.calls.filter((x) => x.method === "PUT" && x.path === "/runners/app-co")[1]!.body as { token: string }).token;
     expect(second).not.toBe(first);
     expect(await c.runners.authenticate(first)).toBeNull();
     expect((await c.req("POST", `/api/companies/${company.id}/runner/restart`)).statusCode).toBe(200);
@@ -110,9 +150,10 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
     expect(added.statusCode).toBe(201);
-    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"] }));
+    // A private literal the owner typed in is trusted for private, so the guard keeps it (BOS-708).
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.20:11235"], private: ["192.168.68.20:11235"] }));
     await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [], private: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
     expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
   });
@@ -141,9 +182,19 @@ describe("runners through the launcher (R55)", () => {
     const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
     const last = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body;
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"] }));
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"] }));
+    // A public git name is allowed but never trusted for private: its DNS could be pointed at the stack later (BOS-777).
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"], private: [] }));
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://git.example.org/o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["git.example.org:443"], private: [] }));
+    // A LAN-style name, ssh scp-style too, is still the owner's LAN host.
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "git@git.lan:o/r.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["git.lan:22"], private: ["git.lan:22"] }));
+    // A row saved before BOS-777 has the flag on for a public name; it is still not trusted.
+    await c.db.update(projects).set({ repoUrl: "https://git.example.org/o/r.git", allowPrivate: true }).where(eq(projects.id, p.id));
+    await c.launcher.syncAllow(company.id);
+    expect(last()).toEqual({ allow: ["git.example.org:443"], private: [] });
     expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
     expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
     expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
@@ -164,10 +215,12 @@ describe("runners through the launcher (R55)", () => {
     const q = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Odd" })).json() as { id: string };
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
     await c.req("PATCH", `/api/projects/${q.id}`, { repoUrl: "https://my_git.lan/o/r" });
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").length).toBeGreaterThan(0));
+    // Wait for both patches' own syncs to land, so clearing the log doesn't race one of them into the syncAll assertions.
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
+    await new Promise((r) => setTimeout(r, 20));
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
-    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"] } })]);
+    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] } })]);
   });
 
   it("start-up sync tries again while the launcher is coming up, and never throws", async () => {
@@ -221,5 +274,42 @@ describe("runners through the launcher (R55)", () => {
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).statusCode).toBe(409);
     expect((await c.req("GET", `/api/companies/${company.id}/runner`)).json()).toEqual({ registered: false, launcher: null });
     expect(c.fake.calls).toEqual([]);
+  });
+});
+
+describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {
+  it("trusts private IP literals and LAN-style names only", () => {
+    for (const u of ["http://192.168.68.67:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
+    for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
+  });
+});
+
+describe("allowsPrivate (BOS-708): whether a tool server is trusted for private addresses", () => {
+  const lookup = (table: Record<string, string[]>, fail = false) => async (host: string) => {
+    if (fail) throw new Error("ENOTFOUND");
+    const addrs = table[host];
+    if (!addrs) throw new Error("ENOTFOUND");
+    return addrs;
+  };
+
+  it("trusts only what the owner meant for a private address", async () => {
+    // A private IP literal can't be re-pointed; a LAN or stack-style name is the owner's own host.
+    expect(await allowsPrivate("http://172.18.0.2:5432/mcp", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://10.0.0.5:1/", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://db:5432/mcp", lookup({}))).toBe(true);
+    expect(await allowsPrivate("http://penpot.lan:8080/", lookup({}))).toBe(true);
+    // A public IP literal or a public name is not trusted.
+    expect(await allowsPrivate("http://8.8.8.8:80/", lookup({}))).toBe(false);
+    expect(await allowsPrivate("https://tools.example.org/mcp", lookup({ "tools.example.org": ["93.184.216.34"] }))).toBe(false);
+  });
+
+  it("does not trust a name whose lookup fails (Jane's finding 1): a DNS error or empty answer is not a private address", async () => {
+    expect(await allowsPrivate("https://evil.example.org/mcp", lookup({}, true))).toBe(false);
+    expect(await allowsPrivate("https://evil.example.org/mcp", lookup({ "evil.example.org": [] }))).toBe(false);
+  });
+
+  it("trusts a name only when every address it resolves to is private, so a mixed answer is not trusted", async () => {
+    expect(await allowsPrivate("https://mixed.example.org/mcp", lookup({ "mixed.example.org": ["93.184.216.34", "172.18.0.2"] }))).toBe(false);
+    expect(await allowsPrivate("https://lan.example.org/mcp", lookup({ "lan.example.org": ["172.18.0.2", "172.18.0.3"] }))).toBe(true);
   });
 });

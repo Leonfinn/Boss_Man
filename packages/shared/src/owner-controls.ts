@@ -57,6 +57,7 @@ export const OWNER_CONTROLS = {
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
+    "Release hold", "Cancel hold and review again",
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
@@ -226,7 +227,7 @@ export const OWNER_FIELDS = {
   ],
   "Reviews and CEO": [
     "Prefix", "Record only (rehearse)", "Scrum Master", "Ask after (days)", "Who runs it", "Minutes the CEO has", "Advice",
-    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Disk cap (GB)",
+    "Ask a model for a second opinion", "Provider address", "Model", "API key", "Nudges per hour", "Most minutes per run", "Disk cap (GB)",
     // The agent fence's mode (BOS-325).
     "Fence",
   ],

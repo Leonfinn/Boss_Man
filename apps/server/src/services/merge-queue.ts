@@ -8,6 +8,7 @@ import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
+import { heldTicketIds, holdView } from "./review-holds.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -37,7 +38,7 @@ export type RunningNow = {
   overLimit: boolean;
 };
 
-export type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket";
+export type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 
 /** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
 export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -354,6 +355,7 @@ export function mergeQueueService(
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
 
       const waiting: WaitingRow[] = [];
+      const heldIds = await heldTicketIds(db, ids);
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         const card = cards.get(r.id);
@@ -364,6 +366,12 @@ export function mergeQueueService(
         const waitedMs = t.getTime() - r.lastActivityAt.getTime();
         const overAnHour = waitedMs > WAITING_LIMIT_MS;
         const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: mins(waitedMs), risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
+        // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
+        const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
+        if (hold) {
+          waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
+          continue;
+        }
         if (card?.type === "risk_review") {
           waiting.push({ ...base, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: overAnHour || failedCheck, next: "Boss Man merges it as soon as you answer the sign-off.", actor: "owner", decisionId: card.id });
           continue;

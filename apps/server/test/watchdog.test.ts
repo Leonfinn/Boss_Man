@@ -313,6 +313,28 @@ describe("the Scrum Master's actions (BOS-58)", () => {
     expect(await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.dev.id))).toHaveLength(0);
   });
 
+  it("lists only flags it can act on (BOS-857): list, then nudge every listed flag works", async () => {
+    await ctx.switchOn();
+    const t = await handed();
+    // Open flags the Scrum Master can't act on: never handed over, an owner's wait, and an escalated one.
+    const never = await ctx.ticket();
+    const owner = await ctx.ticket();
+    const esc = await ctx.ticket();
+    await ctx.db.insert(watchdogFlags).values([
+      { companyId: ctx.companyId, ticketId: never.id, rule: "idle_agent" },
+      { companyId: ctx.companyId, ticketId: owner.id, rule: "owner_decision_waiting", lastFlaggedAt: ctx.now() },
+      { companyId: ctx.companyId, ticketId: esc.id, rule: "idle_agent", lastFlaggedAt: ctx.now(), escalatedAt: ctx.now() },
+    ]);
+    const listed = JSON.parse(textOf(await call({ action: "list" }))) as Array<{ flagId: string; ticketId: string }>;
+    expect(listed.map((f) => f.ticketId)).toEqual([t.id]);
+    for (const f of listed) {
+      const r = await call({ action: "nudge", ticketId: f.ticketId, reason: "Listed, so it must be actionable." });
+      expect(textOf(r)).toContain("Done and logged");
+    }
+    // Once actioned it is no longer offered.
+    expect(textOf(await call({ action: "list" }))).toBe("No open flags.");
+  });
+
   it("nudges with a logged reason, once per hand-off, and the owner's undo takes back a wake not yet delivered", async () => {
     await ctx.switchOn();
     const t = await handed();

@@ -299,16 +299,18 @@ export function schedulerService(
 
   /**
    * The funding source ids Infinite mode runs are paid from (BOS-279): a Synthetic plan with an agent on an
-   * `infinite:` model. Those runs don't spend the plan's credits (checked on the live API), so the quota hold
-   * never applies to them, and the owner's "paused" note about the plan leaves them running.
+   * `infinite:` model and no other live agent. Those runs don't spend the plan's credits (checked on the live
+   * API), so the quota hold never applies to them and there is no "paused" note to send. A plan that also pays
+   * for a normal agent is held for that agent, so the owner is told (BOS-852: it used to be skipped).
    */
   async function infiniteSourceIds() {
     const rows = await db
-      .select({ id: fundingSources.id })
+      .select({ id: fundingSources.id, model: agents.model })
       .from(fundingSources)
       .innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id))
-      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt), like(agents.model, "%/infinite:%")));
-    return new Set(rows.map((r) => r.id));
+      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt)));
+    const mixed = new Set(rows.filter((r) => !isInfiniteModel(r.model)).map((r) => r.id));
+    return new Set(rows.filter((r) => !mixed.has(r.id)).map((r) => r.id));
   }
 
   /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
@@ -1136,7 +1138,7 @@ export function schedulerService(
      * waits instead of landing on the owner.
      */
     async ceoCanRun(companyId: string): Promise<boolean> {
-      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused, model: agents.model }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo) return true;
       // A clean run since the last usage/auth failure says the account has room again.
       const since = new Date(now().getTime() - 24 * 3_600_000);
@@ -1149,7 +1151,8 @@ export function schedulerService(
       const lastFail = recent.findIndex((r) => /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i.test(r.outcome ?? ""));
       if (lastFail !== -1 && !recent.slice(0, lastFail).some((r) => r.endedAt && !/^(error|lost|interrupted)/i.test(r.outcome ?? ""))) return false;
       // The account test the scheduler uses for a routine run: soft hold only, and no window at its limit.
-      if (ceo.fundingSourceId) {
+      // A CEO on an Infinite-mode model is never held by the quota (BOS-279), so the plan's reading doesn't stop it.
+      if (ceo.fundingSourceId && !isInfiniteModel(ceo.model)) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
         if (source) {
           const samples = await latestQuotaWindows(source.id);

@@ -875,6 +875,8 @@ export class SessionManager {
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
         }
+        // BOS-853: the agent's `git fetch` reads origin from the shared repo's origin view, with no login; its pushes go nowhere.
+        for (const [key, value] of workspaces.copyGitConfig(spec.projectId)) addGitConfig(env, key, value);
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;

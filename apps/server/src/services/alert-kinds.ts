@@ -81,6 +81,11 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.runId ? [{ kind: "runActive", runId: c.runId }] : []),
   },
+  // run-time-limit.ts (BOS-846): a run was stopped for passing the owner's per-run time limit. The limit is the
+  // owner's own setting, so the card starts with them. One card per stopped run; it doesn't clear by itself.
+  run_time_limit: {
+    topRung: "owner",
+  },
   // sweeps.ts longTicketlessRuns: a run with no ticket going for a long time.
   ticketless_run: {
     topRung: "ceo",

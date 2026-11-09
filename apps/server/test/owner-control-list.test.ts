@@ -152,6 +152,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>TicketPrefix": "Reviews and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews and CEO",
   "pages/Settings.tsx>NudgeCap": "Reviews and CEO",
+  "pages/Settings.tsx>RunTimeLimit": "Reviews and CEO",
   "pages/Settings.tsx>WorkspaceDisk": "Reviews and CEO",
   "pages/Settings.tsx>AdviceTimeout": "Reviews and CEO",
   "pages/Settings.tsx>StandingRules": "Reviews and CEO",
