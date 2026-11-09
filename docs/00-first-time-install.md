@@ -428,7 +428,7 @@ docker logs --tail 50 boss-man-runner-<slug>
 - If the runner image was never built, or the canary failed in step 5, run `scripts/update-runner.sh` again, then choose **Start runner**.
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
 - Choose **Reconnect runner** to give it a fresh token and container.
-- A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner retries by itself every 30 seconds.
+- A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner keeps retrying by itself, waiting longer each time, up to 30 seconds between tries.
 - Running without the launcher? An empty token file makes the runner stop with "Set BOSSMAN_RUNNER_TOKEN_FILE...". Follow [docs/06, step 7](06-install-truenas.md#7-the-runner-token).
 
 **The port is already in use.**
@@ -456,7 +456,7 @@ grep BOSSMAN_INSECURE_COOKIES $B/src/.env
 After changing it, run `docker compose up -d` from `$B/src`. Open the page with the same address each time, so the cookie keeps working.
 
 **`docker compose` says something is not set or a file is missing.**
-Messages like "Set POSTGRES_PASSWORD in .env" or "Set BOSSMAN_DATA in .env" mean `.env` is missing, or you're not in `$B/src`. A missing secret file means step 3 wasn't finished. Check:
+A message like "Set POSTGRES_PASSWORD in .env" means `.env` is missing, or you're not in `$B/src`. (A missing `BOSSMAN_DATA` gives no message: Compose quietly uses `/srv/boss-man/data`, so check it is set.) A missing secret file means step 3 wasn't finished. Check:
 
 ```sh
 cd $B/src && ls -a . secrets

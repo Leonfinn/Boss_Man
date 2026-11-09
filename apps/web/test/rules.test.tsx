@@ -26,4 +26,14 @@ describe("decision rules", () => {
     expect(fetch).toHaveBeenCalledWith("/api/companies/c1/rule-requests", expect.objectContaining({ method: "POST", body: JSON.stringify({ text: "Let agents read GitHub freely" }) }));
     expect((screen.getByLabelText("What should this rule do?") as HTMLTextAreaElement).value).toBe("");
   });
+
+  // BOS-786: the built-in defaults line must say the CEO is asked first, as the code does.
+  it("says an unmatched request goes to the CEO first, and what comes straight to the owner", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("rule-requests") ? { ceo: { name: "Ada" } } : { company: [], global: [], defaults: [] }), { status: 200 })));
+    render(<Rules companies={[company]} companyId="c1" go={() => {}} />);
+    const line = screen.getByText(/Checked last, and can't be changed\./);
+    expect(line.textContent).toContain("A request nothing matches goes to the CEO first, and to you if the CEO does not settle it.");
+    expect(line.textContent).toContain("Deletes, moves and requests that name a path come straight to you.");
+    expect(line.textContent).not.toContain("goes to you.");
+  });
 });

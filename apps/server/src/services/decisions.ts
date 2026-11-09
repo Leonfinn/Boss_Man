@@ -62,6 +62,7 @@ import { agents, budgetPolicies, companies, decisions, deploys, engagementMessag
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
+import { lineEvent } from "./merge-line.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -462,6 +463,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
   const fix = /without [`']?workflows?[`']? (scope|permission)/i.test(why)
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
     : "";
+  await lineEvent(db, t, { event: "hold_started", hold: "card", note: `the merge didn't finish: ${why}`.slice(0, 200) });
   return db
     .insert(decisions)
     .values({

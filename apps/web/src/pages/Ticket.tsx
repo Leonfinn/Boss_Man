@@ -568,8 +568,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
                   </div>
                   <div className="field">
-                    {/* A lesson learned goes to a decision, so it only reaches the brief if the owner approves it. */}
-                    <label htmlFor="review-lesson">Lesson learned (optional) — you'll be asked whether to add it to the project brief</label>
+                    {/* A lesson learned goes to a CEO decision (BOS-105), so it only reaches the brief if the CEO approves it; the owner is told the outcome. */}
+                    <label htmlFor="review-lesson">Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome</label>
                     <input id="review-lesson" value={lesson} onChange={(e) => setLesson(e.target.value)} maxLength={240} placeholder={'One line, e.g. "Check the migration is expand-only before approving."'} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
