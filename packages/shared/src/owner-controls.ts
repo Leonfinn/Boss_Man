@@ -212,7 +212,7 @@ export const OWNER_FIELDS = {
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
-    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Search feedback",
+    "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
