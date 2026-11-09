@@ -57,7 +57,8 @@ describe("Settings → Updates says Deploy latest is the server only (BOS-868)",
     unmount();
 
     calls.length = 0;
-    vi.mocked(fetch).mockImplementation(async (url: string, init?: RequestInit) => {
+    vi.mocked(fetch).mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
       calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
       return url.endsWith("/api/self-deploy") ? json({ ...view, enabled: false }) : json([]);
     });
