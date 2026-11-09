@@ -306,7 +306,8 @@ describe("the review tool", () => {
     const call = async (agentId: string) => textOf(await (await c.mcp(agentId)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
     expect(await call(c.senior.id)).toContain("Base ");
     expect(await call(c.ceo.id)).toContain("Base ");
-    expect(await call(c.other.id)).toBe("Only your company's CEO or this ticket's reviewer reviews it.");
+    // The refusal names who holds the review, so the agent can nudge them (BOS-298 step 12).
+    expect(await call(c.other.id)).toBe("This ticket's code review is with Sam. Nudge them, or ask the CEO to add you.");
     expect(await call(c.worker.id)).toBe("You can't review a ticket assigned to you.");
   });
 
