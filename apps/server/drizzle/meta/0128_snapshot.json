@@ -1,5 +1,5 @@
 {
-  "id": "65b091ca-3527-4772-ab8d-dac4ab0e72f3",
+  "id": "873e7a18-5f01-4a42-84e9-019044040b89",
   "prevId": "d34f2886-846a-49b0-8e33-9dcfb131f27a",
   "version": "7",
   "dialect": "postgresql",
@@ -1552,12 +1552,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 30
-        },
-        "max_run_minutes": {
-          "name": "max_run_minutes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
         },
         "advice_timeout_minutes": {
           "name": "advice_timeout_minutes",
@@ -3976,6 +3970,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5491,6 +5492,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "allow_private": {
+          "name": "allow_private",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "verify_command": {
           "name": "verify_command",
           "type": "text",
@@ -6632,12 +6640,6 @@
         "cancel_requested_at": {
           "name": "cancel_requested_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stop_reason": {
-          "name": "stop_reason",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

@@ -164,7 +164,7 @@ Backups and the files copied in stage 3 are usually readable by root only, while
 
 ### Stage 3: final backup and stop (on the OLD host)
 
-1. **Wait for the CEO's message "all runs ended, merges frozen" before stopping anything.** The CEO winds the agents down. There is no single "pause everything" button in Boss Man; the only pause control is the per-agent Pause button on the Agents page, and you do not need to press it. Then stop the deployer's scheduled job in whatever scheduler the host uses (**Unconfirmed per host**).
+1. **Wait for the CEO's message "all runs ended, merges frozen" before stopping anything.** The CEO winds the agents down. You do not need to pause anything yourself; if you want to be sure nothing new starts meanwhile, press **Stop all work** under Settings → Server and runner (runs already going finish by themselves, and a banner with **Resume** shows on every page until you lift it). If you pressed it, the hold travels in the backup, so press Resume on the new host once the move is checked. Then stop the deployer's scheduled job in whatever scheduler the host uses (**Unconfirmed per host**).
 2. **Stop everything that writes, but keep the database running.** The server writes all the time (heartbeats, events, sessions) and Tailscale rewrites its state, so a backup or copy taken while they run can miss data or be torn. Stop the server (both colours under blue/green), the proxy, the launcher and Tailscale; leave `db` up:
 
 ```sh

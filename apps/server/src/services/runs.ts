@@ -170,6 +170,25 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
       return { cancelled: true };
     },
 
+    /**
+     * Ends every run going now, in every company, through the per-run cancel above (BOS-837): a runner that is
+     * offline ends its run here with the same "stopped: runner offline". Returns how many it cancelled. Runs that
+     * ended while this was working are left as they are, not counted.
+     */
+    async cancelAll() {
+      const live = await db.select({ id: runs.id }).from(runs).where(isNull(runs.endedAt));
+      let cancelled = 0;
+      for (const { id } of live) {
+        const r = await this.cancel(id).catch((err: unknown) => {
+          // It ended on its own between the list and the cancel: exactly what the owner wanted, so not an error.
+          if (err instanceof RunError && err.status === 409) return null;
+          throw err;
+        });
+        if (r) cancelled++;
+      }
+      return { cancelled };
+    },
+
     /** Ends runs whose runner was told to stop them but never confirmed within the guard time. Called by the sweep. */
     async endUnconfirmedCancels(t: Date) {
       const waiting = await db.select({ id: runs.id, at: runs.cancelRequestedAt }).from(runs).where(and(isNull(runs.endedAt), isNotNull(runs.cancelRequestedAt)));

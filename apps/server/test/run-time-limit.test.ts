@@ -84,6 +84,18 @@ describe("run time limit", () => {
     expect((await ctx.db.select().from(companies).where(eq(companies.id, ctx.company.id)))[0]!.maxRunMinutes).toBe(90);
   });
 
+  it("Raise the limit never goes above the 10080-minute cap the Settings field accepts", async () => {
+    ctx = await setup();
+    await ctx.limit(9000);
+    await ctx.startRun(9100);
+    await ctx.sweeps.run();
+    const cards = await ctx.limitCards();
+    expect(cards).toHaveLength(1);
+    const answered = await ctx.req("POST", `/api/decisions/${cards[0]!.id}/answer`, { answer: "Raise the limit" });
+    expect(answered.statusCode).toBe(200);
+    expect((await ctx.db.select().from(companies).where(eq(companies.id, ctx.company.id)))[0]!.maxRunMinutes).toBe(10080);
+  });
+
   it("Leave it changes nothing, and clearing the limit with null switches it off", async () => {
     ctx = await setup();
     await ctx.limit(30);
