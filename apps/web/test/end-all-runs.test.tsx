@@ -83,7 +83,7 @@ describe("the Runs page's 'End all running runs' button (BOS-837)", () => {
 
   it("says one run, not one runs", async () => {
     stub([liveRun()], 1);
-    const asked = vi.fn(() => true);
+    const asked = vi.fn((_text: string) => true);
     vi.stubGlobal("confirm", asked);
     render(<Runs companies={companies} />);
     fireEvent.click(await screen.findByRole("button", { name: "End all running runs" }));
