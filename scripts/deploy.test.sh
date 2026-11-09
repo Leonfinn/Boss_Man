@@ -100,6 +100,10 @@ grep -q "To go back to the old code (does not touch the database)" "$t/unhealthy
 grep -q "api/ready" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't ask to check the restore"; exit 1; }
 grep -q "To undo the restore" "$t/unhealthy.out" || { echo "FAIL: rollback help doesn't say how to undo the restore"; exit 1; }
 grep -q "before-restore-" "$t/unhealthy.out" || { echo "FAIL: undo step doesn't use step 3's copy"; exit 1; }
+# BOS-882: the undo step must name step 3's file, not work out a new timestamp minutes later (which never matches).
+undo="$(grep "To undo the restore" "$t/unhealthy.out")"
+! grep -q 'date +%F-%H%M' <<<"$undo" || { echo "FAIL: undo step works out a fresh timestamp instead of naming step 3's file"; exit 1; }
+grep -q 'ls -t ../before-restore-\*.sql.gz | head -1' <<<"$undo" || { echo "FAIL: undo step doesn't say how to find step 3's file"; exit 1; }
 ! grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t/unhealthy.out" || { echo "FAIL: rollback help hard-codes an IP address"; exit 1; }
 # A restart (BOS-647): --force at the commit that runs recreates the server (an unchanged image would leave it running),
 # leaves the launcher alone and keeps the rollback record, so --rollback still goes back to the release before.

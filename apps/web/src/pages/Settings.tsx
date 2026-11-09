@@ -2646,32 +2646,86 @@ export function ThisHost() {
   );
 }
 
+type AutomaticEntryView = {
+  address: string;
+  kind: "tool server" | "git host";
+  name: string;
+  company: string | null;
+  trusted: boolean;
+  notAllowed: string | null;
+};
+
 type NetguardAllowView = {
   report: {
     mode: string | null;
     entries: { entry: string; coveredBy: string[]; note: string | null }[] | null;
     lineCanGo: boolean;
+    automatic: AutomaticEntryView[] | null;
     env: { lines: string[][]; reportedAt: string; envFound: boolean } | null;
     warnings: string[];
   } | null;
 };
 
-/** Settings → Network guard allow list (BOS-770): the BOSSMAN_NETGUARD_ALLOW entries in .env, and which ones Boss Man already covers. Read only. */
+/** What an address the guard opens by itself is, in plain words. */
+function automaticLabel(e: AutomaticEntryView): string {
+  return e.kind === "git host" ? `git host for the project "${e.name}"` : `tool server "${e.name}"`;
+}
+
+/**
+ * Settings → Network guard (BOS-770, BOS-791): what runners may reach. The addresses Boss Man opens by itself (each
+ * company's tool servers and project git hosts), then the owner's own BOSSMAN_NETGUARD_ALLOW lines from .env, with the
+ * ones Boss Man already covers marked. An address the guard now drops shows as not allowed, with the reason.
+ * Read only: it never changes .env.
+ */
 export function NetguardAllow() {
   const q = usePoll((signal) => api<NetguardAllowView>("/api/netguard-allow", { signal }), 60_000, "netguard-allow");
   const r = q.data?.report;
   if (!r) return null;
   const lines = r.env?.lines ?? [];
+  const automatic = r.automatic ?? [];
+  const notAllowed = automatic.filter((e) => e.notAllowed !== null);
   return (
-    <Section id="netguard-allow-h" title="Network guard: extra allowed addresses">
+    <Section id="netguard-allow-h" title="Network guard: addresses runners may reach">
       <p className="muted" style={{ fontSize: 14 }}>
-        Addresses on your private network that every runner may reach, from the BOSSMAN_NETGUARD_ALLOW line in your .env. Boss Man already lets each company reach its own tool servers and its projects' git hosts, so those don't need a line here. This page only reports; it never changes .env.
+        Two lists: the addresses Boss Man opens for your runners by itself, and any extra addresses you added in your .env. This page only reports; it never changes .env.
       </p>
-      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so this list isn't used.</p>}
+      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so these lists aren't used.</p>}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Allowed automatically</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses Boss Man opens itself: each company's tool servers and its projects' git hosts. A company's entries are only reachable from that company's own runners.
+      </p>
+      {r.automatic === null ? (
+        <p className="muted" data-testid="netguard-automatic-unknown">Boss Man couldn't work out the addresses it opens by itself just now.</p>
+      ) : automatic.length === 0 ? (
+        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses.</p>
+      ) : (
+        <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
+          {automatic.map((e) => (
+            <li key={`${e.company ?? ""}|${e.address}`}>
+              <span className="mono">{e.address}</span> <span className="muted">· {automaticLabel(e)}</span>
+              {e.company && <span className="muted"> · for {e.company}</span>}
+              {e.notAllowed ? (
+                <span className="error" data-testid="netguard-not-allowed"> · {e.notAllowed}</span>
+              ) : (
+                <span className="muted"> · allowed</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {notAllowed.length > 0 && (
+        <p className="error" role="alert" data-testid="netguard-not-allowed-summary">
+          {notAllowed.length === 1 ? "One address above is not allowed" : `${notAllowed.length} addresses above are not allowed`}, so runners can't reach {notAllowed.length === 1 ? "it" : "them"}.
+        </p>
+      )}
+      <h3 style={{ fontSize: 15, fontWeight: 600 }}>Extra lines from your .env</h3>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses you added in the BOSSMAN_NETGUARD_ALLOW line in your .env, so every runner may reach them. Anything Boss Man already opens by itself doesn't need a line here.
+      </p>
       {r.entries === null ? (
         <p className="muted">The launcher didn't say which entries it uses (it isn't running, or it is older than this page).</p>
       ) : r.entries.length === 0 ? (
-        <p data-testid="netguard-allow-empty">The launcher has no extra entries.</p>
+        <p data-testid="netguard-allow-empty">You have no extra lines.</p>
       ) : (
         <ul data-testid="netguard-allow-entries" style={{ fontSize: 14 }}>
           {r.entries.map((e) => (
