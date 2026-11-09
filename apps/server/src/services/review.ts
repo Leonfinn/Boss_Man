@@ -5,7 +5,7 @@ import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
-import { addTicketDependency } from "./ticket-links.js";
+import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
@@ -174,10 +174,13 @@ export class SignoffPendingError extends ReviewError {
  * is a normal wait: no failure trail, no retry card.
  */
 export class ReviewHeldError extends ReviewError {
-  constructor() {
-    super(409, "A reviewer passed this work but is holding the merge, so nothing was merged. Release the hold first (on the ticket page, or the reviewer or the CEO can); it merges after that.");
+  constructor(message = "A reviewer passed this work but is holding the merge, so nothing was merged. Release the hold first (on the ticket page, or the reviewer or the CEO can); it merges after that.") {
+    super(409, message);
   }
 }
+
+/** The same wait for an open card raised against the ticket (BOS-919, DR-047 point 3): the merge goes ahead once it is answered. */
+const cardHeld = (cardId: string) => new ReviewHeldError(`The card ${cardId} raised on this ticket is still open, so nothing was merged. Answer it first; the merge is started again after that.`);
 
 /** What a reviewer asks for with "Passed, hold merge" (BOS-808). */
 export type HoldInput = { reason: string; waitsOn: HoldWaitInput[]; releaseAt: Date | null };
@@ -1140,6 +1143,8 @@ export function reviewService(
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
       // Nor while a reviewer holds the merge (BOS-808): a normal wait, no marker and no card.
       if (await openHold(db, ticketId)) throw new ReviewHeldError();
+      const card = await openHoldingCard(db, ticketId);
+      if (card) throw cardHeld(card);
       const startedAt = await this.claimLanding(ticketId, reviewer);
       let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
       try {
@@ -1408,6 +1413,10 @@ export function reviewService(
       if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
       // Nor past a reviewer's hold (BOS-808); every merge path comes through here, so this fails them all closed.
       if (await openHold(db, ticketId)) throw new ReviewHeldError();
+      // Nor past an open card raised on the ticket (BOS-919): a card no longer moves a ticket in review to blocked,
+      // so this is what keeps the merge waiting for the answer.
+      const card = await openHoldingCard(db, ticketId);
+      if (card) throw cardHeld(card);
       // Nor past a sign-off that isn't recorded (BOS-503, DR-021): a lost card used to let the unmerged-approvals
       // retry and carried-work landing merge a high-risk ticket the owner never saw. Every path into a merge comes
       // through here, so this one check fails them all closed. A card that went missing is raised again.
