@@ -5,6 +5,8 @@ import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
 import { useMediaQuery, usePoll, useRoute } from "./hooks";
 import { useNewBuild } from "./new-build";
+import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
+import { setHold, useHold } from "./hold";
 import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
@@ -110,13 +112,60 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
 
 /** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
 export function NewBuildBanner({ newer }: { newer: boolean }) {
+  // BOS-773: if this browser holds any kept text, say plainly that reloading won't lose it, so the
+  // owner isn't warned off by the reload prompt. Kept live: it changes as drafts are typed and cleared.
+  const [kept, setKept] = useState(() => hasAnyDraft());
+  useEffect(() => {
+    if (!newer) return;
+    const update = () => setKept(hasAnyDraft());
+    update();
+    window.addEventListener(DRAFT_CHANGED, update);
+    window.addEventListener("storage", update);
+    return () => {
+      window.removeEventListener(DRAFT_CHANGED, update);
+      window.removeEventListener("storage", update);
+    };
+  }, [newer]);
   if (!newer) return null;
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <span>Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.</span>
+      <span>
+        Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.
+        {kept ? " What you've typed is kept: it comes back when the page reloads." : " Nothing you've typed is lost by reloading: every text box keeps a draft."}
+      </span>
       <button className="btn" type="button" onClick={() => window.location.reload()}>
         Reload
       </button>
+    </p>
+  );
+}
+
+/** On every page while the owner's "Stop all work" hold is on (BOS-836), with the one button that lifts it. */
+export function HoldBanner() {
+  const hold = useHold();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (hold.data?.paused !== true) return null;
+  const resume = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setHold(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        <strong>All work is stopped.</strong> No new agent runs start in any company until you resume; runs already going finish by themselves.
+      </span>
+      <button className="btn" type="button" disabled={busy} onClick={() => void resume()}>
+        Resume
+      </button>
+      {error && <span role="alert" className="error">{error}</span>}
     </p>
   );
 }
@@ -268,6 +317,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <HoldBanner />
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>

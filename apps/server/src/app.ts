@@ -9,7 +9,7 @@ import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, featureHorizon, findCredential, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
-import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
+import { NO_CHECK, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -26,7 +26,7 @@ import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
-import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
+import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
@@ -54,7 +54,8 @@ import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shar
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
-import { isSignoffPending, ReviewError, reviewService } from "./services/review.js";
+import { holdView } from "./services/review-holds.js";
+import { isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -71,11 +72,11 @@ import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
+import { mergeJamService } from "./services/merge-jam.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
-import { SkillError, skillsService } from "./services/skills.js";
-import { skillChangeEntry, skillSide } from "./services/skill-files.js";
+import { skillsService } from "./services/skills.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { ownerRepliesService } from "./services/owner-replies.js";
@@ -83,7 +84,7 @@ import { buildBrief } from "./services/brief.js";
 import { getStandingRules, setStandingRules, standingRulesError, STANDING_RULES_MAX, undoStandingRules } from "./services/standing-rules.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
-import { cleanFolder, HISTORY_PAGE_MAX, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
+import { wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
@@ -91,8 +92,10 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
-import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
+import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
+import { wikiRoutes } from "./routes/wiki.js";
+import { skillRoutes } from "./routes/skills.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -146,7 +149,7 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
-  /** The portal's own address for share links, e.g. http://192.168.68.67:3111; without it links use the owner's address. */
+  /** The portal's own address for share links, e.g. http://192.0.2.10:3111; without it links use the owner's address. */
   portalUrl?: string;
   /** Rate limits on the public feedback portal; tests lower them. */
   portalLimits?: Partial<PortalLimits>;
@@ -156,6 +159,8 @@ export type AppOptions = {
   serverHealth?: Partial<Pick<ServerHealthDeps, "rssMb" | "memoryLimit" | "stallsSince">>;
   /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
   launcher?: LauncherOptions;
+  /** DNS lookup for the network-guard page's "resolves to a private address" check (BOS-791); tests pass a made-up one. */
+  lookup?: HostLookup;
   /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
   deployerDir?: string;
   /** How long a runner update waits for runs to finish before asking the owner (default 30). */
@@ -263,7 +268,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
-  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
+  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
@@ -322,6 +327,10 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
+    // DR-033: the runner resolves a deploy's commit and moves its tag; a tag it can't move goes to the CEO (`alerts` is built below).
+    runners,
+    alert: (input) => alerts.raise(input),
+    log: (m) => app.log.warn(m),
     onShipped: async (ticketId) => {
       const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(t?.featureId);
@@ -440,7 +449,8 @@ export async function buildApp(opts: AppOptions) {
       log: (line) => app.log.warn({ memoryJump: line }, "memory jump"),
     },
   });
-  // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries; null when neither the launcher nor the host has anything to say.
+  // BOS-770: the owner's BOSSMAN_NETGUARD_ALLOW entries, and (BOS-791) what the guard opens by itself; null when neither
+  // the launcher nor the host has anything to say.
   const netguardAllow = async () => {
     const [launcher, env] = await Promise.all([launch.netguardConfig(), hostFacts.netguardEnv().catch(() => null)]);
     if (!launcher && !env) return null;
@@ -477,7 +487,7 @@ export async function buildApp(opts: AppOptions) {
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
-  const runsSvc = runsService(db, { runners, now: opts.now });
+  const runsSvc = runsService(db, { runners, now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   // The owner's unanswered ticket messages (BOS-425). The scheduler and the alert ladder are built
@@ -505,7 +515,7 @@ export async function buildApp(opts: AppOptions) {
   runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setSelfDeployHook(selfDeploy);
-  decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
+  decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   decisionsSvc.setModelChangeHook((ctx, companyId, config) => agentsSvc.applyModelChange(ctx, companyId, config));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
@@ -636,6 +646,9 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing cards failed"));
   });
   const sweeps = sweepService(db, {
+    // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
+    // built below, so this resolves it per pass.
+    mergeJam: () => mergeJam.run(),
     clearAlerts: () => clearing.check(),
     // A feature the roadmap commits to but nothing is working on (BOS-595): the sweep raises one CEO
     // card, which the one closer above withdraws as soon as a ticket is linked to the feature.
@@ -675,6 +688,8 @@ export async function buildApp(opts: AppOptions) {
     requeue: (input) => scheduler.wake(input),
     cancelOnRunner: (runnerId, runId) => runners.send(runnerId, { type: "run.cancel", runId }),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
+    // The run time limit stops a run through the Stop button's own cancel (BOS-846).
+    cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
@@ -743,6 +758,7 @@ export async function buildApp(opts: AppOptions) {
     },
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     localHour: (t) => Number(formatDate("en-GB", t, { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ })),
     now: opts.now,
     log: (m) => app.log.error(m),
@@ -758,6 +774,7 @@ export async function buildApp(opts: AppOptions) {
     nudge: (input) => scheduler.nudge(input),
     ceoCanRun: (companyId) => scheduler.ceoCanRun(companyId),
     hosts: () => hostFacts.hosts(),
+    serverHost: () => hostFacts.serverHost(),
     clearExpired: async () => {
       const n = await clearing.check();
       if (n) await notes.syncDecisions();
@@ -857,6 +874,13 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setDeployWaitHook(deployWait);
+  // The merge line jam alert (BOS-766): the same view the Merge queue screen reads, and the owner's own
+  // notification service, so quiet hours and caps apply as for every other notification.
+  const mergeJam = mergeJamService(db, {
+    view: (companyId) => mergeQueue.get(companyId),
+    notify: (input) => notes.notify(input),
+    now: opts.now,
+  });
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A sign-off card for older code is replaced before the press is taken, with the reason (BOS-734).
@@ -875,7 +899,7 @@ export async function buildApp(opts: AppOptions) {
         : review.startLanding(ticketId, reviewer)
       ).catch(async (err) => {
         // Waiting on the sign-off, or another merge already running, is a wait, not a failed merge: no card.
-        if (isSignoffPending(err)) return;
+        if (isSignoffPending(err) || err instanceof ReviewHeldError) return;
         if (err instanceof ReviewError && /already being checked and merged/i.test(err.message)) return;
         // A landing that couldn't start has already left a trail and a card (startLanding), so raise nothing
         // more, so a single failed press never leaves two cards saying the same thing; log it in case an
@@ -1091,7 +1115,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1314,6 +1338,35 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
       return runLimits();
     });
+    // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
+    // Owner only: no agent tool or route writes these settings.
+    const checkQueueView = async () => {
+      const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
+      const live = rows.filter((r) => runners.isConnected(r.id));
+      return {
+        mode: await checkQueueSvc.mode(),
+        slots: await checkQueueSvc.slots(),
+        maxSlots: MAX_CHECK_SLOTS,
+        defaultSlots: DEFAULT_CHECK_SLOTS,
+        // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
+        runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
+      };
+    };
+    owner.get("/api/settings/check-queue", async () => checkQueueView());
+    owner.put("/api/settings/check-queue", async (req) => {
+      const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
+      const was = await checkQueueSvc.mode();
+      await checkQueueSvc.setSlots(b.slots);
+      await checkQueueSvc.setMode(b.mode);
+      // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
+      // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
+      let cancelled = 0;
+      if (was === "server" && b.mode === "legacy")
+        for (const id of await checkQueueSvc.queuedIds())
+          if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
+      if (b.mode === "server") await checks.pump();
+      return { ...(await checkQueueView()), cancelled };
+    });
     // BOS-313: check the merged result before pushing it (off by default while it rolls out).
     owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
     owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
@@ -1471,7 +1524,10 @@ export async function buildApp(opts: AppOptions) {
       const b = McpServerInput.parse(req.body);
       const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
       if (!c) return reply.code(404).send({ error: "not_found" });
-      const [row] = await db.insert(mcpServers).values({ ...b, companyId: id }).onConflictDoNothing().returning();
+      // The owner typed this one in, so a private host (or a LAN name) is meant; a public name they add is not trusted,
+      // since it could be re-pointed at a private address later (BOS-708).
+      const allowPrivate = await allowsPrivate(b.url);
+      const [row] = await db.insert(mcpServers).values({ ...b, companyId: id, allowPrivate }).onConflictDoNothing().returning();
       if (row) void launch.syncAllow(id);
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
     });
@@ -1687,7 +1743,7 @@ export async function buildApp(opts: AppOptions) {
             .string()
             .trim()
             .max(500)
-            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.168.68.67:3003/you/repo.git.")
+            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.0.2.10:3003/you/repo.git.")
             .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
@@ -1720,6 +1776,8 @@ export async function buildApp(opts: AppOptions) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
         Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
       }
+      // The owner set this git address themselves, so its private address is meant (a LAN git server); the guard keeps it (BOS-708).
+      if (fields.repoUrl !== undefined) Object.assign(fields, { allowPrivate: !!fields.repoUrl });
       const [p] = await db
         .update(projects)
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
@@ -1901,7 +1959,7 @@ export async function buildApp(opts: AppOptions) {
       const signoffNow = (await signoffState(db, row.t)).state;
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow };
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1956,112 +2014,8 @@ export async function buildApp(opts: AppOptions) {
         .catch(ticketChatErrors(reply));
     });
 
-    // Skills (R71): the company's library, and who has what.
-    const skillErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
-      if (err instanceof SkillError) return reply.code(err.status).send({ error: "skill", message: err.message });
-      throw err;
-    };
-    const SkillParams = z.object({ id: Uuid, skillId: Uuid });
-    const SkillFiles = z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000) })).min(1).max(200);
-    // Skills the CEO proposed: the owner answers through the decision; these show what is behind it.
-    owner.get("/api/companies/:id/skill-proposals", async (req) => skillProposals.list(IdParam.parse(req.params).id));
-    owner.get("/api/companies/:id/skill-proposals/:pid", async (req, reply) => {
-      const { id, pid } = z.object({ id: Uuid, pid: Uuid }).parse(req.params);
-      return skillProposals.detail(id, pid).catch(skillErrors(reply));
-    });
-    owner.get("/api/companies/:id/skills", async (req) => skillsSvc.list(IdParam.parse(req.params).id));
-    owner.post("/api/companies/:id/skills", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z
-        .discriminatedUnion("from", [
-          z.object({ from: z.literal("link"), url: z.string().url().max(2000) }),
-          z.object({ from: z.literal("written"), name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }),
-          z.object({ from: z.literal("upload"), name: z.string().trim().max(64).optional(), files: SkillFiles }),
-        ])
-        .parse(req.body);
-      try {
-        const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
-        // The owner's own add is their call, but it skips the review: say so in the log.
-        for (const x of added) await record(db, { companyId: id, kind: "skill.added_by_owner", summary: `The owner added the skill ${x.name} directly (${b.from === "link" ? `from ${b.url}` : b.from}). Added by the owner, not security-reviewed.` });
-        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name, sourceRef: s.sourceRef })));
-      } catch (err) {
-        return skillErrors(reply)(err);
-      }
-    });
-    // Other companies' skills, to copy into this one (not which agents hold them).
-    owner.get("/api/companies/:id/skills/elsewhere", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const { q } = z.object({ q: z.string().max(100).default("") }).parse(req.query);
-      return skillsSvc.searchElsewhere(id, q);
-    });
-    owner.post("/api/companies/:id/skills/copy", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { skillId } = z.object({ skillId: Uuid }).parse(req.body);
-      return skillsSvc.copyFrom(id, skillId).then((s) => reply.code(201).send(s), skillErrors(reply));
-    });
-    owner.get("/api/companies/:id/skills/:skillId", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      return skillsSvc.get(id, skillId).catch(skillErrors(reply));
-    });
-    owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000), confirmEmptyBody: z.boolean().optional() }).parse(req.body);
-      try {
-        // The edit replaces the skill's files: keep the old text so the log says what actually changed.
-        const old = await skillsSvc.get(id, skillId);
-        const oldSkillMd = old.files.find((f) => f.path === "SKILL.md")?.text ?? "";
-        const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
-        // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
-        const entry = skillChangeEntry(
-          skillId,
-          { name: old.name, description: old.description, bundleHash: old.bundleHash, skillMd: oldSkillMd, paths: old.files.map((f) => f.path) },
-          skillSide(s),
-          (from, to, was) => `Owner edited the skill ${s.name}${was} from ${from} to ${to}`,
-          " Not security-reviewed; full text in detail.",
-        );
-        await record(db, { companyId: id, kind: "skill.edited_by_owner", ...entry });
-        return { id: s.id, name: s.name };
-      } catch (err) {
-        return skillErrors(reply)(err);
-      }
-    });
-    owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      return skillProposals.proposeRefresh(id, skillId).then((p) => ({ changed: !!p, proposalId: p?.id ?? null, status: p?.status ?? null }), skillErrors(reply));
-    });
-    owner.delete("/api/companies/:id/skills/:skillId", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      return skillsSvc.remove(id, skillId).then(() => reply.code(204).send(), skillErrors(reply));
-    });
-    // Packs: skills added together from one link (R71), given and updated as one. A pack's name
-    // has a slash in it (owner/repo), so it travels in the body or the query.
-    const PackName = z.string().min(1).max(200);
-    owner.put("/api/companies/:id/skill-packs/agents", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { pack, agentIds } = z.object({ pack: PackName, agentIds: z.array(Uuid).max(200) }).parse(req.body);
-      return skillsSvc.setPackHolders(id, pack, agentIds).then(() => ({ pack, agentIds }), skillErrors(reply));
-    });
-    owner.post("/api/companies/:id/skill-packs/refresh", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { pack } = z.object({ pack: PackName }).parse(req.body);
-      return skillProposals.proposeRefreshPack(id, pack).catch(skillErrors(reply));
-    });
-    owner.delete("/api/companies/:id/skill-packs", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { pack } = z.object({ pack: PackName }).parse(req.query);
-      return skillsSvc.removePack(id, pack).then(() => reply.code(204).send(), skillErrors(reply));
-    });
-    owner.put("/api/companies/:id/skills/:skillId/addons", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      const { requires } = z.object({ requires: z.array(z.string().max(40)).max(10) }).parse(req.body);
-      return skillsSvc.setRequires(id, skillId, requires).then(() => ({ requires }), skillErrors(reply));
-    });
-    owner.get("/api/runner-addons", async () => RUNNER_ADDONS);
-    owner.put("/api/companies/:id/skills/:skillId/agents", async (req, reply) => {
-      const { id, skillId } = SkillParams.parse(req.params);
-      const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);
-      return skillsSvc.setHolders(id, skillId, agentIds).then(() => ({ agentIds }), skillErrors(reply));
-    });
+    // Skills and packs (R71): routes/skills.ts, on this owner scope.
+    skillRoutes(owner, db, { skillsSvc, skillProposals });
 
     // The company as one file (docs/11): set-up always; wiki and tickets when asked. Read-only.
     owner.get("/api/companies/:id/export", async (req, reply) => {
@@ -2131,16 +2085,6 @@ export async function buildApp(opts: AppOptions) {
       return r && !r.started ? reply.code(409).send({ error: "retro", message: r.reason }) : reply.code(201).send(r);
     });
 
-    // The company wiki, and what each ticket produced (R69).
-    const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
-      if (err instanceof WikiError) return reply.code(err.status).send({ error: "wiki", message: err.message });
-      throw err;
-    };
-    // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
-    const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
-    const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
-    // The owner's own editor may replace a page outright; the shrink guard is for agents (BOS-430).
-    const OwnerPageBody = PageBody.extend({ replace: z.boolean().optional() });
     // The CEO-style brief, built when asked and never stored as a page (R84).
     owner.get("/api/companies/:id/brief", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2148,64 +2092,8 @@ export async function buildApp(opts: AppOptions) {
       if (!c) return reply.code(404).send({ error: "not_found" });
       return { markdown: await buildBrief(db, { companyId: id, agentId: null, role: "ceo", since: null, now: opts.now?.() ?? new Date(), plain: true }) };
     });
-    owner.get("/api/companies/:id/wiki", async (req) => wiki.list(IdParam.parse(req.params).id, z.object({ q: z.string().max(200).optional() }).parse(req.query).q));
-    owner.post("/api/companies/:id/wiki", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = PageBody.parse(req.body);
-      try {
-        const slug = pageSlug(cleanFolder(b.folder ?? ""), b.title);
-        const [taken] = (await wiki.list(id)).filter((p) => p.slug === slug);
-        if (taken) return reply.code(409).send({ error: "wiki", message: `There's already a page called "${taken.title}" there. Open it to change it, or pick another title.` });
-        const r = await wiki.write(id, { ...b, slug, folder: b.folder ?? "", agentId: null, runId: null });
-        return reply.code(201).send(r.page);
-      } catch (err) {
-        return wikiErrors(reply)(err);
-      }
-    });
-    owner.get("/api/companies/:id/wiki/*", async (req, reply) => {
-      const { id, slug } = SlugParams.parse(req.params);
-      // versions=1 lists every saved version of the page, newest first, in pages: the history
-      // screen uses it to reach versions past the newest 100 the page itself carries (BOS-496).
-      if ((req.query as Record<string, string | undefined>).versions === "1") {
-        const q = z.object({ offset: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_MAX).optional() }).parse(req.query);
-        return wiki.versions(id, slug, q).catch(wikiErrors(reply));
-      }
-      return wiki.get(id, slug).catch(wikiErrors(reply));
-    });
-    owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
-      const { id, slug } = SlugParams.parse(req.params);
-      return wiki.write(id, { ...OwnerPageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
-    });
-    owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
-      const { id, slug } = SlugParams.parse(req.params);
-      return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
-    });
-    // Put an old version back (BOS-430): a new version of its own, so the restore can be undone.
-    // The page's slug goes in the body, as a page address can hold folders and Fastify's wildcard must be last.
-    owner.post("/api/companies/:id/wiki-restore", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ slug: z.string().min(1).max(500), revisionId: Uuid }).parse(req.body);
-      return wiki.restore(id, { ...b, agentId: null, runId: null, isCeo: true }).then((r) => r.page, wikiErrors(reply));
-    });
-    owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
-      const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
-      return wiki.revision(id, rev).catch(wikiErrors(reply));
-    });
-    // Semantic wiki search settings. dims stays at the 768 the embeddings column holds.
-    const semanticView = (s: Awaited<ReturnType<typeof semantic.settings>>) => ({ enabled: s.enabled, baseUrl: s.baseUrl, model: s.model, dims: s.dims, secretId: s.secretId });
-    owner.get("/api/companies/:id/wiki-semantic", async (req) => {
-      const id = IdParam.parse(req.params).id;
-      return { ...semanticView(await semantic.settings(id)), status: await semantic.status(id) };
-    });
-    owner.post("/api/companies/:id/wiki-semantic/test", async (req) => semantic.test(IdParam.parse(req.params).id));
-    owner.put("/api/companies/:id/wiki-semantic", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ enabled: z.boolean(), baseUrl: z.string().url().max(300).regex(/^https?:/), model: z.string().trim().min(1).max(200), secretId: Uuid.nullable() }).parse(req.body);
-      const before = await semantic.settings(id);
-      const after = await semantic.setSettings(id, b);
-      if (after.enabled && (!before.enabled || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) await semantic.reindexAll(id);
-      return semanticView(after);
-    });
+    // The company wiki, semantic search settings and what each ticket produced (R69): routes/wiki.ts.
+    wikiRoutes(owner, { wiki, semantic });
     // The model second opinion on permission cards (BOS-338). The key is picked from Secrets, never sent back.
     owner.get("/api/companies/:id/second-opinion", async (req) => secondOpinion.settings(IdParam.parse(req.params).id));
     owner.put("/api/companies/:id/second-opinion", async (req, reply) => {
@@ -2218,9 +2106,6 @@ export async function buildApp(opts: AppOptions) {
       IdParam.parse(req.params);
       return secondOpinion.test(SecondOpinionSettings.parse(req.body));
     });
-    owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));
-    owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id, { family: true }));
-    owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
 
     // A held wake can be run now: it gets high priority, which passes the quota hold, and starts on the next pass.
     owner.post("/api/tickets/:id/run-now", async (req, reply) => {
@@ -2674,6 +2559,8 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/scheduler/queue", async () => scheduler.queue());
     owner.post("/api/scheduler/tick", async () => scheduler.tick());
+    // Read by Settings → "Stop all work" and the every-page banner, so a reload shows the real hold (BOS-836).
+    owner.get("/api/kill-switch", async () => ({ paused: await scheduler.globallyPaused() }));
     owner.post("/api/kill-switch", async (req) => {
       const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
       await scheduler.setGlobalPause(paused);
@@ -2829,12 +2716,21 @@ export async function buildApp(opts: AppOptions) {
       endpoint: z.string().trim().min(1).max(500),
       isProduction: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
+      /** DR-033: the tag to move after a successful deploy; null turns it off. Owner-only, like every target setting. */
+      liveTag: z.object({ projectId: Uuid, name: z.string().trim().min(1).max(100) }).nullable().optional(),
     });
     const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
       throw err;
     };
-    owner.get("/api/companies/:id/deploy-targets", async (req) => deploysSvc.listTargets(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/deploy-targets", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const [targets, last] = await Promise.all([deploysSvc.listTargets(id), deploysSvc.lastSucceeded(id)]);
+      return targets.map((t) => {
+        const d = last.get(t.id);
+        return { ...t, lastDeploy: d ? { id: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tagName: d.tagName, tagResult: d.tagResult, tagFrom: d.tagFrom, tagTo: d.tagTo } : null };
+      });
+    });
     owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       return deploysSvc
@@ -2870,6 +2766,18 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    // A reviewer's hold on the merge (BOS-808): the owner can release it (the normal approval and merge follow) or cancel it (the pass is withdrawn).
+    owner.get("/api/tickets/:id/hold", async (req) => ({ hold: await holdView(db, IdParam.parse(req.params).id) }));
+    owner.post("/api/tickets/:id/hold/release", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const r = await review.releaseHold(id, { name: await ownerName(req) }, { background: true }).catch(reviewErrors(reply));
+      if ((r as { approval?: { outcome?: string } } | undefined)?.approval?.outcome === "landing") reply.code(202);
+      return r;
+    });
+    owner.post("/api/tickets/:id/hold/cancel", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return review.cancelHold(id, { name: await ownerName(req) }).catch(reviewErrors(reply));
+    });
     /**
      * "Approve and merge" on the ticket page (BOS-471): when the owner's sign-off card is open, this answers
      * it exactly as Decisions does (same answer path, so the sign-off is settled and any stale merge-retry
@@ -2957,6 +2865,8 @@ export async function buildApp(opts: AppOptions) {
       const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
       return runsSvc.transcript(id, q).catch(runErrors(reply));
     });
+    // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
+    owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
     owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
     // Stale-blocker, stalled-run and missed-work sweeps (R21, R32, R82); also run on a timer.
@@ -2966,5 +2876,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue };
 }

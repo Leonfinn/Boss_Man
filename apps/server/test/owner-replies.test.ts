@@ -4,7 +4,8 @@ import { and, eq, isNull } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import type { RunnerCommand } from "@boss-man/shared";
-import { agents, decisions, ownerReplies, runs, tickets, wakes } from "../src/db/schema.js";
+import { DEFAULT_WATCHDOG } from "@boss-man/shared";
+import { agents, companies, decisions, ownerReplies, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 /** The setup for the current test; every test sets it in beforeEach, so the helpers can rely on it. */
@@ -200,14 +201,18 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
 
   it("asks the CEO to answer when the CEO holds the ticket, and the ask never goes to the owner", async () => {
     const t = await c().ticket("Ask the CEO");
+    // With the watchdog off the Scrum Master's rung skips (BOS-762 turns it on by default; this test
+    // is about the ask reaching the CEO, not the watchdog), so the stand-in ask starts climbing.
+    await c().db.update(companies).set({ watchdog: { ...DEFAULT_WATCHDOG, enabled: false } }).where(eq(companies.id, c().company.id));
     await c().db.delete(wakes);
     await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Is this worth doing?", agentId: c().ceo.id });
     // Ten minutes pass in one go: the re-wake and the ask are both due in the same sweep, each on
     // its own age check, so the ask never waits on the re-wake.
     await c().age(t.id, 11);
     expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 1, standIns: 1 });
-    // The ask starts on the Scrum Master's rung (the CEO's own rung would refuse itself), and the
-    // ladder climbs to the CEO: never the owner, who would have to answer for the CEO.
+    // The ask starts on the Scrum Master's rung (the CEO's own rung would refuse itself), and with the
+    // watchdog off that rung skips, so the ladder climbs to the CEO: never the owner, who would have to
+    // answer for the CEO.
     const card = (await c().db.select().from(decisions).where(eq(decisions.dedupeKey, `owner-reply:${(await c().open(t.id))[0]!.id}`)))[0];
     expect(card, "the ask is a card").toBeDefined();
     expect(card!.question).toContain("holds the ticket");
@@ -233,6 +238,21 @@ describe("an owner's message on a ticket waits for an answer (BOS-425)", () => {
     expect(await c().open(t.id)).toEqual([]);
     expect((await c().state(t.id))[0]).toMatchObject({ replyReminders: 2 });
   });
+  it("words a 90-minute wait as \"90 minutes\", never \"1 hours\" (BOS-887)", async () => {
+    const t = await c().ticket("Checkout error states");
+    // A live run takes the message, then ends; no sweep runs yet, so the first sweep sees the message 90 minutes old.
+    const run = await c().started(c().worker.id);
+    await c().db.update(runs).set({ ticketId: t.id }).where(eq(runs.id, run.id));
+    await c().req("POST", `/api/tickets/${t.id}/messages`, { text: "Any update on the checkout copy?" });
+    await c().db.update(runs).set({ endedAt: c().now() }).where(eq(runs.id, run.id));
+    await c().db.delete(wakes);
+    await c().age(t.id, 90);
+    expect(await c().ownerReplies.sweep()).toMatchObject({ rewoken: 1 });
+    const note = (await wakesFor(c().worker.id, t.id)).find((w) => w.reason === "woken by owner")?.note;
+    expect(note, "the agent is told how long the message has waited").toContain("90 minutes");
+    expect(note).not.toContain("1 hours");
+  });
+
   it("keeps a message to an unassigned ticket as a note: nobody is chased", async () => {
     const t = await c().ticket("Nobody on it", { assigneeAgentId: undefined });
     await c().db.delete(wakes);

@@ -330,7 +330,7 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
     expect(await openCards(c)).toHaveLength(0);
   });
 
-  it("a runner-update-only setup step raises no separate card, and its ticket is named on the runner-update card", async () => {
+  it("a runner-update-only setup step raises no separate card, and the go-live pass leaves the runner-update card alone (DR-042 point 5: it is named when that card is raised)", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
     // Boss Man's own runner-update card for the live commit, as self-deploy raises it.
@@ -347,14 +347,8 @@ describe("one setup card per go-live: identical steps grouped (BOS-741, DR-039 f
 
     expect(await openCards(c)).toHaveLength(0);
     const [runnerCard] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `self-deploy:runner:${C}`));
-    expect(runnerCard!.question).toContain(t.title);
-    expect(runnerCard!.question).toMatch(/runner update above/);
-    // Named once, not stacked on a repeat pass.
-    await c.releaseLog.note(companyId, A);
-    await c.releaseLog.note(companyId, C);
-    await c.releaseLog.releaseManagerWakes("deployed");
-    const [again] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `self-deploy:runner:${C}`));
-    expect(again!.question.match(new RegExp(t.title, "g"))).toHaveLength(1);
+    expect(runnerCard!.question).not.toContain(t.title);
+    expect(runnerCard!.question).toBe(`Update the runners to ${C.slice(0, 8)}?`);
   });
 
   it("steps that differ still get their own card", async () => {
@@ -453,18 +447,76 @@ describe("runner-update asks close themselves when the live runner image already
   }
   const states = async (c: Awaited<ReturnType<typeof setupApp>>) => Object.fromEntries((await c.db.select().from(decisions)).map((d) => [d.question.slice(0, 40), d.status]));
 
-  it("a ticket whose only step is the runner update is not named on the runner card when the image already has its merge", async () => {
+  const available = (c: Awaited<ReturnType<typeof setupApp>>, deployed: string) => writeFile(availableFile(c), JSON.stringify({ version: 1, checkedAt: new Date().toISOString(), deployed, tip: deployed, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
+  const dueNow = (c: Awaited<ReturnType<typeof setupApp>>, value: object) => c.db.insert(settings).values({ key: "self_deploy_runner_due", value: { commit: C, fromCommit: A, after: new Date(Date.now() - 1000).toISOString(), ...value } });
+  const lastServer = (c: Awaited<ReturnType<typeof setupApp>>) => c.db.insert(settings).values({ key: "self_deploy_last_server", value: { result: "deployed", from: A, to: C, ended: new Date().toISOString() } });
+
+  it("the runner card names the live runner-only tickets in its context's tickets list, never from its text; the go-live pass adds nothing to it", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);
-    await c.db.insert(decisions).values(runnerCard(companyId, C));
-    await withImage(c, companyId, C);
-    await doneTicket(c, projectId, { title: "Needs new tooling", mergeCommit: B, ownerSetup: "Build and update runners", at: new Date("2026-11-08T12:00:00Z") });
-    await doneTicket(c, projectId, { title: "The merge the image was built from", mergeCommit: C, at: new Date("2026-11-08T13:00:00Z") });
+    await withImage(c, companyId, A);
+    const t = await doneTicket(c, projectId, { title: "Needs new tooling", mergeCommit: B, ownerSetup: "Build and update runners", at: new Date("2026-11-08T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Also set up a bucket", mergeCommit: A, ownerSetup: "Build and update runners\nSettings → Storage → Add bucket", at: new Date("2026-11-08T11:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newest merge", mergeCommit: C, at: new Date("2026-11-08T13:00:00Z") });
+    // The go-live pass no longer touches the runner card.
     await c.releaseLog.note(companyId, A);
     await c.releaseLog.note(companyId, C);
     await c.releaseLog.releaseManagerWakes("deployed");
-    const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `self-deploy:runner:${C}`));
-    expect(card!.question).not.toContain("Needs new tooling");
+    await dueNow(c, { offer: true, needs: C });
+    await lastServer(c);
+    await available(c, C);
+    await c.selfDeploy.sync();
+    const card = (await c.db.select().from(decisions)).find((d) => d.dedupeKey === `self-deploy:runner:${C}`)!;
+    expect((card.context as { tickets?: { ticketId: string; title: string }[] }).tickets).toEqual([{ ticketId: t.id, title: "Needs new tooling" }]);
+    expect(card.question.match(/It also carries/g)).toHaveLength(1);
+    expect(card.question).toContain('"Needs new tooling"');
+    expect(card.question).not.toContain("Also set up a bucket");
+  });
+
+  it("a runner-only ticket the image already has is not named", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await withImage(c, companyId, B);
+    await doneTicket(c, projectId, { title: "Needs new tooling", mergeCommit: B, ownerSetup: "Build and update runners", at: new Date("2026-11-08T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newest merge", mergeCommit: C, at: new Date("2026-11-08T13:00:00Z") });
+    const { runnerOnlyTickets } = await import("../src/services/runner-image.js");
+    expect(await runnerOnlyTickets(c.db, companyId, C)).toEqual([]);
+    await c.db.update(runners).set({ imageCommit: null });
+    expect((await runnerOnlyTickets(c.db, companyId, C)).map((x) => x.title)).toEqual(["Needs new tooling"]);
+  });
+
+  it("with no runner change, a runner-only ticket the runners lack sets the offer by itself; once they have it, no card", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await withImage(c, companyId, A);
+    await doneTicket(c, projectId, { title: "Image base", mergeCommit: A, at: new Date("2026-11-08T11:00:00Z") });
+    await doneTicket(c, projectId, { title: "Needs new tooling", mergeCommit: B, ownerSetup: "Build and update runners", at: new Date("2026-11-08T12:00:00Z") });
+    await doneTicket(c, projectId, { title: "Newest merge", mergeCommit: C, at: new Date("2026-11-08T13:00:00Z") });
+    await deployResult(c, { from: A, to: C });
+    await c.selfDeploy.sync();
+    const [due] = await c.db.select().from(settings).where(eq(settings.key, "self_deploy_runner_due"));
+    expect((due!.value as { offer: boolean; needs: string }).offer).toBe(true);
+    expect((due!.value as { needs: string }).needs).toBe(B);
+  });
+
+  it("the button's card uses the plain key when no card for that commit is open, and is not closed once the image has the commit", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await merged(c, projectId);
+    await withImage(c, companyId, C);
+    await available(c, C);
+    const r = await c.selfDeploy.updateRunners();
+    expect("decisionId" in r).toBe(true);
+    const [card] = await c.db.select().from(decisions);
+    expect(card!.dedupeKey).toBe(`self-deploy:runner:${C}`);
+    expect((card!.context as { requested?: boolean }).requested).toBe(true);
+    // Brains' fix 1: the runners already run this commit, and the card says so.
+    expect(card!.question).toContain(`The runners already run ${C.slice(0, 8)}, which includes this. Nothing to do.`);
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(decisions))[0]!.status).toBe("open");
+    // Same commit again with the card still open: the same card.
+    const again = await c.selfDeploy.updateRunners();
+    expect("decisionId" in again && again.decisionId).toBe(card!.id);
   });
 
   it("a rebuild from a commit that has the change withdraws the open runner card, with a note", async () => {
@@ -481,6 +533,21 @@ describe("runner-update asks close themselves when the live runner image already
     expect(all).toHaveLength(1);
     expect(all[0]!.status).toBe("withdrawn");
     expect((all[0]!.context as { withdrawn: { note: string } }).withdrawn.note).toContain("already rebuilt");
+  });
+
+  it("self-closing goes through the shared withdraw path: a card the owner opened leaves the closed notice (Brains' fix 2)", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    await merged(c, projectId);
+    await c.db.insert(decisions).values({ ...runnerCard(companyId, B), context: { type: "self_deploy", target: "runner", commit: B, fromCommit: A, ownerOpenedAt: new Date().toISOString() } });
+    await withImage(c, companyId, C);
+    await available(c, C);
+    await c.selfDeploy.sync();
+    const [d] = await c.db.select().from(decisions);
+    expect(d!.status).toBe("withdrawn");
+    const x = d!.context as { withdrawn: { note: string }; closedNotice?: { text: string } };
+    expect(x.withdrawn.note).toContain("already rebuilt");
+    expect(x.closedNotice?.text).toContain("already rebuilt");
   });
 
   it("keeps the card when the image is older than the commit, when no image commit is recorded, and for the owner's own button", async () => {

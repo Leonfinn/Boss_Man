@@ -6,9 +6,9 @@
 import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
-import { nameRunnerSetupTickets, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import { raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
-import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
+import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -26,19 +26,6 @@ const HOW_WORDS: Record<ReleaseHow, string> = {
   restarted: "a restart after a hand-apply",
 };
 
-/** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
-const splitSteps = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-
-/** Spaces, tabs and newlines alike, so the same step written differently reads the same (BOS-741). */
-const stepKey = (step: string) => step.replace(/\s+/g, " ").trim();
-
-/**
- * A step that only asks for the runner update (BOS-741): Boss Man's own runner-update card for the release
- * covers it, so it doesn't get a card of its own. Exact after normalising whitespace, never a guess: a step
- * that asks for the runner update and something else is not just about the runners and keeps its card.
- */
-const RUNNER_ONLY_STEPS = new Set(["Build and update runners", "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners"]);
-const isRunnerOnlyStep = (step: string) => RUNNER_ONLY_STEPS.has(stepKey(step));
 
 /**
  * What a ticket's setup steps ask the owner to do, minus the runner-update-only ones (BOS-741), each keyed by
@@ -256,7 +243,6 @@ export const releaseLogService = (
       const ids = group.tickets.filter((t) => t.decisionId !== card.id).map((t) => t.id);
       if (ids.length) await db.update(tickets).set({ ownerSetupDecisionId: card.id }).where(inArray(tickets.id, ids));
     }
-    withdrew += await nameOnRunnerCard(companyId, to, live);
     if (raised || withdrew) log(`owner setup for company ${companyId}: raised ${raised}, withdrew ${withdrew} (live ${short(to)})`);
     return { raised, withdrew };
   }
@@ -288,22 +274,6 @@ export const releaseLogService = (
       const fresh = c.tickets.filter((t) => !t.decisionId);
       return fresh.length ? [{ tickets: fresh, steps: [...c.steps.values()] }] : [];
     });
-  }
-
-  /**
-   * Names, on Boss Man's own runner-update card, every ticket going live with it that has no step of its own
-   * but asks for the runner update (BOS-741, DR-039 follow-up 2). The runner card is raised by the deployer
-   * with its own condition (`nameRunnerSetupTickets` in decisions.ts); this fills it in once the tickets are
-   * known, on the live-commit pass, and keeps the list current when a card for the same commit is still open.
-   * Returns 1 when it changed a card, so the pass's count still says what it did.
-   */
-  async function nameOnRunnerCard(companyId: string, to: string, live: SetupTicket[]) {
-    // A ticket the live runner image already has (BOS-764) is not named: the owner has nothing left to build for it.
-    const image = await runnerImageCommit(db, companyId);
-    const order = image ? await mergeCommitOrder(db, companyId) : [];
-    const names = live.filter((t) => !t.steps.size && !t.decisionId && !imageContains(image, t.mergeCommit, order)).map((t) => ({ ticketId: t.id, title: t.title }));
-    if (!names.length) return 0;
-    return (await nameRunnerSetupTickets(db, companyId, to, names)) ? 1 : 0;
   }
 
   /**

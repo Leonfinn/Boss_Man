@@ -127,7 +127,7 @@ describe("Synthetic quota", () => {
     expect(await screen.findByText(/850 of 1,000 · 85%/)).toBeTruthy();
     expect(screen.getByText(/in \d+ days?|in \d+ hours?/)).toBeTruthy();
     expect(screen.getByText(/This period: 2 readings, 400 → 850 \(\+450/)).toBeTruthy();
-    expect(screen.getByText(/Checked 2m ago · you've been warned at 80%/)).toBeTruthy();
+    expect(screen.getByText(/Checked 2 min ago · you've been warned at 80%/)).toBeTruthy();
   });
 
   it("says the quota is unknown rather than showing an error", async () => {

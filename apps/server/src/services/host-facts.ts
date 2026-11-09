@@ -183,11 +183,18 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
     return Number.isFinite(age) && age <= HOST_REPORT_FRESH_MS ? r.addons : {};
   }
 
+  /** The name the host deployer reports for the server itself (BOS-774), for the card lint: a card that names a
+   * different host is refused. null when there is no report yet, so the lint can say so rather than guess. */
+  async function serverHost(): Promise<string | null> {
+    const r = await read();
+    return r?.name ?? null;
+  }
+
   /** The BOSSMAN_NETGUARD_ALLOW lines the host last reported from .env (BOS-770), with when; null when it reports none (an older deployer, or no deployer). */
   async function netguardEnv(): Promise<{ envFound: boolean; lines: string[][]; reportedAt: string } | null> {
     const r = await read();
     return r?.netguardEnv ? { ...r.netguardEnv, reportedAt: r.writtenAt } : null;
   }
 
-  return { read, hosts, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
+  return { read, hosts, serverHost, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };
 }

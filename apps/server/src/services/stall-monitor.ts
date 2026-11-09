@@ -16,6 +16,7 @@ import { readFile } from "node:fs/promises";
 import { monitorEventLoopDelay, performance, PerformanceObserver, type PerformanceEntry } from "node:perf_hooks";
 import { getHeapStatistics } from "node:v8";
 import { startLoopProfiler, type LoopProfiler, type StallProfile } from "./stall-profile.js";
+import { sinceHours } from "@boss-man/shared";
 
 const MB = 1024 * 1024;
 const mb = (n: number) => Math.round(n / MB);
@@ -301,7 +302,7 @@ export function createStallMonitor(opts: StallMonitorOptions = {}): StallMonitor
       return { count: hits.length, worstMs: hits.reduce((m, s) => Math.max(m, s.ms), 0), thresholdMs };
     },
     summary() {
-      const hourAgo = Date.now() - 3_600_000;
+      const hourAgo = sinceHours(new Date()).getTime();
       const ns = (n: number) => (Number.isFinite(n) ? Math.round(n / 1e6) : 0);
       const gc: StallSummary["gc"] = {};
       for (const [k, v] of Object.entries(gcTotals)) gc[k] = { count: v.count, totalMs: Math.round(v.totalMs), maxMs: Math.round(v.maxMs) };

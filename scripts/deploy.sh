@@ -29,6 +29,17 @@ HEALTH_TIMEOUT="${BOSSMAN_HEALTH_TIMEOUT:-120}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+env_get() { # file key: the last KEY=value in a .env-style file; accepts "export KEY=v", quotes and a trailing " # comment"
+  [[ -f $1 ]] || return 0
+  local line v
+  line="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" || true; } | tail -n 1)"
+  [[ -n $line ]] || return 0
+  v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+  if [[ $v == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+  elif [[ $v == \'* ]]; then v="${v#\'}"; v="${v%%\'*}"
+  else v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+  printf '%s\n' "$v"
+}
 # BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
 # BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
 # file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
@@ -141,11 +152,23 @@ print_rollback_help() {
   say "Look at the logs first:   docker compose logs --tail 100 server"
   say "To go back to the old code (does not touch the database):   scripts/deploy.sh --rollback"
   say "  or by hand:   git checkout $FROM && docker compose build server && docker compose up -d --no-deps server"
-  say "Only if the data itself is damaged, restore the backup (this loses everything written since):"
-  say "  docker compose stop server"
-  say "  docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'"
-  say "  gunzip -c $BACKUP | docker compose exec -T db psql -U bossman bossman"
-  say "  docker compose up -d --no-deps server"
+  say "Only if the data itself is damaged, restore the backup (this loses everything written since)."
+  say "These are Guide 10's safer steps: test the backup, keep a copy of the current data, stop at the first error:"
+  say "  1. Test the backup first. The last line must start with OK:; if not, choose another file (see Guide 10)."
+  say "       scripts/restore-test.sh ${BACKUP:-<backup file>}"
+  say "  2. Stop the server so nothing writes:"
+  say "       docker compose stop server"
+  say "  3. Keep a copy of the current data, in case the restore was the wrong call:"
+  say "       docker compose exec -T db pg_dump -U bossman bossman | gzip > ../before-restore-\$(date +%F-%H%M).sql.gz"
+  say "  4. Replace the live database. If it says \"being accessed by other users\", go back to step 2:"
+  say "       docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'"
+  say "  5. Load the backup, stopping at the first error (the new empty database is half filled if this fails: repeat step 4):"
+  say "       gunzip -c ${BACKUP:-<backup file>} | docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U bossman -d bossman"
+  say "  6. Start Boss Man again:"
+  say "       docker compose up -d --no-deps server"
+  say "  7. Check the restore worked. The answer must say role is leader; then sign in, open Tickets and compare the counts with step 1's output:"
+  say "       docker compose exec -T server node -e \"fetch('http://localhost:3100/api/ready').then(async r=>console.log(await r.text()))\""
+  say "  8. To undo the restore, put back step 3's copy of the old data: repeat steps 2, 4 and 5 with the ../before-restore-*.sql.gz file step 3 made in place of the backup file (ls -t ../before-restore-*.sql.gz | head -1 shows the newest), then start again with step 6."
 }
 
 do_rollback() {
@@ -170,10 +193,13 @@ main() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   # BOS-69: this script builds and starts production's images and project. In a staging folder it would start a launcher
   # that manages production's runners, so it refuses; use scripts/deploy-staging.sh there.
-  local proj stack
-  proj="${COMPOSE_PROJECT_NAME:-$(grep -s '^COMPOSE_PROJECT_NAME=' .env | tail -1 | cut -d= -f2- || true)}"
-  stack="${BOSSMAN_STACK:-$(grep -s '^BOSSMAN_STACK=' .env | tail -1 | cut -d= -f2- || true)}"
-  if [[ -n $stack || ( -n $proj && $proj != boss-man ) ]]; then
+  # A staging folder is also recognised by its compose overlay (COMPOSE_FILE with deploy/staging.yml), so one with no
+  # project name or stack in .env still refuses. .env is read tolerantly: "export KEY=v", quotes, a trailing " # note".
+  local proj stack cfs
+  proj="${COMPOSE_PROJECT_NAME:-$(env_get .env COMPOSE_PROJECT_NAME)}"
+  stack="${BOSSMAN_STACK:-$(env_get .env BOSSMAN_STACK)}"
+  cfs="${COMPOSE_FILE:-$(env_get .env COMPOSE_FILE)}"
+  if [[ -n $stack || ( -n $proj && $proj != boss-man ) || $cfs == *deploy/staging.yml* ]]; then
     die "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). deploy.sh only handles production; for staging use scripts/deploy-staging.sh."
   fi
   # With blue/green the server is two colours behind a proxy; this script knows only the single server. Swaps are the host deployer's job.

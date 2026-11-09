@@ -6,6 +6,7 @@ import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
+import { MERGE_LINE_KIND } from "./merge-line.js";
 import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
@@ -65,7 +66,8 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
           .from(activity)
           .leftJoin(agents, eq(agents.id, activity.agentId))
           .leftJoin(tickets, eq(tickets.id, activity.ticketId))
-          .where(and(eq(activity.companyId, companyId), gt(activity.at, from), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
+          // The merge-line timeline (BOS-769) is a record for measuring jams, not news: the "state" rows already say it moved.
+          .where(and(eq(activity.companyId, companyId), gt(activity.at, from), ne(activity.kind, MERGE_LINE_KIND), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
           .orderBy(desc(activity.at));
 
   /** Other agents' live runs that aren't owner chat: what each is doing, in the same words the dashboard uses (BOS-118). */

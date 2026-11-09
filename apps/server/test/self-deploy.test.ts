@@ -261,6 +261,55 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
   });
 
+  // BOS-835: the merge gate runs in the runner, so a server update alone leaves it on old code (BOS-690's
+  // renumbering was on main and live on the server, yet BOS-619 and BOS-708 still bounced).
+  it("names Build and update runners and the stale merge gate on a server card whose update changes runner code", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).toContain("Settings → Server and runner → Updates → Build and update runners");
+    expect(d!.question).toContain("the merge gate keeps running the old code");
+    const risks = (d!.context as { update: { risks: string[] } }).update.risks;
+    expect(risks.some((r) => r.includes("Build and update runners") && r.includes("merge gate"))).toBe(true);
+  });
+
+  it("says nothing about the runners on a server card whose update leaves runner code alone", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: false });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.question).not.toContain("Build and update runners");
+    expect(d!.question).not.toContain("merge gate");
+    const risks = (d!.context as { update: { risks: string[] } }).update.risks;
+    expect(risks.some((r) => r.includes("merge gate") || r.includes("Build and update runners"))).toBe(false);
+  });
+
+  // QA (BOS-848): the hand-apply card is built on another branch of the same code, and the runner's own card must not repeat the line.
+  it("names the stale merge gate in the risks of a hand-apply card whose update changes runner code, and not otherwise", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml", "apps/runner/Dockerfile"], runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [yes] = await c.open();
+    const yesRisks = (yes!.context as { update: { risks: string[] } }).update.risks;
+    expect(yesRisks.some((r) => r.includes("Build and update runners") && r.includes("merge gate"))).toBe(true);
+    await c.db.delete(decisions);
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], runnerChanged: false });
+    await c.selfDeploy.sync();
+    const [no] = await c.open();
+    const noRisks = (no!.context as { update: { risks: string[] } }).update.risks;
+    expect(noRisks.some((r) => r.includes("merge gate") || r.includes("Build and update runners"))).toBe(false);
+  });
+
+  it("does not add the 'after this, rebuild the runners' line to the runner update card itself", async () => {
+    const c = (ctx = await setup());
+    await c.available({ runnerChanged: true });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const runnerCards = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
+    expect(runnerCards.length).toBeGreaterThan(0);
+    for (const d of runnerCards) expect(d.question).not.toContain("the merge gate keeps running the old code");
+  });
+
   it("pages the owner when a deploy fails, and flags a refusal", async () => {
     const c = (ctx = await setup());
     await c.status({ id: "", result: "failed", message: "server not healthy after 120s" });

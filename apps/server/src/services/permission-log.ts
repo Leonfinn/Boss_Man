@@ -3,6 +3,7 @@
 // tool calls an agent reported as refused. Each entry is one log line carrying the run, ticket and
 // agent ids so it can be searched, and the last hour is kept in memory for server_status.
 // Nothing is stored in the database: the summary starts again when the server restarts.
+import { sinceHours } from "@boss-man/shared";
 
 export type PermissionLogEntry = {
   at: Date;
@@ -26,7 +27,6 @@ export type PermissionLogEntry = {
 export type RefusedCall = { at: Date; companyId: string; runId: string; agentId: string | null; ticketId: string | null; title: string | null };
 type Answer = { at: Date; companyId: string; answeredBy: string };
 
-const HOUR_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 
 const quote = (s: string | null | undefined) => JSON.stringify((s ?? "").slice(0, 200));
@@ -40,7 +40,7 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
   let fenced: RefusedCall[] = [];
 
   function trim() {
-    const cutoff = now().getTime() - HOUR_MS;
+    const cutoff = sinceHours(now()).getTime();
     decided = decided.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
     refused = refused.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
     fenced = fenced.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);

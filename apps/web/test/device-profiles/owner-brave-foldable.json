@@ -1,0 +1,25 @@
+{
+  "label": "Brave · 1667px · touch",
+  "browser": "Brave",
+  "fingerprint": "9ac049f4-250b-49d7-9d30-8b33d2408c22",
+  "readings": [
+    {
+      "width": 1667,
+      "height": 1668,
+      "pixelRatio": 3,
+      "coarsePointer": true,
+      "displayMode": "standalone",
+      "units": { "vh": 724, "dvh": 724, "svh": 724, "lvh": 724, "visual": 724 },
+      "afterScroll": false
+    },
+    {
+      "width": 1667,
+      "height": 1668,
+      "pixelRatio": 3,
+      "coarsePointer": true,
+      "displayMode": "standalone",
+      "units": { "vh": 724, "dvh": 724, "svh": 724, "lvh": 724, "visual": 724 },
+      "afterScroll": true
+    }
+  ]
+}

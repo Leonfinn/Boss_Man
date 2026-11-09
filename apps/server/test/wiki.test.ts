@@ -108,6 +108,24 @@ describe("wiki and ticket outputs (R69)", () => {
     expect((await c.req("DELETE", `${base}/how-we-deploy`)).statusCode).toBe(204);
     expect((await c.req("GET", `${base}/how-we-deploy`)).statusCode).toBe(404);
   });
+
+  it("keeps the wiki routes owner-only: no session gets 401 (BOS-903 moved them to routes/wiki.ts)", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/wiki`;
+    expect((await c.req("POST", base, { title: "Secret plan", body: "Only the owner." })).statusCode).toBe(201);
+    const anon = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: object) => c.app.inject({ method, url, ...(payload ? { payload } : {}) });
+    const tries = [
+      await anon("GET", base),
+      await anon("POST", base, { title: "x", body: "y" }),
+      await anon("GET", `${base}/secret-plan`),
+      await anon("PUT", `${base}/secret-plan`, { title: "x", body: "y" }),
+      await anon("DELETE", `${base}/secret-plan`),
+      await anon("GET", `/api/companies/${c.company.id}/wiki-semantic`),
+      await anon("GET", `/api/tickets/${c.company.id}/artifacts`),
+    ];
+    expect(tries.map((r) => r.statusCode)).toEqual(tries.map(() => 401));
+    expect((await c.req("GET", `${base}/secret-plan`)).json()).toMatchObject({ body: "Only the owner." });
+  });
   it("files pages in nested folders, and moves them", async () => {
     const c = (ctx = await setup());
     const base = `/api/companies/${c.company.id}/wiki`;

@@ -2,6 +2,8 @@ import { useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
 type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
@@ -85,6 +87,8 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
   const [ask, setAsk] = useState("");
+  // The "what should this rule do?" text is kept in this browser as it is typed (DR-045).
+  const askDraftKey = `rule-ask/${scopeId ?? "all"}`;
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
@@ -123,6 +127,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       const r = await api<{ ceo: { name: string } }>(`/api/companies/${scopeId}/rule-requests`, { method: "POST", body: { text: ask } });
       setSentTo(r.ceo.name);
       setAsk("");
+      clearDraft(askDraftKey);
     });
   };
   const test = (e: FormEvent) => {
@@ -194,7 +199,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           <form onSubmit={askCeo} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div className="field">
               <label htmlFor="rule-ask">What should this rule do?</label>
-              <textarea id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={(e) => setAsk(e.target.value)} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+              <DraftTextarea draftKey={askDraftKey} id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={setAsk} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
             </div>
             <div className="actions">
               <button className="btn primary" type="submit" disabled={!ask.trim()}>
@@ -278,7 +283,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           Built-in defaults
         </h2>
         <p className="muted" style={{ fontSize: 14 }}>
-          Checked last, and can't be changed. A request nothing matches goes to you.
+          Checked last, and can't be changed. A request nothing matches goes to the CEO first, and to you if the CEO does not settle it. Deletes, moves and requests that name a path come straight to you.
         </p>
         <ol className="rules">
           {list.data?.defaults.map((r, i) => (

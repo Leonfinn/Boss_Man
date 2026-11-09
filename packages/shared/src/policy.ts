@@ -272,19 +272,130 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall);
 }
 
+/**
+ * The non-public address ranges, in one place (BOS-886), so the permission check, the skill fetcher and the
+ * launcher's network guard can't drift apart. IPv4 rows are `[network, prefix bits]`; IPv6 rows are the leading
+ * 16 bits in hex with how many of those bits must match. The permission check and the skill fetcher refuse every
+ * row; the launcher counts only the rows the stack lives on, because widening that would widen its trust.
+ */
+export const NON_PUBLIC_V4: ReadonlyArray<readonly [string, number]> = [
+  ["0.0.0.0", 8], // "this network": an address that names nothing (0.0.0.0, and the 0.x.y.z it is written as)
+  ["10.0.0.0", 8], // private (RFC 1918)
+  ["100.64.0.0", 10], // carrier-grade NAT (RFC 6598): how a phone hotspot or a Tailscale address can look
+  ["127.0.0.0", 8], // loopback: this machine
+  ["169.254.0.0", 16], // link-local (APIPA), including the cloud metadata service at 169.254.169.254
+  ["172.16.0.0", 12], // private (RFC 1918)
+  ["192.0.0.0", 24], // IETF protocol assignments: 192.0.0.0/29, refused whole as the skill fetcher did
+  ["192.168.0.0", 16], // private (RFC 1918)
+  ["198.18.0.0", 15], // benchmarking range (RFC 2544): never a real host
+  ["224.0.0.0", 4], // multicast: a fetch can't mean one of these (224.0.0.251 is mDNS)
+  ["240.0.0.0", 4], // reserved, including 255.255.255.255 broadcast
+];
+
+/** The non-public IPv6 ranges, as `[leading 16 bits in hex, bits that must match]`. */
+export const NON_PUBLIC_V6: ReadonlyArray<readonly [string, number]> = [
+  ["fc00", 7], // unique local (RFC 4193): the home and the stack's LAN
+  ["fe80", 10], // link-local
+  ["fec0", 10], // site-local, deprecated but still seen on older home networks
+  ["ff00", 8], // multicast
+];
+
+/**
+ * The address part of an IPv6 literal (BOS-896), brackets and any trailing dot removed, or null if `host` isn't one.
+ * A host name like feed.com starts like an IPv6 prefix (fec0, fc00) but is not an address: only a host with a ':'
+ * whose groups are all hex counts, so the IPv6 rows never read a name.
+ */
+function ipv6Literal(host: string): string | null {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h.includes(":")) return null;
+  if (/^[0-9a-f:]+$/.test(h) === false) {
+    // An embedded dotted IPv4 tail (::ffff:192.168.0.1) is still a literal; the dotted part is checked by mappedV4InRanges.
+    const dotted = /(^|:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h);
+    if (!dotted || v4Number(dotted[2]!) === null) return null;
+    const withoutDotted = h.slice(0, h.length - dotted[2]!.length).replace(/:$/, "");
+    if (withoutDotted && !/^[0-9a-f:]+$/.test(withoutDotted)) return null;
+    return h;
+  }
+  // Groups of 1-4 hex digits, with one run of "::" allowed to stand for the omitted zero groups; at most 8 groups.
+  if ((h.match(/::/g)?.length ?? 0) > 1) return null;
+  const [head, tail] = h.split("::") as [string, string | undefined];
+  const groups = (s: string) => (s ? s.split(":") : []);
+  const headGroups = groups(head);
+  const tailGroups = tail === undefined ? [] : groups(tail);
+  if (![...headGroups, ...tailGroups].every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  if (tail === undefined ? headGroups.length !== 8 : headGroups.length + tailGroups.length > 7) return null;
+  return h;
+}
+
+/** An IPv4 address as a 32-bit number, or null if it isn't four dotted decimal parts. */
+function v4Number(ip: string): number | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  return parts.some((n) => n > 255) ? null : ((parts[0]! << 24) >>> 0) + (parts[1]! << 16) + (parts[2]! << 8) + parts[3]!;
+}
+
+/** True when `ip` (already lower-cased, brackets off) is in one of `ranges`. */
+export function inV4Ranges(ip: string, ranges: ReadonlyArray<readonly [string, number]>): boolean {
+  const n = v4Number(ip);
+  if (n === null) return false;
+  return ranges.some(([network, bits]) => {
+    const net = v4Number(network)!;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return ((n & mask) >>> 0) === ((net & mask) >>> 0);
+  });
+}
+
+/** True when the IPv6 address's leading 16 bits fall in one of `ranges`. */
+export function inV6Ranges(hex: string, ranges: ReadonlyArray<readonly [string, number]>): boolean {
+  const lead = parseInt(hex.slice(0, 4), 16);
+  if (!Number.isFinite(lead)) return false;
+  return ranges.some(([network, bits]) => {
+    const mask = (0xffff << (16 - bits)) & 0xffff;
+    return (lead & mask) === (parseInt(network, 16) & mask);
+  });
+}
+
+/**
+ * Whether an IPv4 literal, or IPv4-mapped IPv6 in both dotted and hex form, is in `ranges`; false for anything else.
+ * The URL parser writes ::ffff:192.168.0.1 as ::ffff:c0a8:1, so both forms are read.
+ */
+export function mappedV4InRanges(ip: string, ranges: ReadonlyArray<readonly [string, number]>): boolean {
+  if (inV4Ranges(ip, ranges)) return true;
+  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(ip);
+  if (dotted) return inV4Ranges(dotted[1]!, ranges);
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(ip);
+  if (!hex) return false;
+  const hi = parseInt(hex[1]!, 16);
+  const lo = parseInt(hex[2]!, 16);
+  return inV4Ranges(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`, ranges);
+}
+
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
 export function isPrivateHost(host: string): boolean {
   const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!h.includes(".") && !h.includes(":")) return true; // a bare name like "truenas" or "localhost"
   if (/(^|\.)(localhost|local|lan|internal|localdomain|home\.arpa)$/.test(h)) return true;
-  // IPv4-mapped IPv6 (the URL parser writes ::ffff:192.168.0.1 as ::ffff:c0a8:1).
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-  const v4 = mapped ? [parseInt(mapped[1]!, 16) >> 8, parseInt(mapped[1]!, 16) & 255, parseInt(mapped[2]!, 16) >> 8, parseInt(mapped[2]!, 16) & 255] : /^\d+\.\d+\.\d+\.\d+$/.test(h) ? h.split(".").map(Number) : null;
-  if (v4) {
-    const [a, b] = v4 as [number, number];
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  return h === "::" || h === "::1" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h);
+  // An address is checked against the ranges for its own family only (BOS-896): an IPv6 literal (with or without
+  // brackets) against the IPv6 rows, a dotted-quad against the IPv4 rows. A host name is neither, so it isn't read as
+  // an address: feed.com starts like fec0::/10 and fcbarcelona.com like fc00::/7, but they are names, not addresses.
+  const v6 = ipv6Literal(h);
+  if (v6 !== null) return isPrivateAddress(v6);
+  if (v4Number(h) !== null) return isPrivateAddress(h);
+  return false;
+}
+
+/**
+ * Whether an IP literal is off limits to a fetch (BOS-886): every non-public range, in IPv4, IPv6 and both forms
+ * of an IPv4-mapped IPv6 address. The one answer the permission check, the skill fetcher and their tests compare
+ * against; the launcher asks for its own narrower set (isStackAddress in launcher.ts).
+ */
+export function isPrivateAddress(ip: string): boolean {
+  if (mappedV4InRanges(ip, NON_PUBLIC_V4)) return true;
+  const h = ip.toLowerCase();
+  // Any IPv4-mapped form is not a public address, whether its range is in the table or not.
+  if (/^::ffff:/.test(h)) return true;
+  return h === "::" || h === "::1" || inV6Ranges(h, NON_PUBLIC_V6);
 }
 
 /** Every web address in a tool call's input, to two levels deep (e.g. crawl4ai's url and urls). */
