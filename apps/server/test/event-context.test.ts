@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, ticketArtifacts, ticketDependencies, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { decisions, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -126,6 +126,137 @@ describe("unblocked wakes (R85)", () => {
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "unblocked"));
     expect(w).toMatchObject({ agentId: ctx.dev.id, ticketId: blocked.id });
     expect(w!.note).toContain('You asked "Which provider?"; the answer was: Adyen');
+  });
+
+  describe("the owner's answer reaches the ticket it blocked (BOS-951)", () => {
+    const posted = (ticketId: string) => ctx.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, ticketId));
+
+    it("posts the chosen option and the whole long note on the blocked ticket, and the wake keeps the answer", async () => {
+      const blocked = await ctx.ticket("Run the desktop test", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      // A long question, the shape that lost the answer before: 800 characters of question left no room for the output.
+      const question = `${"Does the app open and show the board with a test ticket on it when you follow the install steps on your own machine? ".repeat(10)}`.trim();
+      const output = "PASS  Board opens\nPASS  Test ticket shows\nPASS  Details fold opens\nResult: all green on macOS 14.4";
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question, options: ["Works", "Broken"], recommendedOption: "Works", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+      await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Works", note: output });
+
+      // 1: the whole answer and note are on the blocked ticket's conversation, attributed to the owner.
+      const [m] = await posted(blocked.id);
+      expect(m).toMatchObject({ author: "owner", agentId: null });
+      expect(m!.text).toContain("The owner answered your card on this ticket: Works");
+      expect(m!.text).toContain(output);
+      expect(m!.text).toContain("macOS 14.4");
+
+      // 2: the wake now shortens the question, not the answer (the answer is what the agent acts on); the
+      // note is on the ticket, and a long answer itself is never cut. So a long answer survives whole.
+      const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.reason, "unblocked"), eq(wakes.ticketId, blocked.id)));
+      expect(w!.note).toContain("the answer was: Works");
+      expect(w!.note!.length).toBeLessThanOrEqual(800 + 1 + "The whole answer and note are on this ticket's conversation.".length);
+      expect(w!.note!.indexOf(question)).toBe(-1);
+      expect(w!.note!.length).toBeLessThanOrEqual(320);
+    });
+
+    it("keeps a long answer whole in the wake, cutting the question instead", async () => {
+      const blocked = await ctx.ticket("Long answer", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      const question = `${"Please check whether the board opens, the test ticket shows and the details fold opens on your machine? ".repeat(12)}`.trim();
+      const answer = `Here is what I saw:\n${"line of the test output\n".repeat(60)}last line: all green`;
+      // The owner answers in their own words (the box under a card), which is where a pasted output goes.
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question, options: ["Works", "Broken"], recommendedOption: "Works", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+      await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer, custom: true });
+      const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.reason, "unblocked"), eq(wakes.ticketId, blocked.id)));
+      // The wake keeps the start of the answer (the question is cut, so it reaches much further than before) and
+      // points at the ticket; the whole answer is on the ticket's conversation.
+      expect(w!.note).toContain("the answer was: Here is what I saw:");
+      expect(w!.note).toContain("The whole answer and note are on this ticket's conversation.");
+      expect(w!.note!.length).toBeLessThanOrEqual(800 + 2 + "The whole answer and note are on this ticket's conversation.".length);
+      const [m] = await posted(blocked.id);
+      expect(m!.text).toContain(answer);
+    });
+
+    it("posts on the ticket a card names without holding it up (a kept ticket in review)", async () => {
+      const t = await ctx.ticket("Check the stage", { systemState: "review", assigneeAgentId: ctx.dev.id });
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question: "How did the stage look?", options: ["Good", "Bad"], recommendedOption: "Good", raisedByAgentId: ctx.co.ceo.id, context: { type: "question", ticketId: t.id } })
+        .returning();
+      await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Good", note: "The header fold opened." });
+      const [m] = await posted(t.id);
+      expect(m).toMatchObject({ author: "owner" });
+      expect(m!.text).toContain("The header fold opened.");
+    });
+
+    it("posts on every ticket the card was about, once each", async () => {
+      const a = await ctx.ticket("First", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      const b = await ctx.ticket("Second", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question: "Check both?", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values([
+        { blockedTicketId: a.id, blockerDecisionId: d!.id },
+        { blockedTicketId: b.id, blockerDecisionId: d!.id },
+      ]);
+      await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Yes", note: "Both fine." });
+      expect((await posted(a.id)).map((m) => m.text)).toEqual([expect.stringContaining("Both fine.")]);
+      expect((await posted(b.id)).map((m) => m.text)).toEqual([expect.stringContaining("Both fine.")]);
+    });
+
+    it("leaves a decision the CEO settles to the CEO's own wake, not as the owner's words", async () => {
+      const blocked = await ctx.ticket("Waits on the CEO", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question: "Which one?", options: ["A", "B"], recommendedOption: "A", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+      const c = await agent(ctx.co.ceo.id);
+      // The CEO can't answer its own question, so here Boss Man's own card (no raising agent) is settled by the
+      // CEO: the answer is the CEO's, not the owner's words, so it isn't posted as the owner's.
+      await ctx.db.update(decisions).set({ raisedByAgentId: null, tier: "ceo" }).where(eq(decisions.id, d!.id));
+      const r = await c.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "A", note: "The CEO looked." } });
+      expect(textOf(r)).toContain("Answered");
+      expect(textOf(r)).not.toContain("Fail");
+      await c.close();
+      expect(await posted(blocked.id)).toEqual([]);
+    });
+
+    it("is readable by id after it drops off the open list", async () => {
+      const blocked = await ctx.ticket("Read the answer back", { systemState: "blocked", assigneeAgentId: ctx.dev.id });
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question: "Is the header right?", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: blocked.id, blockerDecisionId: d!.id });
+      await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "No", note: "The logo overlaps the title." });
+      const c = await agent(ctx.co.ceo.id);
+      const read = await c.callTool({ name: "decisions", arguments: { action: "read", id: d!.id } });
+      expect(textOf(read)).toContain("Is the header right?");
+      expect(textOf(read)).toContain("Answer: <untrusted source=\"decision card answer\">\nNo\n</untrusted>");
+      expect(textOf(read)).toContain("The logo overlaps the title.");
+      // It is not in the open list any more, which is why reading by id matters.
+      expect(textOf(await c.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d!.id);
+      await c.close();
+    });
+
+    it("reads a card that is still open, and refuses another company's", async () => {
+      const [d] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.co.company.id, kind: "question", question: "Still open?", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ctx.co.ceo.id })
+        .returning();
+      const c = await agent(ctx.co.ceo.id);
+      const read = await c.callTool({ name: "decisions", arguments: { action: "read", id: d!.id } });
+      expect(textOf(read)).toContain("Still open?");
+      expect(textOf(read)).toContain("not answered yet");
+      const other = await c.callTool({ name: "decisions", arguments: { action: "read", id: randomUUID() } });
+      expect(textOf(other)).toContain("No card with that id");
+      await c.close();
+    });
   });
 });
 

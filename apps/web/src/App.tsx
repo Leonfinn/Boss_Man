@@ -97,15 +97,21 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "wrapup")
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
+      </p>
+    );
   const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done.
+      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
     </p>
   );
 }

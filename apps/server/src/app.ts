@@ -408,6 +408,17 @@ export async function buildApp(opts: AppOptions) {
         if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
       }
     },
+    // BOS-988: the same message, only to the runs the drain has not told yet, answering with the ones it reached.
+    tellRuns: async (text, runIds) => {
+      const reached: string[] = [];
+      for (const runId of runIds) {
+        const [r] = await db.select({ companyId: runsTable.companyId }).from(runsTable).where(and(eq(runsTable.id, runId), isNull(runsTable.endedAt)));
+        if (!r) continue;
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner && runners.send(runner.id, { type: "run.message", runId, text: `Message from Boss Man: ${text}`, interrupt: false })) reached.push(runId);
+      }
+      return reached;
+    },
     // `sweeps` is built further down; this only runs when a hold lifts.
     afterHold: (since) => sweeps.resumeAfterUpdate(since),
     dir: opts.deployerDir,
@@ -2100,7 +2111,12 @@ export async function buildApp(opts: AppOptions) {
         return importErrors(reply)(err);
       }
       for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
-      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      // The company is already saved and its id is what the caller needs. A failure while raising the
+      // checklist card must not turn a successful import into an error reply with no company id (BOS-927):
+      // log it and still return the import's result.
+      await decisionsSvc
+        .raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" })
+        .catch((err) => app.log.error({ err, companyId: done.companyId }, "import checklist card failed"));
       if (launch.enabled)
         void launch.start(done.companyId).catch((err) =>
           notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
@@ -2279,6 +2295,7 @@ export async function buildApp(opts: AppOptions) {
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      keepOffPortal: z.boolean(),
       publicSummary: z.string().trim().max(2000).nullable(),
       showPublicly: z.boolean(),
     });

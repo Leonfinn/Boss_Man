@@ -17,7 +17,7 @@ import { DraftTextarea } from "../components/DraftTextarea";
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -190,6 +190,14 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             <>
               <dt>Image</dt>
               <dd className="mono">{s.imageVersion}</dd>
+            </>
+          )}
+          {s?.registered && (
+            <>
+              <dt>Network guard</dt>
+              <dd data-testid="runner-guard-row">
+                launcher: {c ? c.guard ?? "not reported" : "no container"} · runner: {s.sandbox?.guard ? (s.sandbox.guard.state === "on" ? "on" : `absent (${s.sandbox.guard.reason})`) : "not reported yet"}
+              </dd>
             </>
           )}
         </dl>
@@ -1818,7 +1826,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
-type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
 function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -1848,6 +1856,15 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {sb?.guard ? (
+        <p style={{ fontSize: 14 }} data-testid="network-guard-line">
+          {sb.guard.state === "on"
+            ? "Network guard: on. The runner tried to reach its own gateway and was refused at once."
+            : `Network guard: absent. The runner's own gateway was not refused (${sb.guard.reason}), so private addresses on this network are not blocked.`}
+        </p>
+      ) : sb ? (
+        <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>
+      ) : null}
       {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
@@ -2255,6 +2272,7 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
+  const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
   const v = view.data;
   const w = wait.data?.on ? wait.data : null;
@@ -2264,6 +2282,8 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed && !(s?.result === "deployed" && s.to_commit === v.available.tip);
   return (
     <Section id="deploy-h" title="Updates">
+      {/* "Ask agents to wrap up", inside the update box (BOS-988): the main action while an update or rebuild waits on runs. */}
+      <WrapUpAction m={maint.data} reload={maint.reload} />
       <p style={{ fontSize: 14 }}>
         {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
       </p>
@@ -2531,7 +2551,10 @@ export function CheckQueueSetting() {
 type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
 type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
 type Report = { live: LiveRow[]; update: UpdateRow | null };
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null };
+/** The owner's wrap-up ask is on: its own hold, or asked while an update waits (BOS-988), which keeps the update's kind. */
+type WrapUpStatus = MaintenanceView & { on: true; wrapAsked?: boolean; minutes?: number; notRespondingAfter: number; runsList: WrapUpRun[] };
 
 /** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
 function UpdateHistory({ r }: { r: UpdateRow }) {
@@ -2596,7 +2619,9 @@ export function RunnerUpdate() {
       )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
-          ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
+          ? m.kind === "wrapup"
+            ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
+            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>
@@ -2625,6 +2650,114 @@ export function RunnerUpdate() {
       </div>
       {act.view}
     </Section>
+  );
+}
+
+/**
+ * "Ask agents to wrap up" (BOS-929, BOS-988), inside the top Runner update box. It tells every running agent to
+ * finish its step, save its work and stop cleanly, so an update or a runner rebuild can go ahead. Unlike "Stop all
+ * work" it also messages the runs going now, so they end by themselves. While an update waits it is the main action
+ * and the still-running list shows here; the update keeps waiting and goes ahead when the runs end. Nothing is ever
+ * stopped for you: the not-responding flag only offers a Stop for that one run.
+ */
+export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | null; reload: () => void; children?: ReactNode }) {
+  const act = useAction();
+  if (!m) return null;
+  const s = m.on && (m.kind === "wrapup" || (m as WrapUpStatus).wrapAsked) ? (m as WrapUpStatus) : null;
+  const waiting = m.on && !s;
+  const start = () =>
+    act.run(async () => {
+      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
+      reload();
+      return "Every running agent was asked to wrap up.";
+    });
+  const cancel = () =>
+    act.run(async () => {
+      await api("/api/maintenance/cancel-wrap", { method: "POST", body: {} });
+      reload();
+      return "Wrap-up cancelled: runs already told still end by themselves; the update keeps waiting for them.";
+    });
+  const stopOne = (run: WrapUpRun) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
+      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      reload();
+      return "Stopping that run.";
+    });
+  const n = s ? s.runsList.length : m.on ? m.runs : 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-testid="wrapup-box">
+      {s ? (
+        <>
+          <p style={{ fontSize: 14 }} data-testid="wrapup-on">
+            <span className="tag">Wrap-up on</span>{" "}
+            {n === 0
+              ? "Every agent has finished; the update can go ahead."
+              : `${n} agent${n === 1 ? " is" : "s are"} still running and ${n === 1 ? "has" : "have"} been asked to finish the step they are on. Nothing new starts; the update starts when they have finished.`}
+          </p>
+          {s.runsList.length > 0 && (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }} data-testid="wrapup-runs">
+              {s.runsList.map((run) => {
+                const onCard = !!run.waitingOn;
+                const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                return (
+                  <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+                    <strong>{run.agent ?? "An agent"}</strong>
+                    <span className="muted">
+                      {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                    </span>
+                    {onCard ? (
+                      <span className="tag amber" title={run.waitingOn!.question}>
+                        Waiting for an answer
+                      </span>
+                    ) : late ? (
+                      <span className="tag red">Not responding</span>
+                    ) : (
+                      <span className="tag grey">Working</span>
+                    )}
+                    {(late || onCard) && (
+                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                        Stop this run
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {s.runsList.length > 0 && (
+            <p className="muted" style={{ fontSize: 13 }}>
+              After {s.notRespondingAfter} minutes a run still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+            </p>
+          )}
+          <div>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void cancel()}>
+              Cancel wrap-up
+            </button>
+          </div>
+        </>
+      ) : waiting ? (
+        <>
+          <p style={{ fontSize: 14 }} data-testid="wrapup-waiting">
+            <span className="tag amber">Update waiting</span>{" "}
+            {n === 0 ? "No agents are running now; the update can go ahead." : `${n} agent${n === 1 ? " is" : "s are"} still running. The update starts when they have finished: press Ask agents to wrap up to have them finish their step and stop by themselves.`}
+          </p>
+          <div>{children ?? (
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void start()}>
+              Ask agents to wrap up
+            </button>
+          )}</div>
+        </>
+      ) : (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" className="btn small" disabled={act.busy} onClick={() => void start()}>
+            Ask agents to wrap up
+          </button>
+          <span className="muted" style={{ fontSize: 13 }}>Stop the running agents cleanly before an update, if any are going.</span>
+        </div>
+      )}
+      {act.view}
+    </div>
   );
 }
 
