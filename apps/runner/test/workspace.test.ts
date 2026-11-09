@@ -549,6 +549,41 @@ describe("turn checkpoints (R39)", () => {
   });
 });
 
+// BOS-832: the review-time clash check (BOS-426) must read the same current branch and main the merge gate will.
+describe("the clash check reads a current branch and a current main (BOS-832)", () => {
+  it("reports no clash when the branch already contains origin's main tip", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The branch and main both touch the same line. The branch commit reaches the shared repo (a turn
+    // checkpoint), then main moves and the agent merges main in on the branch (the HOL-585 shape): the
+    // branch head holds main's tip and merges clean, but the shared ref is still the pre-merge commit.
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    await ws.checkpoint(spec, "after a turn");
+    r.commit("main side");
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", "-X", "ours", "origin/main");
+    // HOL-585's shape: the branch head already holds main's tip, so no clash is possible.
+    expect(git(w.path, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), "HEAD")).toBe("");
+    expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
+  });
+
+  it("still reports a real clash", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    r.commit("main side");
+    const res = await ws.clash(spec, "main");
+    expect(res.clashes).toBe(true);
+    expect(res.files).toEqual(["README.md"]);
+  });
+});
+
 describe("images for a ticket", () => {
   it("reads a screenshot from the ticket's worktree or plain working folder, never outside them, and caps the size", () => {
     const root = mkdtempSync(path.join(tmpdir(), "bm-ws-img-"));

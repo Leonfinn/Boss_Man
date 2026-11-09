@@ -848,6 +848,15 @@ swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg
 [[ $(hget phase) == end ]] || fail "no end-of-window check"; all_pass
 grep -qx blue "$D/state/stopped-by-plan" || fail "planned stop not recorded"
 has "$DL" "stop grace 60 server-blue"; has "$D/deployer.log" "Stopped server-blue in"
+# 31h1 (QA, BOS-826 on BOS-794). The grace is BG_STOP_SECONDS; a value that is not 1-4 digits falls back to 60 rather than
+# reaching `compose stop -t` (an empty or negative -t, or a shell injection through the env, must not).
+swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; BG_STOP_SECONDS=7 bg
+has "$DL" "stop grace 7 server-blue"; all_pass
+for bad in abc -5 12345 "7; touch $T/injected" ""; do
+  swap; sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; BG_STOP_SECONDS="$bad" bg
+  has "$DL" "stop grace 60 server-blue"
+done
+[[ ! -e $T/injected ]] || fail "BG_STOP_SECONDS was run as shell"
 # 31h2 (BOS-794). A planned stop that outlived its grace and needed SIGKILL (137), or ended on SIGTERM (143), is still planned:
 # healthy, not paged, and the detail says it needed SIGKILL.
 for x in 137 143; do
