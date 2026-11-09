@@ -243,6 +243,10 @@ a { color: inherit; text-underline-offset: 3px; }
   .out { grid-template-columns: repeat(3, 1fr); }
   .install { grid-template-columns: 1fr; gap: 56px; }
   .route .boss { right: 8px; }
+  /* Footer: stack the brand and its line above the links. Side by side, the seven links squeezed the brand
+     column to a sliver at 840 (owner, 9 Nov). */
+  .foot .wrap { grid-template-columns: 1fr; gap: 20px; }
+  .foot p { max-width: 560px; }
 }
 
 /* Phone */
