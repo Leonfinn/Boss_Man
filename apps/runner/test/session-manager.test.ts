@@ -40,6 +40,7 @@ function harness(model: string | null, opts: { expectError?: boolean; skills?: A
   const ended = new Promise<void>((resolve, reject) => {
     done = (error) => (error && !opts.expectError ? reject(new Error(`The run ended with an error: ${error}`)) : resolve());
   });
+  ended.catch(() => {});
   const manager: SessionManager = new SessionManager({
     workspaces: opts.workspaces,
     lockRetryMs: opts.lockRetryMs,
