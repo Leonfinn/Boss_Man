@@ -1087,14 +1087,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * files. Its status.json still describes the last deployer run (an older commit), and its
      * available.json may be gone. Reading those first recorded the old commit and left every merge that
      * waits for go-live stuck after a hand-apply. So the running build's own commit is a candidate too,
-     * and the newest of the three (by merge order) is what runs: a deploy while the old process is still
-     * up has the host's report newer, and a hand-apply has the build newer.
+     * and it wins unless a deploy ended after this process started (the old colour still up: the host's report
+     * is newer then). A hand-apply leaves the report older than the process, so the build wins.
      */
     async noteLive(a: Available | null, s: DeployStatus | null) {
       if (!deps.releaseLog) return 0;
       const reported = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || "";
       const build = process.env.BOSSMAN_COMMIT || "";
-      const live = newestRunning(reported, build);
+      // A deploy that ended after this process started happened under it (blue/green: the old colour is still up),
+      // so the host's report is newer than the build; recording the build then would rewind the live commit.
+      const startedAt = Date.now() - process.uptime() * 1000;
+      const deployedUnderUs = !!s && (s.result === "deployed" || s.result === "rolled_back") && Date.parse(s.ended) > startedAt;
+      const live = deployedUnderUs ? reported : newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
       const rows = await db.select({ id: companies.id }).from(companies);
       for (const c of rows) await deps.releaseLog.note(c.id, live);
