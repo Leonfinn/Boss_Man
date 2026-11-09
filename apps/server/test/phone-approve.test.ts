@@ -535,3 +535,46 @@ describe("rule 8: rate limit, ntfy URL and retention", () => {
     expect(await c.db.select().from(phoneActionHits)).toEqual([]);
   });
 });
+
+describe("QA (BOS-248): token lifetime edges and isolation between cards", () => {
+  it("a link works one millisecond before its 15 minutes are up and is refused at exactly 15 minutes", async () => {
+    const c = await setup();
+    const d1 = await c.ask();
+    const { token: t1 } = await c.sync();
+    const start = c.clock().getTime();
+    c.setClock(new Date(start + 15 * 60_000 - 1));
+    expect((await c.tap({ token: t1 })).json().outcome).toBe("approved");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d1.id)))[0]!.answer).toBe("Yes");
+
+    const d2 = await c.ask({ question: "Use Cloudflare instead?" });
+    const { token: t2 } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 15 * 60_000));
+    expect((await c.tap({ token: t2 })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d2.id)))[0]!.status).toBe("open");
+  });
+
+  it("an expired, unanswered link is also refused on a re-tap and never answers the card", async () => {
+    const c = await setup();
+    const d = await c.ask();
+    const { token } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 20 * 60_000));
+    for (let i = 0; i < 2; i++) expect((await c.tap({ token })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+  });
+
+  it("one card's link answers only that card", async () => {
+    const c = await setup();
+    const a = await c.ask({ question: "Question A?" });
+    const { token: ta } = await c.sync();
+    const b = await c.ask({ question: "Question B?" });
+    const { token: tb } = await c.sync();
+    expect(ta).not.toBe(tb);
+    expect((await c.tap({ token: ta })).json().outcome).toBe("approved");
+    const rows = await c.db.select().from(decisions);
+    expect(rows.find((r) => r.id === a.id)!.status).not.toBe("open");
+    expect(rows.find((r) => r.id === b.id)!.status).toBe("open");
+    // B's own link still works, once.
+    expect((await c.tap({ token: tb })).json().outcome).toBe("approved");
+    expect((await c.tap({ token: tb })).json().outcome).toBe("already_answered");
+  });
+});
