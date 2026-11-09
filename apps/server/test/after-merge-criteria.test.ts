@@ -330,6 +330,44 @@ describe("after-merge criteria", () => {
     expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([]);
   });
 
+  // BOS-1012: Claude Code sends a number as the string "6" (its JSON schema is anyOf [integer, string]),
+  // so the handler's typeof-number branch never ran and a card naming a criterion by number was refused.
+  it("a criterion number sent as a string, as Claude Code sends it, links the card", async () => {
+    const SIX = [...SLOTS.slice(0, 4), LIVE, { text: "Claude Max 2 shows the 2 line on the Funding page", after: "merge" as const }];
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: SIX, systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "1 pass; 2 pass; 3 pass; 4 pass" });
+    const c = await ctx.agent(ctx.dev.id);
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the Funding page show the 2 line?", options: ["Pass - it shows the 2 line", "Fail - it doesn't"], recommended: "Pass - it shows the 2 line", triedFirst: "Ran the checks; only the owner's live plan shows their own allowance.", blocksTicketId: t.id, criterion: "6" } }));
+    expect(asked).toMatch(/decision/i);
+    expect(asked).not.toMatch(/No criterion/);
+    const card = (await ctx.db.select().from(decisions).where(and(eq(decisions.question, "Does the Funding page show the 2 line?"), eq(decisions.companyId, ctx.co.company.id))))[0]!;
+    expect((card.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([5]);
+    // The refusals still stand for a string number: out of range, and pointing at a before-merge check.
+    const past = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", blocksTicketId: t.id, criterion: "9" } }));
+    expect(past).toMatch(/No criterion 9 on this ticket/i);
+    const before = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the health check still pass?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Ran the checks myself; the host only answers to the owner.", blocksTicketId: t.id, criterion: "1" } }));
+    expect(before).toMatch(/checked before merge/i);
+    // And without a ticket to attach to, the reason is given rather than a card raised.
+    const noTicket = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", criterion: "6" } }));
+    expect(noTicket).toMatch(/goes with blocksTicketId set to that ticket/i);
+  });
+
+  it("a criterion copied with the after-merge note Boss Man shows still matches its text", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const c = await ctx.agent(ctx.dev.id);
+    // Exactly what `tickets read` shows on the criterion line, suffix and all.
+    const shown = `${LIVE.text} (checked after merge; don't fail the review on it)`;
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Is BOS-373 answered on the real host?", options: ["Pass - the host answers", "Fail - it doesn't"], recommended: "Pass - the host answers", triedFirst: "Asked the host myself and it refused; only the owner's tailnet reaches it here.", blocksTicketId: t.id, criterion: shown } }));
+    expect(asked).toMatch(/decision/i);
+    expect(asked).not.toMatch(/No criterion/);
+    const [card] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "Is BOS-373 answered on the real host?"), eq(decisions.companyId, ctx.co.company.id)));
+    expect((card!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
+    // Case and runs of spacing don't stop it matching either.
+    const loose = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "And now, on the host?", options: ["Pass", "Fail"], recommended: "Pass", triedFirst: "Asked the host myself and it refused; only the owner's tailnet reaches it here.", blocksTicketId: t.id, criterion: `  ${LIVE.text.toUpperCase().replace(/ /g, "   ")}  ` } }));
+    expect(loose).not.toMatch(/No criterion/);
+    const [second] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "And now, on the host?"), eq(decisions.companyId, ctx.co.company.id)));
+    expect((second!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
+  });
+
   it("the owner's answer records a fail, which keeps the ticket open", async () => {
     const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
     const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Does the host answer?", options: ["Yes, it works", "No, it does not"], recommendedOption: "Yes, it works", context: { type: "question" }, raisedByAgentId: ctx.dev.id }).returning();

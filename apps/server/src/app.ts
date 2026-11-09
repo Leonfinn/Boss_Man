@@ -301,13 +301,16 @@ export async function buildApp(opts: AppOptions) {
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
   const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
+  let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve() });
   // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
   // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
   const releaseLog = releaseLogService(db, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
@@ -847,6 +850,7 @@ export async function buildApp(opts: AppOptions) {
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
+  releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
   // In server mode (BOS-316, BOS-597) it reports the server-owned check queue's own mode, slots, and
   // running and waiting counts for the company, so the screen can show "waiting for a check slot".

@@ -4,7 +4,7 @@
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
@@ -399,7 +399,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       assignedToOwner: r.assignedToOwner,
       stateChangedAt: r.stateChangedAt,
       blockedUntil: r.blockedUntil,
-      scheduled: !!r.monitorAt || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
+      // Waiting for go-live (BOS-1021) is a plan, not a stall; after GO_LIVE_WAIT_MAX_MS nobody may have deployed, so it counts again.
+      scheduled: !!r.monitorAt || (!!r.goLiveWait && !!r.goLiveWaitSince && Date.now() - r.goLiveWaitSince.getTime() < GO_LIVE_WAIT_MAX_MS) || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
       mergeWaiting: mergeWaiting.has(r.id),

@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -407,6 +407,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // A review only needs the before-merge criteria reported: an after-merge one can only be settled
       // once the work is live, so it must not bounce rounds of review (DR-024 #5). Once the work has
       // merged, the ticket can't be done until those after-merge criteria are reported pass or fail.
+      if (state === "done") {
+        // BOS-1021: the live checks can't be made before the merge is running; closing now would hide that.
+        const [w] = await db.select({ wait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+        if (w?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(w.wait as GoLiveWait)}), so its after-merge checks can't be made. Boss Man wakes you when it is live; then report them and close the ticket.`);
+      }
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)
         return fail(
