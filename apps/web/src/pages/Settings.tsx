@@ -2716,7 +2716,9 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
                         Waiting for an answer
                       </span>
                     ) : late ? (
-                      <span className="tag red">Not responding</span>
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
+                        Not responding
+                      </span>
                     ) : (
                       <span className="tag grey">Working</span>
                     )}
@@ -2731,8 +2733,11 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
             </ul>
           )}
           {s.runsList.length > 0 && (
-            <p className="muted" style={{ fontSize: 13 }}>
-              After {s.notRespondingAfter} minutes a run still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+            <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
+              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              {s.kind === "wrapup"
+                ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
+                : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}
             </p>
           )}
           <div>

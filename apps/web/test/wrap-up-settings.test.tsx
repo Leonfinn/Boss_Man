@@ -99,6 +99,24 @@ describe("Ask agents to wrap up in the Runner update box", () => {
     );
     render(<WrapUpAction m={wrapOn} reload={() => {}} />);
     expect(await screen.findByText("Not responding")).toBeTruthy();
-    expect(screen.getByText(/After 10 minutes/)).toBeTruthy();
+    expect(screen.getByText("Not responding").getAttribute("title")).toContain("10 minutes");
+    const note = screen.getByTestId("wrapup-note").textContent ?? "";
+    expect(note).toContain("most finish within a few minutes");
+    expect(note).toContain("won't stop an agent for you");
+    expect(note).toContain("Stop this run");
+    expect(note).toContain("anything it hasn't saved yet is lost");
+    expect(note).toContain("nothing new starts until you press Cancel wrap-up");
+    // Plain words: the old jargon is gone.
+    expect(note).not.toContain("on that one only");
+    expect(note).not.toMatch(/\ba run still going is marked/i);
+  });
+
+  it("tells a wrap-up asked during an update what happens at the deadline if the owner does nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(wrapDuringUpdate)));
+    render(<WrapUpAction m={wrapDuringUpdate} reload={() => {}} />);
+    const note = (await screen.findByTestId("wrapup-note")).textContent ?? "";
+    expect(note).toContain("the update keeps waiting");
+    expect(note).toMatch(/you'll be asked whether to stop the agents still running/);
+    expect(note).not.toContain("Cancel wrap-up");
   });
 });
