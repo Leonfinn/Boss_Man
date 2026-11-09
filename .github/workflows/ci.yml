@@ -77,6 +77,8 @@ jobs:
           # The tests try /usr/bin/chromium, chromium-browser and google-chrome first (ubuntu-latest
           # ships Chrome); Playwright's own Chromium is the fallback when none is there.
           if [ -x /usr/bin/google-chrome ]; then /usr/bin/google-chrome --version; else playwright install --with-deps chromium; fi
+      # Tests that load the built page (e.g. wrap-up-layout.test.ts, BOS-988) skip without apps/web/dist.
+      - run: pnpm --filter @boss-man/web build
       - name: Web tests in a real browser, none skipped
         env:
           # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
