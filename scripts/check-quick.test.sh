@@ -170,6 +170,34 @@ if command -v flock >/dev/null; then
   notlogged "typecheck" "signalled run"
 fi
 
+# A path-reading test (BOS-881): a change to the paths it reads runs it, even though it imports none of them, and from the
+# package the test lives in. Its entry reads apps/web/src/pages/, apps/web/src/components/ and packages/shared/src/owner-controls.ts.
+own="pnpm --filter @boss-man/server exec vitest related --run test/owner-control-list.test.ts"
+g checkout -q -B pathpages origin/main; commit apps/web/src/pages/Plan.tsx
+run 0 "web page change runs the owner-controls list" env
+logged "$own" "web page"
+logged "pnpm --filter @boss-man/server typecheck" "web page typecheck"
+grep -q "^PASS  path-reading test test/owner-control-list.test.ts (apps/server changes)" "$t/out" || fail "no PASS line: $(cat "$t/out")"
+g checkout -q -B pathcomponents origin/main; commit apps/web/src/components/Sidebar.tsx
+run 0 "web component change runs it" env
+logged "$own" "web component"
+g checkout -q -B pathshared origin/main; commit packages/shared/src/owner-controls.ts
+run 0 "owner-controls list change runs it" env
+logged "$own" "shared owner-controls"
+# A web change that is neither a page nor a component, and other shared code, leave it out.
+g checkout -q -B pathother origin/main; commit apps/web/src/lib/format.ts packages/shared/src/other.ts
+run 0 "an unrelated web and shared change leaves it out" env
+notlogged "owner-control-list" "unrelated web change"
+# A page change on top of a broad server list still runs it (the broad list is skipped, the path-reading test is not).
+g checkout -q -B pathbroad origin/main; commit apps/web/src/pages/Decisions.tsx apps/server/src/mcp.ts
+run 0 "a page change beside a broad server change" env
+grep -qF "SKIP related tests: too broad" "$t/out" || fail "expected the broad list skipped: $(cat "$t/out")"
+logged "$own" "broad beside page"
+notlogged "vitest related --run src/mcp.ts" "broad beside page"
+# The merge gate never skips it either.
+run 0 "merge check runs it" env BOSSMAN_MERGE_CHECK=1
+logged "$own" "merge check"
+
 # A broad related-test list is skipped (exit 0), typecheck still runs; CHECK_QUICK_FORCE_RELATED=1 runs it.
 g checkout -q -B broad origin/main; commit apps/server/src/mcp.ts
 run 0 "mcp.ts is broad" env
