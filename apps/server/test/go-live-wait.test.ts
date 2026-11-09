@@ -62,13 +62,15 @@ const NEW = "c".repeat(40);
 const serverRuns = (commit: string) => ctx.db.insert(settings).values({ key: `live_release:${ctx.co.company.id}`, value: { old: commit, new: commit } }).onConflictDoUpdate({ target: settings.key, set: { value: { old: commit, new: commit } } });
 
 /** A ticket in review, approved and merged by the gate as `commit`, touching `path`. */
-async function mergeOne(commit: string, path: string) {
+async function mergeOne(commit: string, path: string, opts: { noFileList?: boolean } = {}) {
   const { db, req, dev, project, co, reg } = ctx;
-  const stand = standInRunner(ctx.runners, reg.runnerId, mergeReplies(commit, path));
+  const replies = mergeReplies(commit, path);
+  if (opts.noFileList) delete replies["workspace.diff"]; // the gate cannot say what changed
+  const stand = standInRunner(ctx.runners, reg.runnerId, replies);
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live panel", assigneeAgentId: dev.id, acceptanceCriteria: [LIVE] })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review" }).where(eq(tickets.id, t.id));
   const r = await ctx.review.landVisible(t.id, "the owner");
-  expect(stand).toEqual([]);
+  expect(stand).toEqual(opts.noFileList ? ["workspace.diff"] : []);
   expect(co.company.id).toBeTruthy();
   return { id: t.id, r };
 }
@@ -157,6 +159,19 @@ describe("after-merge checks wait for go-live", () => {
     expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).toContain("isn't live yet");
     await serverRuns(NEW);
     expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
+  });
+
+  it("a merge whose changed files are unknown waits for the server and the runners", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));
+    const { id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true });
+    expect(r.outcome).toBe("merged");
+    const t = await ctx.row(id);
+    expect(t.touchesRunner).toBe(true);
+    expect(t.goLiveWait).toBe("both");
+    await serverRuns(NEW);
+    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
+    expect((await ctx.row(id)).goLiveWait).toBe("runner");
   });
 
   it("a merge that is already live is handed to the assignee at once, as before", { timeout: 120_000 }, async () => {
