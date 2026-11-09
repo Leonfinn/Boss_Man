@@ -67,7 +67,9 @@ describe("Checks at once reaches the runners (BOS-993)", () => {
     expect(r.json()).toMatchObject({ slots: 2, applying: true });
     expect(c.fake.calls[0]).toBe("PUT /checks 2");
     // The hold is the settings kind, so the panel says so and agents are woken when it ends.
-    await vi.waitFor(async () => expect(c.fake.calls).toContain("POST /runners/app-co/recreate"));
+    // The drain runs on a timer in production; one pass here swaps the idle company's runner.
+    await c.maintenance.step();
+    expect(c.fake.calls).toContain("POST /runners/app-co/recreate");
     // The recreate hook tells the launcher the number again, so a launcher that lost it still builds the runner right.
     const at = c.fake.calls.indexOf("POST /runners/app-co/recreate");
     expect(c.fake.calls.slice(0, at).filter((x) => x === "PUT /checks 2").length).toBeGreaterThanOrEqual(2);
