@@ -2,6 +2,8 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { goLiveWaitWords, touchesRunnerCode } from "@boss-man/shared";
+import { goLiveWaitOf } from "./go-live-wait.js";
 import { criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
@@ -469,13 +471,14 @@ export function reviewService(
    * The work landed: done, unless a criterion can only be checked now that it is live (DR-024 #5). Then
    * the ticket goes back to its assignee to show those before it can close.
    */
-  async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
+  async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null, files?: string[]) {
     // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
     // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
     const carry = carryFailedOver(readCriteria(t.acceptanceCriteria), t.stateNote);
     await db
       .update(tickets)
-      .set({ mergeCommit: commit, pullRequestNote: null, ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });
@@ -494,8 +497,8 @@ export function reviewService(
   }
 
   /** After a real merge: close the ticket, or send it back to show the checks only a live host can settle. */
-  async function closeAfterMerge(t: typeof tickets.$inferSelect, commit: string | null, causedByRunId?: string | null) {
-    const r = await finishMerged(t, commit);
+  async function closeAfterMerge(t: typeof tickets.$inferSelect, commit: string | null, causedByRunId?: string | null, files?: string[]) {
+    const r = await finishMerged(t, commit, files);
     if (!r.detail.afterMerge) return { outcome: "merged" as const, delivered: null, detail: r.detail };
     const merged = commit ? `Merged as ${commit.slice(0, 12)}. ` : "Merged. ";
     // The branch is merged, so its working copy would be released (and checking on it would need a fresh
@@ -508,6 +511,15 @@ export function reviewService(
     if (repoUrl?.repoUrl) await deps.work.updateTicket(t.id, { state: "in_progress", overLimit: true, internal: true, noCode: true });
     const carried = r.detail.carried ?? [];
     const quoted = (list: string[]) => list.map((c) => `"${c}"`).join(", ");
+    // BOS-1021: the merge is not running yet (server not updated, or runner code the runners lack): the checks
+    // can't pass, so nobody is woken and no owner card is asked for. Boss Man wakes the assignee at go-live.
+    const waitsFor = commit ? await goLiveWaitOf(db, { companyId: t.companyId, mergeCommit: commit, touchesRunner: files ? touchesRunnerCode(files) : true }) : null;
+    if (waitsFor) {
+      await db.update(tickets).set({ goLiveWait: waitsFor, goLiveWaitSince: new Date() }).where(eq(tickets.id, t.id));
+      await record(db, { companyId: t.companyId, ticketId: t.id, kind: "go_live_wait", summary: `Merged as ${commit!.slice(0, 12)}; ${goLiveWaitWords(waitsFor)}. The after-merge checks (${quoted(r.detail.afterMerge!)}) start when it is live; the assignee is woken then.` });
+      if (carried.length) await tellCeo(t, "after merge carried", `"${t.title}" merged with ${quoted(carried)} still at fail. It stays open as after-merge ${carried.length > 1 ? "checks" : "check"} and starts when the change is live (${goLiveWaitWords(waitsFor)}). Nothing to do unless it stalls.`).catch(() => undefined);
+      return { outcome: "merged" as const, delivered: null, detail: { ...r.detail, commit, goLiveWait: waitsFor } };
+    }
     const carriedWhy = carried.length ? ` ${quoted(carried)} ${carried.length > 1 ? "were" : "was"} still at fail when it merged, so ${carried.length > 1 ? "they stay" : "it stays"} on this ticket as after-merge ${carried.length > 1 ? "checks" : "check"}, not a separate ticket.` : "";
     const delivered = await tellAgent(
       { ...t, systemState: "in_progress" },
@@ -934,6 +946,33 @@ export function reviewService(
       const rows = await latestRows(db, ticketId);
       if (wake && t.systemState === "review") await wakeReviewers(db, t, activeRows(rows).filter((r) => r.id === hold.reviewRequestId), (id, i) => wake!(id, i));
       return { outcome: "cancelled" as const, delivered: "cancelled; the review is open again" };
+    },
+
+    /**
+     * BOS-1021: for every merged ticket of the company whose after-merge checks wait for go-live, looks again at
+     * what is still missing. Once the server runs the merge (and the runners have it, for runner code) the wait is
+     * cleared and the assignee is woken with the live checks; until then nothing is sent. Returns how many were woken.
+     */
+    async releaseGoLiveWaiters(companyId: string) {
+      const waiting = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), isNotNull(tickets.goLiveWait)));
+      let woken = 0;
+      for (const t of waiting) {
+        const now = await goLiveWaitOf(db, t);
+        if (now) {
+          if (now !== t.goLiveWait) await db.update(tickets).set({ goLiveWait: now }).where(eq(tickets.id, t.id));
+          continue;
+        }
+        // Claim it first: a second pass (the server update and a runner hello can land together) must not wake twice.
+        const [claimed] = await db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null }).where(and(eq(tickets.id, t.id), isNotNull(tickets.goLiveWait))).returning({ id: tickets.id });
+        if (!claimed) continue;
+        const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
+        const quoted = left.map((c) => `"${c}"`).join(", ");
+        if (!left.length || t.systemState === "done") continue;
+        await record(db, { companyId, ticketId: t.id, kind: "go_live", summary: `The merge is live${t.touchesRunner ? " and the runners have it" : ""}: the after-merge checks can be made now.` });
+        const text = `${t.mergeCommit ? `Merged as ${t.mergeCommit.slice(0, 12)}, and it is live now` : "It is live now"}${t.touchesRunner ? ", with the runners rebuilt" : ""}. These checks can only be made now: ${quoted}. Report pass or fail for each and move the ticket to done. If only the owner can check one, put a card in front of them (raise_decision with blocksTicketId): answering it records their answer as that check's pass or fail, so you can close the ticket once they have. If a check fails on the live work, report it as fail and move the ticket to done: Boss Man opens the follow-up ticket for it, assigned to you, so don't make one by hand.`;
+        if (await tellAgent({ ...t, systemState: "in_progress" }, text, "after merge").catch(() => null)) woken++;
+      }
+      return woken;
     },
 
     /**
@@ -1758,7 +1797,7 @@ export function reviewService(
       // BOS-316: what was pushed is exactly the tree a merge job just passed, so main passes its check (P11a).
       if (serverChecks && m.status === "merged") await queue.setMainState(t.projectId, "green", m.commit);
       // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
-      const mine = await closeAfterMerge(t, m.commit, causedByRunId);
+      const mine = await closeAfterMerge(t, m.commit, causedByRunId, changed?.files.map((f) => f.path));
       for (const c of together) {
         await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
         // A fix riding along on this merge is just as live (BOS-639).
