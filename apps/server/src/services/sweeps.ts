@@ -23,6 +23,7 @@ import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type Signoff
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
+import { fenceDefaultSweep } from "./fence-default.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -1341,6 +1342,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.endUnconfirmedCancels(t);
       // Runs past the company's time limit (BOS-846). Off by default; a failing read must not take the pass down.
       if (opts.cancelRun) await runTimeLimitSweep(db, { now, cancel: opts.cancelRun, alert: opts.alert }).run().catch(() => ({ stopped: 0 }));
+      // A fence mode nobody chose (BOS-940): Off where the runner can't fence, or one card asking about an old Off.
+      await fenceDefaultSweep(db, t).catch(() => ({ turnedOff: 0, raised: 0 }));
       await opts.expireAdvice?.();
       const neverStarted = await neverStartedRuns(t);
       const lost = await lostRuns(t);

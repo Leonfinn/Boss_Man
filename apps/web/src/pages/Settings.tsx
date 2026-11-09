@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { FENCE_OFF_CONSEQUENCE, RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type DeviceProfile, type FundingSource, type Project } from "../api";
 import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
@@ -1821,7 +1821,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
 type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
-function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+export function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const act = useAction();
   const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
   const mode = company.fenceMode ?? "off";
@@ -1842,6 +1842,15 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         : sb.level === "partial"
           ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
           : "Agent runs are isolated from each other.";
+  // Off is never left looking like a safe default (BOS-940): say why it is Off and what it means.
+  const offLine =
+    mode !== "off"
+      ? null
+      : company.fenceModeChosenAt
+        ? `You chose Off. ${FENCE_OFF_CONSEQUENCE}`
+        : sb?.level === "unavailable"
+          ? `The fence is Off because this host can't fence agents. ${FENCE_OFF_CONSEQUENCE}`
+          : `Nobody chose Off: it was Boss Man's old default. ${FENCE_OFF_CONSEQUENCE}`;
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1849,21 +1858,25 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
       {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
+      {offLine && <p style={{ fontSize: 14 }}>{offLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
           id="fence-mode"
           value={mode}
           disabled={act.busy}
-          onChange={(e) =>
+          onChange={(e) => {
+            const fenceMode = e.target.value;
+            // Off is the owner's explicit choice, made after reading what it means (BOS-940).
+            if (fenceMode === "off" && !window.confirm(`Turn the agent fence off? ${FENCE_OFF_CONSEQUENCE} Agent runs can also read each other's memory and start-up keys.`)) return;
             void act.run(async () => {
-              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode } });
               onChanged();
               return "Saved. It applies to runs that start from now on.";
-            })
-          }
+            });
+          }}
         >
-          <option value="off">Off: agents run as before</option>
+          <option value="off">Off: agents run unfenced</option>
           <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
             {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
           </option>

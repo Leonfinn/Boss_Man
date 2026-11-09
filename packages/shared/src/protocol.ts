@@ -420,11 +420,13 @@ export type MigrationsResult =
   | { needed: null; reason: string };
 
 /**
- * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
- * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ * The company's agent fence setting (BOS-325): off, watch (default for new companies since BOS-940: agents run
+ * fenced and refusals are logged) or enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
  */
 export const FENCE_MODES = ["off", "watch", "enforce"] as const;
 export type FenceMode = (typeof FENCE_MODES)[number];
+/** What Off means, in BOS-373's words, said wherever the owner chooses Off (BOS-940): Settings and the fence card. */
+export const FENCE_OFF_CONSEQUENCE = "With the fence Off, agents can read the runner's key and this company's git login.";
 /** Flip once BOS-323 is merged and its test shows the git gap closed. */
 export const FENCE_ENFORCE_AVAILABLE = false;
 /** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */

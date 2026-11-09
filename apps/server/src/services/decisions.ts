@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
+import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -228,6 +229,8 @@ export type DecisionContext =
   | { type: "project_cap"; projectId: string }
   /** A run stopped for passing the company's per-run time limit (BOS-846); "Raise the limit" lifts it by half. */
   | { type: "run_time_limit"; companyId: string; runId: string; minutes: number }
+  /** A company still at the old unchosen fence Off, on a runner that can fence (BOS-940): switch to Watch or keep Off. */
+  | { type: "fence_default" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -361,6 +364,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "engagement",
   "project_cap",
   "run_time_limit",
+  "fence_default",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
@@ -1094,6 +1098,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
       const problem = await retroHook?.problemReverting(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "fence_default") {
+      const problem = await checkFenceAnswer(db, d.companyId, answer);
       if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Write the corrected lesson in the note box.");
@@ -2919,6 +2927,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "run_time_limit") {
         // Only lifts a limit that is still the one the card was about, so a limit the owner changed meanwhile isn't overwritten.
         if (answer === "Raise the limit") await db.update(companies).set({ maxRunMinutes: Math.min(10080, Math.ceil(ctx.minutes * 1.5)) }).where(and(eq(companies.id, d.companyId), eq(companies.maxRunMinutes, ctx.minutes)));
+      } else if (ctx.type === "fence_default") {
+        await applyFenceAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
