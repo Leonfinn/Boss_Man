@@ -348,6 +348,9 @@ export function schedulerService(
 
   /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
   async function swapAdvice(source: typeof fundingSources.$inferSelect) {
+    // Synthetic spends the account's paid top-up credit once the weekly allowance is used (BOS-934).
+    if (source.provider === "synthetic")
+      return ` If the Synthetic account has top-up credit, set "I have top-up credit" to "Keep all work running" on the Funding page to carry on with it.`;
     if (source.provider !== "anthropic") return "";
     const pool = await claudeAccounts(source);
     for (const other of pool.filter((p) => p.id !== source.id)) {
