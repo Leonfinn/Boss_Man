@@ -1818,7 +1818,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
-type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
 function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -1848,6 +1848,15 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {sb?.guard ? (
+        <p style={{ fontSize: 14 }} data-testid="network-guard-line">
+          {sb.guard.state === "on"
+            ? "Network guard: on. The runner tried to reach its own gateway and was refused at once."
+            : `Network guard: absent. The runner could reach its own gateway (${sb.guard.reason}), so private addresses on this network are not blocked.`}
+        </p>
+      ) : sb ? (
+        <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>
+      ) : null}
       {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
