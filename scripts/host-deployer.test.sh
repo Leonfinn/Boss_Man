@@ -261,7 +261,19 @@ rm -f "$D/state/last-server"
 
 # 8. Runner updates: only to the deployed commit; never needs the tip.
 head="$(git -C "$T/src" rev-parse HEAD)"
-req runner "$c3"; host; has "$D/outbox/status.json" "Nothing is broken and nothing needs doing now"
+# 8a (BOS-947). A card for a commit the server has moved past still builds, from the version the server runs.
+req runner "$base"; host
+[[ $(status result) == deployed && $(status to_commit) == "$head" && $(status requested_commit) == "$base" ]] || fail "8a: older runner card: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "built from the version the server runs now; the card named ${base:0:8}"
+has "$STUB_LOG" "update-runner.sh"
+# 8b. A commit that is not part of what the server runs (a switch-back) is refused, in plain words, with what to press.
+git -C "$T/w" checkout -q -b side "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && git -C "$T/w" push -q origin side 2>/dev/null
+side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" checkout -q - ; git -C "$T/src" fetch -q origin side
+rm -f "$D/state/last-runner"; before="$(calls)"
+req runner "$side"; host
+[[ $(status result) == rejected ]] || fail "8b: side commit: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "Open Settings → Server and runner → Updates and press Build and update runners"
+rm -f "$D/state/last-runner"
 req runner "$head"; host
 [[ $(status result) == deployed && $(status target) == runner ]] || fail "runner status"
 has "$STUB_LOG" "update-runner.sh"

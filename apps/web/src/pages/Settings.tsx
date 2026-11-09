@@ -17,7 +17,7 @@ import { DraftTextarea } from "../components/DraftTextarea";
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
 type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -190,6 +190,14 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             <>
               <dt>Image</dt>
               <dd className="mono">{s.imageVersion}</dd>
+            </>
+          )}
+          {s?.registered && (
+            <>
+              <dt>Network guard</dt>
+              <dd data-testid="runner-guard-row">
+                launcher: {c ? c.guard ?? "not reported" : "no container"} · runner: {s.sandbox?.guard ? (s.sandbox.guard.state === "on" ? "on" : `absent (${s.sandbox.guard.reason})`) : "not reported yet"}
+              </dd>
             </>
           )}
         </dl>
@@ -1818,7 +1826,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
-type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null } | null; sandboxCheckedAt?: string | null };
+type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
 export function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -1857,6 +1865,15 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {sb?.guard ? (
+        <p style={{ fontSize: 14 }} data-testid="network-guard-line">
+          {sb.guard.state === "on"
+            ? "Network guard: on. The runner tried to reach its own gateway and was refused at once."
+            : `Network guard: absent. The runner's own gateway was not refused (${sb.guard.reason}), so private addresses on this network are not blocked.`}
+        </p>
+      ) : sb ? (
+        <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>
+      ) : null}
       {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       {offLine && <p style={{ fontSize: 14 }}>{offLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -2497,7 +2514,9 @@ export function CheckQueueSetting() {
 type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
 type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
 type Report = { live: LiveRow[]; update: UpdateRow | null };
-type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null };
+type WrapUpStatus = MaintenanceView & { on: true; kind: "wrapup"; minutes: number; notRespondingAfter: number; runsList: WrapUpRun[] };
 
 /** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
 function UpdateHistory({ r }: { r: UpdateRow }) {
@@ -2562,7 +2581,9 @@ export function RunnerUpdate() {
       )}
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
-          ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
+          ? m.kind === "wrapup"
+            ? "Agents were asked to wrap up. Press Cancel wrap-up (below) once you are done to let new work start again."
+            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" below.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>
@@ -2594,6 +2615,104 @@ export function RunnerUpdate() {
   );
 }
 
+/**
+ * Settings → Server and runner → "Ask agents to wrap up" (BOS-929): a clean stop before an update. It is a mode of
+ * the runner-update hold, so while it is on nothing new starts. The panel names each run still going, and says when
+ * one is waiting for you to answer a request (so it isn't called stuck). Nothing is ever stopped for you; the 10-minute
+ * flag only offers a Stop for that one run.
+ */
+export function WrapUp() {
+  const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-wrapup");
+  const act = useAction();
+  const m = view.data;
+  if (!m) return null;
+  const on = m.on && m.kind === "wrapup";
+  const s = on ? (m as WrapUpStatus) : null;
+  const start = () =>
+    act.run(async () => {
+      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
+      view.reload();
+      return "Every running agent was asked to wrap up.";
+    });
+  const cancel = () =>
+    act.run(async () => {
+      await api("/api/maintenance/cancel", { method: "POST", body: {} });
+      view.reload();
+      return "Wrap-up cancelled: new runs start again.";
+    });
+  const stopOne = (run: WrapUpRun) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
+      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      view.reload();
+      return "Stopping that run.";
+    });
+  return (
+    <Section id="wrapup-h" title="Ask agents to wrap up">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Tells every running agent to finish the step it is on, save its work on the ticket, and stop cleanly, so an update or a runner rebuild can go ahead. Unlike "Stop all work", it also messages the agents that are running now, so they end by themselves and nothing they have not saved is lost. Press "Cancel wrap-up" once the update is done to let new work start again.
+      </p>
+      {s ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-testid="wrapup-on">
+          <p style={{ fontSize: 14 }}>
+            <span className="tag">Wrap-up on</span> {s.runsList.length === 0 ? "Every agent has stopped; nothing new starts until you cancel." : `Waiting for ${s.runsList.length} run${s.runsList.length === 1 ? "" : "s"}. Nothing new starts until you cancel.`}
+          </p>
+          {s.runsList.length > 0 && (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }} data-testid="wrapup-runs">
+              {s.runsList.map((run) => {
+                const waiting = !!run.waitingOn;
+                const late = !waiting && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                return (
+                  <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+                    <strong>{run.agent ?? "An agent"}</strong>
+                    <span className="muted">
+                      {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                    </span>
+                    {waiting ? (
+                      <span className="tag amber" title={run.waitingOn!.question}>
+                        Waiting for an answer
+                      </span>
+                    ) : late ? (
+                      <span className="tag red">Not responding</span>
+                    ) : (
+                      <span className="tag grey">Working</span>
+                    )}
+                    {(late || waiting) && (
+                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                        Stop this run
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="muted" style={{ fontSize: 13 }}>
+            After {s.notRespondingAfter} minutes a run that is still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+          </p>
+          <div>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void cancel()}>
+              Cancel wrap-up
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <button type="button" className="btn" disabled={act.busy || (m.on && m.kind !== "wrapup")} onClick={() => void start()}>
+            Ask agents to wrap up
+          </button>
+          {m.on && m.kind !== "wrapup" && (
+            <p className="muted" style={{ fontSize: 13 }}>
+              An update is already waiting for the runs above to finish.
+            </p>
+          )}
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
 type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
@@ -2611,20 +2730,84 @@ const OWNER_FACT_LABELS: Record<string, string> = {
   "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
 };
 
+/** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
+const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
+const readHostFactsOpen = () => {
+  try {
+    return localStorage.getItem(HOST_FACTS_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+/** A check fact that is a count of things wrong or of something that went wrong: a non-zero value is a problem.
+ * These keep their plain meaning, so `check.restart_counts.max` of 1 is not read as a failure. */
+const CHECK_TROUBLE = /^(unhealthy|notRunning|stale|ageSeconds|lastExitCode)$/;
+/** The host's own answer to "can Boss Man reach the code host": any value but "ok" is a failing check. */
+const CHECK_OK = /(^|\.)(probe|health)$/;
+/** An add-on state saying it is not up (host-deployer.sh's states: running, stopped, needs_login, not installed). */
+const ADDON_RUNNING = "running";
+
+/**
+ * What is wrong with the reported facts, for the folded header, so folding never hides a problem (BOS-924):
+ * a fact a card needs that is missing, a check that is failing, or an add-on that isn't running.
+ */
+function reportedProblems(d: HostFactsView): { missing: string[]; failing: string[]; addonsDown: string[] } {
+  const missing: string[] = [];
+  const failing: string[] = [];
+  const addonsDown: string[] = [];
+  for (const [k, f] of Object.entries(d.facts)) {
+    const v = f.value.trim();
+    if (!v) missing.push(k);
+    else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
+    else if (k.startsWith("check.")) {
+      const last = k.slice(k.lastIndexOf(".") + 1);
+      const wrong = CHECK_TROUBLE.test(last)
+        ? v !== "0"
+        : CHECK_OK.test(k)
+          ? !/^(ok|pass|passed|healthy)$/i.test(v)
+          : false;
+      if (wrong) failing.push(k);
+    }
+  }
+  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim()) missing.push(OWNER_FACT_LABELS[k] ?? k);
+  return { missing, failing, addonsDown };
+}
+
+/** The folded header's one line: what the problems are, in plain words, or nothing when all is well. */
+function problemLine(p: { missing: string[]; failing: string[]; addonsDown: string[] }): string | null {
+  const bits: string[] = [];
+  if (p.missing.length) bits.push(`${p.missing.length} missing`);
+  if (p.failing.length) bits.push(`${p.failing.length} check${p.failing.length === 1 ? "" : "s"} failing`);
+  if (p.addonsDown.length) bits.push(`${p.addonsDown.length} add-on${p.addonsDown.length === 1 ? "" : "s"} not running`);
+  return bits.length ? bits.join(" · ") : null;
+}
+
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
 export function ThisHost() {
   const facts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 30_000, "host-facts");
   const act = useAction();
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState(readHostFactsOpen);
   const d = facts.data;
   if (!d) return null;
   const keys = Object.keys(d.facts).sort();
+  const problems = reportedProblems(d);
+  const trouble = problemLine(problems);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    try {
+      localStorage.setItem(HOST_FACTS_OPEN_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const save = (key: string) =>
     act.run(async () => {
       await api("/api/host-facts", { method: "PUT", body: { key, value: draft[key] ?? "" } });
       facts.reload();
       return "Saved.";
     });
+  const summary = `${d.hostName ? `${d.hostName}, ` : ""}${when(d.reportedAt)}`;
   return (
     <Section id="this-host-h" title="This host">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -2633,25 +2816,45 @@ export function ThisHost() {
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
       {keys.length > 0 && (
-        <dl data-testid="host-facts" style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 16px", fontSize: 14 }}>
-          {keys.map((k) => {
-            const f = d.facts[k]!;
-            return (
-              <Fragment key={k}>
-                <dt className="mono">{k}</dt>
-                <dd>
-                  <span className="mono">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
-                  {f.conflict && (
-                    <span className="error" role="alert">
-                      {" "}
-                      You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
-                    </span>
-                  )}
-                </dd>
-              </Fragment>
-            );
-          })}
-        </dl>
+        <div className="host-facts">
+          <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>
+            <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            <span>
+              Reported facts ({keys.length}) — {summary}
+            </span>
+            {trouble && (
+              <span className="tag amber" data-testid="host-facts-problems">
+                {trouble}
+              </span>
+            )}
+          </button>
+          <div id="host-facts-body" hidden={!open} style={open ? undefined : { display: "none" }}>
+            {trouble && (
+              <p className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
+                Worth a look: {[...problems.missing, ...problems.failing, ...problems.addonsDown.map((a) => `addon.${a}`)].join(", ")}.
+              </p>
+            )}
+            <dl data-testid="host-facts" className="host-facts-list">
+              {keys.map((k) => {
+                const f = d.facts[k]!;
+                return (
+                  <Fragment key={k}>
+                    <dt className="mono">{k}</dt>
+                    <dd>
+                      <span className="mono host-fact-value">{f.value}</span> <span className="muted">({f.source === "host" ? "reported by the host" : "confirmed by you"})</span>
+                      {f.conflict && (
+                        <span className="error" role="alert">
+                          {" "}
+                          You confirmed "{f.conflict.confirmed}" but the host reports "{f.conflict.reported}". The host's value is used.
+                        </span>
+                      )}
+                    </dd>
+                  </Fragment>
+                );
+              })}
+            </dl>
+          </div>
+        </div>
       )}
       <h3 style={{ fontSize: 15, fontWeight: 600 }}>Facts only you can give</h3>
       {d.ownerFacts.map((k) => (
@@ -3209,6 +3412,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <div key={company.id} style={{ display: "contents" }}>
             <Runner company={company} />
             <RunnerUpdate />
+            <WrapUp />
             <Devices />
           </div>
         ) : current.id === "transfer" ? (

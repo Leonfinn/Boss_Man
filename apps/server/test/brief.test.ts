@@ -76,6 +76,22 @@ describe("activity log (R83)", () => {
     await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Adyen" });
     expect((await log()).find((r) => r.kind === "decision_answered")).toMatchObject({ ticketId: t.id, agentId: null, summary: 'Owner answered "Which provider?": Adyen' });
 
+    // BOS-951 criterion 3: a long question doesn't push the option out of the whats_new line. Only the question is
+    // shortened, so the option chosen is still there in the 100-character change line the brief shows.
+    const t2 = await ctx.ticket("Check the board on a phone", { assigneeAgentId: ctx.dev.id });
+    const [d2] = await ctx.db
+      .insert(decisions)
+      .values({ companyId: cid(), kind: "question", question: `${"Does the board open and the details fold open on your machine? ".repeat(6)}`.trim(), options: ["Works", "Broken"], recommendedOption: "Works", raisedByAgentId: ctx.dev.id })
+      .returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t2.id, blockerDecisionId: d2!.id, blockerTicketId: null });
+    await ctx.req("POST", `/api/decisions/${d2!.id}/answer`, { answer: "Broken" });
+    const answered = (await log()).find((r) => r.kind === "decision_answered" && r.summary.includes("Broken"));
+    expect(answered?.summary).toContain(': Broken');
+    // The brief's change line cuts at 100 characters, so the summary has to be short enough for the answer to show.
+    expect(answered!.summary.length).toBeLessThanOrEqual(140);
+    const line = (await brief(ctx.dev.id, "worker")).split("\n").find((l) => l.includes("Broken"));
+    expect(line).toContain("Broken");
+
     await ctx.db.delete(runs).where(eq(runs.agentId, ctx.dev.id)); // BOS-513: the test token's stand-in run is still open and would block the wake
     await ctx.scheduler.wake({ agentId: ctx.dev.id, reason: "assigned", ticketId: t.id });
     await ctx.scheduler.tick();

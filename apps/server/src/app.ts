@@ -105,7 +105,7 @@ import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
-import { approveGate, phoneApproveService } from "./services/phone-approve.js";
+import { phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -331,6 +331,7 @@ export async function buildApp(opts: AppOptions) {
     pushPlain: (n) => notes.pushPlain(n),
     answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra),
     now: opts.now,
+    fetch: opts.fetch,
   });
   notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
@@ -1354,7 +1355,7 @@ export async function buildApp(opts: AppOptions) {
     });
     /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
     const approveStatus = async (s: NotifySettings) => {
-      const g = approveGate(s, s.ntfy?.tokenSecretId ? await secretsSvc.reveal(s.ntfy.tokenSecretId) : null);
+      const { gate: g } = await phoneApprove.gate(s);
       return g.on ? { on: true } : { on: false, why: g.why };
     };
     // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
@@ -2072,7 +2073,12 @@ export async function buildApp(opts: AppOptions) {
         return importErrors(reply)(err);
       }
       for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
-      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      // The company is already saved and its id is what the caller needs. A failure while raising the
+      // checklist card must not turn a successful import into an error reply with no company id (BOS-927):
+      // log it and still return the import's result.
+      await decisionsSvc
+        .raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" })
+        .catch((err) => app.log.error({ err, companyId: done.companyId }, "import checklist card failed"));
       if (launch.enabled)
         void launch.start(done.companyId).catch((err) =>
           notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),

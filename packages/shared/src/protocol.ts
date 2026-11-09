@@ -12,13 +12,24 @@ export const HEARTBEAT_MS = 15_000;
 
 const Uuid = z.string().uuid();
 
+export const GuardReport = z.object({
+  /** on: a connect to the runner's own default gateway was refused at once with EHOSTUNREACH (the guard). absent: it connected, timed out, was refused or there was no gateway. */
+  state: z.enum(["on", "absent"]),
+  reason: z.string().max(200),
+  errno: z.string().max(100).nullable(),
+  ms: z.number().nonnegative(),
+});
+export type GuardReport = z.infer<typeof GuardReport>;
+
 /**
  * What a runner can fence agents with (DR-004, BOS-321), from its start-up self-test. full: Landlock
  * ABI 6+; partial: ABI 2-5, files fenced but `missing` lists what isn't; unavailable: no usable
  * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
  * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
  */
-export const SandboxReport = z.object({
+export const SandboxReport =z.object({
+  /** The runner's own network-guard probe (DR-049 point 2); absent on a runner that predates it. */
+  guard: GuardReport.optional(),
   landlockAbi: z.number().int().nonnegative(),
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),

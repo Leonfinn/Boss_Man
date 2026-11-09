@@ -93,7 +93,7 @@ export const OWNER_CONTROLS = {
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature", "Discard draft",
+    "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
@@ -121,10 +121,14 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
+    // Ask every running agent to stop cleanly before an update (BOS-929).
+    "Ask agents to wrap up", "Cancel wrap-up", "Stop this run",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
     "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
+    // This host (BOS-924): the reported facts fold away behind a one-line header; the arrow opens them.
+    "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
@@ -247,7 +251,8 @@ export const OWNER_FIELDS = {
     "I understand this gives the runner a direct path to Boss Man's own services or your private network, and I want it anyway",
   ],
   Funding: [
-    "Hold routine work at", "I have extra usage", "Can trigger the hold",
+    // "I have top-up credit" is the same setting on a Synthetic plan's card (BOS-934).
+    "Hold routine work at", "I have extra usage", "I have top-up credit", "Can trigger the hold",
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
   ],
   Rules: ["Rules for", "What should this rule do", "New rule", "Command matches (regex)", "Tool title matches (regex)", "Then", "An agent of"],
