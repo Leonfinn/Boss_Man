@@ -1,0 +1,216 @@
+name: Publish images
+
+# Every merge to main that passes CI publishes test images (BOS-973, plan: BOS-935, DR-050): built natively on x86 and
+# ARM, pushed once to the first registry in the IMAGE_PREFIXES list, copied to the others by digest (the digests must be
+# identical), signed without a key, and checked in every registry. Tags: sha-<12 characters of the commit> only.
+# The "beta" and version tags come from the Release workflow, when the owner presses its button.
+#
+# Settings (Settings > Secrets and variables > Actions; docs/25-published-images.md):
+#   variable IMAGE_PREFIXES    e.g. "ghcr.io/<owner> docker.io/<namespace>" (default: ghcr.io/<repository owner>)
+#   variable DOCKERHUB_PUBLISH "true" turns Docker Hub on; then the two secrets below must exist or the run fails
+#   secrets  DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a read-and-write access token)
+#   variable PUBLISH_IMAGES    image names, default the server, launcher and netguard. Add boss-man-runner only after the
+#                              Claude pack (BOS-972) has merged: the runner image holds Claude Code until then. It is
+#                              refused here unless scripts/image-tests.sh no-anthropic passes on it.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+# One publish at a time, and a release waits for it. Never cancel one half way.
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
+
+jobs:
+  settings:
+    # Only a CI run that passed on a push to main (not the nightly run, not a pull request).
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      primary: ${{ steps.s.outputs.primary }}
+      ghcr: ${{ steps.s.outputs.ghcr }}
+      hub: ${{ steps.s.outputs.hub }}
+      images: ${{ steps.s.outputs.images }}
+      tag: ${{ steps.s.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
+        id: s
+        env:
+          IMAGE_PREFIXES: ${{ vars.IMAGE_PREFIXES }}
+          PUBLISH_IMAGES: ${{ vars.PUBLISH_IMAGES }}
+          DOCKERHUB_PUBLISH: ${{ vars.DOCKERHUB_PUBLISH }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          prefixes="$(scripts/publish-images.sh prefixes)"
+          images="$(scripts/publish-images.sh images)"
+          {
+            echo "primary=$(echo "$prefixes" | head -n 1)"
+            echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
+            echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
+            echo "images=$(echo "$images" | jq -R . | jq -sc .)"
+            echo "tag=$(scripts/publish-images.sh tag "$SHA")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing to:" >> "$GITHUB_STEP_SUMMARY"
+          echo "$prefixes" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: settings
+    name: build ${{ matrix.image }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        image: ${{ fromJSON(needs.settings.outputs.images) }}
+        arch: [amd64, arm64]
+    # Native runners, no emulation (as CI's images job).
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: ${{ needs.settings.outputs.ghcr == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: ${{ needs.settings.outputs.hub == 'true' }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: The runner image is published only when it holds no Anthropic code (DR-050)
+        if: ${{ matrix.image == 'boss-man-runner' }}
+        run: |
+          docker build -f apps/runner/Dockerfile --build-arg BOSSMAN_IMAGE_VERSION=ci -t boss-man-runner:ci .
+          XFAIL_NO_ANTHROPIC=0 scripts/image-tests.sh no-anthropic
+      - name: Build, attach the SBOM and provenance, and push by digest to the first registry
+        env:
+          NAME: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+          PRIMARY: ${{ needs.settings.outputs.primary }}
+          TAG: ${{ needs.settings.outputs.tag }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          df="$(scripts/publish-images.sh dockerfile "$NAME")"
+          args=()
+          case "$NAME" in
+            boss-man-server) args+=(--build-arg "BOSSMAN_COMMIT=$SHA") ;;
+            boss-man-runner) args+=(--build-arg "BOSSMAN_IMAGE_VERSION=$TAG" --build-arg "BOSSMAN_IMAGE_COMMIT=$SHA") ;;
+          esac
+          docker buildx build -f "$df" "${args[@]}" \
+            --label "org.opencontainers.image.source=https://github.com/$REPO" \
+            --label "org.opencontainers.image.revision=$SHA" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --provenance=mode=max --sbom=true \
+            --output "type=image,name=$PRIMARY/$NAME,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file meta.json .
+          mkdir -p digests
+          jq -r '."containerimage.digest"' meta.json > "digests/$NAME-$ARCH"
+          echo "$NAME $ARCH $(cat "digests/$NAME-$ARCH")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: digests/${{ matrix.image }}-${{ matrix.arch }}
+          retention-days: 1
+
+  merge:
+    needs: [settings, build]
+    name: publish ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.settings.outputs.images) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing: a short-lived certificate for this workflow run
+    env:
+      IMAGE_PREFIXES: ${{ vars.IMAGE_PREFIXES }}
+      PUBLISH_IMAGES: ${{ vars.PUBLISH_IMAGES }}
+      DOCKERHUB_PUBLISH: ${{ vars.DOCKERHUB_PUBLISH }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+      NAME: ${{ matrix.image }}
+      PRIMARY: ${{ needs.settings.outputs.primary }}
+      TAG: ${{ needs.settings.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+      - uses: docker/login-action@v3
+        if: ${{ needs.settings.outputs.ghcr == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: ${{ needs.settings.outputs.hub == 'true' }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          merge-multiple: true
+          path: digests
+      - name: Join the two architectures into one image in the first registry
+        id: join
+        run: |
+          set -euo pipefail
+          [ "$(ls digests | wc -l)" = 2 ] || { echo "expected one digest per architecture, found: $(ls digests)"; exit 1; }
+          sources=""
+          for f in digests/*; do sources="$sources $PRIMARY/$NAME@$(cat "$f")"; done
+          # shellcheck disable=SC2086  # one argument per source
+          docker buildx imagetools create -t "$PRIMARY/$NAME:$TAG" $sources
+          digest="$(docker buildx imagetools inspect "$PRIMARY/$NAME:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Copy it to the other registries by digest (fails if a digest differs)
+        env:
+          DIGEST: ${{ steps.join.outputs.digest }}
+        run: scripts/publish-images.sh copy "$NAME" "$TAG" "$DIGEST"
+      - name: Sign it in every registry (keyless; the signature is stored per registry)
+        env:
+          DIGEST: ${{ steps.join.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for p in $(scripts/publish-images.sh prefixes); do
+            cosign sign --yes "$p/$NAME@$DIGEST"
+          done
+      - name: Check the signature, SBOM and provenance in every registry
+        env:
+          DIGEST: ${{ steps.join.outputs.digest }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: scripts/publish-images.sh verify "$NAME" "$DIGEST"
+      - name: The NOTICE is inside the image
+        env:
+          DIGEST: ${{ steps.join.outputs.digest }}
+        run: docker run --rm --entrypoint cat "$PRIMARY/$NAME@$DIGEST" /NOTICE > /dev/null
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.join.outputs.digest }}
+        run: echo "- \`$NAME\` \`$TAG\` = \`$DIGEST\` in every registry, signed, with SBOM and provenance" >> "$GITHUB_STEP_SUMMARY"
