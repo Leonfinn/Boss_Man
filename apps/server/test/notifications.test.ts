@@ -95,7 +95,7 @@ describe("notification ladder (R44)", () => {
     const [p] = c.pushed;
     expect(p!.url).toBe("https://ntfy.example.ts.net/");
     expect(p!.headers.authorization).toBe("Bearer tk_secret_value_123");
-    expect(p!.body).toEqual({ topic: "bossman", title: "App Co needs a decision", message: "Ship the beta?", priority: 4, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions" });
+    expect(p!.body).toEqual({ topic: "bossman", title: "App Co needs a decision", message: "Ship the beta?", priority: 4, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions", actions: [{ action: "view", label: "Open in Boss Man", url: "https://bossman.example.ts.net/#/decisions", clear: false }] });
     expect(rows.find((r) => r.level === "ask")!.pushedAt).not.toBeNull();
 
     const feed = (await c.req("GET", "/api/notifications")).json();
