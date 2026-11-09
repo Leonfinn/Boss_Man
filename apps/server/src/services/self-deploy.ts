@@ -204,6 +204,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /**
+   * BOS-1037: what is really live. This process's own commit is the ground truth for what runs: a deploy restarts
+   * into the new commit (a single server) or switches to the new colour's process, which is already the new commit
+   * (blue/green), so the build is never behind reality. A hand-apply leaves the host's own files stale (its
+   * status.json describes the last deployer run, an older commit), which is why the build has to win there. With no
+   * build commit (a `dev` build, or a test that drives the pass directly), the host's report is used, as before.
+   */
+  function newestRunning(reported: string, build: string): string {
+    const isSha = (x: string) => /^[0-9a-f]{40}$/i.test(x);
+    if (isSha(build)) return build;
+    return isSha(reported) ? reported : "";
+  }
+
+  /**
    * What the owner is approving (BOS-213): Boss Man's merges record the ticket as
    * `Merge "<title>" (<ticket id>)`, so each one maps back to its ticket and title. Commits that
    * aren't a ticket keep their subject line. Long ranges show the first 20 tickets.
@@ -1069,10 +1082,23 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * each company's Release Manager on one small ticket. The commit is the same one server_status
      * reports as live, so nothing here depends on where the host keeps its files. Returns how many
      * Release Managers were woken.
+     *
+     * BOS-1037: a hand-apply restarts the server on the new commit but never touches the deployer's own
+     * files. Its status.json still describes the last deployer run (an older commit), and its
+     * available.json may be gone. Reading those first recorded the old commit and left every merge that
+     * waits for go-live stuck after a hand-apply. So the running build's own commit is a candidate too,
+     * and it wins unless a deploy ended after this process started (the old colour still up: the host's report
+     * is newer then). A hand-apply leaves the report older than the process, so the build wins.
      */
     async noteLive(a: Available | null, s: DeployStatus | null) {
       if (!deps.releaseLog) return 0;
-      const live = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || process.env.BOSSMAN_COMMIT || "";
+      const reported = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || "";
+      const build = process.env.BOSSMAN_COMMIT || "";
+      // A deploy that ended after this process started happened under it (blue/green: the old colour is still up),
+      // so the host's report is newer than the build; recording the build then would rewind the live commit.
+      const startedAt = Date.now() - process.uptime() * 1000;
+      const deployedUnderUs = !!s && (s.result === "deployed" || s.result === "rolled_back") && Date.parse(s.ended) > startedAt;
+      const live = deployedUnderUs ? reported : newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
       const rows = await db.select({ id: companies.id }).from(companies);
       for (const c of rows) await deps.releaseLog.note(c.id, live);
