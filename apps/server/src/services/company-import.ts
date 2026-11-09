@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -13,6 +13,7 @@ import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.j
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
 import { reachesStack, sendableAddress } from "./launcher.js";
+import { normalizeStandingRules, standingRulesError } from "./standing-rules.js";
 import { addTicketDependency } from "./ticket-links.js";
 
 export class ImportError extends Error {
@@ -29,7 +30,7 @@ export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
 const Uuidish = z.string().max(100);
-const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null) });
+const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null), standingRules: opt(100_000) });
 const Agent = z.object({
   ref: Uuidish.optional(),
   name: z.string().trim().min(1).max(80),
@@ -185,6 +186,18 @@ export function readPackage(zip: Uint8Array): Package {
   const manifest = parse(z.object({ format: z.string() }), json("manifest.json") ?? {}, "manifest.json");
   if (manifest.format !== EXPORT_FORMAT) throw new ImportError(400, `This isn't a Boss Man company package (format "${manifest.format}", expected "${EXPORT_FORMAT}").`);
   const company = parse(Company, json("company.json"), "company.json");
+  // Standing rules come in as plain text only (DR-041): same trimming and length cap as the owner's own
+  // save, and nothing else in the package can turn them into a permission rule. Text that is too long
+  // or holds a credential is left out, with a warning, rather than failing the whole import.
+  const rules = normalizeStandingRules(company.standingRules ?? "");
+  company.standingRules = rules || null;
+  if (rules && standingRulesError(rules)) {
+    notes.push(`The standing rules in the package were left out: ${standingRulesError(rules)}`);
+    company.standingRules = null;
+  } else if (rules && findCredential(rules)) {
+    notes.push("The standing rules in the package were left out because they look like they hold a password or key.");
+    company.standingRules = null;
+  }
 
   const under = (dir: string) => [...files.keys()].filter((p) => p.startsWith(`${dir}/`));
   const folders = (dir: string) => [...new Set(under(dir).map((p) => p.split("/")[1]!))].sort();
@@ -274,6 +287,8 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
     skills: pkg.skills.map((s) => ({ name: s.name, renamedFrom: s.name !== s.folder ? s.folder : null, description: s.description, scripts: s.files.map((f) => f.path).filter((p) => SCRIPT.test(p)) })),
     secrets: pkg.secrets.map((s) => ({ name: s.name, envName: s.envName, agents: s.agents })),
     // Each tool server and the host:port the runner's network guard would let through for it (null: none it can allow).
+    // Each project's verify commands word for word: they run on the runner during checks (BOS-818). Shown, not judged.
+    projects: pkg.projects.map((p) => ({ name: p.name, verifyCommand: p.verifyCommand ?? null, deepVerifyCommand: p.deepVerifyCommand ?? null })),
     toolServers: await Promise.all(pkg.toolServers.map(async (t) => ({ name: t.name, url: t.url, opens: sendableAddress(t.url), stackService: await reachesStack(t.url) }))),
     warnings,
   };
@@ -323,9 +338,26 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // Tickets keep their numbers (a repeat gets a new one); tickets without one are numbered after the highest.
     const seen = new Set<number>();
     const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
+    // A package may tighten the owner's safeguards but never loosen them (BOS-754): approving engagements
+    // keeps its default (on), and each review policy keeps the default's owner sign-offs and plan approvals.
+    // The checklist says what the package asked for, so the owner can loosen it on purpose.
+    const tightened: string[] = [];
+    if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
+    const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
+    // The company's policy is floored against the default; each project's override against the company's
+    // (BOS-818). The default has no review kinds, so the company's own policy is what shows the security
+    // review a project override would otherwise drop.
+    const floored = (policy: ReviewPolicy, project?: { name: string; floor: ReviewPolicy }) => {
+      const r = noLooserThan(policy, project?.floor);
+      if (r.tightened.length)
+        tightened.push(
+          `Kept on${project ? ` in project ${project.name}` : ""}: ${listed(r.tightened)}. The package had ${r.tightened.length > 1 ? "them" : "it"} switched off. To change ${r.tightened.length > 1 ? "them" : "it"}, use ${project ? "the project's review settings" : "Settings → Reviews"}.`,
+        );
+      return r.policy;
+    };
     const [c] = await tx
       .insert(companies)
-      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), nextTicketNumber: Math.max(0, ...seen) + 1 })
+      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), ...(pkg.company.standingRules ? { standingRules: pkg.company.standingRules, standingRulesBy: "import", standingRulesAt: new Date() } : {}), nextTicketNumber: Math.max(0, ...seen) + 1 })
       .returning();
     const companyId = c!.id;
 
@@ -342,7 +374,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // An older package marks reviewers on the agent; its "marked" cells name them instead (BOS-198).
     const marks: Partial<Record<ReviewKind, string[]>> = {};
     for (const a of pkg.agents) if (a.reviewKind && (REVIEW_KINDS as readonly string[]).includes(a.reviewKind)) (marks[a.reviewKind as ReviewKind] ??= []).push(agentId.get(a.slug)!);
-    await tx.update(companies).set({ reviewPolicy: remapPolicy(pkg.company.reviewPolicy, agentRef, marks) }).where(eq(companies.id, companyId));
+    const companyPolicy = floored(remapPolicy(pkg.company.reviewPolicy, agentRef, marks));
+    await tx.update(companies).set({ reviewPolicy: companyPolicy }).where(eq(companies.id, companyId));
 
     for (const s of pkg.skills) {
       const m = s.meta;
@@ -358,7 +391,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       const { slug, columns, reviewPolicy, ...fields } = p;
       const [row] = await tx
         .insert(projects)
-        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : remapPolicy(reviewPolicy, agentRef, marks) })
+        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), { name: fields.name, floor: companyPolicy }) })
         .returning();
       projectId.set(slug, row!.id);
       columnsOf.set(row!.id, await tx.insert(workflowColumns).values(columns.map((col, i) => ({ projectId: row!.id, name: col.name, systemState: col.systemState, wipLimit: col.wipLimit ?? null, position: i }))).returning({ id: workflowColumns.id, systemState: workflowColumns.systemState }));
@@ -440,10 +473,12 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // What the owner still has to do, for the checklist decision.
     const slugName = (slug: string) => pkg.agents.find((a) => a.slug === slug)?.name ?? slug;
     const checklist = [
+      ...(pkg.company.standingRules ? [`Standing rules came in as plain notes every run reads (they grant no permissions). Read them in Settings and change what doesn't fit:\n${pkg.company.standingRules}`] : []),
       ...pkg.secrets.map((s) => `Add the secret "${s.name}" and grant it as ${s.envName}${s.agents.length ? ` to ${s.agents.map(slugName).join(", ")}` : ""}.`),
       ...(opts.fundingSourceId ? [] : ["Give each agent a funding source."]),
       ...pkg.skills.filter((s) => s.files.some((f) => SCRIPT.test(f.path))).map((s) => `Read the scripts in the skill ${s.name} before agents use it.`),
       "Every imported agent is paused: check its model and instructions, then unpause it.",
+      ...tightened,
     ];
     return { companyId, name, agentIds: [...agentId.values()], wikiPageIds: pages.map((p) => p.id), checklist };
   });

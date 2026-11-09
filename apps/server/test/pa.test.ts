@@ -204,8 +204,9 @@ describe("the CEO's PA (R87)", () => {
     expect(ceoRun.prompt).toContain("The owner asked: Is checkout late?");
     await c.emit({ type: "run.update", runId: ceoRun.runId, update: { kind: "agent_message", text: "It's on track." } });
     await c.settle();
+    // The PA relay posts the CEO's words unchanged; the CEO's own chat reply also gets its what-changed line (BOS-758).
     expect((await c.thread(c.pa.id)).at(-1)).toMatchObject({ role: "assistant", text: "From the CEO:\n\nIt's on track." });
-    expect((await ceoThread(c)).at(-1)).toMatchObject({ role: "assistant", text: "It's on track." });
+    expect((await ceoThread(c)).at(-1)).toMatchObject({ role: "assistant", text: "It's on track.\n\nNo changes made in this reply." });
   });
 
   it("fails open: a failed PA run goes to the CEO", async () => {

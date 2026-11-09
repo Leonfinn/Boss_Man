@@ -30,7 +30,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   if (!c) return null;
   const files: Record<string, Uint8Array> = {};
 
-  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix });
+  files["company.json"] = json({ name: c.name, mission: c.mission, reviewPolicy: c.reviewPolicy, goalCheckDays: c.goalCheckDays, ownerApprovesEngagements: c.ownerApprovesEngagements, ticketPrefix: c.ticketPrefix, ...(c.standingRules?.trim() ? { standingRules: c.standingRules } : {}) });
 
   // Agents, by a folder name other files refer to them by.
   const team = await db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));

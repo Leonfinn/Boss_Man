@@ -111,7 +111,7 @@ export type PushReading = {
   warnings: string[];
   dangerous: boolean;
 };
-export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
+export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; ownerWhy?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
@@ -124,7 +124,7 @@ export type AdvisedDecision = {
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
   advice?: Advice;
   settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
-  withdrawn?: { by: string; note: string };
+  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */

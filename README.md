@@ -40,12 +40,14 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | Doc | What's in it |
 |---|---|
 | [docs/00-first-time-install.md](docs/00-first-time-install.md) | **Start here to install:** from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
+| [docs/23-updating.md](docs/23-updating.md) | **Read before you update:** the update steps, backups and how to check one restores, breaking changes that need a hand step, and where release notes are |
 | [docs/01-scope.md](docs/01-scope.md) | The problem, goals, non-goals and requirements, plus the v1, v1.1 and later scope |
 | [docs/02-architecture.md](docs/02-architecture.md) | Components, the runner model, the data model, the decision queue, engagements, budgets and secrets |
 | [docs/03-phased-plan.md](docs/03-phased-plan.md) | Spikes first, then the build phases to v1, and the plan for Boss Man to build itself |
 | [docs/04-research.md](docs/04-research.md) | Findings with sources: the Paperclip code, Claude authentication and policy, ACP, and quota tracking |
 | [docs/05-decision-log.md](docs/05-decision-log.md) | Every scoping decision and its answer |
 | [docs/21-move-to-new-host.md](docs/21-move-to-new-host.md) | Moving Boss Man to another Docker host: what moves, hard-coded host values, cut-over order, rollback; TrueNAS and Proxmox notes |
+| [docs/22-staging.md](docs/22-staging.md) | A second, separate staging stack: setup, one-step deploy of a commit, rollback, smoke checklist, what it does not cover |
 | [docs/06-install-truenas.md](docs/06-install-truenas.md) | Installing on TrueNAS SCALE: datasets, building the images on the NAS, credentials, updates and backups |
 | [docs/07-feature-requests.md](docs/07-feature-requests.md) | Feedback notes, features, scoring and the public feedback portal |
 | [docs/08-v1.2-plan.md](docs/08-v1.2-plan.md) | The v1.2 plan: the runner launcher, the setup wizard, merge checks, pull requests, the Agents page and more |

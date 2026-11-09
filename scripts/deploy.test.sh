@@ -91,6 +91,21 @@ if FAKE_HEALTH=unhealthy BOSSMAN_HEALTH_TIMEOUT=1 PATH="$t/bin:$PATH" scripts/de
 grep -q "Last 20 lines of the server log" "$t/unhealthy.out" || { echo "FAIL: no log header in the rollback help"; exit 1; }
 grep -q "EACCES: permission denied" "$t/unhealthy.out" || { echo "FAIL: rollback help didn't show the server log"; exit 1; }
 grep -q "compose logs --no-color --tail 20 server" "$FAKE_LOG" || { echo "FAIL: didn't ask for 20 log lines"; exit 1; }
+# A restart (BOS-647): --force at the commit that runs recreates the server (an unchanged image would leave it running),
+# leaves the launcher alone and keeps the rollback record, so --rollback still goes back to the release before.
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
+[[ $(cat "$t/backups/deploy-status.previous-commit") == "$one" ]] || { echo "FAIL: setup: rollback record"; exit 1; }
+: >"$FAKE_LOG"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --force --commit "$two" >"$t/force.out" 2>&1 || { echo "FAIL: --force at the same commit"; cat "$t/force.out"; exit 1; }
+[[ $(git rev-parse HEAD) == "$two" ]] || { echo "FAIL: --force at the same commit moved the checkout"; exit 1; }
+grep -q "compose up -d --no-deps --force-recreate server$" "$FAKE_LOG" || { echo "FAIL: --force at the same commit did not recreate the server"; cat "$FAKE_LOG"; exit 1; }
+[[ $(cat "$t/backups/deploy-status.previous-commit") == "$one" ]] || { echo "FAIL: --force at the same commit overwrote the rollback record"; exit 1; }
+grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: restart status"; exit 1; }
+# An ordinary deploy does not recreate anything twice.
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
+! grep -q -- "--force-recreate" "$FAKE_LOG" || { echo "FAIL: a normal deploy force-recreated"; exit 1; }
 # The readable-check is one text in the three scripts.
 for s in rebuild-live host-deployer; do
   [[ "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/$s.sh")" == "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/deploy.sh")" ]] || { echo "FAIL: readable-check in $s.sh differs from deploy.sh"; exit 1; }

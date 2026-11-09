@@ -105,13 +105,15 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
+    "Restart the server",
     // This host: confirm a fact only the owner can give.
     "Confirm",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
   ],
-  // Tool servers and funding sources (a new funding source is added here, not on the Funding tab).
-  "Access and funding": ["Remove", "Add tool server", "Edit", "Delete", "Save", "Add", "Cancel"],
+  // Tool servers, deploy targets and funding sources (a new funding source is added here, not on the Funding tab).
+  "Access and funding": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Add", "Cancel"],
   "Reviews and CEO": [
     "Reset to defaults", "Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours", "Run a retro now",
     "Cancel", "Edit", "Test", "Start a new chapter",
@@ -164,7 +166,7 @@ export const OWNER_FIELDS = {
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "What should the agent change",
-    "Lesson learned (optional) — you'll be asked whether to add it to the project brief", "Doesn't need code changes",
+    "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
     "Urgent", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
   ],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
@@ -203,9 +205,15 @@ export const OWNER_FIELDS = {
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",
     "Instructions, in Markdown", "A skill folder, its files, or a .zip",
   ],
-  "Server and runner": ["Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)"],
+  "Server and runner": [
+    "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
+    "Background (infinite mode) runs at once (0 to 16)",
+  ],
   "Access and funding": [
     "Server name", "Server URL", "Transport", "Token secret", "Header name", "Header value",
+    // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
+    "Name", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
+    "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
   ],
   "Reviews and CEO": [

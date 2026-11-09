@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REVIEW_POLICY, describeRoles, normaliseMarked, policyAgentIds, ReviewPolicySchema, reviewRolesOf, ruleFor, type ReviewRule } from "../src/review-policy.js";
+import { DEFAULT_REVIEW_POLICY, describeRoles, noLooserThan, normaliseMarked, policyAgentIds, ReviewPolicySchema, reviewRolesOf, ruleFor, type ReviewPolicy, type ReviewRule } from "../src/review-policy.js";
 
 describe("review policy", () => {
   it("defaults parse and follow the owner's table", () => {
@@ -40,5 +40,45 @@ describe("reviewer lists", () => {
     const rule = { ...DEFAULT_REVIEW_POLICY.medium, kinds: { security: "marked", infra: "marked", adversarial: "marked" } };
     expect(normaliseMarked(rule, { security: [a], infra: [a, b] }).kinds).toEqual({ security: a, infra: [a, b], adversarial: "ceo" });
     expect(normaliseMarked(DEFAULT_REVIEW_POLICY.low, {})).toBe(DEFAULT_REVIEW_POLICY.low);
+  });
+
+  it("keeps the default's owner sign-offs and plan approvals on, and nothing else (BOS-754)", () => {
+    const agent = "11111111-1111-4111-8111-111111111111";
+    const loose: ReviewPolicy = {
+      ...DEFAULT_REVIEW_POLICY,
+      low: { planApprover: "owner", reviewer: agent, ownerSignoff: true },
+      high: { planApprover: "none", reviewer: agent, ownerSignoff: false, kinds: { security: agent } },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, planApprover: "ceo" },
+    };
+    const r = noLooserThan(loose);
+    // Tightened only where the default has the owner; reviewers, kinds and a stricter low tier are kept.
+    expect(r.policy).toEqual({ ...loose, high: { planApprover: "owner", reviewer: agent, ownerSignoff: true, kinds: { security: agent } }, critical: DEFAULT_REVIEW_POLICY.critical });
+    expect(r.tightened).toEqual(["your sign-off on high-risk work", "your approval of high-risk plans", "your approval of critical-risk plans"]);
+    expect(loose.high.ownerSignoff).toBe(false);
+    expect(noLooserThan(DEFAULT_REVIEW_POLICY)).toEqual({ policy: DEFAULT_REVIEW_POLICY, tightened: [] });
+  });
+
+  it("keeps the floor's review kinds and non-CEO reviewers, and anything the policy adds (BOS-818)", () => {
+    const a = "11111111-1111-4111-8111-111111111111";
+    const b = "22222222-2222-4222-8222-222222222222";
+    // A floor with a security review at high (as a package's company policy may have).
+    const floor: ReviewPolicy = { ...DEFAULT_REVIEW_POLICY, high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { security: [a, b] } } };
+    const loose: ReviewPolicy = {
+      ...DEFAULT_REVIEW_POLICY,
+      medium: { ...DEFAULT_REVIEW_POLICY.medium, reviewer: "ceo" },
+      high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a } },
+      critical: { ...DEFAULT_REVIEW_POLICY.critical, reviewer: b, kinds: { adversarial: "ceo" } },
+    };
+    const r = noLooserThan(loose, floor);
+    expect(r.policy).toEqual({
+      ...loose,
+      medium: DEFAULT_REVIEW_POLICY.medium,
+      high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { infra: a, security: [a, b] } },
+    });
+    expect(r.tightened).toEqual(["a reviewer other than the CEO for medium-risk work", "the security review of high-risk work"]);
+    // A kind the policy already has keeps its own reviewer; the default floor has no kinds to add.
+    expect(noLooserThan({ ...floor, high: { ...floor.high, kinds: { security: "ceo" } } }, floor).tightened).toEqual([]);
+    expect(noLooserThan(loose).policy.high.kinds).toEqual({ infra: a });
+    expect(loose.medium.reviewer).toBe("ceo");
   });
 });

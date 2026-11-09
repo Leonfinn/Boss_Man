@@ -643,6 +643,226 @@ export function ToolServers({ company }: { company: Company }) {
   );
 }
 
+type DeployTargetRow = {
+  id: string;
+  name: string;
+  kind: "ssh" | "docker" | "git";
+  endpoint: string;
+  isProduction: boolean;
+  rules: { requiresApproval?: boolean; liveTag?: { projectId: string; name: string } | null };
+  lastDeploy: { id: string; ref: string; commit: string | null; at: string | null; tagName: string | null; tagResult: string | null } | null;
+};
+
+const ENDPOINT_HINT = { ssh: "deploy@host or ssh://deploy@host:22", docker: "tcp://socket-proxy:2375", git: "https://git.example.com/you/app.git" } as const;
+
+/** What a deploy tag result means, in plain words. */
+function tagResultText(r: string | null) {
+  if (!r) return "";
+  if (r === "moved") return "tag moved";
+  if (r === "unchanged") return "tag already there";
+  if (r === "pending") return "moving the tag…";
+  return r.replace(/^skipped: /, "tag not moved: ").replace(/^failed: /, "tag move failed: ");
+}
+
+/**
+ * Deploy targets (R14, R15, DR-033): where agents ship work, which deploys wait for you, and the tag
+ * Boss Man moves after a successful deploy. Owner-only: agents can list targets but never edit them.
+ */
+export function DeployTargets({ company }: { company: Company }) {
+  const targets = usePoll((signal) => api<DeployTargetRow[]>(`/api/companies/${company.id}/deploy-targets`, { signal }), 30_000, `deploy-targets-${company.id}`);
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 120_000, `projects-${company.id}`);
+  const repoProjects = (projects.data ?? []).filter((p) => p.repoUrl && !p.archivedAt);
+  const blank = { name: "", kind: "ssh" as DeployTargetRow["kind"], endpoint: "", isProduction: false, requiresApproval: false, tagOn: false, tagProject: "", tagName: "" };
+  const [form, setForm] = useState(blank);
+  const [editing, setEditing] = useState<string | null>(null);
+  const act = useAction();
+  const edit = (t: DeployTargetRow) => {
+    setEditing(t.id);
+    const lt = t.rules.liveTag;
+    setForm({ name: t.name, kind: t.kind, endpoint: t.endpoint, isProduction: t.isProduction, requiresApproval: !!t.rules.requiresApproval, tagOn: !!lt, tagProject: lt?.projectId ?? "", tagName: lt?.name ?? "" });
+  };
+  const cancel = () => {
+    setEditing(null);
+    setForm(blank);
+  };
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const tagProject = form.tagProject || repoProjects[0]?.id || "";
+      const body = {
+        name: form.name,
+        kind: form.kind,
+        endpoint: form.endpoint,
+        isProduction: form.isProduction,
+        requiresApproval: form.requiresApproval,
+        liveTag: form.tagOn ? { projectId: tagProject, name: form.tagName.trim() } : null,
+      };
+      if (editing) await api(`/api/deploy-targets/${editing}`, { method: "PATCH", body });
+      else await api(`/api/companies/${company.id}/deploy-targets`, { method: "POST", body });
+      const what = editing ? "Saved" : "Added";
+      cancel();
+      targets.reload();
+      return `${what}.${form.tagOn ? ` After each successful deploy to ${form.name}, Boss Man moves the tag ${form.tagName.trim()}.` : ""}`;
+    });
+  };
+  const remove = (t: DeployTargetRow) =>
+    window.confirm(`Delete the deploy target ${t.name}? Agents can no longer deploy to it, and its deploy history goes with it.`) &&
+    void act.run(async () => {
+      await api(`/api/deploy-targets/${t.id}`, { method: "DELETE" });
+      if (editing === t.id) cancel();
+      targets.reload();
+      return `Deleted ${t.name}.`;
+    });
+  const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name ?? "a project";
+  return (
+    <Section id="deploy-targets-h" title="Deploy targets">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Where agents ship work. A deploy to a production target, or to one that requires approval, waits for you in Decisions. Only the run carrying out an approved deploy gets the target's secrets (grant them on the Secrets page, "only for deploys to …").
+      </p>
+      {targets.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Where</th>
+                <th scope="col">Approval</th>
+                <th scope="col">Tag after deploy</th>
+                <th scope="col">Last successful deploy</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {targets.data.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name}
+                    {t.isProduction && <span className="tag amber" style={{ marginLeft: 6 }}>production</span>}
+                  </td>
+                  <td>
+                    <span className="muted">{t.kind}</span> <span className="mono">{t.endpoint}</span>
+                  </td>
+                  <td>{t.isProduction || t.rules.requiresApproval ? "You approve each deploy" : "Starts straight away"}</td>
+                  <td>
+                    {t.rules.liveTag ? <span className="mono">{t.rules.liveTag.name}</span> : <span className="muted">none</span>}
+                    {t.rules.liveTag && <span className="muted"> in {projectName(t.rules.liveTag.projectId)}</span>}
+                  </td>
+                  <td>
+                    {t.lastDeploy ? (
+                      <>
+                        <span className="mono">{t.lastDeploy.commit ? t.lastDeploy.commit.slice(0, 7) : t.lastDeploy.ref}</span>
+                        {t.lastDeploy.at && <span className="muted"> {when(t.lastDeploy.at)}</span>}
+                        {t.lastDeploy.tagResult && (
+                          <div className={t.lastDeploy.tagResult.startsWith("failed") ? "error" : "muted"} style={{ fontSize: 13 }}>
+                            {tagResultText(t.lastDeploy.tagResult)}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">none yet</span>
+                    )}
+                  </td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => edit(t)} aria-label={`Edit deploy target ${t.name}`}>
+                      Edit
+                    </button>{" "}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(t)} aria-label={`Delete deploy target ${t.name}`}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        targets.data && <p className="muted" style={{ fontSize: 14 }}>No deploy targets yet: agents can't deploy until you add one.</p>
+      )}
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-labelledby="deploy-target-form-h">
+        <h3 id="deploy-target-form-h" style={{ fontSize: 15, fontWeight: 600 }}>
+          {editing ? `Edit ${form.name || "deploy target"}` : "Add a deploy target"}
+        </h3>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Name
+            <input required maxLength={80} value={form.name} placeholder="Production" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Kind
+            <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as DeployTargetRow["kind"] })}>
+              <option value="ssh">SSH host</option>
+              <option value="docker">Docker endpoint</option>
+              <option value="git">Git remote</option>
+            </select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 260px" }}>
+            Address
+            <input required maxLength={500} className="mono" value={form.endpoint} placeholder={ENDPOINT_HINT[form.kind]} onChange={(e) => setForm({ ...form, endpoint: e.target.value })} />
+          </label>
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.isProduction} onChange={(e) => setForm({ ...form, isProduction: e.target.checked })} />
+          Production (you approve every deploy, and high-risk work must deploy to staging first)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.requiresApproval || form.isProduction} disabled={form.isProduction} onChange={(e) => setForm({ ...form, requiresApproval: e.target.checked })} />
+          Requires approval (you approve each deploy here too)
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.tagOn} onChange={(e) => setForm({ ...form, tagOn: e.target.checked, tagProject: form.tagProject || repoProjects[0]?.id || "" })} />
+          After a successful deploy, move tag
+        </label>
+        {form.tagOn && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 26 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                Tag name
+                <input required maxLength={100} className="mono" value={form.tagName} placeholder="live-deployed" onChange={(e) => setForm({ ...form, tagName: e.target.value })} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                In the repo of
+                <select required value={form.tagProject} onChange={(e) => setForm({ ...form, tagProject: e.target.value })}>
+                  {!repoProjects.length && <option value="">No project has a git repo yet</option>}
+                  {repoProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="muted" style={{ fontSize: 13 }}>
+              After each deploy to this target reports success, Boss Man moves this tag on the project's git host to the exact commit that was deployed, using the company's git token. It only moves the tag to work already merged into the main branch, and never deletes it. <strong>Moving this tag can start pipelines on your git host</strong> (for example a GitHub Actions, GitLab CI, Gitea or Woodpecker job that runs when a tag is pushed), so only turn this on for a tag you want to follow the deploy. Deploy scripts must not push this tag themselves. The name can't contain "/" or be the name of a branch.
+            </p>
+            <details>
+              <summary style={{ fontSize: 13 }}>If the git host protects the tag</summary>
+              <ul className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+                <li>GitHub: the token needs Contents read and write (the same as merges). A tag ruleset that blocks updates will refuse the move: allow updates to this tag, or exempt the token's user.</li>
+                <li>GitLab: the token needs write_repository. A protected tag can't be moved, so don't protect this tag, or pick a name that isn't protected.</li>
+                <li>Gitea or Forgejo: the token needs repository write. If the tag is protected, allow the token's user to push it under the repo's Settings → Tags.</li>
+                <li>Others (Bitbucket, plain git over https): set GIT_USERNAME as you would for merges. A repo reached only over ssh isn't supported.</li>
+              </ul>
+            </details>
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" className="btn primary" disabled={act.busy || (form.tagOn && (!form.tagName.trim() || !(form.tagProject || repoProjects[0])))}>
+            {editing ? "Save" : "Add target"}
+          </button>
+          {editing && (
+            <button type="button" className="btn" onClick={cancel}>
+              Cancel
+            </button>
+          )}
+        </div>
+      </form>
+      {act.view}
+    </Section>
+  );
+}
+
 const PROVIDERS: Array<[string, string]> = [
   ["anthropic", "Anthropic"],
   ["openai", "OpenAI"],
@@ -1581,12 +1801,22 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       : sb.level === "unavailable"
         ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
         : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
+  // What the fence means for runs reading each other (BOS-555): said plainly, so Off never looks safe.
+  const isolationLine =
+    mode === "off" || sb?.level === "unavailable"
+      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys."
+      : !sb
+        ? null
+        : sb.level === "partial"
+          ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
+          : "Agent runs are isolated from each other.";
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
         The fence is a kernel limit on what an agent's commands can touch: its own folders and nothing else. It doesn't ask you anything and doesn't change which permission cards appear. When it refuses something the agent just sees "Permission denied", and Boss Man writes that to its permission log.
       </p>
       <p style={{ fontSize: 14 }}>{hostLine}</p>
+      {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
@@ -1602,7 +1832,9 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
           }
         >
           <option value="off">Off: agents run as before</option>
-          <option value="watch">Watch: agents run inside the fence and every refusal is logged</option>
+          <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
+            {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
+          </option>
           <option value="enforce" disabled>
             Enforce: not available yet (waiting for a security fix, BOS-323)
           </option>
@@ -1611,7 +1843,7 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
       <details style={{ marginTop: 10 }}>
         <summary>Setting up a host</summary>
         <ul style={{ fontSize: 14 }}>
-          <li>The fence needs a Linux kernel with Landlock (5.13 or newer, and 6.x for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
+          <li>The fence needs a Linux kernel with Landlock (5.19 or newer, and 6.12 or newer for full cover). Most current Docker hosts have it; TrueNAS, a Proxmox VM and a plain Linux machine all work if the kernel does.</li>
           <li>The runner tests the fence each time it starts. If this page says "can't fence", update the host's kernel, or check that the container's security profile doesn't block Landlock, then restart the runner.</li>
           <li>A fenced agent has its own temporary folder for each run and can't write to the shared /tmp. A skill that hard-codes /tmp needs to use the folder in $TMPDIR instead.</li>
           <li>Start with Watch on one company, look at the permission log after a few days, and fix what it shows before anything stricter.</li>
@@ -1876,8 +2108,20 @@ type SelfDeployView = {
   enabled: boolean;
   pending: boolean;
   status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[] } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[]; bluegreen?: boolean } | null;
+  /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
+  deployer?: { reportedAt: string | null; late: boolean };
+  lateAfterMinutes?: number;
 };
+
+/** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
+function deployerLine(v: SelfDeployView): string {
+  const d = v.deployer;
+  if (!d) return "The host deployer has not reported yet.";
+  if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
+  if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
+  return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
+}
 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 function SelfDeploy({ go }: { go: (to: string) => void }) {
@@ -1894,7 +2138,7 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
         {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
       </p>
       <p className="muted" style={{ fontSize: 14 }}>
-        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : "The host deployer has not reported yet."}
+        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
       <div>
         <button
@@ -1929,6 +2173,25 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           }
         >
           Build and update runners
+        </button>{" "}
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running" || !v.available?.deployed}
+          title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
+          onClick={() => {
+            const bg = v.available?.bluegreen === true;
+            const ask = bg
+              ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
+              : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
+            if (!window.confirm(ask)) return;
+            act.run(async () => {
+              await api("/api/self-deploy/restart", { method: "POST", body: {} });
+              return "Restart requested. The host picks it up within a minute; the line above shows how it went.";
+            });
+          }}
+        >
+          Restart the server
         </button>
       </div>
       {act.view}
@@ -1938,16 +2201,19 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 
-/** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
-function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; defaults: { instance: number; company: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+/**
+ * How many agents may run at once, in total and per company, plus the separate background slots for
+ * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
+ */
+export function RunLimits() {
+  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
   const act = useAction();
-  const [edit, setEdit] = useState<{ instance: string; company: string } | null>(null);
+  const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { instance: String(d.instance), company: String(d.company) };
-  const [i, c] = [Number(v.instance), Number(v.company)];
-  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i;
+  const v = edit ?? { instance: String(d.instance), company: String(d.company), background: String(d.background) };
+  const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
+  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
     <Section id="run-limits-h" title="How many agents run at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1964,6 +2230,13 @@ function RunLimits() {
           Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit: this company").
         </p>
       </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
+        </p>
+      </div>
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
       </p>
@@ -1974,10 +2247,77 @@ function RunLimits() {
           disabled={act.busy || !valid}
           onClick={() =>
             void act.run(async () => {
-              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c } });
+              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
               setEdit(null);
               view.reload();
               return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
+
+/** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
+export function CheckQueueSetting() {
+  const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const n = Number(v.slots);
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
+  const changed = v.mode !== d.mode || n !== d.slots;
+  return (
+    <Section id="check-queue-h" title="Checks">
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        <legend>Who runs agents' checks</legend>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
+          <span>
+            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+          </span>
+        </label>
+        <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
+          <span>
+            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+          </span>
+        </label>
+      </fieldset>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="check-slots">Checks at once (1 to {d.maxSlots})</label>
+        <input id="check-slots" type="number" min={1} max={d.maxSlots} value={v.slots} onChange={(e) => setEdit({ ...v, slots: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors.
+        </p>
+      </div>
+      {d.runnersTooOld.length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="check-queue-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 14 }}>
+        Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid || !changed}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              setEdit(null);
+              view.reload();
+              return r.cancelled ? `Saved. ${r.cancelled} waiting check${r.cancelled === 1 ? " was" : "s were"} cancelled.` : "Saved.";
             })
           }
         >
@@ -2163,6 +2503,64 @@ export function ThisHost() {
   );
 }
 
+type NetguardAllowView = {
+  report: {
+    mode: string | null;
+    entries: { entry: string; coveredBy: string[]; note: string | null }[] | null;
+    lineCanGo: boolean;
+    env: { lines: string[][]; reportedAt: string; envFound: boolean } | null;
+    warnings: string[];
+  } | null;
+};
+
+/** Settings → Network guard allow list (BOS-770): the BOSSMAN_NETGUARD_ALLOW entries in .env, and which ones Boss Man already covers. Read only. */
+export function NetguardAllow() {
+  const q = usePoll((signal) => api<NetguardAllowView>("/api/netguard-allow", { signal }), 60_000, "netguard-allow");
+  const r = q.data?.report;
+  if (!r) return null;
+  const lines = r.env?.lines ?? [];
+  return (
+    <Section id="netguard-allow-h" title="Network guard: extra allowed addresses">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Addresses on your private network that every runner may reach, from the BOSSMAN_NETGUARD_ALLOW line in your .env. Boss Man already lets each company reach its own tool servers and its projects' git hosts, so those don't need a line here. This page only reports; it never changes .env.
+      </p>
+      {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so this list isn't used.</p>}
+      {r.entries === null ? (
+        <p className="muted">The launcher didn't say which entries it uses (it isn't running, or it is older than this page).</p>
+      ) : r.entries.length === 0 ? (
+        <p data-testid="netguard-allow-empty">The launcher has no extra entries.</p>
+      ) : (
+        <ul data-testid="netguard-allow-entries" style={{ fontSize: 14 }}>
+          {r.entries.map((e) => (
+            <li key={e.entry}>
+              <span className="mono">{e.entry}</span>
+              {e.note && <span className="muted"> · {e.note}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {r.lineCanGo && r.entries && r.entries.length > 1 && <p data-testid="netguard-allow-line-can-go">Every entry is already allowed by Boss Man; this line can go.</p>}
+      {r.env && lines.length > 1 && (
+        <div style={{ fontSize: 14 }}>
+          <p>Lines in .env (the host reported {when(r.env.reportedAt)}):</p>
+          <ol>
+            {lines.map((l, i) => (
+              <li key={i}>
+                <span className="mono">{l.join(" ") || "(empty)"}</span> <span className="muted">{i === lines.length - 1 ? "(used)" : "(ignored)"}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {r.warnings.map((w) => (
+        <p key={w} className="error" role="alert">
+          {w}
+        </p>
+      ))}
+    </Section>
+  );
+}
+
 function ServerPanel() {
   const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
   const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
@@ -2232,7 +2630,7 @@ function ColourRow({ c }: { c: Colour }) {
 
 const TABS = [
   { id: "system", label: "Server and runner", help: "This install's server and updates, and the company's runner." },
-  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts." },
+  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts, and where they deploy." },
   { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
   { id: "transfer", label: "Import and export", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template." },
   // These three are pages of their own (#/funding, #/rules, #/secrets), shown inside Settings.
@@ -2248,6 +2646,7 @@ type ImportPreview = {
   agents: Array<{ name: string; role: string; title: string | null; agentKind: string; model: string | null; instructions: string | null }>;
   skills: Array<{ name: string; renamedFrom: string | null; description: string; scripts: string[] }>;
   secrets: Array<{ name: string; envName: string; agents: string[] }>;
+  projects: Array<{ name: string; verifyCommand: string | null; deepVerifyCommand: string | null }>;
   toolServers: Array<{ name: string; url: string; opens: string | null; stackService: boolean }>;
   warnings: string[];
 };
@@ -2361,6 +2760,24 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                 {scripts.map((s) => (
                   <li key={s.name}>
                     {s.name}: {s.scripts.join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {preview.projects.length > 0 && (
+            <div style={{ fontSize: 14 }}>
+              <strong>Checks each project runs.</strong> These commands run on the runner before work is merged. Read them before you import:
+              <ul>
+                {preview.projects.map((p, i) => (
+                  <li key={i}>
+                    {p.name}: {p.verifyCommand ? <code style={{ whiteSpace: "pre-wrap" }}>{p.verifyCommand}</code> : "none"}
+                    {p.deepVerifyCommand && (
+                      <>
+                        {" "}
+                        (full check: <code style={{ whiteSpace: "pre-wrap" }}>{p.deepVerifyCommand}</code>)
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -2537,7 +2954,9 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <ServerPanel />
             <SelfDeploy go={go} />
             <ThisHost />
+            <NetguardAllow />
             <RunLimits />
+            <CheckQueueSetting />
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
@@ -2572,6 +2991,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
               </p>
             </section>
             <ToolServers company={company} />
+            <DeployTargets company={company} />
             <Funding company={company} onChanged={onChanged} />
           </div>
         ) : (

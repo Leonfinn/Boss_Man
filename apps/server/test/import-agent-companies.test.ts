@@ -34,6 +34,8 @@ const FILES: Record<string, string> = {
     "      env:",
     "        GIT_TOKEN:",
     '          kind: "secret"',
+    "        umami_username:",
+    '          kind: "secret"',
     "projects:",
     "  site:",
     "    workspaces:",
@@ -70,6 +72,7 @@ describe("Agent Companies import (docs/11, step 4)", () => {
     expect(pre.agents.map((a: { name: string; agentKind: string; model: string }) => `${a.name} ${a.agentKind} ${a.model}`)).toEqual(["Boss claude claude-opus-5-5", "Builder opencode openrouter/some/model"]);
     expect(pre.skills.map((s: { name: string }) => s.name).sort()).toEqual(["dogfood", "seo-audit", "seo-pack-seo-audit"]);
     expect(pre.secrets).toEqual([{ name: "GIT_TOKEN", envName: "GIT_TOKEN", agents: ["builder"] }]);
+    expect(pre.warnings).toEqual(expect.arrayContaining([expect.stringContaining("umami_username (add it as UMAMI_USERNAME)")]));
     expect(pre.warnings).toEqual(
       expect.arrayContaining([expect.stringContaining("Left out 1 skills that drive Paperclip itself, since Boss Man has its own tools for that: paperclip."), expect.stringContaining("imported as seo-pack-seo-audit"), "Builder had skills that aren't in the export: missing-skill.", expect.stringContaining("1 agent's instructions describe working in Paperclip (the paperclip skill, heartbeats, its API or /paperclip paths), which Boss Man doesn't have: Builder.")]),
     );

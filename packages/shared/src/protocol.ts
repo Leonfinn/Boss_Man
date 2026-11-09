@@ -23,7 +23,7 @@ export const SandboxReport = z.object({
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
   missing: z.array(z.string().max(100)).max(10),
-  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only: nothing uses them, and runs are kept apart by Landlock, not namespaces (BOS-555). */
   userns: z.boolean(),
   probe: z.boolean().nullable(),
 });
@@ -173,7 +173,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
   z.object({ type: z.literal("workspace.image"), requestId: z.string(), ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
-  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /**
+   * fence: run the check inside the fence (BOS-323), like run.start's. A runner that can't fence runs
+   * it as before and says so (VerifyResult.fenced); an older runner ignores it.
+   */
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
@@ -198,6 +202,16 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     target: z.string().min(1),
     branches: z.array(z.object({ ticketId: Uuid, branch: z.string().min(1) })).max(500),
   }),
+  /**
+   * What a deploy's ref is (DR-033): the commit it resolves to after a fetch, whether that commit is on the
+   * base branch, and the remote's branch names (so a deploy tag can't take a branch's name). Read-only.
+   */
+  z.object({ type: z.literal("workspace.resolve"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), ref: z.string().min(1).max(200), baseRef: z.string().min(1) }),
+  /**
+   * Move a deploy target's tag to the commit a deploy shipped (DR-033). The daemon checks the name and the
+   * commit again, builds the refspec itself and pushes with a lease; it never deletes and never touches a branch.
+   */
+  z.object({ type: z.literal("workspace.tag"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), name: z.string().min(1).max(100), commit: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/), baseRef: z.string().min(1) }),
   /** Prove the company's Claude setup-token works with one tiny prompt (R58). The runner fetches the token itself. */
   z.object({ type: z.literal("credential.check"), requestId: z.string() }),
   /** Ask an agent kind for its model list without sending a prompt: a throwaway ACP session, closed at once. */
@@ -238,6 +252,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** The git commit this image was built from (BOS-764); absent from an image built before it was recorded. */
+    imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
@@ -267,8 +283,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "clash-check": answers workspace.clash (BOS-426). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -300,7 +316,8 @@ export type WorkspaceDiff = {
 };
 
 /** The outcome of a ticket's check (R47). */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/** fenced: set only when the check was asked to run fenced, saying whether it was. */
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
 /**
  * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
  * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
@@ -335,10 +352,13 @@ export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
 
 /** The outcome of merging a ticket's branch (R46). */
+export type MigrationRenamed = { from: string; to: string };
+
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string }
-  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
+  /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }
@@ -358,6 +378,36 @@ export type CarriedResult = { carried: CarriedTicket[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };
+
+/** The answer to workspace.resolve (DR-033). `commit` is null when the ref names no commit (an image tag, say). */
+export type ResolveResult = { commit: string | null; onBase: boolean; branches: string[]; error?: string };
+
+/**
+ * The answer to workspace.tag (DR-033). moved: the remote tag now points at `to` (`from` is null when it was new).
+ * unchanged: it already did. refused: a check failed before any push. failed: the push was refused, or the tag
+ * was moved by someone else meanwhile (it is left where they put it). `error` carries the reason or git's text.
+ */
+export type TagResult = { result: "moved" | "unchanged" | "refused" | "failed"; from: string | null; to: string; error?: string };
+
+/** A deploy tag name (DR-033): one ref component, so never a path, and nothing git's check-ref-format refuses. */
+export function deployTagNameProblem(name: string): string | null {
+  if (!name) return "Give a tag name.";
+  if (name.length > 100) return "Keep the tag name to 100 characters or fewer.";
+  if (name.includes("/")) return "The tag name can't contain '/'.";
+  if (name.startsWith("-") || name.startsWith(".")) return "The tag name can't start with '-' or '.'.";
+  if (name.endsWith(".") || name.endsWith(".lock")) return "The tag name can't end with '.' or '.lock'.";
+  if (name === "@" || name.includes("..") || name.includes("@{")) return "The tag name can't be '@' or contain '..' or '@{'.";
+  // Control characters, space and the characters git keeps for revision syntax.
+  if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return "The tag name can't contain spaces or any of ~ ^ : ? * [ \\.";
+  if (name.toUpperCase() === "HEAD") return "The tag name can't be HEAD.";
+  return null;
+}
+
+/**
+ * Whether a deploy ref is safe to hand to git rev-parse (DR-033): a branch, tag or sha shape, never an option.
+ * Anything else (an image tag with odd characters, say) simply isn't resolved.
+ */
+export const DEPLOY_REF = /^[A-Za-z0-9_][A-Za-z0-9._/+-]{0,199}$/;
 
 /**
  * Whether a ticket's new migrations take a number another branch already has (BOS-219).

@@ -278,7 +278,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           Built-in defaults
         </h2>
         <p className="muted" style={{ fontSize: 14 }}>
-          Checked last, and can't be changed. A request nothing matches goes to you.
+          Checked last, and can't be changed. A request nothing matches goes to the CEO first, and to you if the CEO does not settle it. Deletes, moves and requests that name a path come straight to you.
         </p>
         <ol className="rules">
           {list.data?.defaults.map((r, i) => (

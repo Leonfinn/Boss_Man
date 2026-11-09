@@ -27,6 +27,22 @@ const data = {
 };
 
 describe("merge queue screen (BOS-587)", () => {
+  it("names the carried ticket on a carried-work row, using the typed carried field (BOS-819)", async () => {
+    const carried = { ticketId: "t9", ref: "APP-9", title: `Fix the "login" bug and don't break the owner's links` };
+    const held = { ticketId: "t8", ref: "APP-8", title: "Build the page", minutes: 72, state: "waiting_for_other_ticket", label: "waiting for APP-9 to merge first", stuck: true, next: "APP-9 has to be reviewed and merged first.", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false, carried: [carried] };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waiting: [held], waitingCount: 1 })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Build the page")).toBeTruthy();
+    const row = screen.getAllByRole("article")[1]!;
+    expect(row.getAttribute("data-stuck")).toBe("true");
+    // The carried row names the ticket it waits for, described from the typed list, and links to it.
+    const carriedLine = row.querySelector('[data-carried="true"]');
+    expect(carriedLine?.textContent).toContain("It needs APP-9 to merge first.");
+    expect(within(carriedLine as HTMLElement).getByRole("link", { name: "APP-9" }).getAttribute("href")).toBe("#/tickets/t9");
+    // The full title is kept on the link's hover text, quotes and all.
+    expect(within(carriedLine as HTMLElement).getByRole("link", { name: "APP-9" }).getAttribute("title")).toBe(carried.title);
+  });
+
   it("shows running, waiting in order (stuck highlighted) and recent, linking each ticket", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(data)));
     render(<MergeQueue companies={[company]} companyId="c1" />);
@@ -49,6 +65,17 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.getByText(/merged as abcdef1/)).toBeTruthy();
   });
 
+  it("shows work held for another ticket's unapproved work as waiting for it, stuck, with what happens next (BOS-766, QA BOS-821)", async () => {
+    const held = { ticketId: "t9", ref: "APP-20", title: "Build the page", minutes: 65, state: "waiting_for_other_ticket", label: "waiting for APP-19 to merge first", stuck: true, next: "APP-19 has to be reviewed and merged first.", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false, carried: [{ ticketId: "t8", ref: "APP-19", title: "Ship the API" }] };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waiting: [held], waitingCount: 1 })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Build the page")).toBeTruthy();
+    const row = screen.getAllByRole("article").find((r) => within(r).queryByText("Build the page"))!;
+    expect(row.getAttribute("data-stuck")).toBe("true");
+    expect(within(row).getByText(/waiting for APP-19 to merge first/)).toBeTruthy();
+    expect(within(row).getByText(/Next: APP-19 has to be reviewed and merged first/)).toBeTruthy();
+  });
+
   it("says plainly when nothing is waiting or running", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waitingCount: 0, running: [], waiting: [], recent: [] })));
     render(<MergeQueue companies={[company]} companyId="c1" />);
@@ -61,11 +88,29 @@ describe("merge queue screen (BOS-587)", () => {
     expect(waitingLabel(4)).toBe("4 waiting to merge");
     expect(waitingLabel(0)).toBeNull();
     const noop = () => {};
-    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={4} mergeStuck={0} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
     const link = screen.getByRole("link", { name: /Merge queue/ });
     expect(link.getAttribute("href")).toBe("#/merge-queue");
     expect(link.getAttribute("aria-current")).toBe("page");
     expect(within(link).getByLabelText("4 waiting to merge").textContent).toBe("4");
+    expect(within(link).getByLabelText("4 waiting to merge").className).not.toContain("warn");
+  });
+
+  it("turns the badge into the stuck count in the warning colour when items are stuck (BOS-767)", () => {
+    const noop = () => {};
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed={false} narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    const link = screen.getByRole("link", { name: /Merge queue/ });
+    const badge = within(link).getByLabelText("2 stuck");
+    expect(badge.textContent).toBe("2");
+    expect(badge.className).toContain("warn");
+    expect(link.querySelector(".count-dot")?.className).toContain("warn");
+  });
+
+  it("colors the collapsed strip dot amber when items are stuck (BOS-767)", () => {
+    const noop = () => {};
+    render(<Sidebar active="merge-queue" companies={[company]} current={company} decisions={[]} unread={0} feedback={0} mergeWaiting={5} mergeStuck={2} notifications="unsupported" collapsed narrow={false} onToggleCollapsed={noop} onPickCompany={noop} onCreateCompany={async () => {}} onEnableNotifications={noop} onLogout={noop} />);
+    const dot = screen.getByRole("link", { name: /Merge queue/ }).querySelector(".count-dot");
+    expect(dot?.className).toContain("warn");
   });
 });
 
