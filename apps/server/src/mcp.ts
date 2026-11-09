@@ -24,7 +24,7 @@ import type { hostFactsService } from "./services/host-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
-import { DeployError, type deploysService } from "./services/deploys.js";
+import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
@@ -740,7 +740,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "deploy",
     {
       description:
-        "Ship work to one of your company's deploy targets. action: targets (list them), request (target, ref, optional notes and ticketId; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done).",
+        "Ship work to one of your company's deploy targets. action: targets (list them, each with its deploy tag if it has one and its last successful deploy: commit, time and tag result, so you can say what is live), request (target, ref, optional notes and ticketId; Boss Man records the commit the ref names and the approval names it; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done). Deploy scripts must not push git tags themselves (agents have no git login): when a target has a deploy tag, Boss Man moves it to the deployed commit after you report success.",
       inputSchema: {
         action: z.enum(["targets", "request", "report"]),
         target: z.string().optional(),
@@ -754,8 +754,22 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async (input) => {
       try {
         if (input.action === "targets") {
-          const ts = await deploys.listTargets(scope.companyId);
-          return text(JSON.stringify(ts.map((t) => ({ name: t.name, kind: t.kind, endpoint: t.endpoint, production: t.isProduction }))));
+          const [ts, last] = await Promise.all([deploys.listTargets(scope.companyId), deploys.lastSucceeded(scope.companyId)]);
+          return text(
+            JSON.stringify(
+              ts.map((t) => {
+                const d = last.get(t.id);
+                return {
+                  name: t.name,
+                  kind: t.kind,
+                  endpoint: t.endpoint,
+                  production: t.isProduction,
+                  deployTag: liveTagOf(t)?.name ?? null,
+                  lastSucceeded: d ? { deployId: d.id, ref: d.ref, commit: d.commit, at: d.finishedAt, tag: d.tagName ? { name: d.tagName, result: d.tagResult, from: d.tagFrom, to: d.tagTo } : null } : null,
+                };
+              }),
+            ),
+          );
         }
         if (input.action === "request") {
           if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");
@@ -764,7 +778,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }
         if (!input.deployId || !input.outcome) return fail("Give the deployId and the outcome.");
         const d = await deploys.report({ companyId: scope.companyId, runId: scope.runId }, { deployId: input.deployId, outcome: input.outcome, notes: input.notes });
-        return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.`);
+        const tag = d.tagResult === "pending" ? ` Boss Man is moving the tag ${d.tagName} to ${d.commit?.slice(0, 7)}; the result goes on the ticket.` : "";
+        return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.${tag}`);
       } catch (err) {
         if (err instanceof DeployError) return fail(err.message);
         throw err;
@@ -2602,7 +2617,7 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 
 /**
  * Every tool with a case in changeTrace, which may return null for its read actions (notes list,
- * roadmap list). Kept in step with the switch below by a guard there and by chat.test.ts.
+ * roadmap list, review diff). Kept in step with the switch below by a guard there and by chat.test.ts.
  */
 export const TRACED_TOOLS: ReadonlySet<string> = new Set([
   "notes", "create_ticket", "create_feature", "log_feedback", "set_ticket_state", "update_ticket", "set_ticket_risk",
@@ -2714,9 +2729,7 @@ async function changeTrace(name: string, input: Record<string, unknown>, ref: (i
         ? `reviewed a ticket (${input.verdict === "approved" ? "approved" : "asked for changes"})`
         : action === "sequence" || action === "overrule" || action === "retry_merge"
           ? "arranged a ticket's reviews"
-          : action === "diff"
-            ? "read a ticket's diff"
-            : null;
+          : null;
     case "request_note":
       return "asked for a lasting note";
     case "feedback":
@@ -2741,11 +2754,17 @@ const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 function traceCalls(server: McpServer, db: Db, runId: string, companyId: string): McpServer {
   const register = server.registerTool.bind(server);
-  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id.
+  // Names a ticket by its BOS-style reference (BOS-806), looked up once per id. The lookup runs after the
+  // tool already succeeded: if it fails, the change is still made and still named, just without the number
+  // (BOS-820), so a failed lookup can never turn a good call into an error the agent would retry.
   const refOf = async (id: string) => {
-    const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
-    if (!t) return null;
-    return (await refsOf(db, companyId))(t).ref;
+    try {
+      const [t] = await db.select({ number: tickets.number }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
+      if (!t) return null;
+      return (await refsOf(db, companyId))(t).ref;
+    } catch {
+      return null;
+    }
   };
   server.registerTool = ((name: string, config: never, cb: (input: Record<string, unknown>, extra: never) => Promise<unknown>) =>
     register(name, config, (async (input: Record<string, unknown>, extra: never) => {

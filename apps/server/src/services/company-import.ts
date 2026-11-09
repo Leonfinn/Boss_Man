@@ -287,6 +287,8 @@ export async function previewPackage(db: Db, pkg: Package, name = pkg.company.na
     skills: pkg.skills.map((s) => ({ name: s.name, renamedFrom: s.name !== s.folder ? s.folder : null, description: s.description, scripts: s.files.map((f) => f.path).filter((p) => SCRIPT.test(p)) })),
     secrets: pkg.secrets.map((s) => ({ name: s.name, envName: s.envName, agents: s.agents })),
     // Each tool server and the host:port the runner's network guard would let through for it (null: none it can allow).
+    // Each project's verify commands word for word: they run on the runner during checks (BOS-818). Shown, not judged.
+    projects: pkg.projects.map((p) => ({ name: p.name, verifyCommand: p.verifyCommand ?? null, deepVerifyCommand: p.deepVerifyCommand ?? null })),
     toolServers: await Promise.all(pkg.toolServers.map(async (t) => ({ name: t.name, url: t.url, opens: sendableAddress(t.url), stackService: await reachesStack(t.url) }))),
     warnings,
   };
@@ -342,11 +344,14 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     const tightened: string[] = [];
     if (pkg.company.ownerApprovesEngagements === false) tightened.push("Kept on: your approval before this company takes on work for another company. The package had it switched off.");
     const listed = (xs: string[]) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]!);
-    const floored = (policy: ReviewPolicy, project?: string) => {
-      const r = noLooserThan(policy);
+    // The company's policy is floored against the default; each project's override against the company's
+    // (BOS-818). The default has no review kinds, so the company's own policy is what shows the security
+    // review a project override would otherwise drop.
+    const floored = (policy: ReviewPolicy, project?: { name: string; floor: ReviewPolicy }) => {
+      const r = noLooserThan(policy, project?.floor);
       if (r.tightened.length)
         tightened.push(
-          `Kept on${project ? ` in project ${project}` : ""}: ${listed(r.tightened)}. The package had ${r.tightened.length > 1 ? "them" : "it"} switched off. To change ${r.tightened.length > 1 ? "them" : "it"}, use ${project ? "the project's review settings" : "Settings → Reviews"}.`,
+          `Kept on${project ? ` in project ${project.name}` : ""}: ${listed(r.tightened)}. The package had ${r.tightened.length > 1 ? "them" : "it"} switched off. To change ${r.tightened.length > 1 ? "them" : "it"}, use ${project ? "the project's review settings" : "Settings → Reviews"}.`,
         );
       return r.policy;
     };
@@ -369,7 +374,8 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     // An older package marks reviewers on the agent; its "marked" cells name them instead (BOS-198).
     const marks: Partial<Record<ReviewKind, string[]>> = {};
     for (const a of pkg.agents) if (a.reviewKind && (REVIEW_KINDS as readonly string[]).includes(a.reviewKind)) (marks[a.reviewKind as ReviewKind] ??= []).push(agentId.get(a.slug)!);
-    await tx.update(companies).set({ reviewPolicy: floored(remapPolicy(pkg.company.reviewPolicy, agentRef, marks)) }).where(eq(companies.id, companyId));
+    const companyPolicy = floored(remapPolicy(pkg.company.reviewPolicy, agentRef, marks));
+    await tx.update(companies).set({ reviewPolicy: companyPolicy }).where(eq(companies.id, companyId));
 
     for (const s of pkg.skills) {
       const m = s.meta;
@@ -385,7 +391,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       const { slug, columns, reviewPolicy, ...fields } = p;
       const [row] = await tx
         .insert(projects)
-        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), fields.name) })
+        .values({ companyId, ...fields, reviewPolicy: reviewPolicy === undefined || reviewPolicy === null ? null : floored(remapPolicy(reviewPolicy, agentRef, marks), { name: fields.name, floor: companyPolicy }) })
         .returning();
       projectId.set(slug, row!.id);
       columnsOf.set(row!.id, await tx.insert(workflowColumns).values(columns.map((col, i) => ({ projectId: row!.id, name: col.name, systemState: col.systemState, wipLimit: col.wipLimit ?? null, position: i }))).returning({ id: workflowColumns.id, systemState: workflowColumns.systemState }));
