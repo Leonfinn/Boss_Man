@@ -107,7 +107,7 @@ describe("decision queue", () => {
     fireEvent.click(screen.getByText("How the ranking works"));
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
     // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
-    expect(screen.getByText(`1 decision waiting in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
+    expect(screen.getByText(`1 decision to do in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
@@ -435,7 +435,8 @@ describe("Allow always", () => {
     expect(screen.getByText("Always allow any agent to use crawl4ai's md tool.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
     await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Rules\./)).toBeTruthy());
-    expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
+    const answerCall = (fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }]);
+    expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });
   it("says why a command has no always option", () => {
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
