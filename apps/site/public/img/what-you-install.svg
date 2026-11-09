@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 800" width="1160" height="800" role="img" aria-labelledby="wi-title wi-desc">
+  <title id="wi-title">What you install: the Boss Man server, its database, a launcher and one runner per company; runners connect out to the server, so nothing needs an open port</title>
+  <desc id="wi-desc">Everything runs in Docker on one machine. Your browser opens the Boss Man server's web page on port 3100. The server keeps everything in its database and reads the master key file. The server tells the launcher to start or stop a company's runner. The launcher is the only part that talks to Docker, and it sits on a private network with no way out. There is one runner per company. Each runner connects out to the server; it has no open ports. A network guard container sits beside each runner and blocks private networks. Runners reach out to your git host and your AI account. The feedback portal on port 3101 is reachable from the machine itself only, unless you change that. Optional add-ons are not part of this install: Tailscale for HTTPS, phone notifications, the Penpot design tool and your own tool servers.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="wi-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="wi-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#c8282f"/></marker>
+  </defs>
+  <rect width="1160" height="800" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">Everything runs on one machine. The runners dial out, so you open no ports for them.</text>
+
+  <!-- browser -->
+  <rect x="0" y="110" width="210" height="130" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="16" y="140" class="d" font-size="20" fill="#17202c">Your browser</text>
+  <g class="b" font-size="14" fill="#17202c"><text x="16" y="166">On your own network.</text><text x="16" y="184">Opens the web page</text><text x="16" y="202">on port 3100.</text></g>
+  <path d="M214 150 H284" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#wi-ar)"/>
+
+  <!-- machine -->
+  <rect x="250" y="56" width="910" height="500" rx="14" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="290" y="88" class="d" font-size="18" fill="#17202c">The Boss Man machine (Docker Compose)</text>
+
+  <!-- server -->
+  <rect x="290" y="110" width="230" height="130" rx="10" fill="#17202c"/>
+  <text x="306" y="140" class="d" font-size="20" fill="#eef2f6">Boss Man server</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="306" y="166">The web page, tickets and</text><text x="306" y="184">agents' work. Port 3100.</text><text x="306" y="208">Reads the master key.</text></g>
+
+  <!-- launcher -->
+  <rect x="580" y="110" width="230" height="130" rx="10" fill="#17202c"/>
+  <text x="596" y="140" class="d" font-size="20" fill="#eef2f6">Launcher</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="596" y="166">Starts and stops runners.</text><text x="596" y="184">The only part that talks</text><text x="596" y="202">to Docker. No way out.</text></g>
+  <path d="M524 175 H576" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#wi-ar)"/>
+  <text x="548" y="197" class="b" font-size="12" text-anchor="middle" fill="#3d4757">start/stop</text>
+
+  <!-- portal note -->
+  <rect x="850" y="110" width="290" height="130" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="866" y="140" class="d" font-size="18" fill="#17202c">Feedback portal, port 3101</text>
+  <g class="b" font-size="14" fill="#3d4757"><text x="866" y="166">Part of the server. Reachable</text><text x="866" y="184">from the machine itself only,</text><text x="866" y="202">until you say otherwise.</text></g>
+
+  <!-- db -->
+  <rect x="290" y="330" width="230" height="110" rx="10" fill="#f0b75c"/>
+  <text x="306" y="360" class="d" font-size="20" fill="#17202c">Database</text>
+  <g class="b" font-size="14" fill="#17202c"><text x="306" y="386">Postgres. Everything Boss</text><text x="306" y="404">Man knows. Back it up.</text></g>
+  <path d="M405 244 V326" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#wi-ar)"/>
+
+  <!-- key -->
+  <rect x="290" y="462" width="230" height="70" rx="10" fill="#ffffff" stroke="#c8282f" stroke-width="2"/>
+  <text x="306" y="490" class="bb" font-size="15" fill="#17202c">secrets/master.key</text>
+  <text x="306" y="512" class="b" font-size="13" fill="#3d4757">Keep a copy off the machine.</text>
+  <path d="M290 497 H270 V222 H286" fill="none" stroke="#17202c" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#wi-ar)"/>
+
+  <!-- runners -->
+  <rect x="580" y="330" width="270" height="140" rx="10" fill="#17202c"/>
+  <text x="596" y="360" class="d" font-size="20" fill="#eef2f6">Runner: company A</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="596" y="386">Runs the agents' work.</text><text x="596" y="404">No open ports.</text><text x="596" y="428">Its own folders for code</text><text x="596" y="446">and sessions.</text></g>
+  <rect x="870" y="330" width="270" height="140" rx="10" fill="#17202c"/>
+  <text x="886" y="360" class="d" font-size="20" fill="#eef2f6">Runner: company B</text>
+  <g class="b" font-size="14" fill="#c3cbd6"><text x="886" y="386">One runner for every</text><text x="886" y="404">company you add.</text><text x="886" y="428">Same again, with its</text><text x="886" y="446">own folders.</text></g>
+  <path d="M810 175 H830 V290 H1005 V326" fill="none" stroke="#17202c" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#wi-ar)"/>
+  <path d="M830 290 V326" fill="none" stroke="#17202c" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#wi-ar)"/>
+  <text x="838" y="283" class="b" font-size="13" fill="#3d4757">creates</text>
+
+  <!-- the key arrow -->
+  <path d="M630 326 V280 H500 V246" fill="none" stroke="#c8282f" stroke-width="4" marker-end="url(#wi-arr)"/>
+  <text x="512" y="302" class="bb" font-size="14" fill="#c8282f">runner dials out</text>
+  <path d="M214 150 H284" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#wi-ar)"/>
+
+  <!-- guard -->
+  <rect x="580" y="488" width="560" height="44" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="596" y="515" class="b" font-size="14" fill="#17202c">A network guard sits beside each runner and blocks private networks.</text>
+
+  <!-- outside -->
+  <path d="M715 470 V488 M1005 470 V488" fill="none" stroke="#17202c" stroke-width="2"/>
+  <path d="M860 532 V586" fill="none" stroke="#17202c" stroke-width="3" marker-end="url(#wi-ar)"/>
+  <rect x="580" y="590" width="560" height="64" rx="10" fill="#ffffff" stroke="#17202c" stroke-width="2"/>
+  <text x="596" y="618" class="d" font-size="18" fill="#17202c">Outside: your git host and your AI account</text>
+  <text x="596" y="640" class="b" font-size="14" fill="#3d4757">Runners reach these to do the work. Nothing reaches in.</text>
+
+  <!-- add-ons -->
+  <line x1="0" y1="680" x2="1160" y2="680" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="0" y="708" class="d" font-size="18" fill="#17202c">Optional add-ons, not part of this install</text>
+  <rect x="0" y="722" width="272" height="64" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="14" y="748" class="bb" font-size="14" fill="#17202c">Tailscale</text><text x="14" y="768" class="b" font-size="13" fill="#3d4757">HTTPS for the web page (Guide 9)</text>
+  <rect x="296" y="722" width="272" height="64" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="310" y="748" class="bb" font-size="14" fill="#17202c">Phone notifications</text><text x="310" y="768" class="b" font-size="13" fill="#3d4757">ntfy, its own Compose project</text>
+  <rect x="592" y="722" width="272" height="64" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="606" y="748" class="bb" font-size="14" fill="#17202c">Penpot</text><text x="606" y="768" class="b" font-size="13" fill="#3d4757">Design tool, its own Compose project</text>
+  <rect x="888" y="722" width="272" height="64" rx="10" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="902" y="748" class="bb" font-size="14" fill="#17202c">Your own tool servers</text><text x="902" y="768" class="b" font-size="13" fill="#3d4757">You run them and register them</text>
+</svg>

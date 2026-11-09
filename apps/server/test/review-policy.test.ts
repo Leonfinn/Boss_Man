@@ -408,6 +408,15 @@ describe("review policy API", () => {
     expect(rows.map((r) => [r.kind, r.reviewerAgentId]).sort()).toEqual([["code", c.senior.id], ["security", c.ceo.id]]);
   });
 
+  // QA (BOS-848): the SQL default in migration 0127 is a hand-copied string; it must say exactly what the shared constant says.
+  it("keeps the column default equal to DEFAULT_REVIEW_POLICY, and a new company's policy through the API too (BOS-824)", async () => {
+    const c = await setup();
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Drift Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    expect(res.rows[0]!.p).toEqual(DEFAULT_REVIEW_POLICY);
+    const made = (await c.req("POST", "/api/companies", { name: "Fresh Co" })).json() as { company: { id: string } };
+    expect((await c.req("GET", `/api/companies/${made.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
+  });
+
   it("makes the risk-tier help follow the company's policy", async () => {
     const c = await setup();
     await c.setPolicy((p) => (p.low.reviewer = c.senior.id));

@@ -28,6 +28,8 @@ export const OWNER_CONTROLS = {
     "Actual size", "Fit to window",
     // The banner shown when Boss Man was updated after the page was opened (BOS-550).
     "Reload",
+    // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
+    "Resume",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -70,6 +72,8 @@ export const OWNER_CONTROLS = {
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
   Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
+  // The Runs page's emergency stop: every run going now, in every company (BOS-837).
+  Runs: ["End all running runs", "Ending"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: ["Refresh"],
   Wiki: [
@@ -105,6 +109,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
+    "Stop all work",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.
     "Restart the server",
     // This host: confirm a fact only the owner can give.
