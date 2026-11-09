@@ -41,7 +41,8 @@ describe("features go on the portal by default (BOS-957)", () => {
 
     expect((await visitor()).json().features).toEqual([]);
     expect((await c.req("PATCH", `/api/features/${f.id}`, { publicSummary: "A dark theme you can switch on." })).statusCode).toBe(200);
-    expect((await visitor()).json().features.map((x: { title: string }) => x.title)).toEqual(["Dark mode"]);
+    // Visitors see the summary's first line as the title, not the internal title (BOS-991).
+    expect((await visitor()).json().features.map((x: { title: string }) => x.title)).toEqual(["A dark theme you can switch on."]);
   });
 
   it("takes a feature off the portal the moment it is marked sensitive, and cannot be voted on", async () => {
@@ -76,7 +77,8 @@ describe("features go on the portal by default (BOS-957)", () => {
     const { portalToken } = await c.portal(c.company.id);
     const body = (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
     expect(body.features).toHaveLength(1);
-    expect(body.features[0]).toMatchObject({ title: f.title, description: "A dark theme you can switch on." });
+    expect(body.features[0]).toMatchObject({ title: "A dark theme you can switch on.", description: "A dark theme you can switch on." });
+    // The internal description does not reach the page (BOS-991); the public title test below covers the title.
     expect(JSON.stringify(body)).not.toContain("Internal: owner's private note");
   });
 

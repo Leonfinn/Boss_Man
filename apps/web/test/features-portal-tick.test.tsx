@@ -15,7 +15,7 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
 const feature = (over: Record<string, unknown> = {}) => ({
   id: "f1", companyId: "c1", areaId: null, parentId: null, title: "Dark mode", description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null,
-  portalVisible: false, keepOffPortal: false, publicSummary: null, showPublicly: false,
+  portalVisible: false, keepOffPortal: false, publicSummary: null, publicTitle: null, showPublicly: false,
   createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0,
   tickets: { total: 0, done: 0, items: [] },
   portal: { onPortal: false, reason: "needs public summary" },
@@ -73,6 +73,18 @@ describe("Features list: on-portal tick (BOS-957)", () => {
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
     expect(await screen.findByText("needs public summary")).toBeTruthy();
     expect((screen.getByRole("checkbox", { name: "On portal: Dark mode" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("saves the public title with the summary, so visitors see it instead of the internal title (BOS-991)", async () => {
+    const s = stub({ publicSummary: "A dark theme you can switch on." });
+    render(<Features companies={[company]} companyId="c1" featureId="f1" go={() => {}} />);
+    const title = (await screen.findByLabelText(/Public title/)) as HTMLInputElement;
+    expect(title.value).toBe("");
+    fireEvent.change(title, { target: { value: "  Night reading  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save summary" }));
+    await waitFor(() =>
+      expect(s.patches).toEqual([{ url: "/api/features/f1", body: { publicSummary: "A dark theme you can switch on.", publicTitle: "Night reading" } }]),
+    );
   });
 
   it("has a 'Keep off the portal (sensitive)' mark on the feature page", async () => {
