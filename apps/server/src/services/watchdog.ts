@@ -14,6 +14,7 @@ import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
+import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
@@ -80,6 +81,9 @@ export type WatchdogDeps = {
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
+  /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a card that names
+   * another host is refused. Absent: only the name the facts carry stands in. */
+  serverHost?: () => Promise<string | null>;
   /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
   localHour?: (t: Date) => number;
   log?: (msg: string) => void;
@@ -387,6 +391,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const rr = await latestRows(db, r.id);
       if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
     }
+    const heldIds = await heldTicketIds(db, rows.map((r) => r.id));
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -398,6 +403,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
       mergeWaiting: mergeWaiting.has(r.id),
+      held: heldIds.has(r.id),
       unblockedAt: releasedAt(r),
       bounces: bounces.get(r.id) ?? 0,
     }));
@@ -1303,7 +1309,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
-      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, addons: input.steps?.length ? await deps.addons?.() : undefined });
+      const ask = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, proof: input.proof, hosts: deps.hosts ? await deps.hosts() : undefined, ...(deps.serverHost ? { serverHost: await deps.serverHost() } : {}), addons: input.steps?.length ? await deps.addons?.() : undefined });
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {

@@ -26,7 +26,8 @@ import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
-import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
+import { holdView } from "./services/review-holds.js";
+import { NOTHING_CHANGED, ReviewError, type HoldInput, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { startRefusal, WorkError, type workService } from "./services/work.js";
@@ -529,7 +530,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you needn't paste a URL; a link is background only, and each step must be complete on its own. Steps are checked when the card is raised (BOS-417): one that points to another document (\"follow docs/06\", a .md file, \"see the guide\", \"with changes\", \"as before\"), uses a shell variable like $X that no step up to there sets (inline X=1 cmd counts), has a command that isn't copy-safe (a placeholder like <host-ip> or YOUR_KEY, a prompt character, more than one line, trailing punctuation) or has an unfilled {{token}} is refused, saying which step and why. Put each command in its own fenced \`\`\`sh block. Each fence line must say where the command runs and as which account: sh host=\"<name>\" as=\"root\" or as=\"login\". For the command that runs on the server Boss Man itself runs on, write host=\"{{host}}\": Boss Man fills it with the name the host deployer reports (the same name server_status gives as the host), so never an old name from memory, an old runbook or a compose file, as the owner would be sent to a machine that no longer runs Boss Man. A card that names another host is refused and names the one Boss Man has on record; leave the host out and Boss Man fills in the reported name; with no host report yet {{host}} is refused and a named host is raised unconfirmed. A card that sets up a new host Boss Man has no record for yet passes newHost with that name; only the CEO may pass it, and only that one name may be unrecorded on the card. A step that relies on an add-on (Tailscale: tailscale, ts.net, tailnet; ntfy: ntfy, test push, test notification, phone notification; Penpot: penpot) that server_status records as not set up, stopped or waiting for a login is refused, and one whose state is unknown is flagged; on the card that sets an add-on up, pass setsUp with its name so its own steps aren't refused; that card then closes by itself (and frees the ticket it blocks) once Boss Man sees the add-on working after the card was raised, so you need not withdraw it. A command that waits for typed input (read, read -p, sudo -S, passwd, ssh-keygen without -N, docker login without --password-stdin) is refused: give the value in the command, or for a secret an editor step naming the exact line or Boss Man's Secrets screen. So is a pager (psql without -P pager=off, git log/diff/show without --no-pager, systemctl status or journalctl without --no-pager, less, more, man), a database or container-shell prompt the owner would type into (psql with no -c, docker exec -it … bash; use psql -P pager=off -c \"…\"), and a command that never returns by itself (docker stats without --no-stream, docker logs -f, tail -f, watch, top, ping without -c); none of these can be overridden. A command block that prints nothing when it works (only assignments, cd, export, or cp/mv/install/mkdir/chmod/chown/ln/touch/rm without -v) must say so in its sentence (\"This prints nothing.\") or show the result (D=$(…); echo \"$D\"). Steps with a host command (docker, docker compose, systemctl, tailscale, chown, chmod, anything naming .env) need proof (DR-024): \"rehearsed <script> @ <commit>\" when the CI rehearsal under scripts/rehearse/ passed on that commit, or \"not rehearsed: <what hasn't been tried and why>\", and then the last step must be a look-only check (docker compose ps, docker logs, tailscale status, curl...) saying what to paste back. The card shows the proof as a banner. The CEO may pass lintOverride with a reason the owner reads, except for copy-safety, unfilled tokens, and typed input, pagers and commands that never return. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
       // Ordering (BOS-551): when this card must come before or after another owner card, pass doAfter/doBefore
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
@@ -543,6 +544,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         stillNeeded: z.string().max(500).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
+        // The host a CEO-raised card is setting up, which Boss Man has no record for yet (DR-046): only that one name may be unrecorded.
+        newHost: z.string().min(1).max(64).optional(),
         proof: z.string().max(300).optional(),
         // Ordering against other owner cards (BOS-551): the ids of the cards this one must be done after or before, each with a short label.
         doAfter: z.array(z.object({ decisionId: z.string().uuid(), label: z.string().min(1).max(120) })).max(10).optional(),
@@ -552,10 +555,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         resetsOnRestart: z.boolean().optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, proof, doAfter, doBefore, resetsOnRestart }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, proof, doAfter, doBefore, resetsOnRestart }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
-      const [me] = lintOverride !== undefined && scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {
@@ -1073,6 +1076,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
+        newHost: z.string().min(1).max(64).optional(),
         proof: z.string().max(300).optional(),
       },
     },
@@ -1214,7 +1218,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
             if (ask.error) return fail(ask.error);
             const reissueSteps = ask.steps ?? input.steps;
             r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint });
@@ -1274,11 +1278,14 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
       inputSchema: {
-        action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge"]),
+        action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold"]),
         ticketId: z.string().uuid(),
-        verdict: z.enum(["approved", "changes_requested"]).optional(),
+        verdict: z.enum(["approved", "approved_hold", "changes_requested"]).optional(),
+        holdReason: z.string().max(1000).optional().describe("With verdict approved_hold: why the merge must wait."),
+        waitsOn: z.array(z.string().max(40)).max(10).optional().describe("With approved_hold: tickets (BOS-12 or id) or decisions (id) that must close first."),
+        holdUntil: z.string().max(40).optional().describe("With approved_hold: a date (2026-11-19) the hold ends on, instead of or as well as waitsOn."),
         comments: z.array(z.object({ path: z.string(), line: z.number().int().positive(), body: z.string().min(1) })).max(50).optional(),
         summary: z.string().max(5000).optional(),
         lesson: z.string().max(1000).optional(),
@@ -1299,6 +1306,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       if (me.role !== "ceo" && !named) return fail("Only your company's CEO or this ticket's reviewer reviews it.");
       if ((input.action === "sequence" || input.action === "overrule" || input.action === "retry_merge") && me.role !== "ceo") return fail("Only your company's CEO can do that.");
       try {
+        if (input.action === "release_hold" || input.action === "cancel_hold") {
+          const by = { name: me.name, agentId: scope.agentId, isCeo: me.role === "ceo" };
+          if (input.action === "cancel_hold") return text(`Hold cancelled: ${(await review.cancelHold(input.ticketId, by, { companyId: scope.companyId })).delivered}. Your pass no longer counts; the reviewer is asked to review it again.`);
+          const r = await review.releaseHold(input.ticketId, by, { companyId: scope.companyId, background: true, causedByRunId: scope.runId });
+          return text(`Hold released: ${r.delivered ?? "the merge goes on"}.`);
+        }
         if (input.action === "retry_merge") {
           await review.retryMerge(input.ticketId, { byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId });
           return text("The merge is being tried again in the background: the whole check runs again on the runner. If it is refused or fails, the ticket says why or raises a card.");
@@ -1342,8 +1355,27 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           await db.update(tickets).set({ fixesLive: input.fixesLive.trim() }).where(eq(tickets.id, rt.id));
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: rt.id, kind: "reorganised", summary: `${me.name} marked it as fixing a live problem: ${input.fixesLive.trim()}` });
         }
+        // "Passed, hold merge" (BOS-808): the pass stands and the merge waits for the tickets, decisions or date named.
+        let hold: HoldInput | undefined;
+        if (input.verdict === "approved_hold") {
+          const waitsOn: HoldInput["waitsOn"] = [];
+          for (const given of input.waitsOn ?? []) {
+            const byRef = REF.exec(given.trim());
+            const id = byRef ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(byRef[1])))))[0]?.id : given.trim();
+            if (!id || !z.string().uuid().safeParse(id).success) return fail(`waitsOn: no ticket ${given} in your company. Use a reference like BOS-12 or an id.`);
+            const [isTicket] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId)));
+            waitsOn.push(isTicket ? { ticketId: id } : { decisionId: id });
+          }
+          let releaseAt: Date | null = null;
+          if (input.holdUntil?.trim()) {
+            releaseAt = new Date(/^\d{4}-\d{2}-\d{2}$/.test(input.holdUntil.trim()) ? `${input.holdUntil.trim()}T00:00:00Z` : input.holdUntil.trim());
+            if (Number.isNaN(releaseAt.getTime())) return fail("holdUntil is not a date. Use a form like 2026-11-19.");
+          }
+          hold = { reason: input.holdReason ?? "", waitsOn, releaseAt };
+        } else if (input.holdReason || input.waitsOn?.length || input.holdUntil) return fail("holdReason, waitsOn and holdUntil go with verdict approved_hold.");
         const r = await review.submit(input.ticketId, {
-          verdict: input.verdict,
+          verdict: input.verdict === "approved_hold" ? "approved" : input.verdict,
+          hold,
           comments: input.comments,
           summary: input.summary,
           lesson: input.lesson,
@@ -1441,6 +1473,7 @@ const thinTicketWarning = (body: string | null | undefined, assignee: string | u
 function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
   const outcome = r.outcome ?? "done";
   if (outcome === "waiting") return `Recorded: ${r.delivered}.`;
+  if (outcome === "held") return `Passed; ${r.delivered}. You are woken once to re-check and release it when what it waits on closes or the date comes (action release_hold, or cancel_hold to withdraw your pass).`;
   if (r.verdict !== "approved") return `Changes requested; ${r.delivered}.`;
   if (outcome === "landing") return "Approved; it is being checked and merged in the background. If the check fails or the merge can't finish, the ticket comes back to the assignee or raises a card.";
   return outcome === "owner_review"
@@ -1551,6 +1584,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const signoff = t.systemState === "review" ? signoffLine(await signoffState(db, t)) : null;
       const signoffLog = await signoffHistory(db, ticketId);
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
+      const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
+      const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
@@ -1561,6 +1596,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(signoff ? [signoff] : []),
         ...(signoffLog ? [signoffLog] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
+        ...(holdLine ? [holdLine] : []),
         ...(ciLine ? [ciLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
