@@ -791,15 +791,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
                   <div className="score" title={why(d) ?? undefined}>
                     {Math.round(d.score) > 0 && (
-                      <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
-                        {Math.round(d.score)}
-                      </b>
+                      <>
+                        <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
+                          {Math.round(d.score)}
+                        </b>
+                        <div className="parts" aria-hidden="true">
+                          <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
+                          <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
+                          <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
+                        </div>
+                      </>
                     )}
-                    <div className="parts" aria-hidden="true">
-                      <span style={{ width: w(d.parts.blocking + d.parts.liveRun), background: "var(--accent)" }} />
-                      <span style={{ width: w(d.parts.urgency), background: "var(--amber)" }} />
-                      <span style={{ width: w(d.parts.age), background: "#8a94a3" }} />
-                    </div>
                   </div>
                   <div className="body">
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>

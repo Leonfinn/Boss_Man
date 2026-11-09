@@ -79,10 +79,11 @@ describe("decision queue", () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     const onAnswered = vi.fn();
-    render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
+    const { container } = render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
 
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
+    expect(container.querySelector(".parts")).toBeTruthy();
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     // The legend folds away behind one line (BOS-245), so it opens before it can be read.
@@ -236,10 +237,11 @@ describe("decision queue", () => {
   });
 
   it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
-    render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const { container } = render(<Decisions decisions={[decision({ score: 0, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 0 }, reasons: ["Raised just now"], blocks: [] })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.queryByText(/Score 0/)).toBeNull();
     expect(screen.queryByText(/for waiting/)).toBeNull();
     expect(screen.queryByLabelText(/^Score/)).toBeNull();
+    expect(container.querySelector(".parts")).toBeNull();
   });
 
   it("says how long ago a card was raised, not 'just now', once it is minutes old (BOS-804)", () => {
