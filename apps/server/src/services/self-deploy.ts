@@ -933,7 +933,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // DR-046 part 2: a runner image update already waiting for runs, so R16 refuses a card that asks the owner to
       // press Build and update runners again. `null` (not absent) says Boss Man looked and found nothing pending.
       const hold = await getHold(db).catch(() => null);
-      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: hold ? { kind: hold.kind, ...(hold.since ? { since: hold.since } : {}), ...(hold.swapped ? { swapped: hold.swapped } : {}) } : null };
+      // A wrap-up hold (BOS-929) swaps no image, so it is not a pending runner update for R16; only real drains count.
+      const runnerHold = hold && hold.kind !== "wrapup" ? hold : null;
+      return { enabled: true, ...(installDir ? { installDir } : {}), ...(open?.commit ? { openCommit: open.commit } : {}), hold: runnerHold ? { kind: runnerHold.kind as "update" | "settings" | undefined, ...(runnerHold.since ? { since: runnerHold.since } : {}), ...(runnerHold.swapped ? { swapped: runnerHold.swapped } : {}) } : null };
     },
 
     /** Checked before an approval is recorded: one request at a time. */

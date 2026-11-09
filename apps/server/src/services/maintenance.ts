@@ -7,7 +7,7 @@ import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, decisions, runs, settings } from "../db/schema.js";
+import { agents, companies, decisions, runs, settings, tickets } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
@@ -17,9 +17,15 @@ export const MAINTENANCE_KEY = "maintenance";
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
 /** The same, for a runner restart that applies new runner settings (BOS-594). */
 export const WRAP_UP_SETTINGS = "A runner restart for a setting change is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the runner is back.";
+/** The owner pressed "Ask agents to wrap up" (BOS-929): the same clean stop, before an update or a runner rebuild. */
+export const WRAP_UP_ASKED = "The owner asked every agent to wrap up before an update. Finish the step you are on, commit your work on the ticket branch, write the ticket's state note with the next step, reply to anything pending, then end your turn now. Don't start anything new: no new checks either. You'll be woken again once it is done.";
 /** What a drain is for. "update": swap each runner not on the current image. "settings": recreate every runner once,
- * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594). */
-export type HoldKind = "update" | "settings";
+ * whatever its image, so new launcher settings (memory, check slots, CPU) reach it without cutting runs off (BOS-594).
+ * "wrapup": the owner asked every agent to stop cleanly (BOS-929); nothing is swapped, so there is no runner to wait
+ * for: the hold only keeps new runs from starting until the owner cancels it or the update it was for finishes. */
+export type HoldKind = "update" | "settings" | "wrapup";
+/** How long the "Ask agents to wrap up" panel lets a run go before calling it "not responding" (BOS-929). Never stopped automatically. */
+export const WRAPUP_NOT_RESPONDING_MINUTES = 10;
 /** The reason drain.json carries for a setting change (scripts/update-runner.sh --settings). */
 export const SETTINGS_REASON = "setting change";
 /** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
@@ -101,6 +107,53 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     return new Map(rows.map((r) => [r.companyId, r.n]));
   }
 
+  /**
+   * The wrap-up panel's list (BOS-929): every work run still going, with its agent, ticket reference and when it
+   * started. A run with an open permission card is named as waiting for an answer, with who it waits on (Brains's
+   * part B), so the panel never calls a run stuck when it is really waiting on the owner.
+   */
+  async function liveWorkRuns(db: Db, since: string) {
+    const live = await db
+      .select({
+        runId: runs.id,
+        agentId: runs.agentId,
+        agentName: agents.name,
+        ticketId: runs.ticketId,
+        ticketRef: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${runs.ticketId})`,
+        ticketTitle: tickets.title,
+        startedAt: runs.startedAt,
+      })
+      .from(runs)
+      .leftJoin(agents, eq(agents.id, runs.agentId))
+      .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+      .where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from 'reply'`))
+      .orderBy(asc(runs.startedAt));
+    // An open permission card names the run it holds (BOS-932/DR-048). One per run is enough to say it is waiting.
+    const waiters = new Map<string, { question: string; tier: string | null }>();
+    if (live.length) {
+      const cards = await db
+        .select({ runId: sql<string>`${decisions.context}->>'runId'`, question: decisions.question, tier: decisions.tier })
+        .from(decisions)
+        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`${decisions.context}->>'runId' is not null`));
+      for (const c of cards) if (c.runId && !waiters.has(c.runId)) waiters.set(c.runId, { question: c.question, tier: c.tier });
+    }
+    const sent = new Date(since).getTime();
+    return live.map((r) => {
+      const w = r.runId ? waiters.get(r.runId) : undefined;
+      return {
+        runId: r.runId,
+        agentId: r.agentId,
+        agent: r.agentName,
+        ticketId: r.ticketId,
+        ticket: r.ticketRef,
+        ticketTitle: r.ticketTitle,
+        runningForMinutes: Math.max(0, Math.round((now().getTime() - new Date(r.startedAt).getTime()) / 60_000)),
+        sinceWrapUpMinutes: Math.max(0, Math.round((now().getTime() - sent) / 60_000)),
+        waitingOn: w ? { question: w.question, tier: w.tier } : null,
+      };
+    });
+  }
+
   async function withdrawQuestion() {
     await db
       .update(decisions)
@@ -167,18 +220,33 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           await save(up);
           return up;
         }
+        // A real update asked for while the owner's wrap-up hold is on (BOS-929): the update takes over, since it
+        // carries the same "nothing new starts" and lifts by itself when the runners are swapped. Its own
+        // start message goes out below, so an agent that missed the wrap-up is told again by the update.
+        if ((kind === "update" || kind === "settings") && have.kind === "wrapup") {
+          const up: Hold = { ...have, kind, reason: kind === "settings" ? SETTINGS_REASON : "runner update", since: now().toISOString() };
+          await save(up);
+          await deps.tellRunning?.(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
+          return up;
+        }
         return have;
       }
-      const minutes = opts.minutes ?? deps.drainMinutes ?? 30;
+      // A wrap-up has no deadline: nothing is waiting on a swap, so it never asks "stop them now?". The panel's
+      // "not responding" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
+      const minutes = opts.minutes ?? (kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
       const t = now();
-      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
+      const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? "asking agents to wrap up" : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
       await save(h);
-      await deps.tellRunning?.(kind === "settings" ? WRAP_UP_SETTINGS : WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
+      const said = kind === "settings" ? WRAP_UP_SETTINGS : kind === "wrapup" ? WRAP_UP_ASKED : WRAP_UP;
+      await deps.tellRunning?.(said).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
       await deps.notify({
         companyId: null,
         level: "note",
-        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : "Update pending: waiting for runs to finish",
-        body: `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
+        title: kind === "settings" ? "Setting change pending: waiting for runs to finish" : kind === "wrapup" ? "Agents asked to wrap up" : "Update pending: waiting for runs to finish",
+        body:
+          kind === "wrapup"
+            ? `Every running agent was asked to finish its step and stop cleanly. Nothing new starts in any company until you cancel the wrap-up or the update it was for finishes. Runs still going after ${minutes} minutes are only flagged, never stopped for you.`
+            : `Nothing new starts in any company. Each runner is ${kind === "settings" ? "recreated with the new settings" : "swapped"} as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`,
         link: "#/settings",
       });
       return h;
@@ -203,14 +271,19 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const active = await activeByCompany(true);
       const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
+      // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
+      // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
+      if (h.kind !== "wrapup") return base;
+      return { ...base, minutes: h.minutes, notRespondingAfter: WRAPUP_NOT_RESPONDING_MINUTES, runsList: await liveWorkRuns(db, h.since) };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */
     async cancel() {
       const h = await getHold(db);
       if (!h) return false;
-      await end("Runner update cancelled", "note", "New runs start again. Runners not swapped yet still run the old image; start the update again when you like.");
+      if (h.kind === "wrapup") await end("Wrap-up cancelled", "note", "New runs start again. Agents that were still going finish on their own; any that ended cleanly are woken on their tickets.");
+      else await end("Runner update cancelled", "note", "New runs start again. Runners not swapped yet still run the old image; start the update again when you like.");
       return true;
     },
 
@@ -218,6 +291,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     async answered(answer: string) {
       const h = await getHold(db);
       if (!h) return;
+      // A wrap-up never asks the deadline question, so its answers are for an old card: nothing to do.
+      if (h.kind === "wrapup") return;
       if (answer === STOP_AND_UPDATE) await save({ ...h, force: true });
       else if (answer === CANCEL_UPDATE) await self.cancel();
       else await save({ ...h, deadline: new Date(now().getTime() + h.minutes * 60_000).toISOString() });
@@ -238,6 +313,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       let h = await getHold(db);
       if (asked && (!h || (asked === "settings" && h.kind !== "settings"))) h = await self.start({ kind: asked });
       if (!h) return;
+
+      // A wrap-up hold (BOS-929) swaps nothing and asks nothing: it only keeps new runs from starting until the
+      // owner cancels it, or a real update takes it over in start() above. The scheduler's hold already does that.
+      if (h.kind === "wrapup") return;
 
       let fleet: FleetRunner[];
       try {
