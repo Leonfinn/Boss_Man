@@ -63,4 +63,16 @@ describe("project page: star and spend", () => {
     const withTokens = (await req("GET", `/api/projects/${p.id}/spend`)).json();
     expect(withTokens.tokens).toEqual({ month: { input: 1000, output: 200 }, total: { input: 1050, output: 205 } });
   });
+
+  // The project routes live in routes/projects.ts (BOS-909) but must stay inside the owner scope.
+  it("refuses the project and setup routes without the owner's session", async () => {
+    const co = (await req("POST", "/api/companies", { name: "Co" })).json().company.id;
+    const p = (await req("POST", `/api/companies/${co}/projects`, { name: "Site" })).json();
+    const anon = (method: "GET" | "POST" | "PATCH", url: string) => t.app.inject({ method, url, ...(method === "GET" ? {} : { payload: {} }) });
+    expect((await anon("PATCH", `/api/projects/${p.id}`)).statusCode).toBe(401);
+    expect((await anon("GET", `/api/projects/${p.id}/spend`)).statusCode).toBe(401);
+    expect((await anon("GET", `/api/companies/${co}/projects`)).statusCode).toBe(401);
+    expect((await anon("GET", "/api/setup-progress")).statusCode).toBe(401);
+    expect((await anon("GET", `/api/projects/${p.id}/brief`)).statusCode).toBe(401);
+  });
 });

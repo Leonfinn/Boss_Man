@@ -5,6 +5,7 @@ export * from "./protocol.js";
 export * from "./policy.js";
 export * from "./board.js";
 export * from "./acceptance.js";
+export * from "./go-live.js";
 export * from "./rank.js";
 export * from "./review.js";
 export * from "./built-in-rules.js";

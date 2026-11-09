@@ -56,6 +56,21 @@ describe("quota card wording", () => {
     expect(screen.queryByText(/Runs out/)).toBeNull();
   });
 
+  // BOS-1012: the rate beside the date is the one the date was worked out from, one decimal under 10%.
+  it("shows the rate the date was made from, with a decimal so 0.3% doesn't read as 0%", async () => {
+    stubApi({ perHour: 0.0031, runsOutPerHour: 0.0045, runsOutAt: later, beforeReset: false });
+    render(<Funding companies={[]} />);
+    expect(await screen.findByText(/about 0\.4% an hour/)).toBeTruthy();
+    expect(screen.queryByText(/about 0\.3% an hour/)).toBeNull();
+  });
+
+  it("shows a fast rate rounded to a whole percent, and warns only when it runs out before the reset", async () => {
+    stubApi({ perHour: 0.123, runsOutPerHour: 0.123, runsOutAt: soon, beforeReset: true });
+    render(<Funding companies={[]} />);
+    expect(await screen.findByText(/about 12% an hour/)).toBeTruthy();
+    expect(screen.getByText(/^Runs out about/)).toBeTruthy();
+  });
+
   it("names each window by its raw adapter name with its latest percentage, and says when credits are in use", async () => {
     stubApi({ runsOutAt: later, beforeReset: false }, true);
     render(<Funding companies={[]} />);

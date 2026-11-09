@@ -333,18 +333,56 @@ describe("ranked decision queue (R20)", () => {
       // A company with no cards of its own reads zero, whatever this one holds.
       const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
       expect(await tally(`?companyId=${other.company.id}`)).toEqual({ open: 0, waiting: 0 });
-      // A page showing a filtered list passes its own figures, never past the list.
-      expect(await tally(`?open=1&waiting=1`)).toEqual({ open: 1, waiting: 1 });
+      // (BOS-996) The page no longer sends its own figures, and if a stale tab still does, the server
+      // ignores them: the tally is the server's alone.
+      expect(await tally(`?open=1&waiting=1`)).toEqual({ open: 2, waiting: 2 });
       expect(await tally(`?open=99&waiting=99`)).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?open=0&waiting=0`)).toEqual({ open: 2, waiting: 2 });
 
       // A card moving between groups changes the count on the next read, the way the live badge follows it.
+      // These writes go straight to the table (as another process might), so step past the few-seconds
+      // kept tally first (BOS-996).
+      ctx.advance(6_000);
       await ctx.db.update(decisions).set({ staleAt: null, staleReason: null }).where(eq(decisions.id, stale.id));
       expect(await tally()).toEqual({ open: 3, waiting: 1 });
+      ctx.advance(6_000);
       await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, plain.id));
       expect(await tally()).toEqual({ open: 2, waiting: 2 });
-      // Answering the hands-on card drops it out of both figures.
+      // Answering the hands-on card drops it out of both figures at once: an answer clears the kept tally.
       await ctx.req("POST", `/api/decisions/${hands.id}/answer`, { answer: "Done" });
       expect(await tally()).toEqual({ open: 1, waiting: 2 });
+    });
+
+    it("the badge, the heading and the dashboard share one read of the queue for a few seconds (BOS-996)", async () => {
+      ctx = await setup();
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      // Count the reads of the decisions table, the queue walk's own first select: the tally keeps the
+      // figures, not the rows. An answer or a new card clears the kept tally first.
+      const measure = async (url: string) => {
+        ctx.reads.queries = 0;
+        ctx.reads.rows = 0;
+        ctx.reads.byTable = {};
+        ctx.reads.on = true;
+        const r = await ctx.req("GET", url);
+        ctx.reads.on = false;
+        return { body: r.json() as { open: number; waiting: number; stats?: { decisionsWaiting: number } }, queueRows: ctx.reads.byTable.decisions ?? 0 };
+      };
+      const first = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(first.body).toEqual({ open: 1, waiting: 0 });
+      expect(first.queueRows).toBeGreaterThan(0);
+      // The page heading, the menu badge and the dashboard all read one company's view, polling
+      // together a moment later: they share the kept tally, so the queue is not walked again.
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      const dash = await measure(`/api/companies/${ctx.company.id}/dashboard`);
+      expect((dash.body as unknown as { stats: { decisionsWaiting: number } }).stats.decisionsWaiting).toBe(1);
+      expect(dash.queueRows).toBe(0);
+      // Past the few seconds the queue is walked again, so a card moving between groups shows at once.
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
+      const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(later.body).toEqual({ open: 0, waiting: 1 });
+      expect(later.queueRows).toBeGreaterThan(0);
     });
   });
 
