@@ -14,6 +14,7 @@ import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
+import { goLiveWaitOf } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
@@ -377,6 +378,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // Second layer: the service refuses too, but the tool should give the reason (BOS-86 round 12).
         const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, blocksTicketId, scope.agentId);
         if (reviewWrite) return fail(reviewWrite);
+        // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
+        // ticket merged before the wait existed is covered too.
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const notLive = m ? await goLiveWaitOf(db, m) : null;
+        if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }
       // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
       // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.

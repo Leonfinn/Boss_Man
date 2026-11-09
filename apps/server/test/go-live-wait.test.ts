@@ -142,6 +142,23 @@ describe("after-merge checks wait for go-live", () => {
     expect(await afterMergeWakes(id)).toHaveLength(1);
   });
 
+  it("no owner card of any kind on a merged ticket that isn't live, including one merged before the wait existed", { timeout: 120_000 }, async () => {
+    const { db, req, dev, project } = ctx;
+    const mk = async (commit: string, at: string) => {
+      const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: `T ${commit.slice(0, 1)}`, assigneeAgentId: dev.id })).json() as { id: string };
+      await db.update(tickets).set({ mergeCommit: commit, mergedAt: new Date(at), systemState: "in_progress" }).where(eq(tickets.id, t.id));
+      return t.id;
+    };
+    await mk(OLD, "2026-11-01T00:00:00Z");
+    const old = await mk(NEW, "2026-11-02T00:00:00Z"); // no go_live_wait flag: a row from before this change
+    await serverRuns(OLD);
+    const c = await ctx.agent(ctx.dev.id);
+    const ask = { question: "Is the new thing live?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: old, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false };
+    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).toContain("isn't live yet");
+    await serverRuns(NEW);
+    expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
+  });
+
   it("a merge that is already live is handed to the assignee at once, as before", { timeout: 120_000 }, async () => {
     await serverRuns(NEW);
     const { id } = await mergeOne(NEW, "apps/server/src/app.ts");

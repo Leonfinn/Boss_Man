@@ -45,7 +45,8 @@ export function serverContains(live: string | null, merge: string, order: string
 /**
  * What a merged ticket's after-merge checks still wait for, or null when the change is live. A merge with no
  * commit (nothing in the repository) has nothing to deploy. Runner code is only waited for when the merge is
- * known to have touched it (touchesRunner true); an unknown is treated as server-only.
+ * known to have touched it (touchesRunner true). At merge an unknown file list is stored as true (wait for both);
+ * a null is only a ticket merged before this wait existed, which waits for the server alone.
  */
 export async function goLiveWaitOf(db: Db, t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null }): Promise<GoLiveWait | null> {
   if (!t.mergeCommit) return null;
