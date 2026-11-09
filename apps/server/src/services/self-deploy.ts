@@ -332,6 +332,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const now = new Date();
     for (const d of await openFor("runner")) {
       if (d.id === keepId) continue;
+      // The owner's own button press is left alone: it is their explicit ask, not a stale automatic card (BOS-764 pattern).
+      if ((d.context as SelfDeployContext).requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(d.dedupeKey ?? "")) continue;
       await withdrawOpen(d.id, replacedNotice({ commit, text: why, now }));
       await record(db, { companyId, kind: "decision_withdrawn", summary: why, at: now });
     }
@@ -346,8 +348,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const open = await openFor("runner");
     if (open.length <= 1) return;
     const live = a?.deployed;
+    // Keep the card for the live version (the newest of those if several), else the newest card; prefer the owner's own
+    // button press when there is one, since it is their explicit ask and must never be the card folded away.
     const mine = live ? open.filter((d) => (d.context as SelfDeployContext).commit === live) : [];
-    const keep = (mine.length ? mine : open).sort((x, y) => +new Date(y.createdAt) - +new Date(x.createdAt))[0]!;
+    const pool = mine.length ? mine : open;
+    const keep = (pool.find((d) => (d.context as SelfDeployContext).requested) ?? pool.sort((x, y) => +new Date(y.createdAt) - +new Date(x.createdAt))[0])!;
+    // Withdraws the rest; the requested-card guard inside leaves any other owner press alone (BOS-1010 rule 7).
     await withdrawOtherRunnerCards(keep.id, (keep.context as SelfDeployContext).commit ?? live ?? "");
   }
 
