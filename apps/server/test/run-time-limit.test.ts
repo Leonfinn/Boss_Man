@@ -2,10 +2,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, runs } from "../src/db/schema.js";
+import { companies, decisions, runners, runs } from "../src/db/schema.js";
 
 const MIN = 60_000;
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -26,8 +26,12 @@ async function setup() {
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json();
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json();
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json();
+  const [runnerRow] = await db.select().from(runners);
   const sent: RunnerCommand[] = [];
   built.runners.connect(reg.runnerId, (c) => (sent.push(c), true), []);
+  // The runner's own run.ended, through the same ingest the real socket uses.
+  let seq = 0;
+  const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const startRun = async (agoMin: number) => {
     const id = randomUUID();
     await db.insert(runs).values({ id, companyId: company.id, agentId: worker.id, startedAt: new Date(clock().getTime() - agoMin * MIN), acpSessionId: "s", lastEventAt: clock() });
@@ -37,7 +41,7 @@ async function setup() {
   // Only this feature's cards: a ticketless old run also draws the Scrum Master's own card.
   const limitCards = async () => (await db.select().from(decisions)).filter((d) => d.dedupeKey?.startsWith("run-time-limit:"));
   const limit = (maxRunMinutes: number | null) => req("PATCH", `/api/companies/${company.id}`, { maxRunMinutes });
-  return { ...built, db, close, company, worker, sent, startRun, row, limit, limitCards, req, advance: (ms: number) => void (offset += ms) };
+  return { ...built, db, close, company, worker, sent, emit, startRun, row, limit, limitCards, req, advance: (ms: number) => void (offset += ms) };
 }
 
 describe("run time limit", () => {
@@ -65,6 +69,28 @@ describe("run time limit", () => {
     // The runner confirms the stop: the run reads "Stopped: run time limit (60 min)".
     await ctx.runners.endRun(old, "cancelled", new Date());
     expect((await ctx.row(old)).outcome).toBe("stopped: run time limit (60 min)");
+  });
+
+  it("keeps the real outcome when the run finishes by itself before the runner confirms the stop", async () => {
+    ctx = await setup();
+    await ctx.limit(60);
+    const id = await ctx.startRun(61);
+    // The limit asks for a stop, which records the why and tells the runner.
+    await ctx.sweeps.run();
+    expect(ctx.sent.filter((c) => c.type === "run.cancel")).toEqual([{ type: "run.cancel", runId: id }]);
+    // In the gap before it confirms the stop, the run finishes its own turn (end_turn): the outcome
+    // the runner reports is the real one, not "stopped: run time limit".
+    await ctx.emit({ type: "run.ended", runId: id, stopReason: "end_turn", error: null });
+    expect((await ctx.row(id)).outcome).toBe("end_turn");
+  });
+
+  it("a run the runner confirms as cancelled still reads 'stopped: run time limit'", async () => {
+    ctx = await setup();
+    await ctx.limit(60);
+    const id = await ctx.startRun(61);
+    await ctx.sweeps.run();
+    await ctx.emit({ type: "run.ended", runId: id, stopReason: "cancelled", error: null });
+    expect((await ctx.row(id)).outcome).toBe("stopped: run time limit (60 min)");
   });
 
   it("raises one owner card per stopped run, and Raise the limit lifts the limit by half", async () => {
