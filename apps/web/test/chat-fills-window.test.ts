@@ -181,8 +181,20 @@ describe.skipIf(!browser || !server)("the real Chat page fills the window (BOS-2
     // BOS-270 replaced a fixed `min(72vh, 760px)` height with "what the heading leaves". So growing the
     // window must grow the panel by the same amount (up to rounding), not stop at a cap: the old code
     // gave 521px at the foldable's 724-tall window and barely more at 1100, leaving a blank band.
-    const short = await measure(await openChat(1440, 900, false));
-    const tall = await measure(await openChat(1440, 1100, false));
+    const shortPage = await openChat(1440, 900, false);
+    let short: Metrics;
+    try {
+      short = await measure(shortPage);
+    } finally {
+      await shortPage.close();
+    }
+    const tallPage = await openChat(1440, 1100, false);
+    let tall: Metrics;
+    try {
+      tall = await measure(tallPage);
+    } finally {
+      await tallPage.close();
+    }
     const grew = tall.messenger.height - short.messenger.height;
     const windowGrew = tall.winH - short.winH;
     expect(windowGrew).toBe(200);
