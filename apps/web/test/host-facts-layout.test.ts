@@ -51,7 +51,7 @@ const facts: [string, string][] = [
   ["repo.originHost", "github.com"],
   ["repo.probe", "failed"],
   ["repo.probeWhy", "ssh: connect to host <code host> port 22: Connection timed out"],
-  ["check.container_status.stopped.names", "bm-worker-1 (exited, exit 137, 2 hours ago), bm-cache-1 (exited, exit 255, 5 minutes ago)"],
+  ["check.container_status.stopped.names", "bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (exited, exit 255, 5 minutes ago)"],
 ];
 
 // The same structure ThisHost renders: the intro, the folded reported-facts block, then the owner's boxes.

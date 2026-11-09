@@ -141,7 +141,7 @@ describe("host facts settings record (BOS-419)", () => {
     const flat = flattenHostRecord((await hostFactsService({ dir }).read())!);
     expect(flat["check.container_status.notRunning"]).toBe("2");
     expect(flat["check.container_status.stopped"]).toBe("2"); // the raw count stays, for the folded list
-    expect(flat["check.container_status.stopped.names"]).toBe("bm-worker-1 (exited, exit 137, 2 hours ago), bm-cache-1 (exited, exit 255, 5 minutes ago)");
+    expect(flat["check.container_status.stopped.names"]).toBe("bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (exited, exit 255, 5 minutes ago)");
     expect(flat["repo.probeWhy"]).toContain("Connection timed out");
   });
 

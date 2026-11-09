@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STOPPED_CONTAINERS_KEY, problemText, type HostFactsView } from "../src/host-facts-display";
+import { STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../src/host-facts-display";
 
 // BOS-986: the "This host" panel says in plain words what is missing and what failed, rather than the raw
 // dotted key ("check.container_status.notRunning" told the owner nothing). These tests pin the wording the
@@ -51,5 +51,19 @@ describe("This host: plain words for what is wrong (BOS-986)", () => {
 
   it("the stopped-container names use the key the server flattens them into", () => {
     expect(STOPPED_CONTAINERS_KEY).toBe("check.container_status.stopped.names");
+  });
+
+  it("splits a flattened list back into whole entries, never on the commas inside one", () => {
+    // A real report joins entries with "; ". Each entry contains ", " (exit code, since when), so splitting on
+    // ", " used to print fragments ("bm-worker-1 (exited" and "exit 137" as separate containers), failing criterion 1.
+    const flat = "bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (restarting, exit 255, 5 minutes ago)";
+    expect(stoppedContainerNames(flat)).toEqual([
+      "bm-worker-1 (exited, exit 137, 2 hours ago)",
+      "bm-cache-1 (restarting, exit 255, 5 minutes ago)",
+    ]);
+    expect(stoppedContainerNames("")).toEqual([]);
+    // The split entries are what the line names, and no fragment sneaks in.
+    const t = problemText("check.container_status.notRunning", view({ "check.container_status.notRunning": "2" }), stoppedContainerNames(flat), "");
+    expect(t).toContain("the containers bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (restarting, exit 255, 5 minutes ago) are not running");
   });
 });

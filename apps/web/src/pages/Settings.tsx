@@ -11,7 +11,7 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
-import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, type HostFactsView } from "../host-facts-display";
+import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../host-facts-display";
 import { clearDraft, readDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 
@@ -2752,9 +2752,7 @@ export function ThisHost() {
   const trouble = problemLine(problems);
   // BOS-986: name what is wrong, not the raw key. The stopped containers come from the host as a list; its reason the
   // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
-  const stopped = (d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "")
-    .split(", ")
-    .filter(Boolean);
+  const stopped = stoppedContainerNames(d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "");
   const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
   const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
   const toggle = () => {

@@ -479,9 +479,9 @@ host_extra_facts() {
       # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
       local errf="$STATE/repo-probe.err" rc=0 ok=0
       : >"$errf" 2>/dev/null || true
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; fi
-      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; fi
-      if ((ok)); then probe=ok; else probe=failed; rc=$?; fi
+      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
       # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
       # cut every token to 80 characters, and keep 200 characters in all.
@@ -579,42 +579,66 @@ host_extra_facts() {
   out+="$sep\"addons\": {$adds}"
   # --- read-only checks (DR-024), chosen by name from this fixed list
   # BOS-986: container_status counts only containers that are not running AND are meant to be. A one-shot setup or
-  # init container that finished (exit 0) is not a fault, and neither is the blue/green standby once its window is
-  # over: both are on purpose. The rest are named, with their exit code and since when, so the panel can say which.
+  # init container that finished (exit 0, restart policy "no") is not a fault, and neither is the blue/green standby
+  # (its window is over). Anything else stopped is named with its exit code and since when, so the panel can say
+  # which. A running container that is failing its health check counts as unhealthy too.
+  # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
   local stopping="" ssep2="" seen_ids=""
   if have_docker; then
-    local cid cname cstate_str cexit csince cproj csvc
-    while IFS=$'\t' read -r cid cname cstate_str cexit csince cproj csvc; do
+    local cid cname cstate_str cstatus csince csvc
+    local -A exit_code=()
+    # Read the stack once. `docker ps` has no exit-code field (`ExitCode` is not one of the names it accepts, and
+    # asking for it makes real Docker fail), so `docker inspect` is asked afterwards for the containers that aren't
+    # up. The listing is kept in a temp file so the loop can read it and the ids can be inspected before it starts.
+    local listing="$STATE/containers.tsv"
+    dk ps -a --filter label=com.docker.compose.project --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.RunningFor}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}' >"$listing" 2>/dev/null || : >"$listing"
+    local ids_nonrunning=""
+    while IFS=$'\t' read -r cid _ cstate_str _; do
+      [[ -n $cid && $cstate_str != running ]] && ids_nonrunning+=" $cid"
+    done <"$listing"
+    if [[ -n ${ids_nonrunning// /} ]]; then
+      local -a idsarr=() ecodes=()
+      read -r -a idsarr <<<"${ids_nonrunning# }"
+      mapfile -t ecodes < <(dk inspect -f '{{.State.ExitCode}}' "${idsarr[@]}" 2>/dev/null || true)
+      local i
+      for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
+    fi
+    while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
       [[ -n $cstate_str ]] || continue
-      # A Compose project is a stack: a symmetric stack run twice on one host holds two containers per service.
-      # If that happens (BOS-986's duplicate compose-file entry on Docker01), count each service once, so the
-      # duplicated stack reads the same as a single one.
-      if [[ -n $cproj && -n $csvc ]]; then
-        [[ " $seen_ids " == *" $cproj/$csvc "* ]] && continue
-        seen_ids+=" $cproj/$csvc"
+      # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
+      # Docker01) holds two containers with the same name. Replicas have their own index (bm-worker-1 and
+      # bm-worker-2), so a stopped replica beside a running one is still counted and named.
+      if [[ -n $cname ]]; then
+        [[ " $seen_ids " == *" $cname "* ]] && continue
+        seen_ids+=" $cname"
       fi
       total=$((total + 1))
-      [[ $cstate_str == running ]] && continue
-      [[ $cstate_str == restarting ]] && unhealthy=$((unhealthy + 1))
-      # A service that is meant to stop after it has done its job (migrate, netguard's --build-only, any
-      # `restart: "no"` helper): its recorded exit code says 0 when it did. A non-zero one is a real failure.
-      if [[ $cname == *-migrate-* || $cname == *-netguard-* || $csvc == migrate || $csvc == netguard ]]; then
-        [[ $cexit == 0 ]] && continue
-      fi
-      # A non-zero exit code is never "meant to stop": that is the whole point of a failure.
-      if [[ $cexit != 0 && -n $cexit ]]; then
-        notrun=$((notrun + 1))
-        stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": ${cexit//[^0-9-]/}, \"since\": $(jstr "$csince")}"; ssep2=", "
+      if [[ $cstate_str == running ]]; then
+        # A container that is up but failing its health check ("Up 2 minutes (unhealthy)") is a problem too.
+        [[ $cstatus == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
         continue
       fi
-      # Exit 0 but still there: a one-shot that finished, so not a fault.
-      continue
-    done < <(dk ps -a --filter label=com.docker.compose.project --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.ExitCode}}\t{{.RunningFor}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}' || true)
-    # The blue/green standby: a server colour that is stopped (exit 0) is the colour the proxy isn't sending traffic
-    # to. It is meant to be stopped once its window has passed, so it doesn't count. The deployer leaves it running
-    # for SOAK_SECONDS after a swap; this report cannot tell a failed swap from a finished window, so a stopped colour
-    # is never counted as "not running" (a colour that crashed has a non-zero exit code above and is).
+      [[ $cstate_str == restarting ]] && unhealthy=$((unhealthy + 1))
+      local cexit="${exit_code[$cid]:-}"
+      # Meant to stop: a one-shot whose job is done. That means a migrate/netguard helper, or any service Compose
+      # starts with `restart: "no"`, and only when it exited 0. A cleanly stopped server or database has a restart
+      # policy of "unless-stopped", so it still counts.
+      local one_shot=false
+      if [[ $cname == *-migrate-* || $cname == *-netguard-* || $csvc == migrate || $csvc == netguard ]]; then one_shot=true; fi
+      local rp
+      rp="$(dk inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid" 2>/dev/null || true)"
+      [[ $rp == no ]] && one_shot=true
+      [[ $one_shot == true && $cexit == 0 ]] && continue
+      # The blue/green standby: a server colour that is stopped (exit 0) is the colour the proxy isn't sending traffic
+      # to. The deployer leaves it running for SOAK_SECONDS after a swap; this report cannot tell a failed swap from a
+      # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
+      # and is counted below).
+      if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      notrun=$((notrun + 1))
+      stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": ${cexit//[^0-9-]/}, \"since\": $(jstr "$csince")}"; ssep2=", "
+    done <"$listing"
+    rm -f "$listing" 2>/dev/null || true
     checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)

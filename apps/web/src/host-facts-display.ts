@@ -38,6 +38,18 @@ export const CHECK_OK = /(^|\.)(probe|health)$/;
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
 
 /**
+ * Split the flattened stopped-container list back into entries (BOS-986). The server joins each entry with "; ",
+ * which cannot occur inside a container name, so an entry that itself contains ", " (exit code, since when) stays
+ * whole. Splitting on ", " printed fragments of a real report.
+ */
+export function stoppedContainerNames(value: string): string[] {
+  return value
+    .split("; ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
  * What a failing check is, and what to do about it. `names` is the reported list of stopped containers, when there
  * is one, so the line names them. `probeWhy` is the host's own one-line reason the code-host read failed.
  */

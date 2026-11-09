@@ -161,44 +161,77 @@ host
 has "$D/outbox/host.json" '"files": ["docker-compose.yml", "deploy/truenas.yml", "deploy/tailscale.yml", "deploy/tailscale-bluegreen.yml"]'
 rm -f "$T/src/.env"; host
 # BOS-986: the "meant to stop" filter for container_status. Run a copy of the script whose docker is a fake that
-# prints a fixed `ps -a` listing: a running server, a one-shot migrate/netguard that exited 0, the standby colour
-# that exited 0, and two containers that really failed. Only the two failures count, and both are named.
+# mimics the real split: `docker ps` has no ExitCode field (asking for one makes real Docker fail), so the report
+# reads it from `docker inspect` for the containers that aren't up. The world holds a running server, a one-shot
+# migrate/netguard that exited 0 with restart policy "no", the standby colour that exited 0, a cleanly stopped
+# database (exit 0, restart policy "unless-stopped", so not meant to stop), an up-but-unhealthy container, and two
+# containers that really failed. Only the database and the two failures count; all three are named.
 mkdir -p "$T/fd"; cat >"$T/fd/docker" <<'FAKE'
 #!/usr/bin/env bash
+# ps <format> lines are: ID, Names, State, Status, RunningFor, project label, service label (a tab between each).
 if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.project && $5 == --format ]]; then
-  printf 'aaa\tsrv\t%s\n' "${FAKE_RUN:-running}"
-  printf 'bbb\tbm-migrate-1\texited\t0\t5 minutes ago\tbm\tmigrate\n'
-  printf 'ccc\tbm-netguard-1\texited\t0\t5 minutes ago\tbm\tnetguard\n'
-  printf 'ddd\tserver-green\texited\t0\t1 minute ago\tbm\tserver-green\n'
-  printf 'eee\tbm-worker-1\texited\t%d\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}"
-  printf 'fff\tbm-cache-1\trestarting\t255\t1 minute ago\tbm\tcache\n'
-  printf 'ggg\tbm-worker-1\texited\t%d\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}" # the same service again: counted once
+  printf 'aaa\tsrv\t%s\t%s\t2 hours ago\tsrv\tsrv\n' "${FAKE_RUN:-running}" "${FAKE_STATUS:-Up 2 hours}"
+  printf 'bbb\tbm-migrate-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tmigrate\n'
+  printf 'ccc\tbm-netguard-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tnetguard\n'
+  printf 'ddd\tserver-green\texited\tExited (0) 1 minute ago\t1 minute ago\tbm\tserver-green\n'
+  printf 'eee\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}"
+  printf 'fff\tbm-cache-1\trestarting\tRestarting (255) 1 second ago\t1 minute ago\tbm\tcache\n'
+  printf 'ggg\tbm-db-1\texited\tExited (0) 10 minutes ago\t10 minutes ago\tbm\tdb\n'
+  printf 'hhh\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}" # the same container again: counted once
+  exit 0
+fi
+# inspect -f <format> <ids...>: the exit code, and the restart policy, per container id.
+if [[ $1 == inspect && $2 == -f && $3 == '{{.State.ExitCode}}' ]]; then
+  shift 3
+  for id in "$@"; do
+    case $id in
+      bbb|ccc|ddd|ggg) echo 0 ;;
+      eee|hhh) echo "${FAKE_EXIT:-137}" ;;
+      fff) echo 255 ;;
+      *) echo 0 ;;
+    esac
+  done
+  exit 0
+fi
+if [[ $1 == inspect && $2 == -f && $3 == '{{.HostConfig.RestartPolicy.Name}}' ]]; then
+  case $4 in
+    bbb|ccc) echo no ;;
+    *) echo unless-stopped ;;
+  esac
   exit 0
 fi
 if [[ $1 == ps && $2 == -aq ]]; then exit 0; fi
 exit 0
 FAKE
 chmod +x "$T/fd/docker"
+# Real Docker fails when a format asks for a field it doesn't have (Dougal's infra review). Make sure the report
+# never asks `docker ps` for {{.ExitCode}} again, so a regression fails here instead of on a real host.
+grep -Eq 'ps -a[^|]*--format[^|]*\{\{\.ExitCode\}\}' "$here/host-deployer.sh" && fail "host-deployer still asks docker ps for {{.ExitCode}}"
 fdscript() { sed "s#^export PATH=.*#export PATH=$T/fd:\$PATH#" "$here/host-deployer.sh" >"$T/fd/hd.sh"; chmod +x "$T/fd/hd.sh"; }
 fdscript
 "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (fact-only fake) exited non-zero"; }
 node -e '
 const c=require(process.argv[1]).checks.container_status;
 const bad=m=>{console.error(m, JSON.stringify(c));process.exit(1)};
-if(c.total!==6)bad("total should count each service once");
-if(c.notRunning!==2)bad("only the two real failures count");
+if(c.total!==7)bad("total should count each container instance once (7 real ones)");
+if(c.notRunning!==3)bad("only the cleanly stopped db and the two real failures count");
 if(c.unhealthy!==1)bad("the restarting one is unhealthy");
 const names=c.stopped.map(s=>s.name).sort().join(",");
-if(names!=="bm-cache-1,bm-worker-1")bad("names: "+names);
+if(names!=="bm-cache-1,bm-db-1,bm-worker-1")bad("names: "+names);
 if(!c.stopped.every(s=>/^[0-9-]+$/.test(String(s.exit))&&/ago/.test(s.since)))bad("exit/since missing");
 ' "$D/outbox/host.json" || fail "container_status (fake) is wrong: $(cat "$D/outbox/host.json")"
+# A cleanly stopped server/db is a real fault even when it exited 0 (Rod's point 3): only one-shots and the standby hide.
+node -e 'const c=require(process.argv[1]).checks.container_status;if(!c.stopped.some(s=>s.name==="bm-db-1"))process.exit(1)' "$D/outbox/host.json" || fail "an exit-0 database must still be named"
+# A running container that is failing its health check counts as unhealthy (Rod's point 2).
+FAKE_STATUS="Up 3 minutes (unhealthy)" "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (unhealthy running) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.unhealthy!==2)process.exit(1)' "$D/outbox/host.json" || fail "a running (unhealthy) container must count"
 # A one-shot that failed (non-zero exit) is a real failure, not "meant to stop".
 FAKE_EXIT=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (failed one-shot) exited non-zero"
 node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json" >"$T/names" || true
-[[ $(cat "$T/names") == "bm-cache-1:255,bm-worker-1:1" ]] || fail "a failed one-shot must count: $(cat "$T/names")"
-# A running server named "exited" nowhere: no false positive when everything is up.
-FAKE_RUN=running FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
-node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==1)process.exit(1)' "$D/outbox/host.json" || fail "only the worker's exit 0 should be ignored, cache still restarting"
+[[ $(cat "$T/names") == "bm-cache-1:255,bm-db-1:0,bm-worker-1:1" ]] || fail "a failed one-shot must count: $(cat "$T/names")"
+# A worker that exited 0 with a normal restart policy is still named, not hidden as a finished one-shot.
+FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
+node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==3)process.exit(1)' "$D/outbox/host.json" || fail "only the migrate/netguard one-shots and the standby colour should be ignored"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"
@@ -338,11 +371,9 @@ req runner "$base"; host
 has "$D/outbox/status.json" "built from the version the server runs now; the card named ${base:0:8}"
 has "$STUB_LOG" "update-runner.sh"
 # 8b. A commit that is not part of what the server runs (a switch-back) is refused, in plain words, with what to press.
-old8b="$(git -C "$T/w" rev-parse --abbrev-ref HEAD)"
-# A commit that shares nothing with main: what the server runs can never fast-forward to it (a switch-back).
-if ! { git -C "$T/w" checkout -q --orphan side8b && git -C "$T/w" rm -rq --cached . && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && git -C "$T/w" push -q -f origin side8b:refs/heads/side 2>/dev/null; }; then fail "8b: could not make a side commit"; fi
-git -C "$T/w" checkout -q "$old8b" || fail "8b: could not leave the side branch"
-side="$(git -C "$T/w" rev-parse side8b)"; git -C "$T/src" fetch -q origin side || fail "8b: could not fetch the side commit"
+# Its own branch name: step 7 already pushed an unrelated "side" branch, and pushing over it failed (silently) every run.
+git -C "$T/w" checkout -q -b switch-back "$base" && echo side >"$T/w/side.txt" && git -C "$T/w" add -A && git -C "$T/w" commit -qm side && git -C "$T/w" push -q origin switch-back 2>/dev/null
+side="$(git -C "$T/w" rev-parse HEAD)"; git -C "$T/w" checkout -q - ; git -C "$T/src" fetch -q origin switch-back
 rm -f "$D/state/last-runner"; before="$(calls)"
 req runner "$side"; host
 [[ $(status result) == rejected ]] || fail "8b: side commit: $(cat "$D/outbox/status.json")"

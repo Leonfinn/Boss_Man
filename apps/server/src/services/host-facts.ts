@@ -115,7 +115,10 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
       if (Array.isArray(v)) {
         o[`check.${check}.${k}`] = String(v.length);
         if (check === "container_status" && k === "stopped" && v.length)
-          o[STOPPED_CONTAINERS_KEY] = v.map((c) => `${c.name} (${c.status}${c.exit ? `, exit ${c.exit}` : ""}${c.since ? `, ${c.since}` : ""})`).join(", ");
+          // BOS-986: entries are joined with "; ", which can never appear inside a container name, so the panel can
+          // split them back apart. Joining with ", " broke them, because each entry already contains ", " (exit code,
+          // since when) and the panel split every one into fragments.
+          o[STOPPED_CONTAINERS_KEY] = v.map((c) => `${c.name} (${c.status}${c.exit ? `, exit ${c.exit}` : ""}${c.since ? `, ${c.since}` : ""})`).join("; ");
         continue;
       }
       o[`check.${check}.${k}`] = String(v);
