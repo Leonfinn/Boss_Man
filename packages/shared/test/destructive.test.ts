@@ -688,6 +688,13 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -r date -i -pe s/a/b/ /etc/hosts",
     "ruby -r json -i -pe s/a/b/ /etc/hosts",
     "ruby -E utf-8 -i -pe s/a/b/ /etc/hosts",
+    // Ruby switches whose value is joined only must not swallow the -i after them (security review round 2).
+    "ruby -W -i -pe s/a/b/ /etc/hosts",
+    "ruby -K -i -pe s/a/b/ /etc/hosts",
+    "ruby -F -i -pe s/a/b/ /etc/hosts",
+    "ruby -T -i -pe s/a/b/ /etc/hosts",
+    "ruby -x -i -pe s/a/b/ /etc/hosts",
+    "ruby -W -i.bak -pe s/a/b/ /etc/hosts",
     // 2. Git deletes.
     "git worktree remove -f ../wt",
     "git worktree remove ../wt",
@@ -708,6 +715,9 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "tar --delet -f a.tar x",
     "tar --checkpoint-action=exec=rm a.tar",
     "tar -cf a.tar --checkpoint=1 --checkpoint-action exec=./x d",
+    "tar cf a.tar --checkpoint=1 --checkpoint-act=exec=ls x",
+    "tar cf a.tar --checkpoint=1 --checkpoint-a=exec=ls x",
+    "tar cf a.tar --checkpoint=1 --checkpoint-action=exec=ls x",
     "tar cIf rm a.tar x",
     "tar --to-command=rm -xf a.tar",
     "tar --use-compress-program=rm -xf a.tar",
@@ -735,6 +745,11 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "sg docker rm -rf /x",
     "firejail rm -rf /x",
     "firejail --net=none rm -rf /x",
+    "firejail --private rm -rf /srv/x",
+    "firejail --seccomp rm -rf /srv/x",
+    "firejail --private-tmp rm -rf /srv/x",
+    "firejail --x11 rm -rf /srv/x",
+    "firejail --debug rm -rf /srv/x",
     "bwrap --ro-bind / / rm -rf /x",
     "bwrap --bind /srv /srv --dev /dev rm -rf /srv/x",
   ];
@@ -773,6 +788,13 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "tar czf a.tgz x",
     "tar -xzf a.tgz -C \"$DIR\"",
     "tar --list -f a.tar",
+    // Archive names that start with a capital letter (or a letter followed by I) are not tar options (BOS-571 review).
+    "tar xf Installer.tgz",
+    "tar czf BUILD.tgz x",
+    "tar czf DIST.tgz x",
+    "tar xf Images.tar",
+    "tar czf Image.tar.gz dir",
+    "tar czf a.tgz srcIndex",
     // cloud CLIs that read or apply without deleting.
     "terraform plan",
     "terraform apply",
@@ -797,6 +819,8 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "sg docker id",
     "firejail ls",
     "firejail --net=none ls",
+    "firejail --private ls",
+    "firejail --seccomp ls",
     "bwrap --ro-bind / / ls",
   ])("leaves %j alone", (c) => {
     expect(commandRisks(c)).toEqual([]);

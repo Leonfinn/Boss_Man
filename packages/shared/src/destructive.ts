@@ -411,8 +411,10 @@ const WRAPPERS: Record<string, string[]> = {
   "systemd-run": ["-u", "-p", "-M", "-H", "-E", "--unit", "--property", "--machine", "--host", "--setenv", "--description", "--slice", "--uid", "--gid", "--nice", "--working-directory"],
   setpriv: ["--reuid", "--regid", "--ruid", "--rgid", "--euid", "--egid", "--groups", "--inh-caps", "--ambient-caps", "--bounding-set", "--securebits", "--pdeathsig", "--selinux-label", "--apparmor-profile", "--landlock-access", "--landlock-rule"],
   entr: [],
-  // firejail runs the program after its own options in the same filesystem (BOS-571).
-  firejail: ["--profile", "--name", "--net", "--netns", "--ip", "--hostname", "--private", "--private-home", "--private-dev", "--private-tmp", "--private-etc", "--private-bin", "--private-lib", "--seccomp", "--seccomp.drop", "--seccomp.block-secondary", "--caps", "--caps.drop", "--caps.keep", "--protocol", "--rlimit-nofile", "--rlimit-nproc", "--rlimit-fsize", "--rlimit-as", "--timeout", "--nice", "--cgroup", "--cpu", "--x11", "--env", "--include", "--whitelist", "--read-only", "--bind", "--tmpfs", "--tmpdir", "--chroot", "--shell", "--output", "--output-stderr", "--audit", "--debug"],
+  // firejail runs the program after its own options in the same filesystem (BOS-571). Its options take a value only
+  // after `=` (--net=none), never as the next word, so none may be listed here: a word after `--private` is the
+  // program (firejail --private rm -rf /x) and must be judged, not skipped (BOS-571 review).
+  firejail: [],
   // bwrap builds a new filesystem view from its --bind/--ro-bind/… options and runs the program there: see the bwrap case (BOS-571).
   bwrap: ["--ro-bind", "--bind", "--dev-bind", "--ro-bind-try", "--bind-try", "--dev-bind-try", "--tmpfs", "--proc", "--dev", "--dir", "--mqueue", "--chdir", "--setenv", "--unsetenv", "--clearenv", "--uid", "--gid", "--hostname", "--args", "--file", "--bind-data", "--ro-bind-data", "--seccomp", "--add-seccomp-fd", "--userns", "--userns-block-fd", "--info-fd", "--json-status-fd", "--cap-add", "--cap-drop", "--perms", "--size", "--lock-file", "--sync-fd", "--level-prefix", "--log-file", "--exec-label", "--file-label", "--unshare-user-try", "--userns-try"],
 };
@@ -784,20 +786,28 @@ export function commandRisks(command: string | string[]): Risk[] {
           // are matched by name (any unambiguous start, --delet) and after --, and by a word only known when it runs.
           const rm = (t: string) => t === "--" ? false : longOf(t, ["delete"]);
           const run = (t: string) => t === "--" ? false : longOf(t, ["to-command", "use-compress-program", "info-script", "new-volume-script"]);
-          // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone. GNU tar also accepts
-          // the value as the next word (--checkpoint-action exec=CMD), so check both forms (BOS-571 review).
-          const execAction = (t: string) => /^--check(point)?(-action)?=exec(=|$)/.test(t);
+          // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone. The option name may
+          // be abbreviated (--checkpoint-act=exec), and GNU tar accepts the value as the next word too
+          // (--checkpoint-action exec=CMD), so check both forms (BOS-571 review).
+          const execAction = (t: string) => {
+            if (!t.startsWith("--") || !t.includes("=")) return false;
+            if (!longOf(t, ["checkpoint-action"])) return false;
+            const value = t.slice(t.indexOf("=") + 1);
+            return /^exec(=|$)/.test(value);
+          };
           const execActionNext = (i: number) => {
             const t = args[i]!.text;
             if (!longOf(t, ["checkpoint-action"])) return false;
             if (t.includes("=")) return false;
             return /^exec(=|$)/.test(args[i + 1]?.text ?? "");
           };
+          // -I PROGRAM runs it (tar -I gzip, and the bundled tar cIf PROGRAM). Only the first word can be that bundle;
+          // a later archive name like Installer.tgz is not an option (BOS-571 review).
           const shortRun = (t: string) => /^-[a-zA-Z]*I/.test(t) || (t === "--" ? false : /^[a-zA-Z]*I/.test(t));
           if (args.some((a, i) => rm(a.text) || execAction(a.text) || execActionNext(i))) return destroys("deletes files or runs a command while it archives (tar --delete)");
           // A word only known when it runs could be that option, unless it is the value of -f or -C (tar czf "$OUT" dir).
           const valued = (i: number) => i > 0 && (/^(-[a-zA-Z]*[fC]|--file|--directory)$/.test(args[i - 1]!.text) || (i === 1 && /^[a-zA-Z]*f$/.test(args[0]!.text)));
-          if (args.some((a) => run(a.text) || shortRun(a.text))) return destroys("runs a command while it archives (tar --to-command)");
+          if ((args[0] && shortRun(args[0].text)) || args.some((a) => run(a.text))) return destroys("runs a command while it archives (tar --to-command)");
           if (args.some((a, i) => mayBeOption(a) && !(valued(i) && !a.split && !a.many))) return destroys("tar with an option only known when it runs");
           return;
         }
@@ -1151,9 +1161,11 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (/^ruby[\d.]*$/.test(prog)) {
           // ruby reads a script from a file or -e code and edits its files in place with -i[SUFFIX]; its switches end
           // at the first word that isn't one (the script file, unless -e was given), as perl's do (BOS-571).
-          // -r/-F/-I/-K/-C/-W/-T take a value (joined or the next word; -E is an encoding, not code), so their value
-          // must not be read as a switch cluster: `ruby -rdate -i …` and `ruby -Fe -i …` still see the -i.
-          const edit = inPlaceSwitches(args, "0l", "rFIEKCWT", "e");
+          // -r/-I/-C/-E take a value (joined or the next word; -E is an encoding, not code), so their value must not
+          // be read as a switch cluster: `ruby -rdate -i …` and `ruby -Fe -i …` still see the -i. But -F/-K/-W/-T/-x
+          // take their value joined only (-Fe, never `-F e`), so a word after them is the next switch: `ruby -W -i`
+          // is the -i (BOS-571 security review round 2).
+          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e");
           // Without -e the first word left is the script file; the rest are the files edited.
           if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (ruby -i)");
         }
