@@ -57,6 +57,33 @@ describe("Settings → Updates lists the changes waiting to go live (BOS-875)", 
     expect(screen.queryByText("plain commit, not a merge")).toBeNull();
   });
 
+  it("opens each waiting change's ticket from its title (BOS-883)", async () => {
+    stub(view({ commits: [merge("Newest change", ticketId(3)), merge("Oldest change", ticketId(1))] }));
+    render(<SelfDeploy go={() => {}} />);
+    await screen.findByText("2 changes waiting:");
+    const links = within(screen.getByRole("list")).getAllByRole("link");
+    expect(links.map((a) => a.textContent)).toEqual(["Newest change", "Oldest change"]);
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([`#/tickets/${ticketId(3)}`, `#/tickets/${ticketId(1)}`]);
+  });
+
+  it("shows a waiting change as plain text when the brackets hold no ticket id (BOS-883)", async () => {
+    stub(view({ commits: [{ sha: "ccccccc3", subject: 'Merge "No ticket here" (00000000-0000-4000-8000-00000000000z)' }] }));
+    render(<SelfDeploy go={() => {}} />);
+    await screen.findByText("1 change waiting:");
+    const items = within(screen.getByRole("list")).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual(["No ticket here"]);
+    expect(within(items[0]!).queryByRole("link")).toBeNull();
+  });
+
+  it("reads the id from the last brackets when the title has its own (BOS-883)", async () => {
+    stub(view({ commits: [merge("Fix the board (again)", ticketId(7))] }));
+    render(<SelfDeploy go={() => {}} />);
+    await screen.findByText("1 change waiting:");
+    const [link] = within(screen.getByRole("list")).getAllByRole("link");
+    expect(link!.textContent).toBe("Fix the board (again)");
+    expect(link!.getAttribute("href")).toBe(`#/tickets/${ticketId(7)}`);
+  });
+
   it("says the update changes the runners when runnerChanged is true, and not otherwise", async () => {
     stub(view({ runnerChanged: true, commits: [merge("Only change", ticketId(1))] }));
     const { unmount } = render(<SelfDeploy go={() => {}} />);
