@@ -387,7 +387,7 @@ describe("features page", () => {
     stub();
     const first = render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Show tasks of Dark mode" }));
-    expect(JSON.parse(localStorage.getItem("bossman.features.open") ?? "")).toEqual({ open: false, ids: ["f1"] });
+    expect(JSON.parse(localStorage.getItem("bossman.features.open") ?? "")).toEqual({ ids: ["f1"] });
     first.unmount();
 
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
@@ -404,6 +404,34 @@ describe("features page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
     expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
     localStorage.clear();
+  });
+
+  it("after Expand all, a single feature's arrow still folds just that one and leaves the others open", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/features"))
+          return json({
+            ...scored,
+            features: [
+              feature(),
+              feature({ id: "f2", title: "Export", tickets: { total: 1, done: 0, items: [{ id: "t3", title: "Build export", state: "ready", outcome: null, assignee: null }] } }),
+            ],
+          });
+        if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+        return json([]);
+      }),
+    );
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand all" }));
+    expect(screen.getByRole("list", { name: "Tasks of Dark mode" })).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Tasks of Export" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide tasks of Dark mode" }));
+    expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
+    expect(screen.getByRole("list", { name: "Tasks of Export" })).toBeTruthy();
+    // Not every feature is open now, so the link offers "Expand all" again.
+    expect(screen.getByRole("button", { name: "Expand all" })).toBeTruthy();
   });
 });
 

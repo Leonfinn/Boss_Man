@@ -286,15 +286,15 @@ const ACTIVE: FeatureStatus[] = ["idea", "considering", "planned", "in_progress"
 // like the "This host" fold (BOS-924). Every read and write is wrapped: private browsing can refuse
 // localStorage, and the list must still work when it does.
 const FEATURE_OPEN_KEY = "bossman.features.open";
-function readFeatureOpen(): { open: boolean; ids: string[] } {
+function readFeatureOpen(): { ids: string[] } {
   try {
-    const saved = JSON.parse(localStorage.getItem(FEATURE_OPEN_KEY) ?? "") as { open?: unknown; ids?: unknown };
-    return { open: saved.open === true, ids: Array.isArray(saved.ids) ? saved.ids.filter((x): x is string => typeof x === "string") : [] };
+    const saved = JSON.parse(localStorage.getItem(FEATURE_OPEN_KEY) ?? "") as { ids?: unknown };
+    return { ids: Array.isArray(saved.ids) ? saved.ids.filter((x): x is string => typeof x === "string") : [] };
   } catch {
-    return { open: false, ids: [] };
+    return { ids: [] };
   }
 }
-function saveFeatureOpen(state: { open: boolean; ids: string[] }) {
+function saveFeatureOpen(state: { ids: string[] }) {
   try {
     localStorage.setItem(FEATURE_OPEN_KEY, JSON.stringify(state));
   } catch {}
@@ -407,14 +407,9 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const [fold, setFold] = useState(readFeatureOpen);
   const [error, setError] = useState<string | null>(null);
   const patch = (id: string, body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(data.reload, (err: Error) => setError(err.message));
-  const isOpen = (id: string) => fold.open || fold.ids.includes(id);
+  const isOpen = (id: string) => fold.ids.includes(id);
   const setFeatureOpen = (id: string, open: boolean) => {
-    const next = { ...fold, ids: open ? [...fold.ids.filter((x) => x !== id), id] : fold.ids.filter((x) => x !== id) };
-    setFold(next);
-    saveFeatureOpen(next);
-  };
-  const setAllOpen = (open: boolean) => {
-    const next = { open, ids: open ? (data.data?.features ?? []).map((f) => f.id) : [] };
+    const next = { ids: open ? [...fold.ids.filter((x) => x !== id), id] : fold.ids.filter((x) => x !== id) };
     setFold(next);
     saveFeatureOpen(next);
   };
@@ -426,6 +421,13 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const groups = [...areas.map((a) => ({ id: a.id, name: a.name })), { id: "", name: areas.length ? "No area" : "" }]
     .map((g) => ({ ...g, features: top.filter((f) => (f.areaId ?? "") === g.id) }))
     .filter((g) => g.features.length);
+  const foldableIds = shown.filter((f) => f.tickets.items.length > 0).map((f) => f.id);
+  const allOpen = foldableIds.length > 0 && foldableIds.every((id) => fold.ids.includes(id));
+  const setAllOpen = (open: boolean) => {
+    const next = { ids: open ? foldableIds : [] };
+    setFold(next);
+    saveFeatureOpen(next);
+  };
   const cols = 7 + (d?.drivers.length ?? 0);
   return (
     <>
@@ -454,9 +456,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
               </label>
-              <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!fold.open)}>
-                {fold.open ? "Collapse all" : "Expand all"}
-              </button>
+              {foldableIds.length > 0 && (
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!allOpen)}>
+                  {allOpen ? "Collapse all" : "Expand all"}
+                </button>
+              )}
               <a href={`#/feedback/${company.id}`} style={{ marginLeft: "auto" }}>
                 Feedback inbox
               </a>
