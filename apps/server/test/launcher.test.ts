@@ -367,6 +367,8 @@ describe("the launcher's private addresses (BOS-886): the shared table, pinned t
   const LIST: Array<[string, boolean]> = [
     ["10.1.2.3", true], ["127.0.0.1", true], ["169.254.1.1", true], ["100.64.0.1", true], ["192.0.0.1", false], ["198.18.0.1", false], ["224.0.0.251", false],
     ["::1", true], ["fd00::1", true], ["ff02::1", false], ["::ffff:192.168.0.1", true], ["::ffff:10.0.0.1", true],
+    // fe80::/10 (fe80 to febf) is link-local and part of the stack; fec0::/10 is deprecated site-local, never trusted, as before.
+    ["fe80::1", true], ["febf::1", true], ["fec0::1", false], ["feff::1", false],
     ["8.8.8.8", false], ["2606:4700::1", false],
   ];
   it("answers each address the same way as before for the stack's ranges, and does not widen to the fetch-only ones", async () => {
@@ -386,7 +388,8 @@ describe("the launcher's private addresses (BOS-886): the shared table, pinned t
   });
 });
 
-describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {  it("trusts private IP literals and LAN-style names only", () => {
+describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {
+  it("trusts private IP literals and LAN-style names only", () => {
     for (const u of ["http://192.168.68.67:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
     for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
   });

@@ -73,8 +73,12 @@ export function isStackService(url: string): boolean {
  * pins today's answers in launcher.test.ts). 240.0.0.0/4 was never counted here either.
  */
 const STACK_V4 = NON_PUBLIC_V4.filter(([network]) => !["192.0.0.0", "198.18.0.0", "224.0.0.0", "240.0.0.0"].includes(network));
-/** Unique-local and link-local: what a stack or home LAN address looks like. Not multicast (ff00::/8), which trust never covered. */
-const STACK_V6 = NON_PUBLIC_V6.filter(([network]) => network !== "ff00");
+/**
+ * Unique-local and link-local (fe80::/10, which covers fe80 to febf): what a stack or home LAN address looks like.
+ * Not multicast (ff00::/8), which trust never covered, and not site-local (fec0::/10): deprecated, and trust never
+ * covered it either (BOS-886 pin).
+ */
+const STACK_V6 = NON_PUBLIC_V6.filter(([network]) => !["ff00", "fec0"].includes(network));
 
 /** True for loopback, private, link-local, CGNAT and unspecified addresses (IPv4, IPv6, and IPv4-mapped IPv6): where the stack's containers live. */
 export function isStackAddress(ip: string): boolean {
