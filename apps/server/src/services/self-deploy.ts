@@ -18,6 +18,7 @@ import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
+import { allMergeOrder } from "./go-live-wait.js";
 import type { BlueGreen } from "./bluegreen.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -201,6 +202,28 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function homeCompany() {
     const [c] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
     return c?.id ?? null;
+  }
+
+  /**
+   * BOS-1037: which of the host's report and this process's own commit is what runs. A deploy leaves the host's
+   * report ahead of the build (the old process is still up while status.json names the new commit); a hand-apply
+   * leaves the build ahead of the host's stale report. In both cases the newer commit (by merge order) is the one
+   * that runs. When the two can't be placed (one not a known merge), or only one is usable, the host's report wins,
+   * as it did before, since it is what the deployer last saw.
+   */
+  async function newestRunning(reported: string, build: string): Promise<string> {
+    const isSha = (x: string) => /^[0-9a-f]{40}$/i.test(x);
+    if (!isSha(reported) || !isSha(build) || reported.toLowerCase() === build.toLowerCase()) return reported || build;
+    const want = reported.toLowerCase();
+    const built = build.toLowerCase();
+    const rows = await db.select({ id: companies.id }).from(companies);
+    for (const c of rows) {
+      const order = await allMergeOrder(db, c.id);
+      const rAt = order.indexOf(want);
+      const bAt = order.indexOf(built);
+      if (rAt >= 0 && bAt >= 0) return bAt > rAt ? build : reported;
+    }
+    return reported;
   }
 
   /**
@@ -1069,10 +1092,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
      * each company's Release Manager on one small ticket. The commit is the same one server_status
      * reports as live, so nothing here depends on where the host keeps its files. Returns how many
      * Release Managers were woken.
+     *
+     * BOS-1037: a hand-apply restarts the server on the new commit but never touches the deployer's own
+     * files. Its status.json still describes the last deployer run (an older commit), and its
+     * available.json may be gone. Reading those first recorded the old commit and left every merge that
+     * waits for go-live stuck after a hand-apply. So the running build's own commit is a candidate too,
+     * and the newest of the three (by merge order) is what runs: a deploy while the old process is still
+     * up has the host's report newer, and a hand-apply has the build newer.
      */
     async noteLive(a: Available | null, s: DeployStatus | null) {
       if (!deps.releaseLog) return 0;
-      const live = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || process.env.BOSSMAN_COMMIT || "";
+      const reported = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || "";
+      const build = process.env.BOSSMAN_COMMIT || "";
+      const live = await newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
       const rows = await db.select({ id: companies.id }).from(companies);
       for (const c of rows) await deps.releaseLog.note(c.id, live);
