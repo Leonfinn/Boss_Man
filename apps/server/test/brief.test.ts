@@ -69,7 +69,7 @@ describe("activity log (R83)", () => {
     const c = await agent(ctx.dev.id);
     await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Limiter added; tests pass." } });
     await c.close();
-    expect((await log()).filter((r) => r.kind !== "run_started")).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "-> review: Limiter added; tests pass." })]);
+    expect((await log()).filter((r) => r.kind !== "run_started")).toEqual([expect.objectContaining({ companyId: cid(), agentId: ctx.dev.id, ticketId: t.id, kind: "state", summary: "in_progress -> review: Limiter added; tests pass." })]);
 
     const [d] = await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Which provider?", options: ["Stripe", "Adyen"], recommendedOption: "Stripe", raisedByAgentId: ctx.dev.id }).returning();
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });

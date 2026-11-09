@@ -722,6 +722,7 @@ export async function buildApp(opts: AppOptions) {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
+    onReview: (t) => scheduler.onTicketReview(t.id, null),
     onFeature: (id) => feedback.syncFeature(id),
     // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
     runningMerges: () => review.runningMerges(),
@@ -2172,16 +2173,12 @@ export async function buildApp(opts: AppOptions) {
       if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
       if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
       if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
-      // Moving a ticket to the state it is already in must not re-run what entering that state does (DR-010).
-      const [before] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
-      const sameState = before?.state === state;
-      const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
-      await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
+      // One move, one history line, and a review round only on a real move into review (DR-010, DR-047): moveTicket does all three.
+      const moved = await work.updateTicket(id, { state, moveReason: `Owner moved it to ${label}`, reviewRound: "new", ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       // Nobody should start work on a ticket the owner has parked or closed.
       if (state === "done" || state === "backlog" || state === "blocked")
         await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
-      if (state === "review" && !sameState) await scheduler.onTicketReview(id, null);
       if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
