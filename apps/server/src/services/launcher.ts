@@ -4,7 +4,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { and, eq, isNotNull, isNull, like } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, like, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, mcpServers, projects, runners, settings } from "../db/schema.js";
 import { DROPPED_PRIVATE, DROPPED_TIED_TO_SERVER, type AutomaticEntry } from "./netguard-allow.js";
@@ -151,6 +151,32 @@ export function toolServerDropped(url: string, where: "stack" | "lookup-failed" 
   }
 }
 
+/**
+ * The tool-server and project ids the owner trusted for a private address (BOS-708's `allow_private`: an imported tool
+ * server ticked on purpose, or a tool server added on a LAN host). BOS-708 may not have merged yet, so the column is read
+ * only when it is there: until it is, no ids are trusted and a name that resolves privately is shown as dropped on the
+ * page, exactly as the guard treats it on this base. Read-only; never throws.
+ */
+async function trustedPrivateIds(db: Db): Promise<{ toolServers: Set<string>; projects: Set<string> }> {
+  const rowsOf = <T,>(r: unknown): T[] => (Array.isArray(r) ? (r as T[]) : (((r as { rows?: T[] }).rows) ?? []));
+  const empty = { toolServers: new Set<string>(), projects: new Set<string>() };
+  try {
+    const has = await db.execute(sql`
+      select table_name from information_schema.columns
+       where table_schema = current_schema() and column_name = 'allow_private' and table_name in ('mcp_servers', 'projects')`);
+    const tables = new Set(rowsOf<{ table_name: string }>(has).map((r) => r.table_name));
+    const read = async (table: "mcp_servers" | "projects", into: Set<string>) => {
+      if (!tables.has(table)) return;
+      const r = await db.execute(sql`select id from ${sql.identifier(table)} where allow_private = true`);
+      for (const row of rowsOf<{ id: string }>(r)) into.add(row.id);
+    };
+    await Promise.all([read("mcp_servers", empty.toolServers), read("projects", empty.projects)]);
+    return empty;
+  } catch {
+    return empty;
+  }
+}
+
 /** The launcher's own check for an allow entry (apps/launcher/src/spec.ts): one bad entry makes it refuse the whole list, so never send one it would refuse. */
 const LAUNCHER_ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
 /** The host:port the guard would be told to allow for a tool server's URL, or null. */
@@ -274,16 +300,17 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
      * is sent (allowFor), never a second copy. Only host:port, names and reasons come out: never a URL or a token.
      */
     async ownAllows(): Promise<{ toolServers: string[]; gitHosts: string[]; automatic: AutomaticEntry[] }> {
-      const mcp = await db.select({ url: mcpServers.url, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
-      const repos = await db.select({ url: projects.repoUrl, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const mcp = await db.select({ id: mcpServers.id, url: mcpServers.url, name: mcpServers.name, company: companies.name }).from(mcpServers).innerJoin(companies, eq(companies.id, mcpServers.companyId));
+      const repos = await db.select({ id: projects.id, url: projects.repoUrl, name: projects.name, company: companies.name }).from(projects).innerJoin(companies, eq(companies.id, projects.companyId)).where(and(isNotNull(projects.repoUrl), isNull(projects.archivedAt)));
+      const trustedPrivate = await trustedPrivateIds(db);
       const toolServers = [...new Set(mcp.map((r) => sendable(toolServerAddress(r.url))).filter((a): a is string => !!a))];
       const gitHosts = [...new Set(repos.map((r) => gitHostAddress(r.url!)).filter((a): a is string => !!a))];
       const tool = await Promise.all(mcp.map(async (r): Promise<AutomaticEntry | null> => {
         const address = sendable(toolServerAddress(r.url));
         if (!address) return null;
-        // After BOS-708 a tool server carries its own allow_private (an import tick or a LAN host the owner added); until
-        // that column ships, none is trusted, which only marks a name that resolves privately as dropped on this page.
-        const trusted = false;
+        // A tool server the owner trusted for a private address (BOS-708's allow_private: an import tick or a LAN host they
+        // added) is kept by the guard, so it is never shown as dropped. Until that column ships, none is trusted.
+        const trusted = trustedPrivate.toolServers.has(r.id);
         const where = await resolvesStack(r.url);
         const notAllowed = toolServerDropped(r.url, where, trusted) ? (isStackService(r.url) ? DROPPED_TIED_TO_SERVER : DROPPED_PRIVATE) : null;
         return { address, kind: "tool server", name: r.name, company: r.company, trusted, notAllowed };

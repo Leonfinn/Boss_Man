@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -143,6 +143,20 @@ describe("runners through the launcher (R55)", () => {
     // The CEO's server status carries the same list.
     const status = (await c.serverStatus.status(company.id)) as { netguardAllow: { automatic: Array<{ address: string }> } | null };
     expect(status.netguardAllow?.automatic.map((e) => e.address)).toContain("git.example.lan:3003");
+  });
+
+  it("keeps a tool server the owner trusted for private (BOS-708) out of the not-allowed list (BOS-791)", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "Nested Co" })).json() as { company: { id: string } };
+    // A tool server whose name points at the stack: on this base it is shown as not allowed.
+    const s = (await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "lan-tool", url: "http://db:5432/", transport: "http" })).json() as { id: string };
+    const first = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; notAllowed: string | null }> } };
+    expect(first.report.automatic.find((e) => e.address === "db:5432")).toMatchObject({ notAllowed: expect.stringContaining("Not allowed") });
+    // Once BOS-708's allow_private column is there and the owner trusted this server, the guard keeps it: not shown as dropped.
+    await c.db.execute(sql`alter table ${sql.identifier("mcp_servers")} add column ${sql.identifier("allow_private")} boolean not null default false`);
+    await c.db.execute(sql`update ${sql.identifier("mcp_servers")} set allow_private = true where id = ${s.id}`);
+    const after = (await c.req("GET", "/api/netguard-allow")).json() as { report: { automatic: Array<{ address: string; notAllowed: string | null }> } };
+    expect(after.report.automatic.find((e) => e.address === "db:5432")).toMatchObject({ notAllowed: null });
   });
 
   it("shows the owner the launcher's BOSSMAN_NETGUARD_ALLOW entries and marks the ones a project's git host covers (BOS-770)", async () => {
