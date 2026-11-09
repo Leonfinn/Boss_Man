@@ -346,6 +346,9 @@ describe("after-merge criteria", () => {
     expect(past).toMatch(/No criterion 9 on this ticket/i);
     const before = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the health check still pass?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Ran the checks myself; the host only answers to the owner.", blocksTicketId: t.id, criterion: "1" } }));
     expect(before).toMatch(/checked before merge/i);
+    // And without a ticket to attach to, the reason is given rather than a card raised.
+    const noTicket = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", criterion: "6" } }));
+    expect(noTicket).toMatch(/goes with blocksTicketId set to that ticket/i);
   });
 
   it("a criterion copied with the after-merge note Boss Man shows still matches its text", async () => {
@@ -358,6 +361,11 @@ describe("after-merge criteria", () => {
     expect(asked).not.toMatch(/No criterion/);
     const [card] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "Is BOS-373 answered on the real host?"), eq(decisions.companyId, ctx.co.company.id)));
     expect((card!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
+    // Case and runs of spacing don't stop it matching either.
+    const loose = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "And now, on the host?", options: ["Pass", "Fail"], recommended: "Pass", triedFirst: "Asked the host myself and it refused; only the owner's tailnet reaches it here.", blocksTicketId: t.id, criterion: `  ${LIVE.text.toUpperCase().replace(/ /g, "   ")}  ` } }));
+    expect(loose).not.toMatch(/No criterion/);
+    const [second] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "And now, on the host?"), eq(decisions.companyId, ctx.co.company.id)));
+    expect((second!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
   });
 
   it("the owner's answer records a fail, which keeps the ticket open", async () => {
