@@ -148,4 +148,54 @@ describe("ending all running runs (BOS-837)", () => {
     expect(live[0]!.cancelRequestedAt).not.toBeNull();
     expect((await c.req("POST", "/api/runs/cancel-all")).json()).toEqual({ cancelled: 1 });
   });
+
+  it("keeps going when one cancel throws, ending the rest, and returns and logs the one it could not end", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co");
+    const b = await c.company("Web Co");
+    // A failed cancel is a dancer's send throwing, or a database error; here the runner's socket throws for one run.
+    // The others, before and after it, must still be cancelled: this is the emergency stop (BOS-862).
+    // A second live run in the first company, so one throwing run is not the whole list.
+    const from = c.sent.length;
+    await c.scheduler.wake({ agentId: a.ceo.id, reason: "start" });
+    await c.scheduler.tick();
+    const second = c.sent.slice(from).find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
+
+    // The runner's call throws for one run's cancel, as a closed socket or a database error can. Put that run in
+    // the middle of the list so the one after it proves the loop went on.
+    const broken = second.runId;
+    c.releases[0]!();
+    c.releases.push(
+      c.runners.connect(a.runnerId, (command) => {
+        if (command.type === "run.cancel" && command.runId === broken) throw new Error("socket is closed");
+        c.sent.push(command);
+        return true;
+      }),
+    );
+    // The list comes off the table unordered, so sort it so the broken run is not first.
+    await c.db.update(runs).set({ startedAt: new Date(Date.now() - 60_000) }).where(eq(runs.id, broken));
+
+    const logs: string[] = [];
+    const off = c.app.log.error;
+    c.app.log.error = ((...args: unknown[]) => (logs.push(String(args[0])), off(...args))) as typeof c.app.log.error;
+    try {
+      const res = await c.req("POST", "/api/runs/cancel-all");
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { cancelled: number; failed: string[] };
+      expect(body.cancelled).toBe(2);
+      expect(body.failed).toEqual([broken]);
+      // The other two got their cancel; the broken one did not stop the loop.
+      expect(c.sent).toContainEqual({ type: "run.cancel", runId: a.runId });
+      expect(c.sent).toContainEqual({ type: "run.cancel", runId: b.runId });
+      expect((await runRow(c.db, a.runId)).cancelRequestedAt).not.toBeNull();
+      expect((await runRow(c.db, b.runId)).cancelRequestedAt).not.toBeNull();
+      // The run it could not end is still live, so the owner can open it and stop it themselves.
+      expect((await runRow(c.db, broken)).endedAt).toBeNull();
+      expect((await runRow(c.db, broken)).cancelRequestedAt).toBeNull();
+      // The failure is logged with the run id and the error's message.
+      expect(logs.some((l) => l.includes(broken) && l.includes("socket is closed"))).toBe(true);
+    } finally {
+      c.app.log.error = off;
+    }
+  });
 });
