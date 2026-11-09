@@ -50,7 +50,7 @@ import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, criteriaWarning, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, withNote, type Scope } from "./mcp-common.js";
+import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, withNote, type Scope } from "./mcp-common.js";
 import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registerTicketMoves } from "./mcp-tickets.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
@@ -360,7 +360,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         resetsOnRestart: z.boolean().optional(),
         // Which of the ticket's after-merge acceptance criteria this card settles (BOS-963): its number (1, 2, ...)
         // or its text. The owner's answer then records that criterion's pass or fail however the card is worded.
-        criterion: z.union([z.number().int(), z.string().min(1).max(500)]).optional(),
+        // A number also arrives as a string ("6") from some agents, so criterionArg accepts both (BOS-1012).
+        criterion: criterionArg,
       },
     },
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion }) => {
@@ -393,7 +394,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // BOS-1021: the owner can't check what isn't running yet.
         if (owner?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(owner.wait as GoLiveWait)}), so its after-merge checks can't pass and the owner is not asked. Boss Man wakes you when it is live; don't raise this card before then.`);
         const list = readCriteria(owner?.criteria);
-        const at = typeof criterion === "number" ? criterion - 1 : list.findIndex((c) => criterionText(c).toLowerCase() === criterion.trim().toLowerCase());
+        const at = criterionAt(list, criterion);
         if (!(at >= 0 && at < list.length)) return fail(`No criterion ${JSON.stringify(criterion)} on this ticket. Its criteria are:${list.length ? list.map((c, i) => ` ${i + 1}. ${criterionText(c)}${isAfterMerge(c) ? " (checked after merge)" : ""}`).join(";") : " none"}. Pass its number or its exact text.`);
         if (!isAfterMerge(list[at]!)) return fail(`Criterion ${at + 1} ("${criterionText(list[at]!)}") is checked before merge, so a review reports it, not an owner card.`);
         criterionIndexes = [at];
