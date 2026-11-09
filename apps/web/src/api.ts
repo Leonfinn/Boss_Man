@@ -294,8 +294,8 @@ export type FundingStatus = {
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
   claudeActive?: boolean;
-  /** Per window: when it runs out at the recent rate (R78); null with no readings. */
-  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
+  /** Per window: when it runs out at its pace so far (R78, BOS-1012); null with no readings. */
+  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutPerHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
   /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */
   providerQuota?: {
     used: number | null;
