@@ -159,6 +159,9 @@ export function parseAcpUsageCost(update: unknown): UsageCost | null {
 export function windowLabel(key: string): { name: string; note?: string } {
   if (key === "five_hour") return { name: "5-hour window" };
   if (key === "seven_day") return { name: "This week" };
+  // Synthetic's own reading, fed into the hold by the server (BOS-852).
+  if (key === "synthetic_weekly") return { name: "Weekly credit allowance" };
+  if (key === "synthetic_requests") return { name: "Synthetic request window" };
   if (/fable|overage_included/.test(key))
     return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit." };
   const m = /^(\d+)_min$/.exec(key);
