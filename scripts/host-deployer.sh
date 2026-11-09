@@ -32,9 +32,9 @@
 # Without that, nothing under the "Blue/green" heading runs.
 set -euo pipefail
 
-DRY=0 ROLLBACK=0 ACK=0
+DRY=0 ROLLBACK=0 ACK=0 FACTS=0
 for arg in "$@"; do
-  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health" >&2; exit 2 ;; esac
+  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; --ack-health) ACK=1 ;; --facts) FACTS=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run] | --ack-health | --facts" >&2; exit 2 ;; esac
 done
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
@@ -468,28 +468,66 @@ host_extra_facts() {
     ohost="${ohost%%[/:]*}"
     [[ $ohost =~ ^[A-Za-z0-9_.-]{1,255}$ ]] || ohost=""
   fi
+  local why=""
   if [[ $kind != none ]]; then
     local cache="$STATE/repo-probe" now_s; now_s="$(date +%s)"
     if [[ -f $cache && $(stat -c %Y "$cache" 2>/dev/null || echo 0) -gt $((now_s - REPO_PROBE_SECONDS)) ]]; then
-      read -r probe probed <"$cache" || true
+      # The cache is three fields: what the probe found, when, and (BOS-986) why it failed, base64 so a line with
+      # spaces in it round-trips. An older cache with two fields leaves the reason empty.
+      local b64=""
+      read -r probe probed b64 <"$cache" || true
+      [[ -n $b64 ]] && why="$(printf '%s' "$b64" | base64 -d 2>/dev/null || true)"
     else
       # A read over whatever origin uses: anonymous for https (no credential helper, no prompt), the host's own key for ssh
-      # (BatchMode: never asks). Only ok/failed is kept.
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>&1); then probe=ok; else probe=failed; fi
+      # (BatchMode: never asks). Only ok/failed, when, and one redacted error line are kept (BOS-986).
+      # BOS-986: ask for the ref a deploy actually needs (`refs/heads/main`), not `HEAD`. A read-only deploy key on
+      # GitHub can refuse the `HEAD` symref while `refs/heads/main` reads fine, which made the probe say "failed" on a
+      # host whose deploys all work. `HEAD` is kept as a fallback for a repo whose default branch is not main (the
+      # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
+      local errf="$STATE/repo-probe.err" rc=0 ok=0
+      : >"$errf" 2>/dev/null || true
+      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
-      printf '%s %s\n' "$probe" "$probed" >"$cache" 2>/dev/null || true
+      # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
+      # cut every token to 80 characters, and keep 200 characters in all.
+      if [[ $probe == failed ]]; then
+        local -a lines=()
+        if [[ -s $errf ]]; then mapfile -t lines <"$errf"; fi
+        ((${#lines[@]})) || lines=("git ls-remote exited with status $rc")
+        # "ssh: Could not resolve hostname <host>: Name or service not known": the host is replaced, so a VPN-only
+        # name can't leak, and the message after it stays (it says what to do).
+        # Only substitute the host when there is one: an empty $ohost (a local-path origin) would make the sed
+        # expression an empty regex, which GNU sed refuses.
+        local sedh=""; [[ -n $ohost ]] && sedh="s#$ohost#<code host>#g; "
+        why="$(printf '%s\n' "${lines[@]}" | grep -v '^[[:space:]]*$' | grep -v '^Warning:' | head -n 1 | cut -c1-200 \
+          | sed -E "${sedh}s#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+#<address>#g; s/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/<user>@<host>/g; s/[A-Za-z0-9_-]{20,}/<key>/g" || true)"
+        [[ -n $why ]] || why="git ls-remote exited with status $rc"
+      fi
+      rm -f "$errf" 2>/dev/null || true
+      printf '%s %s %s\n' "$probe" "$probed" "$(printf '%s' "$why" | base64 -w0 2>/dev/null || printf '%s' "$why" | base64 | tr -d '\n')" >"$cache" 2>/dev/null || true
     fi
     [[ $probe =~ ^(ok|failed)$ ]] || probe=failed
+    [[ $probe == ok ]] && why=""
   fi
-  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed")}"
+  out+="$sep\"repo\": {\"origin\": $(jstr "$kind"), \"originHost\": $(jstr "$ohost"), \"embeddedCredentials\": $creds, \"probe\": $(jstr "$probe"), \"probedAt\": $(jstr "$probed"), \"probeWhy\": $(jstr "$why")}"
   # --- folders and the compose setup
-  local srcdir deployerdir installdir cf cfl="" cfsep="" f bg=false colour=""
+  local srcdir deployerdir installdir cf cfl="" cfsep="" cflseen="" f bg=false colour=""
   srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
   deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
   installdir="$(cd "$D/.." 2>/dev/null && pwd)" || installdir=""
   cf="${COMPOSE_FILE:-}"; [[ -n $cf ]] || cf="$(grep -s '^COMPOSE_FILE=' "$REPO/.env" | tail -1 | cut -d= -f2- || true)"
   cf="${cf%\"}"; cf="${cf#\"}"
-  for f in ${cf//[:,]/ }; do [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] && { cfl+="$cfsep$(jstr "$f")"; cfsep=", "; }; done
+  for f in ${cf//[:,]/ }; do
+    [[ $f =~ ^[A-Za-z0-9_./-]{1,200}$ ]] || continue
+    # BOS-986: one entry per file, in the order the owner wrote them. A file named twice (or the same file under
+    # two spellings, e.g. deploy/tailscale.yml and ./deploy/tailscale.yml) would mount it twice; Compose errors on
+    # that, so the panel showed duplicates on Docker01.
+    f="${f#./}"; f="${f//\/.\//\/}"
+    [[ " $cflseen " == *" $f "* ]] && continue
+    cflseen+=" $f"; cfl+="$cfsep$(jstr "$f")"; cfsep=", "
+  done
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
   out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
   out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
@@ -553,15 +591,72 @@ host_extra_facts() {
   done
   out+="$sep\"addons\": {$adds}"
   # --- read-only checks (DR-024), chosen by name from this fixed list
+  # BOS-986: container_status counts only containers that are not running AND are meant to be. A one-shot setup or
+  # init container that finished (exit 0, restart policy "no") is not a fault, and neither is the blue/green standby
+  # (its window is over). Anything else stopped is named with its exit code and since when, so the panel can say
+  # which. A running container that is failing its health check counts as unhealthy too.
+  # Only fields `docker ps` really has are asked for here (`ExitCode` is not one of them, so it comes from inspect).
   local checks="" csep="" total=0 notrun=0 unhealthy=0 maxrestart=0 line r
+  local stopping="" ssep2="" seen_ids=""
   if have_docker; then
-    while IFS= read -r line; do
-      [[ -n $line ]] || continue
+    local cid cname cstate_str cstatus csince csvc
+    local -A exit_code=()
+    # Read the stack once. `docker ps` has no exit-code field (`ExitCode` is not one of the names it accepts, and
+    # asking for it makes real Docker fail), so `docker inspect` is asked afterwards for the containers that aren't
+    # up. The listing is kept in a temp file so the loop can read it and the ids can be inspected before it starts.
+    local listing="$STATE/containers.tsv"
+    dk ps -a --filter label=com.docker.compose.project --format '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Status}}\t{{.RunningFor}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}' >"$listing" 2>/dev/null || : >"$listing"
+    local ids_nonrunning=""
+    while IFS=$'\t' read -r cid _ cstate_str _; do
+      [[ -n $cid && $cstate_str != running ]] && ids_nonrunning+=" $cid"
+    done <"$listing"
+    if [[ -n ${ids_nonrunning// /} ]]; then
+      local -a idsarr=() ecodes=()
+      read -r -a idsarr <<<"${ids_nonrunning# }"
+      mapfile -t ecodes < <(dk inspect -f '{{.State.ExitCode}}' "${idsarr[@]}" 2>/dev/null || true)
+      local i
+      for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
+    fi
+    while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
+      [[ -n $cstate_str ]] || continue
+      # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
+      # Docker01) holds two containers with the same name. Replicas have their own index (bm-worker-1 and
+      # bm-worker-2), so a stopped replica beside a running one is still counted and named.
+      if [[ -n $cname ]]; then
+        [[ " $seen_ids " == *" $cname "* ]] && continue
+        seen_ids+=" $cname"
+      fi
       total=$((total + 1))
-      [[ $line == *' running '* ]] || notrun=$((notrun + 1))
-      [[ $line == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
-    done < <(dk ps -a --filter label=com.docker.compose.project --format '{{.ID}} {{.State}} {{.Status}}' || true)
-    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy}"; csep=", "
+      if [[ $cstate_str == running ]]; then
+        # A container that is up but failing its health check ("Up 2 minutes (unhealthy)") is a problem too.
+        [[ $cstatus == *unhealthy* ]] && unhealthy=$((unhealthy + 1))
+        continue
+      fi
+      [[ $cstate_str == restarting ]] && unhealthy=$((unhealthy + 1))
+      local cexit="${exit_code[$cid]:-}"
+      # Meant to stop: a one-shot whose job is done. That means a migrate/netguard helper, or any service Compose
+      # starts with `restart: "no"`, and only when it exited 0. A cleanly stopped server or database has a restart
+      # policy of "unless-stopped", so it still counts.
+      local one_shot=false
+      if [[ $cname == *-migrate-* || $cname == *-netguard-* || $csvc == migrate || $csvc == netguard ]]; then one_shot=true; fi
+      local rp
+      rp="$(dk inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid" 2>/dev/null || true)"
+      [[ $rp == no ]] && one_shot=true
+      [[ $one_shot == true && $cexit == 0 ]] && continue
+      # The blue/green standby: a server colour that is stopped (exit 0) is the colour the proxy isn't sending traffic
+      # to. The deployer leaves it running for SOAK_SECONDS after a swap; this report cannot tell a failed swap from a
+      # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
+      # and is counted below).
+      if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      notrun=$((notrun + 1))
+      # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
+      # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
+      # host.json. The server accepts a string and the flatten step skips an empty one.
+      local cexit_s="${cexit//[^0-9-]/}"
+      stopping+="$ssep2{\"name\": $(jstr "$cname"), \"status\": $(jstr "$cstate_str"), \"exit\": $(jstr "$cexit_s"), \"since\": $(jstr "$csince")}"; ssep2=", "
+    done <"$listing"
+    rm -f "$listing" 2>/dev/null || true
+    checks+="$csep\"container_status\": {\"total\": $total, \"notRunning\": $notrun, \"unhealthy\": $unhealthy, \"stopped\": [$stopping]}"; csep=", "
     maxrestart=0
     while read -r r; do [[ $r =~ ^[0-9]+$ ]] && ((r > maxrestart)) && maxrestart=$r; done < <(dk ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.RestartCount}}' 2>/dev/null || true)
     checks+="$csep\"restart_counts\": {\"max\": $maxrestart}"; csep=", "
@@ -1321,5 +1416,14 @@ main() {
   fi
   finish "$result" "$msg" "$(deploy_status_field backup)"
 }
+
+# BOS-986: a by-hand look at what this host says about itself, on the same terms as a tick, but with no request read,
+# no deploy run and no lock held. It writes outbox/host.json exactly as a tick would, so a fix's effect can be checked
+# straight away without waiting a minute for the next cron run.
+if [[ ${FACTS:-0} == 1 ]]; then
+  write_host_facts || { echo "ERROR: could not write $OUTBOX/host.json." >&2; exit 1; }
+  echo "Wrote $OUTBOX/host.json"
+  exit 0
+fi
 
 main

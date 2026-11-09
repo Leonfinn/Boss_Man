@@ -23,7 +23,10 @@ import { openPglite } from "../src/db/client.js";
 import { runners } from "../src/db/schema.js";
 import { pruneRunnerEvents } from "../src/services/housekeeping.js";
 
-const LIMIT_MS = 100;
+// 100 ms on the owner's host and at the merge gate. GitHub's shared runners read 2.5-5x slower (funding status 121 ms and
+// recent runs 127 ms there, 49 ms and 25 ms on a dev machine; board is 45 ms here), so CI gets 300 ms: still a tenth of
+// the 3-4 s freeze this test exists for.
+const LIMIT_MS = process.env.GITHUB_ACTIONS === "true" ? 300 : 100;
 const ITERATIONS = 5;
 const COUNTS = { runs: 20_000, costEvents: 50_000, decisions: 2_000, tickets: 1_000 };
 
@@ -218,14 +221,14 @@ describe("hot-path budget (BOS-653)", () => {
     expect(await n("tickets")).toBeGreaterThanOrEqual(COUNTS.tickets);
   });
 
-  // Proves the meter sees a block like the dateIn freeze (BOS-643): a 250 ms synchronous loop must read as over the limit,
+  // Proves the meter sees a block like the dateIn freeze (BOS-643): a loop 2.5x the limit (250 ms here) must read as over it,
   // and the same work split into 5 ms slices that yield must not.
   it("the meter catches a loop that blocks and passes one that yields", async () => {
     const spin = (ms: number) => {
       const end = performance.now() + ms;
       while (performance.now() < end);
     };
-    const blocking = await measure(async () => spin(250));
+    const blocking = await measure(async () => spin(LIMIT_MS * 2.5));
     expect(blocking.block).toBeGreaterThan(LIMIT_MS);
     const yielding = await measure(async () => {
       for (let i = 0; i < 50; i++) {

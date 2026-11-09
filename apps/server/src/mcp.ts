@@ -9,11 +9,12 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { goLiveWaitWords, type GoLiveWait, FEATURE_STATUSES, HORIZONS, IMPORTANCE, planFirstByDefault, portalVerdict, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
+import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
@@ -49,7 +50,7 @@ import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, criteriaWarning, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, withNote, type Scope } from "./mcp-common.js";
+import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, withNote, type Scope } from "./mcp-common.js";
 import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registerTicketMoves } from "./mcp-tickets.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
@@ -303,7 +304,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         throw err;
       }
       await noteRunTicket(ticketId);
-      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, ticketId));
+      const notLiveWarning = t ? await liveClaimWarning(db, t, body) : null;
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
@@ -311,7 +313,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       hint ??= await ownerActionHint(db, scope, ticketId, body);
       const links = await missingPageNote(db, scope.companyId, body);
-      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}`);
+      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}${notLiveWarning ? `\n\n${notLiveWarning}` : ""}`);
     },
   );
 
@@ -359,7 +361,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         resetsOnRestart: z.boolean().optional(),
         // Which of the ticket's after-merge acceptance criteria this card settles (BOS-963): its number (1, 2, ...)
         // or its text. The owner's answer then records that criterion's pass or fail however the card is worded.
-        criterion: z.union([z.number().int(), z.string().min(1).max(500)]).optional(),
+        // A number also arrives as a string ("6") from some agents, so criterionArg accepts both (BOS-1012).
+        criterion: criterionArg,
       },
     },
     async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion }) => {
@@ -377,15 +380,22 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // Second layer: the service refuses too, but the tool should give the reason (BOS-86 round 12).
         const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, blocksTicketId, scope.agentId);
         if (reviewWrite) return fail(reviewWrite);
+        // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
+        // ticket merged before the wait existed is covered too.
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const notLive = m ? await goLiveWaitOf(db, m) : null;
+        if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }
       // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
       // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.
       let criterionIndexes: number[] | undefined;
       if (criterion !== undefined) {
         if (!blocksTicketId) return fail("criterion says which acceptance criterion this card settles, so it goes with blocksTicketId set to that ticket.");
-        const [owner] = await db.select({ criteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        const [owner] = await db.select({ criteria: tickets.acceptanceCriteria, wait: tickets.goLiveWait }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        // BOS-1021: the owner can't check what isn't running yet.
+        if (owner?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(owner.wait as GoLiveWait)}), so its after-merge checks can't pass and the owner is not asked. Boss Man wakes you when it is live; don't raise this card before then.`);
         const list = readCriteria(owner?.criteria);
-        const at = typeof criterion === "number" ? criterion - 1 : list.findIndex((c) => criterionText(c).toLowerCase() === criterion.trim().toLowerCase());
+        const at = criterionAt(list, criterion);
         if (!(at >= 0 && at < list.length)) return fail(`No criterion ${JSON.stringify(criterion)} on this ticket. Its criteria are:${list.length ? list.map((c, i) => ` ${i + 1}. ${criterionText(c)}${isAfterMerge(c) ? " (checked after merge)" : ""}`).join(";") : " none"}. Pass its number or its exact text.`);
         if (!isAfterMerge(list[at]!)) return fail(`Criterion ${at + 1} ("${criterionText(list[at]!)}") is checked before merge, so a review reports it, not an owner card.`);
         criterionIndexes = [at];
@@ -719,7 +729,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, showPublicly, and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first.",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, showPublicly, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         effort: z.number().int().min(1).max(5).optional(),
@@ -733,7 +743,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         objectiveId: z.string().uuid().nullable().optional(),
         milestoneId: z.string().uuid().nullable().optional(),
         publicSummary: z.string().trim().max(2000).nullable().optional(),
+        publicTitle: z.string().trim().max(200).nullable().optional(),
         showPublicly: z.boolean().optional(),
+        portalVisible: z.boolean().optional(),
+        keepOffPortal: z.literal(true).optional(),
         importance: z.enum(IMPORTANCE).optional(),
         highlight: z.string().max(2000).optional(),
         title: z.string().min(1).max(200).optional(),
@@ -777,6 +790,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
           if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can place features on the roadmap.");
           if (!input.featureId) return fail("Give featureId.");
+          // update_feature never saves a feature's title or description, so a title/description here would be silently
+          // ignored; worse, it could be used as decoy text to slip a security-worded feature onto the portal (BOS-991).
+          if (input.title !== undefined || input.description !== undefined) return fail("update_feature does not change a feature's title or description. Leave them out.");
           const changes = {
             ...(input.objectiveId !== undefined ? { objectiveId: input.objectiveId } : {}),
             ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
@@ -784,10 +800,30 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
             ...(input.status !== undefined ? { status: input.status } : {}),
             ...(input.publicSummary !== undefined ? { publicSummary: input.publicSummary } : {}),
+            ...(input.publicTitle !== undefined ? { publicTitle: input.publicTitle } : {}),
             ...(input.showPublicly !== undefined ? { showPublicly: input.showPublicly } : {}),
+            ...(input.portalVisible !== undefined ? { portalVisible: input.portalVisible } : {}),
+            // An agent may mark a feature sensitive, but only the owner clears that mark: these agents read outside
+            // feedback during triage, so a hostile note must not be able to talk one into publishing a marked feature.
+            ...(input.keepOffPortal === true ? { keepOffPortal: true } : {}),
           };
-          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary or showPublicly.");
+          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary, publicTitle, showPublicly, portalVisible or keepOffPortal (true only).");
           if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+          // A feature the portal rule calls security work stays off the portal: agents read hostile feedback during
+          // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
+          if (input.portalVisible === true) {
+            const target = await feedback.feature(input.featureId, scope.companyId);
+            const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
+            // Judge the stored feature: update_feature never saves title/description, so input values must not be used here.
+            const verdict = portalVerdict({
+              title: target.title,
+              description: target.description,
+              ...facts,
+              keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
+              hasPublicSummary: true,
+            });
+            if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+          }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
           const parts = [
             input.objectiveId !== undefined ? (input.objectiveId ? "linked it to an objective" : "unlinked its objective") : null,
@@ -796,7 +832,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.horizon !== undefined ? `column ${input.horizon ?? "automatic"}` : null,
             input.status !== undefined ? `status ${input.status}` : null,
             input.publicSummary !== undefined ? (input.publicSummary ? "wrote its public summary" : "cleared its public summary") : null,
+            input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
             input.showPublicly !== undefined ? (input.showPublicly ? "shows it publicly" : "hides it from the public roadmap") : null,
+            input.portalVisible !== undefined ? (input.portalVisible ? "put it on the feedback portal" : "took it off the feedback portal") : null,
+            input.keepOffPortal === true ? "kept it off the portal (sensitive)" : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);
@@ -1019,6 +1058,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
       const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
+      const liveLine = await goLiveLine(db, t);
       // One page covers the whole thing, description through conversation, so a long owner message is
       // followed rather than cut; the whole text is paged by offset, and a long line is split and continued.
       const head = [
@@ -1030,6 +1070,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(holdLine ? [holdLine] : []),
         ...(ciLine ? [ciLine] : []),
+        ...(liveLine ? [liveLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
         t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
         "",

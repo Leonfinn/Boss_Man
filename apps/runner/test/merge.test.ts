@@ -17,7 +17,8 @@ const tmp = (prefix: string) => {
   return d;
 };
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  // Retries cover ENOTEMPTY: git 2.47+ runs its automatic maintenance detached, so it can still be writing in a repo here.
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 /** A bare origin plus a scratch clone for pushing "other people's" commits to it. */
