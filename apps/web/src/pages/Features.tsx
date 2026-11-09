@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { featureHorizon, HORIZONS, type Horizon } from "@boss-man/shared";
+import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
   FEATURE_STATUS_LABEL,
@@ -309,6 +309,22 @@ export function taskSummary(f: Feature): string {
   return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
 }
 
+/** What a visitor reads as the feature's title on the portal, shown under the feature's name on the list row (BOS-997):
+ * the public title, or the public summary's first line when no public title is set, said in plain words. Nothing for a
+ * feature off the portal. */
+function VisitorsWillSee({ f }: { f: Feature }) {
+  if (!f.portal?.onPortal) return null;
+  const seen = portalTitle(f.publicTitle, f.publicSummary);
+  if (!seen) return null;
+  const fromSummary = !f.publicTitle?.trim();
+  return (
+    <span className="feature-visitors">
+      <small>Visitors will see: {seen}</small>
+      {fromSummary && <small className="muted">from the summary, no public title set</small>}
+    </span>
+  );
+}
+
 /** The "On portal" tick on a list row (BOS-957): saves at once, and says why a feature is held off when it is. */
 function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Record<string, unknown>) => void }) {
   const reason = f.portal?.reason ?? null;
@@ -330,7 +346,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   return (
     <>
     <tr>
-      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220 }}>
+      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220, maxWidth: 340 }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
             <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
@@ -339,6 +355,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
           )}
           <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
         </span>
+        <VisitorsWillSee f={f} />
       </td>
       <td style={{ whiteSpace: "nowrap" }}>
         <PortalTick f={f} onPatch={onPatch} />

@@ -1,5 +1,5 @@
 // BOS-922 (DR-047 points 4 to 6): every quiet state change goes through moveTicket, so each leaves a history line with
-// its cause and moves the column; a WIP limit counts only tickets whose column matches their state; and migration 0138
+// its cause and moves the column; a WIP limit counts only tickets whose column matches their state; and migration 0139
 // resets columns that were left behind. One test per path the ticket names.
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -15,7 +15,7 @@ import { openPglite } from "../src/db/client.js";
 import { issueRunToken } from "../src/mcp.js";
 import { activity, projects, tickets, workflowColumns } from "../src/db/schema.js";
 
-const migrationPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0138_reset_stale_ticket_columns.sql");
+const migrationPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0139_reset_stale_ticket_columns.sql");
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -145,7 +145,7 @@ describe("a limit counts only tickets whose column matches their state (BOS-922)
   });
 });
 
-describe("migration 0138 resets stale columns (BOS-922)", () => {
+describe("migration 0139 resets stale columns (BOS-922)", () => {
   /** Every statement of the committed migration file, run as it is. */
   const runMigration = (db: Awaited<ReturnType<typeof setup>>["db"]) => db.execute(sql.raw(readFileSync(migrationPath, "utf8")));
 

@@ -18,7 +18,7 @@ import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipp
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, checkPriority } from "./check-gate.js";
-import { checkQueue } from "./check-queue.js";
+import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
@@ -250,6 +250,8 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
+    /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
+    onMerged?: (ticketId: string) => Promise<unknown>;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -471,6 +473,11 @@ export function reviewService(
    * The work landed: done, unless a criterion can only be checked now that it is live (DR-024 #5). Then
    * the ticket goes back to its assignee to show those before it can close.
    */
+  async function announceMerged(ticketId: string) {
+    // The merge has landed; a failure to free a waiting ticket must not undo it. The release sweep catches it later.
+    await deps.onMerged?.(ticketId).catch(() => undefined);
+  }
+
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null, files?: string[]) {
     // A criterion still at fail when the work lands was put off, not failed (BOS-575): it stays on this
     // ticket, with its assignee, as an after-merge check, instead of the ticket closing on it.
@@ -480,6 +487,7 @@ export function reviewService(
       // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
       .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
+    await announceMerged(t.id);
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });
     if (commit) await tellCeoLiveFix(t, commit).catch(() => undefined);
@@ -1685,7 +1693,7 @@ export function reviewService(
       phases.set(ticketId, "merging");
       type Stuck = { status: "job_stuck"; command: string; reason: string; output: string };
       // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
-      const serverMerge = async (): Promise<MergeResult | Stuck> => {
+      const serverMerge = async (): Promise<MergeResult | Stuck | { status: "job_superseded" }> => {
         const message = `Merge "${t.title}" (${ticketId})`;
         for (let round = 0; round < 3; round++) {
           const prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
@@ -1716,7 +1724,12 @@ export function reviewService(
               await started(cur);
             }
             await lineEvent(db, t, { event: "check_ended", ...line, passed: cur.state === "passed" ? true : cur.state === "failed" ? checkVerdict({ ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: 0 }) : null, ...(cur.reason && cur.state !== "passed" ? { why: cur.reason.slice(0, 200) } : {}) }, reused === "passed" ? new Date() : (cur.endedAt ?? new Date()));
-            if (cur.state === "passed") await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: kindOf(command), passed: true, detail: null });
+            if (cur.state === "passed") {
+              await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: kindOf(command), passed: true, detail: null });
+              // A merge card left by an earlier attempt no longer applies once the check has passed.
+              await clearMergeCards(db, ticketId, { by: "system", note: "The merge check has now passed, so this retry card is no longer needed.", at: new Date().toISOString() });
+            }
+            if (cur.state === "cancelled" && cur.reason === SUPERSEDED_TEXT) return { status: "job_superseded" };
             if (cur.state === "stuck" || cur.state === "cancelled") return { status: "job_stuck", command, reason: cur.reason ?? `The check job was ${cur.state}.`, output: cur.logTail ?? "" };
             if (cur.state === "failed") return { status: "check_failed", command, result: { ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: cur.startedAt && cur.endedAt ? cur.endedAt.getTime() - cur.startedAt.getTime() : 0 } };
           }
@@ -1726,7 +1739,7 @@ export function reviewService(
         }
         return { status: "main_moved" };
       };
-      const m0: MergeResult | PushResult | Stuck = serverChecks
+      const m0: MergeResult | PushResult | Stuck | { status: "job_superseded" } = serverChecks
         ? await whileActive(serverMerge)
         : pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
@@ -1740,6 +1753,11 @@ export function reviewService(
               checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
             )),
           );
+      // Replaced by a newer request of this ticket: that one is the live check and raises its own card if it fails, so no card here.
+      if (m0.status === "job_superseded") {
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: "An older merge check request was dropped because a newer commit of this ticket was queued; the newer check carries on. Nothing to do." });
+        return { outcome: "check_stuck", delivered: null, detail: { note: "A newer check of this ticket replaced this one; it carries on." } };
+      }
       if (m0.status === "job_stuck") {
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The queued merge check stopped before it finished: ${m0.reason}` });
         await raiseCheckStuck(db, t, named(m0.command), `stopped: ${m0.reason}`, m0.output);
@@ -1799,7 +1817,8 @@ export function reviewService(
       // Its own after-merge checks keep this ticket open (DR-024 #5), but not the ones riding along.
       const mine = await closeAfterMerge(t, m.commit, causedByRunId, changed?.files.map((f) => f.path));
       for (const c of together) {
-        await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
+        await db.update(tickets).set({ mergeCommit: m.commit, lastActivityAt: new Date() }).where(eq(tickets.id, c.ticketId));
+        await announceMerged(c.ticketId);
         // A fix riding along on this merge is just as live (BOS-639).
         const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));
         if (rider) await tellCeoLiveFix(rider, m.commit).catch(() => undefined);

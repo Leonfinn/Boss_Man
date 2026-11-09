@@ -1,5 +1,5 @@
 {
-  "id": "9b1c6f52-3d7a-4e18-a0c5-6e2f4b8d1a73",
+  "id": "2406c0fb-e4e7-4b5d-9871-eae66534f437",
   "prevId": "550cd3cd-42b4-4559-8d10-6e9784811055",
   "version": "7",
   "dialect": "postgresql",
@@ -8481,6 +8481,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "until": {
+          "name": "until",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'done'"
         }
       },
       "indexes": {
