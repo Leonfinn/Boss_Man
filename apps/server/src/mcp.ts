@@ -30,7 +30,7 @@ import { holdView } from "./services/review-holds.js";
 import { NOTHING_CHANGED, ReviewError, type HoldInput, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
-import { startRefusal, WorkError, type workService } from "./services/work.js";
+import { staleVersionMessage, startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, afterMergeLint, criteriaText, describeRoles, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, reviewRolesOf, SENIOR_DEV_TEMPLATE, unreportedAfterMerge, type Criterion } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -247,7 +247,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       // An early answer only: updateTicket checks the version again inside the write (BOS-897).
-      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
+      if (expected_version !== undefined && t.version !== expected_version) return fail(await staleVersionMessage(db, scope.companyId, ticketId, expected_version));
       if (t.assignee === to.id) return fail(`That ticket is already assigned to ${agent}.`);
       try {
         const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim(), byAgentId: scope.agentId, expectedVersion: expected_version });
@@ -2170,7 +2170,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && fixesLive === undefined && size === undefined && acceptanceCriteria === undefined && !planGiven) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, fixesLive, size, acceptanceCriteria or ceoPlan.");
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
-      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
+      if (expected_version !== undefined && t.version !== expected_version) return fail(await staleVersionMessage(db, scope.companyId, ticketId, expected_version));
       const p = project !== undefined ? await resolveProject(project) : null;
       if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
       let assigneeId: string | null | undefined;
@@ -2188,10 +2188,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         if (planGiven) {
           // A plan-only call has no updateTicket write, so its own write carries the version check (BOS-897).
           const planned = await db.update(tickets).set({ ceoPlan: ceoPlan ?? null, ceoPlanDeadline: ceoPlan && ceoPlanDeadline ? new Date(ceoPlanDeadline) : null, ceoPlanAlertedAt: null }).where(and(eq(tickets.id, ticketId), onlyPlan && expected_version !== undefined ? eq(tickets.version, expected_version) : undefined)).returning({ id: tickets.id });
-          if (!planned.length) {
-            const [now] = await db.select({ version: tickets.version, state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
-            return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now?.state}, version ${now?.version}. Read it again with tickets, then decide.`);
-          }
+          if (!planned.length) return fail(await staleVersionMessage(db, scope.companyId, ticketId, expected_version!));
         }
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${!planGiven ? "" : ceoPlan ? ` (plan set, due ${ceoPlanDeadline})` : " (plan cleared)"}${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${fixesLive === undefined ? "" : fixesLive?.trim() ? ` (fixes live: ${fixesLive.trim()})` : " (no longer marked fixes live)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}${ownerSetup === undefined ? "" : ownerSetup?.trim() ? " (owner setup steps changed)" : " (owner setup steps cleared)"}${acceptanceCriteria === undefined ? "" : ` (acceptance criteria replaced: ${acceptanceCriteria.length ? acceptanceCriteria.map((c, i) => `${i + 1}. ${criteriaText([c])}`).join(" ") : "none now"})`}: ${reason}` });
@@ -2318,15 +2315,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         .returning({ id: tickets.id });
       // A state note is a post: the run's silence is measured from it (BOS-314).
       if (rows.length && summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
-      if (!rows.length) {
-        const [now] = await db
-          .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
-          .from(tickets)
-          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        if (!now) return fail("No ticket with that ID in your company.");
-        return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
-      }
+      if (!rows.length) return fail(expected_version === undefined ? "No ticket with that ID in your company." : await staleVersionMessage(db, scope.companyId, ticketId, expected_version));
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
       await noteRunTicket(ticketId);
       // A live check that failed doesn't hold the merged ticket open: Boss Man opens a filled-in, owned

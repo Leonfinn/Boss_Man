@@ -82,9 +82,19 @@ type TicketPatch = {
   expectedVersion?: number;
 };
 
-/** The refusal for a stale expected version, in set_ticket_state's words. */
-function staleVersionError(expected: number, now: { systemState: string; version: number }) {
-  return new WorkError(409, `Nothing changed: the ticket changed since you last saw it (you had version ${expected}). It is now ${now.systemState}, version ${now.version}. Read it again with tickets, then decide.`);
+/**
+ * The one refusal for a stale expected_version (R81, BOS-897), shared by set_ticket_state, assign_ticket,
+ * update_ticket and updateTicket: it reads the ticket as it is now so the caller can decide again.
+ * Scoped to the caller's company, so another company's ticket id reveals nothing.
+ */
+export async function staleVersionMessage(db: Db, companyId: string, ticketId: string, expected: number): Promise<string> {
+  const [now] = await db
+    .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
+    .from(tickets)
+    .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+    .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+  if (!now) return "No ticket with that ID in your company.";
+  return `Nothing changed: the ticket changed since you last saw it (you had version ${expected}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide.`;
 }
 
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
@@ -545,7 +555,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
       const expected = patch.expectedVersion;
-      if (expected !== undefined && t.version !== expected) throw staleVersionError(expected, t);
+      if (expected !== undefined && t.version !== expected) throw new WorkError(409, await staleVersionMessage(db, t.companyId, ticketId, expected));
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
@@ -626,11 +636,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // The version goes in the same statement as the write, so nothing changes if another write landed after the read above.
         .where(and(eq(tickets.id, ticketId), expected === undefined ? undefined : eq(tickets.version, expected)))
         .returning();
-      if (!updated) {
-        const [now] = await db.select({ systemState: tickets.systemState, version: tickets.version }).from(tickets).where(eq(tickets.id, ticketId));
-        if (!now) throw new WorkError(404, "No such ticket.");
-        throw staleVersionError(expected!, now);
-      }
+      if (!updated) throw new WorkError(409, await staleVersionMessage(db, t.companyId, ticketId, expected!));
       if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
       // Out of review without a merge (sent back, cancelled, closed by hand) ends its pass through the merge line (BOS-769).
       // A merge records "merged" first, and an unapproved ticket was never in the line, so lineEvent writes nothing for either.

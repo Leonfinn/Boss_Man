@@ -91,7 +91,8 @@ describe("ticket versions (R81)", () => {
     raceBeforeWrite();
     const res = await c.callTool({ name: "assign_ticket", arguments: { ticketId: ctx.ticketId, agent: await ceoName(), note: "Yours.", expected_version: 1 } });
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/Nothing changed: the ticket changed since you last saw it \(you had version 1\)\. It is now in_progress, version 2/);
+    expect(textOf(res)).toMatch(/Nothing changed: the ticket changed since you last saw it \(you had version 1\)\. It is now in_progress, assigned to nobody, version 2/);
+    // Still unassigned, so nobody was woken (onAssigned only fires after a write).
     expect(await row()).toMatchObject({ assigneeAgentId: null, title: "Renamed by someone else", version: 2 });
     await c.close();
   });
