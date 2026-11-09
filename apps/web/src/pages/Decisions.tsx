@@ -1060,6 +1060,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
+                        {d.context?.type === "hire" && !!d.context.proposal?.skills?.length && (
+                          <p style={{ fontSize: 14 }}>
+                            <strong>Skills:</strong> {d.context.proposal.skills.join(", ")}. They have them from their first run.
+                          </p>
+                        )}
                         {eff.option && (
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
