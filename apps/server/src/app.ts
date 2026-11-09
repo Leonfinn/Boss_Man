@@ -848,6 +848,7 @@ export async function buildApp(opts: AppOptions) {
     gitHosts,
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     notes,
+    onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     isLeader: () => leader.isLeader(),
     scanList: () => privateDetails.forRunner(),
   });
