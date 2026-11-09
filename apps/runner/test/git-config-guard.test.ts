@@ -68,6 +68,10 @@ function programs() {
 }
 
 async function fixture(env: NodeJS.ProcessEnv = process.env) {
+  // These cases exercise the worktree layer (keys planted in the shared repo's config, the
+  // worktree's admin folder). They pin the kind so they keep testing it now clones are the default
+  // (BOS-343); the clone layer has its own cases below, and workspace.test.ts covers the default.
+  env = { ...env, BOSSMAN_TICKET_COPIES: env.BOSSMAN_TICKET_COPIES ?? "worktree" };
   const o = origin();
   const ws = new Workspaces(tmp("bm332-root-"), env);
   const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: o.url, baseRef: "main" };
