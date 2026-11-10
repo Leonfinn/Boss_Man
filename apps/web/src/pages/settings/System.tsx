@@ -223,7 +223,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           onClick={() =>
             act.run(async () => {
               const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
-              // BOS-1086: a press that can't run yet is queued, not refused; the line above says when it starts.
+              // BOS-1086: a press that cannot run yet is queued, not refused; the line above says when it starts.
               if (r?.queued) {
                 view.reload();
                 return r.message ?? "The runner update is queued.";
