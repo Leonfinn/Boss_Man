@@ -41,7 +41,13 @@ scratch_log() {
   if [ -z "$out" ]; then
     [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
     tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$tmp" 2>/dev/null || return 0
+    if ! { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+      # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
+      # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
+      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
+      echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
+    fi
   fi
   if [ -z "$tmp" ]; then
     [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
