@@ -396,7 +396,10 @@ export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
-  pushLevels: NotifyLevel[];
+  /** Which cards go to the phone (BOS-1006): urgent ones by default. */
+  phonePush?: "urgent" | "all";
+  /** Only "flag" matters now: the Flags tick. */
+  pushLevels?: NotifyLevel[];
   publicUrl: string | null;
   /** Phone Approve buttons (BOS-243): on unless switched off. */
   approveButtons?: boolean;

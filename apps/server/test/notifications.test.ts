@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -49,7 +50,7 @@ async function setup(opts: { listen?: boolean; pushStatus?: number; deployerDir?
   return { ...built, db, req, company, ceo, worker, mcp, pushed, setClock: (d: Date) => (clock = d) };
 }
 
-const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, pushLevels: ["page", "ask"], publicUrl: "https://bossman.example.ts.net/" };
+const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, phonePush: "all", publicUrl: "https://bossman.example.ts.net/" };
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
 describe("notification ladder (R44)", () => {
@@ -118,7 +119,7 @@ describe("notification ladder (R44)", () => {
     const [p] = c.pushed;
     expect(p!.url).toBe("https://ntfy.example.ts.net/");
     expect(p!.headers.authorization).toBe("Bearer tk_secret_value_123");
-    expect(p!.body).toEqual({ topic: "bossman", title: "App Co needs a decision", message: "Ship the beta?", priority: 4, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions", actions: [{ action: "view", label: "Open in Boss Man", url: "https://bossman.example.ts.net/#/decisions", clear: false }] });
+    expect(p!.body).toEqual({ topic: "bossman", title: "App Co needs a decision", message: "Ship the beta?", priority: 3, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions", actions: [{ action: "view", label: "Open in Boss Man", url: "https://bossman.example.ts.net/#/decisions", clear: false }] });
     expect(rows.find((r) => r.level === "ask")!.pushedAt).not.toBeNull();
 
     const feed = (await c.req("GET", "/api/notifications")).json();
@@ -126,6 +127,85 @@ describe("notification ladder (R44)", () => {
     expect(feed.items[0]).toMatchObject({ company: "App Co", link: "#/decisions" });
     expect((await c.req("POST", "/api/notifications/read", { ids: [feed.items[0].id] })).json()).toEqual({ unread: 2 });
     expect((await c.req("POST", "/api/notifications/read", { all: true })).json()).toEqual({ unread: 0 });
+  });
+
+  it("sends only urgent cards by default: a blocking ask, a live-problem deploy and the test push reach the phone; routine deploy, plan and hire cards do not (BOS-1006)", async () => {
+    const c = await setup({ pushStatus: 200 });
+    // No phonePush: the default, urgent only.
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    const seen = (await c.req("GET", "/api/notification-settings")).json();
+    expect(seen.phonePush).toBe("urgent");
+
+    const project = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const ticket = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Rate limiting" })).json() as { id: string };
+
+    // Routine: a plain deploy approval, a plan card and a hire card, none blocking a ticket.
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Deploy Boss Man f0ab92d8 -> ffe89213?", options: ["Deploy", "Not now"], recommendedOption: "Deploy", context: { type: "self_deploy", target: "server", commit: "ffe89213", fromCommit: "f0ab92d8" } });
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Approve the plan?", options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", context: { type: "question", plan: true } });
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Hire Ada?", options: ["Hire", "No"], recommendedOption: "Hire", context: { type: "hire" } });
+    await c.notes.syncDecisions();
+    expect(c.pushed).toHaveLength(0);
+
+    // A card that blocks a ticket and only the owner can answer: urgent, at priority 5.
+    const blocking = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which database should I use?", options: ["Postgres", "SQLite"], recommended: "Postgres", blocksTicketId: ticket.id, triedFirst: "Compared both on the docs." });
+    expect(blocking.id).toBeTruthy();
+    await c.notes.syncDecisions();
+    const urgentPush = c.pushed.find((p) => p.body.message === "Which database should I use?");
+    expect(urgentPush).toBeDefined();
+    expect(urgentPush!.body.priority).toBe(5);
+
+    // A live-problem deploy (fixesLive) is urgent at priority 5; its heading is the push title.
+    c.pushed.length = 0;
+    await c.db.delete(notifications);
+    const deploy = await c.decisions.raise({ companyId: c.company.id, agentId: null, question: "Deploy Boss Man?", options: ["Deploy", "Not now"], recommended: "Deploy" });
+    await c.db.update(decisions).set({ context: { type: "self_deploy", target: "server", commit: "abc", fromCommit: "def", urgent: { heading: "Urgent: contains the fix for server freezes as memory climbs (BOS-1)", fixes: [{ symptom: "server freezes as memory climbs", ref: "BOS-1" }], repeat: false } } }).where(eq(decisions.id, deploy.id));
+    await c.notes.syncDecisions();
+    const fixPush = c.pushed.find((p) => p.body.title === "Urgent: contains the fix for server freezes as memory climbs (BOS-1)");
+    expect(fixPush).toBeDefined();
+    expect(fixPush!.body.priority).toBe(5);
+
+    // The test button goes to the phone at priority 5 even in urgent-only mode.
+    c.pushed.length = 0;
+    expect((await c.req("POST", "/api/notification-settings/test")).statusCode).toBe(200);
+    expect(c.pushed).toHaveLength(1);
+    expect(c.pushed[0]!.body).toMatchObject({ title: "Boss Man test", priority: 5 });
+  });
+
+  it("a page goes to the phone at priority 5 by default; a flag waits for the Flags tick", async () => {
+    const c = await setup();
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    await c.notes.notify({ companyId: c.company.id, level: "flag", title: "Runner didn't start", link: "#/" });
+    expect(c.pushed).toHaveLength(0);
+    await c.notes.notify({ companyId: c.company.id, level: "page", title: "Server unusable", link: "#/" });
+    expect(c.pushed).toHaveLength(1);
+    expect(c.pushed[0]!.body).toMatchObject({ title: "Server unusable", priority: 5 });
+    // The Flags tick still works.
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined, pushLevels: ["flag"] });
+    await c.notes.notify({ companyId: c.company.id, level: "flag", title: "Runner didn't start", link: "#/runs/2" });
+    expect(c.pushed).toHaveLength(2);
+    expect(c.pushed[1]!.body).toMatchObject({ title: "Runner didn't start", priority: 3 });
+  });
+
+  it("pushes routine cards at priority 3 when the owner chooses All decisions (BOS-1006)", async () => {
+    const c = await setup();
+    await c.req("PUT", "/api/notification-settings", SETTINGS);
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Deploy Boss Man f0ab92d8 -> ffe89213?", options: ["Deploy", "Not now"], recommendedOption: "Deploy", context: { type: "self_deploy", target: "server", commit: "ffe89213", fromCommit: "f0ab92d8" } });
+    await c.notes.syncDecisions();
+    expect(c.pushed).toHaveLength(1);
+    expect(c.pushed[0]!.body.priority).toBe(3);
+  });
+
+  it("keeps quiet hours unchanged: an urgent ask is not pushed while they last (BOS-1006)", async () => {
+    const c = await setup();
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined, quietHours: { start: "22:00", end: "07:00", timeZone: "Europe/London" } });
+    const project = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Site" })).json() as { id: string };
+    const ticket = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Rate limiting" })).json() as { id: string };
+    await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which database?", options: ["Postgres", "SQLite"], recommended: "Postgres", blocksTicketId: ticket.id, triedFirst: "Compared both." });
+    // 00:30 in London: quiet hours, so the urgent ask becomes a flag and doesn't reach the phone.
+    await c.notes.syncDecisions();
+    expect(c.pushed).toHaveLength(0);
+    const row = (await c.db.select().from(notifications)).find((n) => n.body === "Which database?");
+    expect(row).toMatchObject({ requested: "ask", level: "flag", demotedBy: "quiet hours", pushedAt: null });
   });
 
   it("records a failed push without losing the notification, and the test button reports it", async () => {

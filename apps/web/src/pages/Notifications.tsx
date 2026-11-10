@@ -59,6 +59,7 @@ type Form = {
   token: string;
   clearToken: boolean;
   pushLevels: NotifyLevel[];
+  phonePush: "urgent" | "all";
   publicUrl: string;
   approveButtons: boolean;
 };
@@ -77,7 +78,8 @@ function toForm(s: NotifySettings): Form {
     topic: s.ntfy?.topic ?? "",
     token: "",
     clearToken: false,
-    pushLevels: s.pushLevels,
+    pushLevels: s.pushLevels ?? [],
+    phonePush: s.phonePush === "all" ? "all" : "urgent",
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
     approveButtons: s.approveButtons !== false,
   };
@@ -127,6 +129,7 @@ function SettingsForm() {
           agentHourlyCap: form.cap,
           ntfy: form.phone ? { url: form.url.trim(), topic: form.topic.trim(), ...(form.token ? { token: form.token } : form.clearToken ? { token: null } : {}) } : null,
           pushLevels: form.pushLevels,
+          phonePush: form.phonePush,
           publicUrl: form.publicUrl.trim() || null,
           approveButtons: form.approveButtons,
         },
@@ -222,17 +225,20 @@ function SettingsForm() {
                 </label>
               )}
             </div>
-            <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }} role="group" aria-label="Levels sent to the phone">
-              <span className="label" style={{ alignSelf: "center" }}>
-                To the phone
-              </span>
-              {(["flag", "page", "ask"] as const).map((l) => (
-                <label key={l} style={check}>
-                  <input type="checkbox" checked={form.pushLevels.includes(l)} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, l] : form.pushLevels.filter((x) => x !== l) })} />
-                  {LEVEL[l].label}s
-                </label>
-              ))}
+            <div className="field" style={{ maxWidth: 360 }}>
+              <label htmlFor="phone-push">Send to my phone</label>
+              <select id="phone-push" value={form.phonePush} onChange={(e) => set({ phonePush: e.target.value === "all" ? "all" : "urgent" })}>
+                <option value="urgent">Urgent only (default)</option>
+                <option value="all">All decisions</option>
+              </select>
             </div>
+            <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+              Urgent means a decision that holds up work only you can answer, a deploy that carries the fix for a live problem, a "server unusable" page, or the test button. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
+            </p>
+            <label style={check}>
+              <input type="checkbox" checked={form.pushLevels.includes("flag")} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, "flag"] : form.pushLevels.filter((x) => x !== "flag") })} />
+              Also send flags (normal priority)
+            </label>
             <div className="field">
               <label htmlFor="public-url">Boss Man's address on your phone, so a tap opens the evidence</label>
               <input id="public-url" type="url" placeholder="https://bossman.your-tailnet.ts.net" value={form.publicUrl} onChange={(e) => set({ publicUrl: e.target.value })} spellCheck={false} />
