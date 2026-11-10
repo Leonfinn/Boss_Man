@@ -75,6 +75,7 @@ async function launch(): Promise<any | null> {
   try {
     chromium = createRequire(import.meta.url)("playwright").chromium;
   } catch {
+    console.warn("settings-walk: playwright is not installed; the browser walk was skipped");
     return null;
   }
   for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
@@ -84,6 +85,7 @@ async function launch(): Promise<any | null> {
       /* next */
     }
   }
+  console.warn("settings-walk: no Chromium could be launched; the browser walk was skipped");
   return null;
 }
 
