@@ -161,17 +161,16 @@ describe("after-merge checks wait for go-live", () => {
     expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
   });
 
-  it("a merge whose changed files are unknown waits for the server and the runners", { timeout: 120_000 }, async () => {
+  // BOS-1094: a branch ticket whose changed files can't be read is not merged (it might change scripts/check-all.sh,
+  // which the owner approves), so there is no merge whose go-live wait could be unknown.
+  it("a merge whose changed files are unknown does not happen", { timeout: 120_000 }, async () => {
     await serverRuns(OLD);
     await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));
     const { id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true });
-    expect(r.outcome).toBe("merged");
+    expect(r.outcome).toBe("check_stuck");
     const t = await ctx.row(id);
-    expect(t.touchesRunner).toBe(true);
-    expect(t.goLiveWait).toBe("both");
-    await serverRuns(NEW);
-    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
-    expect((await ctx.row(id)).goLiveWait).toBe("runner");
+    expect(t.mergeCommit).toBeNull();
+    expect(t.goLiveWait).toBeNull();
   });
 
   it("a merge that is already live is handed to the assignee at once, as before", { timeout: 120_000 }, async () => {
