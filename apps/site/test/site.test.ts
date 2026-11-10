@@ -52,6 +52,21 @@ describe("build", () => {
     expect(html).toContain('<div class="check">');
   });
 
+  it("lists Troubleshooting, then the Glossary, then the FAQ, last in the guides list, and links every glossary term to a real guide section", () => {
+    const html = read("guides/index.html");
+    const at = (p: string) => html.indexOf(`<a href="${p}">`);
+    expect(at("/guides/troubleshooting")).toBeGreaterThan(at("/guides/updates-and-backups"));
+    expect(at("/guides/glossary")).toBeGreaterThan(at("/guides/troubleshooting"));
+    expect(at("/faq")).toBeGreaterThan(at("/guides/glossary"));
+    const glossary = read("guides/glossary.html");
+    expect((glossary.match(/<li><strong>/g) ?? []).length).toBeGreaterThanOrEqual(62);
+    for (const m of glossary.matchAll(/href="(\/guides\/[a-z0-9-]+)(?:#([^"]+))?"/g)) {
+      const page = read(`${m[1].slice(1)}.html`);
+      if (m[2]) expect(page, `${m[0]} has no target`).toContain(`id="${m[2]}"`);
+    }
+    for (const m of read("guides/troubleshooting.html").matchAll(/>From: <a href="(\/guides\/[a-z0-9-]+)/g)) expect(existsSync(path.join(dist, `${m[1].slice(1)}.html`))).toBe(true);
+  });
+
   it("sends the old page addresses to their new homes", () => {
     const redirects = read("_redirects");
     expect(redirects).toContain("/get-started /guides/install-boss-man 301");
