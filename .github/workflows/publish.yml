@@ -5,10 +5,11 @@ name: Publish images
 # identical), signed without a key, and checked in every registry. Tags: sha-<12 characters of the commit> only.
 # The "beta" and version tags come from the Release workflow, when the owner presses its button.
 #
-# Settings (Settings > Secrets and variables > Actions; docs/25-published-images.md):
+# Settings (variables: Settings > Secrets and variables > Actions > Variables; docs/25-published-images.md):
 #   variable IMAGE_PREFIXES    e.g. "ghcr.io/<owner> docker.io/<namespace>" (default: ghcr.io/<repository owner>)
 #   variable DOCKERHUB_PUBLISH "true" turns Docker Hub on; then the two secrets below must exist or the run fails
-#   secrets  DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a read-and-write access token)
+#   secrets  DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a read-and-write access token): secrets of the 'publish' environment
+#            (Settings > Environments > publish, limited to main), never ordinary repository secrets
 #   variable PUBLISH_IMAGES    image names, default the server, launcher and netguard. Add boss-man-runner only after the
 #                              Claude pack (BOS-972) has merged: the runner image holds Claude Code until then. It is
 #                              refused here unless scripts/image-tests.sh no-anthropic passes on it.

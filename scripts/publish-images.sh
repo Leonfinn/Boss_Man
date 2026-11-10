@@ -21,7 +21,7 @@
 #                       (boss-man-runner) is added only once it holds no Anthropic code (BOS-972); publish.yml runs
 #                       `scripts/image-tests.sh no-anthropic` on it first, with the expected-fail marker off.
 #   DOCKERHUB_PUBLISH   "true" turns Docker Hub on. Then a docker.io prefix must be listed and DOCKERHUB_USERNAME and
-#                       DOCKERHUB_TOKEN (GitHub Actions secrets) must be set, or this fails. Off: docker.io entries are skipped.
+#                       DOCKERHUB_TOKEN (secrets of the 'publish' environment) must be set, or this fails. Off: docker.io entries are skipped.
 #   COSIGN_IDENTITY_REGEXP  who may have signed (verify). Default: this repository's publish and release workflows.
 set -euo pipefail
 
@@ -50,8 +50,8 @@ cmd_prefixes() {
   done
   if [ "$hub_on" = 1 ]; then
     [ "$hub_listed" = 1 ] || die "DOCKERHUB_PUBLISH is true but IMAGE_PREFIXES lists no docker.io/<namespace>."
-    [ -n "${DOCKERHUB_USERNAME:-}" ] || die "Docker Hub publishing is on but the DOCKERHUB_USERNAME secret is missing or empty. Add it under Settings > Secrets and variables > Actions, or set DOCKERHUB_PUBLISH to false."
-    [ -n "${DOCKERHUB_TOKEN:-}" ] || die "Docker Hub publishing is on but the DOCKERHUB_TOKEN secret is missing or empty. Add it under Settings > Secrets and variables > Actions, or set DOCKERHUB_PUBLISH to false."
+    [ -n "${DOCKERHUB_USERNAME:-}" ] || die "Docker Hub publishing is on but the DOCKERHUB_USERNAME secret is missing or empty. Add it as a secret of the 'publish' environment (Settings > Environments > publish), not under Secrets and variables > Actions, or set DOCKERHUB_PUBLISH to false."
+    [ -n "${DOCKERHUB_TOKEN:-}" ] || die "Docker Hub publishing is on but the DOCKERHUB_TOKEN secret is missing or empty. Add it as a secret of the 'publish' environment (Settings > Environments > publish), not under Secrets and variables > Actions, or set DOCKERHUB_PUBLISH to false."
   fi
   [ "${#out[@]}" -gt 0 ] || die "no registry left to publish to."
   printf '%s\n' "${out[@]}"

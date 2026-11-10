@@ -13,7 +13,7 @@ The rules are in `scripts/publish-images.sh`, tested by `scripts/publish-images.
 
 ## Settings
 
-In the repository: Settings → Secrets and variables → Actions.
+Variables: repository Settings → Secrets and variables → Actions → Variables. Secrets: the `publish` environment (Settings → Environments → publish).
 
 | Name | Kind | Meaning |
 |---|---|---|
@@ -26,8 +26,8 @@ The runner image (`boss-man-runner`) is **not** in the default set: until the Cl
 
 ## Setting it up (any host; the account steps are on the registries' own sites)
 
-1. GitHub's registry needs nothing in the repository: the workflow uses the run's own token. After the first publish, each package starts private. Make it public: GitHub → your profile or organisation → Packages → the package → Package settings → Danger zone → Change visibility → Public. Do it for each published image.
-2. For Docker Hub: create the account or organisation, then one **public** repository for each published image, named exactly like the image (`boss-man-server`, `boss-man-launcher`, `boss-man-netguard`, later `boss-man-runner`).
+1. GitHub's registry needs nothing in the repository: the workflow uses the run's own token. After the first publish, each package starts private. The images contain the app's source, so make a package public **only once Repo cleanup 5 is done**. Then: GitHub → your profile or organisation → Packages → the package → Package settings → Danger zone → Change visibility → Public. Do it for each published image.
+2. For Docker Hub: create the account or organisation, then one repository for each published image, named exactly like the image (`boss-man-server`, `boss-man-launcher`, `boss-man-netguard`, later `boss-man-runner`). Create each as **Private** (Docker Hub defaults to public): the images contain the app's source, so switch them to public only once Repo cleanup 5 is done. Cost: Docker Hub's free plan allows one private repository, so four private repositories need a paid plan. Without one, leave `DOCKERHUB_PUBLISH` off (ghcr only) until Repo cleanup 5 is done.
 3. Create an access token on Docker Hub (Account settings → Personal access tokens) with *Read & Write* permission (scope it to the published repositories if Docker Hub offers that).
 4. In GitHub: repository Settings → Environments → New environment, named `publish`. Under Deployment branches and tags choose *Selected branches and tags*, add `main`. Under Environment secrets add `DOCKERHUB_TOKEN` (the token) and `DOCKERHUB_USERNAME` (your Docker Hub name). Do not add them under Secrets and variables → Actions.
 5. Set the variables: `IMAGE_PREFIXES` to `ghcr.io/<your GitHub owner> docker.io/<your Docker Hub namespace>` and `DOCKERHUB_PUBLISH` to `true`.
