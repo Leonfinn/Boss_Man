@@ -229,7 +229,7 @@ export const stderrTail = (stderr: string) =>
 
 // The add-ons' settings from the image (docs/12) go through too: without them an agent's agent-browser
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
-export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
+export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
 /**
  * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
@@ -731,6 +731,14 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
+    // The daemon's own temp folder goes on even when the base env is a trimmed one: in a fenced check job /tmp
+    // is refused, and Claude Code's own /tmp/claude-<uid> then ends the session with "Internal error" (BOS-1067).
+    // Only a caller that hands in its own trimmed base env gets this (the daemon passes none, so a normal runner
+    // changes nothing). The check job's code may be older than the branch, so only TMPDIR can be counted on.
+    if (this.opts.baseEnv !== undefined && process.env.TMPDIR !== undefined) {
+      env.TMPDIR ??= process.env.TMPDIR;
+      env.CLAUDE_CODE_TMPDIR ??= process.env.CLAUDE_CODE_TMPDIR ?? process.env.TMPDIR;
+    }
     // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
     // every other granted secret, and a push from inside it fails fast instead of prompting.
     Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
@@ -800,7 +808,7 @@ export class SessionManager {
     rmSync(tmp, { recursive: true, force: true });
     if (!realDirsUnder(tmpRoot, tmpName)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
     chmodSync(tmp, 0o700);
-    Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
+    Object.assign(env, { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
 
