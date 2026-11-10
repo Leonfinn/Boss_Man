@@ -90,6 +90,9 @@ export const WATCH_REASON = "ticket watch";
  */
 export const CEO_REPLY_REASON = "ceo reply";
 export const REPLY_PURPOSE = "reply";
+/** BOS-1082: said to a run that starts with no ticket checkout, so the agent doesn't take its folder for a lost one. */
+export const noCheckoutNote = (folder: string) =>
+  `\n\nThis run has no ticket checkout: it started in ${folder}, which is not a copy of the repo. Don't edit code, run checks or create a worktree here. To change code, work on a run woken on that ticket: it starts in the ticket's own checkout.`;
 // TREE_REASON (mcp.ts) wakes the watcher when everything in its watched tree has stopped.
 /** An assigned ticket nobody is working on, found by the sweep (R82). */
 export const MISSED_REASON = "missed work";
@@ -1007,6 +1010,8 @@ export function schedulerService(
     const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
     await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : reply ? REPLY_PURPOSE : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
+    // BOS-1082: a run with no ticket checkout (no ticket, a watch or a reply) is told so, so it doesn't take its folder for a lost checkout.
+    const noCheckout = !chat && agent.role !== "ceo" && !copy && !(ticket?.repoUrl && workTicketId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
@@ -1042,7 +1047,7 @@ export function schedulerService(
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
-      prompt: chapter?.prompt ?? wakePrompt,
+      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(path.posix.join(workspaceRoot, reply ? `reply/${agent.id}` : (workTicketId ?? agent.id))) : ""),
       mcpToken,
       // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
       // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
@@ -1378,7 +1383,8 @@ export function schedulerService(
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)
-          .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat")), ticketId ? eq(runs.ticketId, ticketId) : isNull(runs.ticketId), input.causedByRunId ? ne(runs.id, input.causedByRunId) : undefined))
+          // BOS-1082: a reply run and a watch run name the ticket but have no checkout of it, so work is never steered into them.
+          .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), or(isNull(runs.purpose), notInArray(runs.purpose, ["chat", REPLY_PURPOSE])), ticketId ? or(isNull(runs.origin), ne(runs.origin, WATCH_REASON)) : undefined, ticketId ? eq(runs.ticketId, ticketId) : isNull(runs.ticketId), input.causedByRunId ? ne(runs.id, input.causedByRunId) : undefined))
           .orderBy(desc(runs.startedAt))
           .limit(1);
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
