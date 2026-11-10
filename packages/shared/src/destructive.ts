@@ -619,18 +619,23 @@ export function commandRisks(command: string | string[]): Risk[] {
     // GIT_CONFIG_* / GIT_DIR assignments from earlier commands of the script (`export X=…`, `declare -x X=…`, a bare `X=…`),
     // read with the same word parser as a prefix, so quotes are gone and a run-time value is marked dynamic (BOS-1064).
     const scriptEnv: Word[] = [];
-    for (const c of top.cmds) {
-      let ws = c.words;
-      while (ws.length && /^[A-Za-z_]\w*\+?=/.test(ws[0]!.text)) ws = ws.slice(1);
-      const assigns = ws.length === 0 ? c.words : /^(export|declare|typeset|readonly|local)$/.test(ws[0]!.text) ? ws.slice(1) : [];
-      for (const a of assigns) if (/^(GIT_CONFIG_\w+|GIT_DIR)\+?=/.test(a.text)) scriptEnv.push(a);
-    }
+    // Also collected from every nested script readScript parses (`bash -c "export …; git gc"`); the list is shared, so an inner script inherits the outer one.
+    const collectEnv = (cmds: Cmd[]) => {
+      for (const c of cmds) {
+        let ws = c.words;
+        while (ws.length && /^[A-Za-z_]\w*\+?=/.test(ws[0]!.text)) ws = ws.slice(1);
+        const assigns = ws.length === 0 ? c.words : /^(export|declare|typeset|readonly|local)$/.test(ws[0]!.text) ? ws.slice(1) : [];
+        for (const a of assigns) if (/^(GIT_CONFIG_\w+|GIT_DIR)\+?=/.test(a.text)) scriptEnv.push(a);
+      }
+    };
+    collectEnv(top.cmds);
 
     const add = (kind: Risk["kind"], why: string, words: Word[], plain: boolean) => risks.push({ kind, why, text: words.map((w) => w.text).join(" "), plain });
     const readScript = (script: string, depth: number, elsewhere?: boolean) => {
       if (depth > MAX_DEPTH) return add("destroys", "commands nested too deeply to read", [], false);
       const p = parse(script);
       if (p.unparsed) add("destroys", "Boss Man couldn't read a script it runs", plainWords([script]), false);
+      collectEnv(p.cmds);
       for (const c of p.cmds) judge({ ...c, nested: true, elsewhere }, depth, false);
     };
 
