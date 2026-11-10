@@ -15,6 +15,7 @@ The full check, `scripts/check-all.sh`, takes 30 to 50 minutes and runs everythi
 Boss Man runs the full check before it merges approved work, so anything it reports blocks the merge.
 
 - Changed `apps/server/src/db/schema.ts`? Generate the migration with drizzle-kit and commit it.
+- Main took your migration number? Leave it. Do not renumber by hand: the merge gate renumbers a branch whose only clash is migration bookkeeping (`rebaseMigrations`, BOS-690), and `scripts/check-quick.sh` accepts that case, printing "migration NNNN will be renumbered to MMMM by the merge gate". A real clash (code, or the same table or column changed on both sides) still fails; see `docs/10-migrations.md`.
 - Added a shell script? Add it to `scripts/check-shell.sh`. Added a `*.test.sh`? Add it to `scripts/test-shell.sh`.
 
 ## Running a full check by hand
