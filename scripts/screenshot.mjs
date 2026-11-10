@@ -74,7 +74,7 @@ function fail(msg) {
 
 // Enough for the app to boot signed in on the board; --api adds or overrides paths.
 const agent = { id: "a1", name: "Bungle - Web Developer", role: "engineer", status: "idle", agentKind: "developer", companyId: "c1", model: null, fundingSourceId: null, paused: false, starred: false, duty: null };
-const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", agents: [agent] };
+const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", standingRules: "", agents: [agent] };
 const project = { id: "p1", companyId: "c1", name: "Development", repoUrl: null, defaultBranch: "main", verifyCommand: null, deepVerifyCommand: null, landing: "merge", gitHost: null, gitApiBase: null, starred: false, ticketCostCapMicros: null, monthlyCapMicros: null, archivedAt: null };
 const columns = ["ready", "in_progress", "blocked", "review", "done"].map((s, i) => ({ id: `col${i}`, name: s, systemState: s, wipLimit: null, tickets: [] }));
 const DEFAULT_API = {
@@ -98,7 +98,15 @@ const DEFAULT_API = {
   "/api/companies/c1/review-policy": {},
   "/api/companies/c1/watchdog": { settings: { enabled: false }, lastSweepAt: null, trippedAt: null, trippedReason: null, openFlags: 0 },
   "/api/policy": {},
+  // List endpoints: an unknown path answers {}, and a screen that reads .length from it throws, so list the ones known to be read.
+  "/api/funding-sources": [],
+  "/api/budgets": [],
+  "/api/secrets": [],
+  "/api/projects/p1/spend": { monthMicros: 0, totalMicros: 0, ticketCostCapMicros: null, monthlyCapMicros: null, monthStart: "2026-11-01T00:00:00.000Z", topTickets: [] },
+  "/api/decisions/tally": {},
+  "/api/kill-switch": {},
 };
+// For reference: Settings → Funding is route "#settings/c1/funding", wait for "#funding-h".
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".woff": "font/woff", ".ico": "image/x-icon", ".webmanifest": "application/manifest+json" };
 
@@ -215,10 +223,19 @@ async function main() {
     }
     const page = await browser.newPage({ viewport: { width: o.width, height: o.height }, deviceScaleFactor: o.ratio, hasTouch: o.touch, isMobile: o.touch });
     if (!o.url) await page.route("**/api/**", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(api[new URL(r.request().url()).pathname] ?? {}) }));
+    // A page error is how a missing fixture shows up ("Cannot read properties of undefined"): say which API paths fell back to {}.
+    page.on("pageerror", (e) => console.error(`screenshot: page error: ${String(e.message).split("\n")[0]}`));
+    page.on("request", (r) => {
+      const p = new URL(r.url()).pathname;
+      if (!o.url && p.startsWith("/api/") && !(p in api)) console.error(`screenshot: no fixture for ${p}, answered {} (add it with --api FILE)`);
+    });
     await page.goto(target, { waitUntil: "load", timeout: o.timeout });
     try {
       await page.waitForSelector(o.wait, { state: "visible", timeout: o.timeout });
     } catch {
+      // Keep what the page showed, so a wrong selector or a missing fixture can be seen rather than guessed.
+      mkdirSync(dirname(resolve(o.out)), { recursive: true });
+      await page.screenshot({ path: `${o.out}.failed.png` }).catch(() => {});
       fail(`"${o.wait}" did not appear within ${o.timeout} ms at ${target}`);
     }
     mkdirSync(dirname(resolve(o.out)), { recursive: true });

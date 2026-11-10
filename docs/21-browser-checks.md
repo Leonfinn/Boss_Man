@@ -23,8 +23,11 @@ For a picture of one screen at one width (a layout ticket, a QA proof), use the 
 ```sh
 pnpm --filter @boss-man/web build        # once; the script serves apps/web/dist
 node scripts/screenshot.mjs --route "#board/p1" --width 1667 --wait ".board-scroll" --out "$BOSSMAN_SCRATCH/board.png"
-node scripts/screenshot.mjs --route "#settings" --width 380 --touch --api my-api.json --wait "h1" --out shot.png
+node scripts/screenshot.mjs --route "#settings/c1/funding" --width 1667 --wait "#funding-h" --out "$BOSSMAN_SCRATCH/funding.png"
+node scripts/screenshot.mjs --route "#board/p1" --width 380 --touch --api my-api.json --wait ".board-scroll" --out shot.png
 ```
+
+Pick a `--wait` selector that only the finished screen has (a section id, not `h1`: the app's error card has headings too). If the wait fails the script still saves what the page showed as `OUT.failed.png`, and it prints each `/api` path it had no fixture for and any page error: a screen that reads `.length` of an unmocked list shows "This page hit an error", and the fix is a line in the `--api` file.
 
 - It serves the build on 127.0.0.1 and answers `/api/*` from a built-in fixture (signed-in owner, one company, one project, an empty board). `--api FILE` is a JSON map of `"/api/path": body` that adds or replaces paths; an unknown path gets `{}`. Find which paths a screen asks for in the page's `api(...)` calls.
 - `--wait SELECTOR` is required: it waits for that element to be visible, never a fixed time, and exits non-zero with one line if it does not appear. Other options: `--height`, `--ratio`, `--touch`, `--full-page`, `--timeout`, `--dist`, `--url` (a running app instead of the local server).
