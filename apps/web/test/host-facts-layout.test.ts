@@ -13,7 +13,7 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 // Long enough to overflow any window: the host's own compose files and every address it listens on.
 const COMPOSE = Array.from({ length: 9 }, (_, i) => `deploy/truenas-${["deployer", "bluegreen", "tailscale", "loki", "grafana", "prometheus", "alerts", "backups", "web"][i]}.yml`).join(",");
 const ADDRESSES = [
-  "192.168.68.25",
+  "192.168.1.25",
   "fd01:9689:a583:bbe:dc10:aa6:91cb:ae19",
   "172.19.0.1",
   "172.18.0.1",
@@ -44,12 +44,14 @@ const facts: [string, string][] = [
   ["memory.availableKb", "26904756"],
   ["memory.totalKb", "41011056"],
   ["network.addresses", ADDRESSES],
-  ["network.port.BOSSMAN_BIND", "192.168.68.25"],
+  ["network.port.BOSSMAN_BIND", "192.168.1.25"],
   ["network.port.BOSSMAN_HOST_PORT", "3101"],
   ["paths.deployer", "/srv/apps/boss-man/deployer"],
   ["paths.install", "/srv/apps/boss-man"],
   ["repo.originHost", "github.com"],
   ["repo.probe", "failed"],
+  ["repo.probeWhy", "ssh: connect to host <code host> port 22: Connection timed out"],
+  ["check.container_status.stopped.names", "bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (exited, exit 255, 5 minutes ago)"],
 ];
 
 // The same structure ThisHost renders: the intro, the folded reported-facts block, then the owner's boxes.
@@ -66,6 +68,13 @@ body { margin: 0; } .app { flex-wrap: nowrap; } .app > nav { flex: 0 0 232px; } 
 <span class="tag amber" data-testid="host-facts-problems">1 check failing</span>
 </button>
 <div id="host-facts-body"${open ? "" : ` hidden style="display: none"`}>
+<div class="muted" data-testid="host-facts-problem-detail" style="font-size: 13px">
+<p style="margin-top: 0; margin-bottom: 4px">Worth a look. Raw keys are in the list below.</p>
+<ul style="margin: 0; padding-left: 18px">
+<li>The containers bm-worker-1 (exited, exit 137, 2 hours ago); bm-cache-1 (exited, exit 255, 5 minutes ago) are not running (of 18 in the Boss Man stack). A stopped or crashed container holds nothing back by itself, but the part of Boss Man it runs is down. The host's log says why it stopped; pressing Build and update runners, or the next update, starts the stack again.</li>
+<li>Boss Man could not read the code host: ssh: connect to host &lt;code host&gt; port 22: Connection timed out. Deploys that already have the code still work, so this only stops the next check of what is waiting.</li>
+</ul>
+</div>
 <dl data-testid="host-facts" class="host-facts-list">
 ${facts.map(([k, v]) => `<dt class="mono">${k}</dt><dd><span class="mono host-fact-value">${v}</span> <span class="muted">(reported by the host)</span></dd>`).join("")}
 </dl>
@@ -96,6 +105,7 @@ type Page = {
   setViewportSize: (v: { width: number; height: number }) => Promise<void>;
   setContent: (html: string, opts?: { waitUntil?: "load" }) => Promise<void>;
   evaluate: <T, A>(fn: (arg: A) => T, arg?: A) => Promise<T>;
+  screenshot: (opts: { path?: string; fullPage?: boolean }) => Promise<Buffer>;
   close: () => Promise<void>;
 };
 type Browser = {
@@ -209,7 +219,33 @@ function check(name: string, m: Measured, open: boolean) {
   }
 }
 
+// Opt-in proof for BOS-986: with BOSSMAN_SCRATCH set, save the panel open at a desktop window and at the owner's
+// foldable profile, so the "Worth a look" wording can be seen. Never a repo file (proofs live in scratch).
+const scratch = process.env.BOSSMAN_SCRATCH;
+const shot = scratch ? (await import("node:path")).join(scratch, `host-facts-${process.env.BOSSMAN_SHOT_TAG ?? "after"}`) : null;
+
 describe.skipIf(!browser)("This host facts layout (BOS-924)", () => {
+  it.skipIf(!shot)("saves the open panel at desktop and the owner's foldable profile to the scratch folder", async () => {
+    const desk = await browser!.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await desk.setContent(HTML(true), { waitUntil: "load" });
+      await desk.screenshot({ path: `${shot}-desktop.png`, fullPage: true });
+    } finally {
+      await desk.close();
+    }
+    const foldable = profiles.find((p) => p.file.startsWith("owner-")) ?? profiles[0];
+    if (foldable) {
+      const fp = await browser!.newPage({ viewport: { width: foldable.width, height: foldable.height }, deviceScaleFactor: foldable.deviceScaleFactor, hasTouch: foldable.hasTouch });
+      try {
+        await fp.setContent(HTML(true), { waitUntil: "load" });
+        await fp.screenshot({ path: `${shot}-foldable.png`, fullPage: true });
+      } finally {
+        await fp.close();
+      }
+    }
+    expect(shot).toContain("host-facts-");
+  });
+
   it("wraps long values inside the panel at desktop 1280, folded and open", async () => {
     const page = await browser!.newPage();
     try {

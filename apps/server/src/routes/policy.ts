@@ -7,7 +7,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { RISK_TIERS, SENIOR_DEV, TOOL_KINDS, riskSummary } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, projects } from "../db/schema.js";
+import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
 import { RuleError, type policyRulesService } from "../services/policy-rules.js";
 import { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
@@ -55,24 +55,7 @@ export function policyRoutes(
     const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
     return c ? c.policy : reply.code(404).send({ error: "not_found" });
   });
-  /** The project's own policy, or null when it uses the company's. */
-  owner.get("/api/projects/:id/review-policy", async (req, reply) => {
-    const [p] = await db.select({ policy: projects.reviewPolicy }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
-    return p ? { policy: p.policy } : reply.code(404).send({ error: "not_found" });
-  });
-  owner.put("/api/projects/:id/review-policy", async (req, reply) => {
-    const { id } = IdParam.parse(req.params);
-    const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
-    if (!proj) return reply.code(404).send({ error: "not_found" });
-    const p = await checkPolicy(proj.companyId, req.body);
-    if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
-    await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
-    return { policy: p };
-  });
-  owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
-    const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
-    return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
-  });
+  // A project's own review policy is routes/projects.ts, registered with the project routes.
   // Standing rules (BOS-353): the owner or the CEO sets a short block every agent reads at the start of every run.
   owner.get("/api/companies/:id/standing-rules", async (req, reply) => {
     const { id } = IdParam.parse(req.params);

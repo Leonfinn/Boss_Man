@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 type Pushed = { url: string; body: Record<string, any> };
-const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, pushLevels: ["page", "ask"], publicUrl: "https://bossman.example.ts.net" };
+const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, phonePush: "all", publicUrl: "https://bossman.example.ts.net" };
 
 async function setup(opts: { listen?: boolean } = {}) {
   const { db, close } = await openPglite();
@@ -82,6 +82,14 @@ async function setup(opts: { listen?: boolean } = {}) {
 }
 
 const httpActions = (p: Pushed | undefined) => ((p?.body.actions ?? []) as Array<{ action: string }>).filter((a) => a.action === "http");
+
+describe("rule 0: ntfy address check", () => {
+  const gate = (url: string) => approveGate({ ...DEFAULT_NOTIFY_SETTINGS, ntfy: { url, topic: "t", tokenSecretId: "x" }, publicUrl: "https://b.example.ts.net" } as never, "tok");
+  it("accepts https and the bundled http://ntfy only", () => {
+    for (const url of ["https://ntfy.example.ts.net:8443", "http://ntfy:80", "http://ntfy", "http://NTFY:80/"]) expect(gate(url)).toEqual({ on: true });
+    for (const url of ["http://ntfy.example.ts.net", "http://ntfy:8080", "http://ntfy.evil.com", "http://user@ntfy", "http://ntfy@evil.com", "http://10.0.0.5", "ftp://ntfy", "not a url"]) expect(gate(url).on).toBe(false);
+  });
+});
 
 describe("rule 0: Approve only through the owner's private channel", () => {
   it("needs a publish token, an https ntfy URL and an https public URL; Open stays either way", async () => {

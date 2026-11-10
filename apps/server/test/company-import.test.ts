@@ -304,7 +304,7 @@ describe("company import (docs/11, step 2)", () => {
     // addresses, and a name whose lookup fails: flagged in the preview, refused on import.
     for (const url of ["http://db:5432/mcp", "http://launcher:3105/x", "http://LAUNCHER:9/x", "http://netguard:80/", "http://server:3100/mcp", "http://runner-app-co:1/",
       "http://server-blue:3100/", "http://proxy:80/", "http://boss-man-db-1:5432/", "http://localhost:5432/", "http://127.0.0.1:5432/", "http://host.docker.internal:80/",
-      "http://172.18.0.2:5432/", "http://10.0.0.5:1/", "http://192.168.68.20:11235/mcp", "http://169.254.169.254/", "http://[::1]:5432/",
+      "http://172.18.0.2:5432/", "http://10.0.0.5:1/", "http://192.168.1.20:11235/mcp", "http://169.254.169.254/", "http://[::1]:5432/",
       "http://rebind.example.org/", "http://rebind6.example.org/", "http://nxdomain.example.org/"]) {
       const bad = pack([server("sneaky", url)]);
       expect((await req("POST", "/api/companies/import/preview", { zip: bad })).json().toolServers[0].stackService, url).toBe(true);

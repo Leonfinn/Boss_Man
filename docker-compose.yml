@@ -11,7 +11,7 @@
 # Back up secrets/master.key: without it, stored secrets cannot be decrypted.
 #
 # Runners, the easy way (R55): turn on the launcher, and each company's runner starts by itself
-# when the company is created (Settings › Runner shows it). In .env:
+# when the company is created (Settings › Server and runner › Runner shows it). In .env:
 #   BOSSMAN_LAUNCHER=1
 #   COMPOSE_PROFILES=launcher
 #   BOSSMAN_DATA=/absolute/host/folder          # company data lives in $BOSSMAN_DATA/companies
@@ -152,13 +152,14 @@ services:
       BOSSMAN_RUNNER_NETWORK: ${BOSSMAN_RUNNER_NETWORK:-boss-man_default}
       BOSSMAN_STACK: ${BOSSMAN_STACK:-}
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
-      BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
+      # Empty = no cap: "Checks at once" in Settings sizes the runner's memory (BOS-993). Set a value only to cap it.
+      BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
       BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
       BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
       # Threads kept back for the server, database and proxy (BOS-586): off (default), auto = 2 on hosts with 6+ threads, or a number.
       BOSSMAN_RESERVED_THREADS: ${BOSSMAN_RESERVED_THREADS:-off}
-      BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-1}
+      BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
       BOSSMAN_OPENCODE_SESSION_DAYS: ${BOSSMAN_OPENCODE_SESSION_DAYS:-}
       # The shared pnpm store (BOS-568). Launcher runners have one writable volume, so this must be a folder under
       # /home/node/workspaces, never its root (the fence would grant the whole volume and the gate store would land on

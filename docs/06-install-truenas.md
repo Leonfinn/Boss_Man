@@ -24,39 +24,39 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
 - A GitHub account that can create a fine-grained token for the repos the agents will work on, and read access to the Boss Man repo from the NAS: a read-only deploy key if the repo is private, nothing if it is public (see [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)).
 
-The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
+The commands below are a worked example. They put Boss Man in `/mnt/tank/apps/boss-man`, where `tank` is the pool and `apps` is a dataset you already keep container apps in. Use your own pool and dataset names, and change that path everywhere it appears. The examples use `192.168.1.50` as the NAS's LAN address; replace it, and `<nas-ip>`, with yours. You can find it in the TrueNAS UI under Network.
 
 ## 1. Create a dataset
 
-Boss Man gets its own dataset under `Container_files`, so you can snapshot and roll it back on its own.
+Boss Man gets its own dataset under `apps`, so you can snapshot and roll it back on its own.
 
-First check that `Container_files` is a dataset and not a plain folder. In a root shell on the NAS (step 2 says how to open one):
+First check that `apps` is a dataset and not a plain folder. In a root shell on the NAS (step 2 says how to open one):
 
 ```sh
-zfs list -o name,mountpoint -r NVME_Apps
+zfs list -o name,mountpoint -r tank
 ```
 
-If `NVME_Apps/Container_files` is in the list, it's a dataset. In the TrueNAS UI, go to Datasets, select `NVME_Apps/Container_files`, and Add Dataset:
+If `tank/apps` is in the list, it's a dataset. In the TrueNAS UI, go to Datasets, select `tank/apps`, and Add Dataset:
 - **Name:** `boss-man`.
-- **Dataset preset:** Generic. Generic datasets use a POSIX ACL, so ordinary `chown` and `chmod` behave as expected ([TrueNAS docs](https://www.truenas.com/docs/scale/25.10/scaletutorials/datasets/permissionsscale/)). Pick Generic even if `Container_files` itself was made with the Apps preset, which uses an NFSv4 ACL that can override them.
+- **Dataset preset:** Generic. Generic datasets use a POSIX ACL, so ordinary `chown` and `chmod` behave as expected ([TrueNAS docs](https://www.truenas.com/docs/scale/25.10/scaletutorials/datasets/permissionsscale/)). Pick Generic even if `apps` itself was made with the Apps preset, which uses an NFSv4 ACL that can override them.
 
-If `Container_files` isn't in the list, it's a plain folder, and TrueNAS can't create a dataset inside it. Then just make the folder; snapshots of the dataset that holds `Container_files` still cover it:
+If `apps` isn't in the list, it's a plain folder, and TrueNAS can't create a dataset inside it. Then just make the folder; snapshots of the dataset that holds `apps` still cover it:
 
 ```sh
-mkdir -p /mnt/NVME_Apps/Container_files/boss-man
+mkdir -p /mnt/tank/apps/boss-man
 ```
 
 Everything Boss Man keeps goes in this folder.
 
 ## 2. Get the code
 
-Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip>` from your Mac and then `su -`). Go to the dataset:
+Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip>` from your computer and then `su -`). Go to the dataset:
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man
+cd /mnt/tank/apps/boss-man
 ```
 
-How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/NVME_Apps/Container_files/boss-man` there. For a public repo the clone is:
+How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/tank/apps/boss-man` there. For a public repo the clone is:
 
 ```sh
 git clone <repo-https-url> src
@@ -75,40 +75,40 @@ If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-
 The server and runners run as uid 1000. Postgres runs as its own user and sets the ownership of its own data folder on first start, so you only create that folder. These commands use full paths, so they work from any folder.
 
 ```sh
-mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/postgres /mnt/NVME_Apps/Container_files/boss-man/data/app-co/workspaces /mnt/NVME_Apps/Container_files/boss-man/data/app-co/runner-data /mnt/NVME_Apps/Container_files/boss-man/data/app-co/claude /mnt/NVME_Apps/Container_files/boss-man/src/secrets
+mkdir -p /mnt/tank/apps/boss-man/data/postgres /mnt/tank/apps/boss-man/data/app-co/workspaces /mnt/tank/apps/boss-man/data/app-co/runner-data /mnt/tank/apps/boss-man/data/app-co/claude /mnt/tank/apps/boss-man/src/secrets
 ```
 
 ```sh
-chown -R 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/app-co /mnt/NVME_Apps/Container_files/boss-man/src/secrets && chmod 700 /mnt/NVME_Apps/Container_files/boss-man/src/secrets
+chown -R 1000:1000 /mnt/tank/apps/boss-man/data/app-co /mnt/tank/apps/boss-man/src/secrets && chmod 700 /mnt/tank/apps/boss-man/src/secrets
 ```
 
 ## 4. Settings and the master key
 
-Go to the repo folder. The `docker compose` commands from here on must run from `/mnt/NVME_Apps/Container_files/boss-man/src`.
+Go to the repo folder. The `docker compose` commands from here on must run from `/mnt/tank/apps/boss-man/src`.
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src
+cd /mnt/tank/apps/boss-man/src
 ```
 
 The master key encrypts every stored secret. Back it up somewhere safe outside the NAS. Without it, stored secrets can't be read.
 
 ```sh
-openssl rand -base64 32 > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key
+openssl rand -base64 32 > /mnt/tank/apps/boss-man/src/secrets/master.key && chown 1000:1000 /mnt/tank/apps/boss-man/src/secrets/master.key && chmod 600 /mnt/tank/apps/boss-man/src/secrets/master.key
 ```
 
 Compose won't start anything while a secret file is missing, so create the runner's token file now, empty. You fill it in at step 7.
 
 ```sh
-touch /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
+touch /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token && chown 1000:1000 /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token && chmod 600 /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token
 ```
 
 Create `.env`. Compose reads it automatically. Its first two lines add the TrueNAS file and start the runners, so plain `docker compose` commands and the update script both use them.
 
 ```sh
-cat > /mnt/NVME_Apps/Container_files/boss-man/src/.env <<EOF
+cat > /mnt/tank/apps/boss-man/src/.env <<EOF
 COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
 COMPOSE_PROFILES=runners
-BOSSMAN_DATA=/mnt/NVME_Apps/Container_files/boss-man/data
+BOSSMAN_DATA=/mnt/tank/apps/boss-man/data
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 BOSSMAN_BIND=<nas-ip>
 BOSSMAN_HOST_PORT=3101
@@ -118,7 +118,7 @@ EOF
 ```
 
 ```sh
-chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
+chmod 600 /mnt/tank/apps/boss-man/src/.env
 ```
 
 - `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only. The TrueNAS UI keeps 80 and 443.
@@ -158,12 +158,12 @@ With no launcher yet, the script also runs `docker compose up -d` at the end (a 
 
 ## 6. First login and the setup wizard
 
-Open `http://<nas-ip>:3101` on your Mac and create the owner account. The **setup wizard** opens. It has eight steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Run the setup wizard**, at the top of Settings, brings it back.
+Open `http://<nas-ip>:3101` in a browser on your computer and create the owner account. The **setup wizard** opens. It has eight steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Run the setup wizard**, at the top of Settings, brings it back.
 
 1. **Your company:** a name, for example "Boss Man Co", and what it's for. The CEO plans from this.
 2. **A project:** a name, for example "Boss Man", and its **Git repo**:
-   - GitHub: `https://github.com/Leonfinn/Boss_Man.git`
-   - your Gitea: `http://192.168.68.67:3003/<owner>/<repo>.git` (plain http is allowed for private LAN addresses)
+   - GitHub: `https://github.com/<owner>/<repo>.git`
+   - your Gitea: `http://192.168.1.50:3003/<owner>/<repo>.git` (plain http is allowed for private LAN addresses)
 3. **The runner:** set it up with step 7b (the launcher, recommended) or step 7, then come back. It shows **Connected** when it's up.
 4. **Claude:** a setup-token or API key (step 8).
 5. **A git token** (step 8). **Check the token against <project>** reads the repo once and says whether the token can push. It changes nothing.
@@ -178,7 +178,7 @@ If you'd rather use the screens directly, **"I know what I'm doing, let me get o
 In **Settings > Server and runner > Runner**, choose **Register a runner**. The token is shown once. Write it into the token file without it landing in your shell history: run the command, paste the token, press Return, then Ctrl-D.
 
 ```sh
-cat > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
+cat > /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token
 ```
 
 The token file must hold only the token. A trailing newline is fine, because the runner trims it.
@@ -203,23 +203,23 @@ With the launcher (R55), each company's runner starts by itself when you create 
 These steps move an existing install, including the compose runner from step 7, over to the launcher. Run them from the repo folder.
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && git pull
+cd /mnt/tank/apps/boss-man/src && git pull
 ```
 
 The launcher keeps company data under `data/companies`, owned by uid 1000:
 
 ```sh
-mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/companies && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/companies
+mkdir -p /mnt/tank/apps/boss-man/data/companies && chown 1000:1000 /mnt/tank/apps/boss-man/data/companies
 ```
 
 In `.env`, replace `COMPOSE_PROFILES=runners` with the launcher profile and turn it on. The first command shows the file so you can check it before changing it.
 
 ```sh
-cat /mnt/NVME_Apps/Container_files/boss-man/src/.env
+cat /mnt/tank/apps/boss-man/src/.env
 ```
 
 ```sh
-sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/NVME_Apps/Container_files/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' >> /mnt/NVME_Apps/Container_files/boss-man/src/.env
+sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/tank/apps/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' >> /mnt/tank/apps/boss-man/src/.env
 ```
 
 Stop and remove the old compose runner. Its folders in `data/app-co` stay where they are.
@@ -239,7 +239,7 @@ Open **Settings > Server and runner > Runner** and choose **Start runner**. It s
 - **The old runner's work.** The new runner starts with empty folders under `data/companies/<slug>`, where `<slug>` comes from the company's name (e.g. `boss-man-co`) and is shown in Settings > Server and runner > Runner. To bring over unfinished work and Claude sessions, choose **Stop**, then copy the old folders, then choose **Start runner** again:
 
   ```sh
-  cp -a /mnt/NVME_Apps/Container_files/boss-man/data/app-co/. /mnt/NVME_Apps/Container_files/boss-man/data/companies/boss-man-co/
+  cp -a /mnt/tank/apps/boss-man/data/app-co/. /mnt/tank/apps/boss-man/data/companies/boss-man-co/
   ```
 
 - **Updates.** `scripts/update-runner.sh` builds and checks the new image, then Boss Man drains (nothing new starts, runs finish) and the launcher recreates each company's runner as soon as that company is idle; `--rollback` does the same onto the previous image, and `--now` recreates everything at once (see the runner update section below).
@@ -247,9 +247,9 @@ Open **Settings > Server and runner > Runner** and choose **Start runner**. It s
 
 ## 8. Credentials and funding
 
-Make both credentials on your Mac, then paste them into **Settings > Secrets**. Values are encrypted on the server and never shown again.
+Make both credentials on your own computer, then paste them into **Settings > Secrets**. Values are encrypted on the server and never shown again.
 
-**Claude setup-token.** If Claude Code isn't on your Mac yet, install it ([docs](https://code.claude.com/docs/en/setup)):
+**Claude setup-token.** If Claude Code isn't on your computer yet, install it ([docs](https://code.claude.com/docs/en/setup)):
 
 ```sh
 curl -fsSL https://claude.ai/install.sh | bash
@@ -278,7 +278,7 @@ On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss M
 
 **When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
-**Funding.** Under **Settings > Access and funding > Funding sources**, add one:
+**Funding.** Under **Settings > Funding**, add one:
 - "Subscription (setup-token)" for a Claude subscription;
 - "API credit" with your monthly grant for an API key.
 
@@ -304,7 +304,7 @@ docker compose logs --tail 100 server
 scripts/deploy.sh
 ```
 
-It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to the folder above the checkout, here `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
+It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to the folder above the checkout, here `/mnt/tank/apps/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
 
 - `--dry-run` shows the steps without running anything.
 - `--runner` / `--no-runner` force or skip the runner update. Updating runners builds the image and asks Boss Man to drain first (runs in progress finish); without the launcher it restarts them at once and cuts runs off. The script asks first (`--yes` skips the question).
@@ -316,7 +316,7 @@ Database changes apply by themselves when the server starts.
 **The manual steps** (the same thing, by hand, if the script is ever unavailable):
 
 ```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F-%H%M).sql.gz
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F-%H%M).sql.gz
 ```
 
 ```sh
@@ -331,7 +331,7 @@ Leave `launcher` out of the build if you don't use it (step 7b).
 scripts/update-runner.sh
 ```
 
-The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Runner update.
+The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Updates > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Updates > Runner update.
 
 **Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
 
@@ -356,16 +356,16 @@ scripts/update-runner.sh --rollback
 **Backups.** Snapshot the `boss-man` dataset (or the one that holds it) and keep a copy of `src/secrets/master.key` off the NAS. A Postgres data folder copied while the database is running may not restore cleanly. For a consistent backup, also dump it:
 
 ```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F).sql.gz
 ```
 
 **Prove the backup restores.** A backup nobody has restored is a hope. This loads the newest backup into a throwaway database beside the live one (the live database is never written to), counts accounts, projects and tickets, prints how long it took and how much would be lost, and drops the throwaway:
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && scripts/restore-test.sh --fresh-backup
+cd /mnt/tank/apps/boss-man/src && scripts/restore-test.sh --fresh-backup
 ```
 
-**Restore the live database from a backup (last resort).** Only when a deploy has damaged the data itself. If the code is the problem, use `scripts/deploy.sh --rollback` (or `host-deployer.sh --rollback`) instead: they never touch the data. A restore **replaces the live data** and loses everything written after the backup was taken. Do it at a quiet time, and ask for help if anything below does not look as described. Run every command as root from the checkout, `cd /mnt/NVME_Apps/Container_files/boss-man/src`. The backups are in the folder above it.
+**Restore the live database from a backup (last resort).** Only when a deploy has damaged the data itself. If the code is the problem, use `scripts/deploy.sh --rollback` (or `host-deployer.sh --rollback`) instead: they never touch the data. A restore **replaces the live data** and loses everything written after the backup was taken. Do it at a quiet time, and ask for help if anything below does not look as described. Run every command as root from the checkout, `cd /mnt/tank/apps/boss-man/src`. The backups are in the folder above it.
 
 1. Pick the backup and rehearse it on the throwaway database first (the live database is not written to). It must end with a line starting `OK:`. If it does not, stop and choose another file:
 ```sh
@@ -417,15 +417,15 @@ If step 5's second command stops with an error, the new empty database is half f
 **Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing git-related to redo: the repo is cloned fresh (a deploy key, if you use one, stays in place). Check what's there first:
 
 ```sh
-ls -la /mnt/NVME_Apps/Container_files/boss-man
+ls -la /mnt/tank/apps/boss-man
 ```
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && docker compose down; cd /mnt/NVME_Apps/Container_files/boss-man
+cd /mnt/tank/apps/boss-man/src && docker compose down; cd /mnt/tank/apps/boss-man
 ```
 
 ```sh
-rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
+rm -rf /mnt/tank/apps/boss-man/src /mnt/tank/apps/boss-man/data
 ```
 
 ## 9a. Install the host deployer (optional)
@@ -435,7 +435,7 @@ This lets you update Boss Man from its own Decisions page: when `main` moves on 
 Everything below is typed in a **root shell** on the NAS (TrueNAS UI > System > Shell, or `su -` over SSH), so there is no `sudo` in front of the commands. Do the steps in this order. Set the folder once in the shell, and use it in every step:
 
 ```sh
-D=/mnt/NVME_Apps/Container_files/boss-man/deployer
+D=/mnt/tank/apps/boss-man/deployer
 ```
 
 **Before you start**
@@ -443,13 +443,13 @@ D=/mnt/NVME_Apps/Container_files/boss-man/deployer
 - The `src` checkout must be on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
 
   ```sh
-  git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main
+  git -C /mnt/tank/apps/boss-man/src ls-remote origin refs/heads/main
   ```
 
 **1. Get this code onto the NAS, by hand.** The change that adds the deployer edits `scripts/` and `deploy/`, which the deployer itself refuses to deploy, so the first time is yours:
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && scripts/deploy.sh
+cd /mnt/tank/apps/boss-man/src && scripts/deploy.sh
 ```
 
 Nothing changes for Boss Man yet: the new compose file is opt-in (step 6).
@@ -465,10 +465,10 @@ ls -ld $D $D/inbox $D/outbox $D/state
 
 `ls` may show `inbox` as owned by another name, such as `n8n`: TrueNAS shows uid 1000 by the name of whichever app user has it. What matters is the number 1000 (`ls -ldn $D/inbox` shows it).
 
-**3. Install the script as a copy.** Read it first (`less /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh`). Copy it; do not make a link into the checkout, because a link would let a merged PR change what root runs.
+**3. Install the script as a copy.** Read it first (`less /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh`). Copy it; do not make a link into the checkout, because a link would let a merged PR change what root runs.
 
 ```sh
-cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh $D/host-deployer.sh
+cp /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh $D/host-deployer.sh
 chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
 
@@ -479,14 +479,14 @@ Merge a PR that touches infra files on its own, after the app PRs before it are 
 To see whether your copy is current:
 
 ```sh
-diff $D/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh && echo same
+diff $D/host-deployer.sh /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh && echo same
 ```
 
-**4. The config file, with the alert webhook.** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with your Home Assistant's, and the last part with the long random ID you will use in the automation (see "Home Assistant" below):
+**4. The config file, with the alert webhook (optional: skip this step if you want no webhook).** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with that of any service that accepts a JSON `POST` (this file is optional: leave `WEBHOOK_URL` out and no webhook is sent):
 
 ```sh
 cat > $D/host.conf <<'EOF'
-WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
 WEBHOOK_ON_SUCCESS=1
 EOF
 chown root:root $D/host.conf && chmod 600 $D/host.conf
@@ -495,7 +495,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
 - Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
-- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
+- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay that adds it; that is untested.
 
 Test the webhook alone, with the same URL, before anything else:
 
@@ -503,7 +503,7 @@ Test the webhook alone, with the same URL, before anything else:
 . $D/host.conf && curl -fsS -X POST -H 'Content-Type: application/json' -d '{"result":"failed","message":"Test from the NAS","from_commit":"aaaaaaaa","to_commit":"bbbbbbbb","at":"2026-10-20T12:00:00Z"}' "$WEBHOOK_URL" && echo sent
 ```
 
-Your phone should buzz. `sent` only means Home Assistant accepted the request: it answers `200` even when no automation listens on that ID (seen on a real install, where the cause turned out to be a mistake in the automation's YAML). If you get `sent` and no buzz, check that the automation saved without errors and that its `webhook_id` matches the end of `WEBHOOK_URL` exactly.
+`sent` only means the service accepted the request. Some services answer `200` even when nothing is set up to act on it, so check that the alert really arrives where you expect it.
 
 **5. Test the script.** First with no request: it reads `main` and writes what is waiting.
 
@@ -514,7 +514,7 @@ $D/host-deployer.sh && cat $D/outbox/available.json
 Then rehearse a request without running anything. `--dry-run` runs every check and leaves the file where it is:
 
 ```sh
-TIP=$(git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main | cut -f1)
+TIP=$(git -C /mnt/tank/apps/boss-man/src ls-remote origin refs/heads/main | cut -f1)
 printf '{"id":"00000000-0000-4000-8000-000000000001","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00Z","approvedBy":"me"}\n' "$TIP" > $D/inbox/request.json
 $D/host-deployer.sh --dry-run
 rm -f $D/inbox/request.json
@@ -525,7 +525,7 @@ You should see either `nothing_new: Nothing new: ... already deployed` (you are 
 **6. Let the server see the folders.** This is the one compose change, and it is also yours to apply. Add the opt-in file and the folder to `.env`, then recreate the server:
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src
+cd /mnt/tank/apps/boss-man/src
 sed -i 's#^COMPOSE_FILE=.*#&:deploy/truenas-deployer.yml#' .env
 echo "BOSSMAN_DEPLOYER=$D" >> .env
 grep -E '^(COMPOSE_FILE|BOSSMAN_DEPLOYER)=' .env
@@ -537,7 +537,7 @@ docker compose exec server ls /run/deployer
 
 **7. The cron job.** In the TrueNAS UI: **System > Advanced > Cron Jobs > Add** (field names as of 25.10; UNVERIFIED, check them on your version):
 - **Description:** `Boss Man host deployer`
-- **Command:** `/mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh`
+- **Command:** `/mnt/tank/apps/boss-man/deployer/host-deployer.sh`
 - **Run As User:** `root`
 - **Schedule:** choose **Custom** and put `*` in every field (Minutes, Hours, Days of month, Months, Days of week), which means every minute. The **Hourly** preset is not enough: it runs once an hour, so a deploy you approve could wait up to an hour.
 - **Hide Standard Output:** ticked (the script keeps its own log). Leave **Hide Standard Error** unticked.
@@ -557,46 +557,18 @@ What you may see instead of a deploy:
 
 **Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
 
-### Home Assistant: a phone alert from the webhook
-
-Create an automation (Settings > Automations & Scenes > Create > Edit in YAML) with a `webhook` trigger. Pick a long random `webhook_id` (for example the output of `openssl rand -hex 24`); anyone who knows it can trigger the automation, so treat it like a password. This uses the current syntax (`triggers:` / `trigger: webhook`, `actions:` / `action:`), which Home Assistant introduced in 2024.10 (**UNVERIFIED** against your version):
-
-```yaml
-alias: Boss Man deploy alert
-description: The NAS posts here when a Boss Man deploy fails or is refused.
-triggers:
-  - trigger: webhook
-    webhook_id: "PUT-A-LONG-RANDOM-ID-HERE"
-    allowed_methods:
-      - POST
-    local_only: true
-actions:
-  - action: notify.mobile_app_YOUR_PHONE
-    data:
-      title: "Boss Man deploy: {{ trigger.json.result }}"
-      message: >-
-        {{ trigger.json.message }}
-        ({{ trigger.json.from_commit[:8] }} to {{ trigger.json.to_commit[:8] }})
-mode: queued
-```
-
-- The webhook's address is `http://<home-assistant>:8123/api/webhook/<webhook_id>`; that is what goes in `WEBHOOK_URL`.
-- `local_only: true` accepts only requests from your local network, so the NAS must reach Home Assistant directly, not through a public URL or a reverse proxy that adds forwarding headers.
-- `trigger.json` is the parsed JSON body of the POST. `notify.mobile_app_YOUR_PHONE` is the notify action Home Assistant makes for your phone's companion app; find its exact name in Developer tools > Actions.
-- Source for the trigger options and `trigger.json`: [Home Assistant, Webhook trigger](https://www.home-assistant.io/docs/automation/trigger/#webhook-trigger). That page could not be opened from where this was written, so the YAML above is from memory of it and not checked; test it with the curl line in step 4.
-
 ## 9b. Upgrading to v1.2
 
 v1.2 adds the launcher, the setup wizard, merge check presets, Gitea and pull requests, the Agents page, the model picker and ticket watchers. The server applies any database changes when it starts. Run these in a root shell (no `sudo`), from the repo folder:
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src
+cd /mnt/tank/apps/boss-man/src
 ```
 
 1. **Back up the database** first:
 
    ```sh
-   docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
+   docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F).sql.gz
    ```
 
 2. **Update the code and the server:**
@@ -631,8 +603,8 @@ With this, a server update has no "Boss Man is down for a minute" gap: the new v
 Root shell, no `sudo`. Set the variables once:
 
 ```sh
-D=/mnt/NVME_Apps/Container_files/boss-man/deployer
-cd /mnt/NVME_Apps/Container_files/boss-man/src
+D=/mnt/tank/apps/boss-man/deployer
+cd /mnt/tank/apps/boss-man/src
 ```
 
 **1. Get the new files onto the NAS, by hand** (they are in `deploy/` and `scripts/`, which the deployer refuses to deploy). Boss Man keeps running as a single server:
@@ -649,8 +621,8 @@ ls deploy/truenas-bluegreen.yml deploy/caddy/Caddyfile
 
 ```sh
 cp -p .env .env.before-bluegreen
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/before-bluegreen.sql.gz
-ls -l .env.before-bluegreen /mnt/NVME_Apps/Container_files/boss-man/before-bluegreen.sql.gz
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/before-bluegreen.sql.gz
+ls -l .env.before-bluegreen /mnt/tank/apps/boss-man/before-bluegreen.sql.gz
 ```
 
 **3. Create the proxy folder, owned by root, with the first include.** Nothing a container can write to may hold this file:
@@ -678,14 +650,14 @@ chmod 644 $D/proxy/active.caddy
 setenv() { if grep -q "^$1=" .env; then sed -i "s#^$1=.*#$1=$2#" .env; else echo "$1=$2" >> .env; fi; }
 setenv BOSSMAN_HOST_PORT 3101
 setenv BOSSMAN_PORTAL_HOST_PORT 3111
-setenv BOSSMAN_PORTAL_BIND 192.168.68.67
-setenv BOSSMAN_PORTAL_URL http://192.168.68.67:3111
+setenv BOSSMAN_PORTAL_BIND 192.168.1.50
+setenv BOSSMAN_PORTAL_URL http://192.168.1.50:3111
 grep -q '^BOSSMAN_DEPLOYER=' .env || echo "BOSSMAN_DEPLOYER=$D" >> .env
 sed -i 's#^COMPOSE_FILE=.*#&:deploy/truenas-bluegreen.yml#' .env
 grep -E '^(COMPOSE_FILE|BOSSMAN_HOST_PORT|BOSSMAN_PORTAL_HOST_PORT|BOSSMAN_PORTAL_BIND|BOSSMAN_PORTAL_URL|BOSSMAN_DEPLOYER|BOSSMAN_BIND)=' .env
 ```
 
-`COMPOSE_FILE` must now end in `:deploy/truenas-bluegreen.yml`. `BOSSMAN_BIND` (the address the UI listens on) is unchanged: it must be the NAS address you use for `http://192.168.68.67:3101` (the proxy uses the same variable the server did). Use the same address in the browser as today, so the login cookie keeps working. Check the compose file renders: `docker compose config -q && echo ok`.
+`COMPOSE_FILE` must now end in `:deploy/truenas-bluegreen.yml`. `BOSSMAN_BIND` (the address the UI listens on) is unchanged: it must be the NAS address you use for `http://192.168.1.50:3101` (the proxy uses the same variable the server did). Use the same address in the browser as today, so the login cookie keeps working. Check the compose file renders: `docker compose config -q && echo ok`.
 
 **5. First bring-up, in this order.** The image for blue is built and the database migrated before anything starts. Do not run a bare `docker compose up -d` during this.
 
@@ -706,8 +678,8 @@ docker compose ps proxy server-blue
 Wait for both to say `healthy`. Then check, using your NAS address:
 
 ```sh
-curl -s http://192.168.68.67:3101/api/ready; echo
-curl -s -o /dev/null -w '%{http_code}\n' http://192.168.68.67:3111/portal.html
+curl -s http://192.168.1.50:3101/api/ready; echo
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.1.50:3111/portal.html
 grep 'Live colour' $D/proxy/active.caddy
 docker compose logs server-blue | grep 'LEADER: \*\*\*'
 ```
@@ -721,7 +693,7 @@ The first line should show `"role":"leader"`, the second `200`, the third `blue`
 ```sh
 grep 'Live colour' $D/proxy/active.caddy
 docker compose ps --format '{{.Service}} {{.Status}}' | grep server-
-curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the commit it was built from
+curl -s http://192.168.1.50:3101/api/health; echo     # "role":"leader"; the commit it was built from
 ```
 
 **What the deployer will not do for you**
@@ -744,7 +716,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 
 1. Back up the database:
 ```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/before-rebuild.sql.gz && ls -l /mnt/NVME_Apps/Container_files/boss-man/before-rebuild.sql.gz
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/before-rebuild.sql.gz && ls -l /mnt/tank/apps/boss-man/before-rebuild.sql.gz
 ```
 2. Build blue at the checkout's commit, then migrate:
 ```sh
@@ -760,7 +732,7 @@ docker compose kill -s SIGUSR2 server-green
 ```
 4. Check. Blue's start command should be `node --import tsx src/main.ts`, and `/api/ready` should show `"role":"leader"` with the new commit:
 ```sh
-docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl -s http://192.168.68.67:3101/api/ready; echo
+docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl -s http://192.168.1.50:3101/api/ready; echo
 ```
 
 **If something goes wrong**
@@ -792,7 +764,7 @@ cat > $D/proxy/active.caddy.new <<'INC'
 INC
 chmod 644 $D/proxy/active.caddy.new && mv -fT $D/proxy/active.caddy.new $D/proxy/active.caddy
 docker compose exec -T proxy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose exec -T proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-curl -s http://192.168.68.67:3101/api/ready; echo
+curl -s http://192.168.1.50:3101/api/ready; echo
 ~~~
 
 6. What changes for people: the server now sees each device's real address (before, every device looked like the proxy), so the login attempt limit counts per device.
@@ -876,7 +848,7 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Boss Man stores the token encrypted in its secrets as "ntfy access token", so you do not add it under **Settings > Secrets** yourself. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
-6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
+6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the ntfy address with its port, exactly the `NTFY_BASE_URL` value from step 2 (for example `https://<host-name>.<tailnet>.ts.net:8443`), and log in as `phone-read` with its password. Subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. Boss Man's **Notifications** page shows this address under **Set up your phone**, with a link to check from the phone's browser: open `<ntfy address>/v1/health`, which should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet. A test send that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.
 7. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
 
 Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
@@ -892,11 +864,7 @@ iPhones only get instant delivery from a self-hosted server if the server forwar
 
 ### Approve buttons
 
-ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
-
-### Moving off the Home Assistant webhook
-
-Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook where you set it up.
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when all of these hold: the ntfy server has a publish token; the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` from step 5 (any other `http://` address is refused, so the token never crosses an untrusted network in clear text); Boss Man's public URL is https; and **Approve buttons** haven't been switched off in Notifications. If one fails, Notifications says which.
 
 ### Blue/green installs
 
@@ -916,7 +884,7 @@ ntfy's docs site wasn't reachable when this was written, so the links point at i
 
 The steps are in [docs/20-https-tailscale.md](20-https-tailscale.md), which works on any Docker host. TrueNAS specifics:
 
-- `COMPOSE_FILE` becomes `docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, and the state folder is `/mnt/NVME_Apps/Container_files/boss-man/data/tailscale` (so create it there). Keep it in a dataset your snapshots cover.
+- `COMPOSE_FILE` becomes `docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, and the state folder is `/mnt/tank/apps/boss-man/data/tailscale` (so create it there). Keep it in a dataset your snapshots cover.
 - Use the sidecar, not the TrueNAS Tailscale app: the app cannot show that LAN traffic is kept apart from the trusted address.
 - Blue/green (9d) is not covered yet.
 

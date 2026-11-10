@@ -603,7 +603,11 @@ describe("the guard's section fallback (BOS-797)", () => {
     const x = repo();
     const log: string[] = [];
     const guard = new GitConfigGuard({ PATH: failingUnset("error: invalid key: x") }, (m) => log.push(m));
-    await expect(guard.check(x.file)).rejects.toThrow(/core\.editor.*extensions\.worktreeconfig.*remote\.origin\.pushurl.*remote\.shared\.pushurl/);
+    // Every leftover key is named; their order follows `git config --list`, which differs between git versions (2.56 lists
+    // extensions.worktreeconfig before core.editor).
+    const refused = await guard.check(x.file).then(() => null, (e: Error) => e.message);
+    expect(refused).toMatch(/Refusing to run git/);
+    for (const key of ["core.editor", "extensions.worktreeconfig", "remote.origin.pushurl", "remote.shared.pushurl"]) expect(refused).toContain(key);
     const keys = x.keys();
     expect(keys).toEqual(expect.arrayContaining(kept));
     expect(keys.some((k) => k.startsWith("filter."))).toBe(false);

@@ -49,9 +49,9 @@ describe("starred projects in the sidebar", () => {
 });
 
 describe("settings pages", () => {
-  it("keeps Funding, Rules and Secrets out of the side menu, inside Settings", async () => {
+  it("keeps Funding, Secrets and Permissions out of the side menu, inside Settings", async () => {
     show([], undefined, [], "settings");
-    for (const name of ["Funding", "Rules", "Secrets"]) expect(screen.queryByRole("link", { name })).toBeNull();
+    for (const name of ["Funding", "Permissions", "Secrets"]) expect(screen.queryByRole("link", { name })).toBeNull();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
     cleanup();
     const { Settings } = await import("../src/pages/Settings");
@@ -61,8 +61,10 @@ describe("settings pages", () => {
         <p>the secrets page</p>
       </Settings>,
     );
-    expect(screen.getByRole("tab", { name: "Secrets" }).getAttribute("aria-selected")).toBe("true");
+    // The menu is a list of links, each a page of its own (BOS-1019): the current one is marked aria-current.
+    const menu = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(menu).getByRole("link", { name: /Secrets/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByText("the secrets page")).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Funding" })).toBeTruthy();
+    expect(within(menu).getByRole("link", { name: /Funding/ })).toBeTruthy();
   });
 });

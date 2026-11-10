@@ -87,7 +87,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
-  "components/ReviewPolicy.tsx": "Reviews and CEO",
+  "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",
   "components/TicketLinks.tsx": "Ticket",
@@ -107,13 +107,29 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Plan.tsx": "Plan",
   "pages/Portal.tsx": "Feedback portal",
   "pages/Roadmap.tsx": "Roadmap",
-  "pages/Rules.tsx": "Rules",
+  // The old Rules page is now the Permission rules card on Settings → Permissions (BOS-1019).
+  "pages/Rules.tsx": "Permissions",
   "pages/Run.tsx": "Run",
   "pages/Runs.tsx": "Runs",
   // No buttons of its own, but it shows ScrumMasterLog's.
   "pages/ScrumMaster.tsx": "Scrum Master",
   "pages/Secrets.tsx": "Secrets",
   "pages/Settings.tsx": "Settings",
+  // The Settings page's panels, one file per panel (BOS-1022). Each panel's screen comes from where Settings renders
+  // it (SITE_SCREEN); these entries are the fallback, and the "as shown on Setup" cases.
+  "pages/settings/Credentials.tsx": "Secrets",
+  "pages/settings/Devices.tsx": "Server and runner",
+  "pages/settings/Funding.tsx": "Funding",
+  "pages/settings/Permissions.tsx": "Permissions",
+  "pages/settings/Projects.tsx": "Projects",
+  "pages/settings/Runner.tsx": "Server and runner",
+  "pages/settings/System.tsx": "Server and runner",
+  "pages/settings/Team.tsx": "Team and CEO",
+  "pages/settings/ThisHost.tsx": "Server and runner",
+  "pages/settings/Tools.tsx": "Tools and deploys",
+  "pages/settings/Transfer.tsx": "Import and export",
+  "pages/settings/Watchdog.tsx": "Watchdog",
+  "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
@@ -123,7 +139,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
 
 /** A page component the router (App.tsx) shows as its own screen, where that isn't its file's screen. */
 const PAGE_SCREEN: Record<string, OwnerScreen> = {
-  "pages/Settings.tsx#ProjectsPage": "Projects",
+  "pages/settings/Projects.tsx#ProjectsPage": "Projects",
 };
 /** A render site that is a tab of its page: `file>Component` is that component as that file renders it. */
 const SITE_SCREEN: Record<string, OwnerScreen> = {
@@ -132,40 +148,44 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Board.tsx>ArchiveProject": "Config",
   // The Runs page's emergency stop, its own component in Runs.tsx (BOS-837).
   "pages/Runs.tsx>EndAllRuns": "Runs",
-  // Settings' tabs (Settings.tsx TABS): each panel the Settings page shows, by the tab that shows it (BOS-442).
+  // Settings' pages (Settings.tsx SETTINGS_GROUPS): each panel the Settings page shows, by the page that shows it (BOS-1019).
   "pages/Settings.tsx>StopAllWork": "Server and runner",
   "pages/Settings.tsx>ServerPanel": "Server and runner",
   "pages/Settings.tsx>SelfDeploy": "Server and runner",
   "pages/Settings.tsx>ThisHost": "Server and runner",
   "pages/Settings.tsx>NetguardAllow": "Server and runner",
   "pages/Settings.tsx>RunLimits": "Server and runner",
+  "pages/Settings.tsx>WipLimits": "Server and runner",
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
-  "pages/Settings.tsx>WrapUp": "Server and runner",
+  "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
-  "pages/Settings.tsx>ToolServers": "Access and funding",
-  "pages/Settings.tsx>DeployTargets": "Access and funding",
-  "pages/Settings.tsx>Funding": "Access and funding",
-  "pages/Settings.tsx>CompanyReviews": "Reviews and CEO",
-  "pages/Settings.tsx>TicketPrefix": "Reviews and CEO",
-  "pages/Settings.tsx>GoalCheck": "Reviews and CEO",
-  "pages/Settings.tsx>NudgeCap": "Reviews and CEO",
-  "pages/Settings.tsx>RunTimeLimit": "Reviews and CEO",
-  "pages/Settings.tsx>WorkspaceDisk": "Reviews and CEO",
-  "pages/Settings.tsx>AdviceTimeout": "Reviews and CEO",
-  "pages/Settings.tsx>StandingRules": "Reviews and CEO",
-  "pages/Settings.tsx>PermissionJudgeSetting": "Reviews and CEO",
-  "pages/Settings.tsx>FenceSetting": "Reviews and CEO",
-  "pages/Settings.tsx>SecondOpinionSetting": "Reviews and CEO",
-  "pages/Settings.tsx>Watchdog": "Reviews and CEO",
-  "pages/Settings.tsx>WorkflowRetros": "Reviews and CEO",
-  "pages/Settings.tsx>Chapters": "Reviews and CEO",
+  "pages/Settings.tsx>ToolServers": "Tools and deploys",
+  "pages/Settings.tsx>DeployTargets": "Tools and deploys",
+  "pages/Settings.tsx>Funding": "Funding",
+  "pages/Settings.tsx>ProjectBudgets": "Funding",
+  "pages/Settings.tsx>CompanyReviews": "Reviews",
+  "pages/Settings.tsx>TicketPrefix": "Team and CEO",
+  "pages/Settings.tsx>GoalCheck": "Reviews",
+  "pages/Settings.tsx>NudgeCap": "Team and CEO",
+  "pages/Settings.tsx>RunTimeLimit": "Team and CEO",
+  "pages/Settings.tsx>WorkspaceDisk": "Server and runner",
+  "pages/Settings.tsx>AdviceTimeout": "Team and CEO",
+  "pages/Settings.tsx>StandingRules": "Team and CEO",
+  "pages/Settings.tsx>PermissionJudgeSetting": "Permissions",
+  "pages/Settings.tsx>FenceSetting": "Permissions",
+  "pages/Settings.tsx>SecondOpinionSetting": "Permissions",
+  "pages/Settings.tsx>Watchdog": "Watchdog",
+  "pages/Settings.tsx>WorkflowRetros": "Team and CEO",
+  "pages/Settings.tsx>Chapters": "Team and CEO",
 };
 /** Components the Settings page renders that hold no controls of their own (a wrapper), so need no tab above. */
-const SETTINGS_WRAPPERS = new Set(["Section"]);
+// JumpLinks is the "on this page" nav, which holds no controls of its own; HTMLHeadingElement is the focused page
+// title's type in the useRef call.
+const SETTINGS_WRAPPERS = new Set(["Section", "JumpLinks", "HTMLHeadingElement"]);
 /** Components whose `label` prop is a form field's label (rendered as a <label> from the prop). */
 const FIELD_COMPONENTS = new Set(["CheckPicker"]);
 
@@ -385,7 +405,7 @@ describe("OWNER_CONTROLS matches the web app", () => {
   });
   // The sidebar menu and the Settings tabs are drawn from arrays, so their labels are read from those.
   const sidebar = [...readFileSync(join(WEB, "components/Sidebar.tsx"), "utf8").matchAll(/\{ id: "[\w-]+", label: "([^"]+)"/g)].map((m) => m[1]!);
-  const tabs = [...(/const TABS = \[([\s\S]*?)\] as const/.exec(readFileSync(join(WEB, "pages/Settings.tsx"), "utf8"))?.[1] ?? "").matchAll(/label: "([^"]+)"/g)].map((m) => m[1]!);
+  const tabs = [...readFileSync(join(WEB, "pages/Settings.tsx"), "utf8").matchAll(/\{\s*id: "[\w-]+",\s*label: "([^"]+)",\s*hint: "/g)].map((m) => m[1]!);
   const projectTabs = [...(/const PROJECT_TABS = \[([\s\S]*?)\] as const/.exec(readFileSync(join(WEB, "pages/Board.tsx"), "utf8"))?.[1] ?? "").matchAll(/label: "([^"]+)"/g)].map((m) => m[1]!);
   for (const l of sidebar) add("Any screen", l);
   for (const l of tabs) add("Settings", l);
@@ -401,12 +421,12 @@ describe("OWNER_CONTROLS matches the web app", () => {
   });
 
   it("puts a component on the screens it's shown on, not its file's", () => {
-    expect([...screensOf("pages/Settings.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
-    expect([...screensOf("pages/Settings.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
+    expect([...screensOf("pages/settings/Projects.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
+    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
-    // Funding sources are added on Access and funding (and in Setup), not on the Funding tab (3 Nov, P5).
-    expect([...screensOf("pages/Settings.tsx#Funding")].sort()).toEqual(["Access and funding", "Setup"]);
-    expect([...screensOf("pages/Settings.tsx#Credentials")].sort()).toEqual(["Secrets", "Setup"]);
+    // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
+    expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
+    expect([...screensOf("pages/settings/Credentials.tsx#Credentials")].sort()).toEqual(["Secrets", "Setup"]);
     // Each override still names a real component, and each tab override a file that renders it.
     for (const id of Object.keys(PAGE_SCREEN)) expect(defined.has(id), id).toBe(true);
     for (const site of Object.keys(SITE_SCREEN)) {
