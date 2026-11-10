@@ -163,7 +163,17 @@ export function scan({ items, extra = [], newFiles = [], denylist = [], allow = 
     const k = matchDenylist(text, denylist)
     if (k) blocked.push({ kind: `listed-private-${k}`, where, listed: true })
   }
-  for (const it of items) if (!SKIP_PATH.test(it.file)) check(`${it.file}:${it.line}`, it.file, it.text)
+  // Skipping is by what the content is, not only its name (Freddy, round 2): a lockfile is skipped only when it already
+  // existed (a NEW file called yarn.lock is scanned), and a file with an image/font/pdf name is skipped only for lines
+  // that really are binary (NUL or undecodable bytes), so a text file named x.png is scanned.
+  const fresh = new Set(newFiles)
+  for (const it of items) {
+    if (SKIP_PATH.test(it.file)) {
+      const lock = /(pnpm-lock\.yaml|package-lock\.json|yarn\.lock)$/i.test(it.file)
+      if (lock ? !fresh.has(it.file) : /[\0�]/.test(it.text)) continue
+    }
+    check(`${it.file}:${it.line}`, it.file, it.text)
+  }
   for (const e of extra) check(e.where, null, e.text)
   return { blocked, warnings }
 }
@@ -184,7 +194,19 @@ const git = (args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 2
 function main() {
   const base = process.argv[2] ?? 'origin/main'
   const range = `${base}...HEAD`
-  const diff = git(['diff', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--diff-filter=ACMR', range])
+  // --text: the branch's own .gitattributes ("* -diff") must not turn files into "Binary files differ" and hide lines.
+  // T: a type change (symlink to file) is scanned too.
+  const flags = ['-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--diff-filter=ACMRT']
+  const diff = git(['diff', ...flags, range])
+  // Every commit of the branch lands in main's history, so a secret added in one commit and deleted in the next is
+  // scanned too (Freddy, round 2). Bounded: past MAX_COMMITS the check fails rather than skipping.
+  const MAX_COMMITS = 300
+  const nCommits = Number(git(['rev-list', '--count', '--no-merges', `${base}..HEAD`]).trim())
+  if (nCommits > MAX_COMMITS) {
+    console.log(`BLOCKED too-many-commits at ${base}..HEAD: ${nCommits} commits is more than the ${MAX_COMMITS} the scan reads one by one. Squash the branch.`)
+    process.exit(1)
+  }
+  const perCommit = git(['log', '-p', '--no-merges', '--format=', ...flags, `${base}..HEAD`])
   const newFiles = git(['diff', '--name-only', '--diff-filter=AR', range]).split('\n').filter(Boolean)
   const extra = []
   const log = git(['log', '--no-merges', '--format=%x00%h%x01%ae%x01%ce%x01%B', `${base}..HEAD`])
@@ -197,7 +219,13 @@ function main() {
   const allowPath = fileURLToPath(new URL('./scan-allow.txt', import.meta.url))
   const allow = existsSync(allowPath) ? parseAllow(readFileSync(allowPath, 'utf8')) : new Set()
   // The commit messages are multi-line: scan line by line so a finding names its commit, not a position in a blob.
-  const res = scan({ items: addedLines(diff), extra: extra.flatMap((e) => e.text.split('\n').map((t) => ({ where: e.where, text: t }))), newFiles, denylist, allow })
+  const seen = new Set()
+  const items = [...addedLines(diff), ...addedLines(perCommit)].filter((i) => {
+    const key = `${i.file}\t${i.line}\t${i.text}`
+    return seen.has(key) ? false : (seen.add(key), true)
+  })
+  if (!denylist.length) console.log("scan: NOTE the owner's private-details list was not applied (empty or not readable); only the secret rules ran")
+  const res = scan({ items, extra: extra.flatMap((e) => e.text.split('\n').map((t) => ({ where: e.where, text: t }))), newFiles, denylist, allow })
   const out = format(res)
   if (out) console.log(out)
   if (res.blocked.length) {

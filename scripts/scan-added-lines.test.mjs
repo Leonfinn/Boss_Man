@@ -106,3 +106,48 @@ test('a "-- " removed line and a "++ /dev/null" added line do not change the fil
   const r = scan({ items: addedLines(diff) })
   assert.equal(r.blocked.length, 1)
 })
+
+// End to end on a real throwaway repo (made-up fake key, built from parts).
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const scanner = fileURLToPath(new URL('./scan-added-lines.mjs', import.meta.url))
+function repoRun(steps) {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-e2e-'))
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' } })
+  try {
+    g('init', '-q', '-b', 'main'); writeFileSync(join(dir, 'a.txt'), 'hello\n'); g('add', '.'); g('commit', '-qm', 'base')
+    g('checkout', '-qb', 'work')
+    for (const [i, files] of steps.entries()) {
+      for (const [f, c] of Object.entries(files)) writeFileSync(join(dir, f), c)
+      g('add', '-A'); g('commit', '-qm', `step ${i}`)
+    }
+    try { return { code: 0, out: execFileSync('node', [scanner, 'main'], { cwd: dir, encoding: 'utf8' }) } }
+    catch (e) { return { code: e.status, out: String(e.stdout) } }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+}
+
+test('e2e: a key added in one commit and removed in the next is still blocked', () => {
+  const r = repoRun([{ 'k.txt': `token = ${fakeGithub}\n` }, { 'k.txt': 'gone\n' }])
+  assert.equal(r.code, 1); assert.ok(!r.out.includes(fakeGithub))
+})
+
+test('e2e: .gitattributes "* -diff" does not hide an added key', () => {
+  const r = repoRun([{ '.gitattributes': '* -diff\n', 'k.txt': `token = ${fakeGithub}\n` }])
+  assert.equal(r.code, 1); assert.ok(!r.out.includes(fakeGithub))
+})
+
+test('e2e: a text file named yarn.lock or x.png is scanned when new', () => {
+  const r = repoRun([{ 'yarn.lock': `token = ${fakeGithub}\n` }])
+  assert.equal(r.code, 1)
+  const r2 = repoRun([{ 'x.png': `token = ${fakeGithub}\n` }])
+  assert.equal(r2.code, 1)
+})
+
+test('e2e: a clean branch passes and says the list was not applied', () => {
+  const r = repoRun([{ 'b.txt': 'host is myserver.example.com\n' }])
+  assert.equal(r.code, 0); assert.match(r.out, /list was not applied/)
+})
