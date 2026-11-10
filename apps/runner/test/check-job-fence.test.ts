@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { levelFor, probeLandlock, type FenceLevel } from "../src/fence.js";
+import { levelFor, probeLandlock, shortTmpName, SOCKET_SUFFIX_ROOM, SUN_PATH_MAX, type FenceLevel } from "../src/fence.js";
 import { Workspaces } from "../src/workspace.js";
 
 const level = levelFor(probeLandlock().abi).level;
@@ -67,7 +67,14 @@ describe("unfenced check job (BOS-655)", () => {
     const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
     expect(r.ok).toBe(true);
     expect(r.output).toContain(`home=${home}`);
-    expect(r.output).toContain(`tmp=${path.join(home, "tmp")}`);
+    expect(r.output).toContain(`tmp=${path.join(root, "jt", shortTmpName(jobId))}`);
+    expect(existsSync(path.join(root, "jt", shortTmpName(jobId)))).toBe(false);
+    // BOS-1087: a socket under the job's TMPDIR must fit in sun_path (107 bytes). The test root is longer than a real
+    // runner's, so measure the part under the root and put it on the real workspaces root (/home/node/workspaces).
+    const tmpPrinted = /tmp=(.*)/.exec(r.output)![1]!;
+    const onRealRoot = path.join("/home/node/workspaces", path.relative(root, tmpPrinted));
+    expect(Buffer.byteLength(onRealRoot) + SOCKET_SUFFIX_ROOM).toBeLessThanOrEqual(SUN_PATH_MAX);
+    expect(Buffer.byteLength(onRealRoot)).toBeLessThanOrEqual(40);
     expect(r.output).toContain(`store=${store}`);
     expect(r.output).not.toContain(gate);
     expect(existsSync(home)).toBe(false);

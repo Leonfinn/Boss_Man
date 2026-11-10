@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
-import { levelFor, probeLandlock, runnerFence } from "../src/fence.js";
+import { levelFor, probeLandlock, runnerFence, shortTmpName } from "../src/fence.js";
 import { SessionManager } from "../src/session-manager.js";
 
 const level = levelFor(probeLandlock().abi).level;
@@ -52,7 +52,7 @@ async function crossRun(sameAgent: boolean) {
   const token = `bm_run_isolation-${randomUUID()}`;
   const secret = `stand-in-secret-${randomUUID()}`;
   const fence = runnerFence(level, dataDir, path.join(root, "workspaces"));
-  const runTmpA = path.join(fence.runTmpRoot, runA);
+  const runTmpA = path.join(fence.runTmpRoot, shortTmpName(runA));
   const mcpA = path.join(runTmpA, "mcp", "mcp.json");
   const homeA = path.join(fence.agentsRoot, agentA);
   // B aims at wherever A's files really are (what A's adapter saw), not where this test expects them.
