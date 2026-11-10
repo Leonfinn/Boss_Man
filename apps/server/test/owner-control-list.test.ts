@@ -115,6 +115,21 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/ScrumMaster.tsx": "Scrum Master",
   "pages/Secrets.tsx": "Secrets",
   "pages/Settings.tsx": "Settings",
+  // The Settings page's panels, one file per panel (BOS-1022). Each panel's screen comes from where Settings renders
+  // it (SITE_SCREEN); these entries are the fallback, and the "as shown on Setup" cases.
+  "pages/settings/Credentials.tsx": "Secrets",
+  "pages/settings/Devices.tsx": "Server and runner",
+  "pages/settings/Funding.tsx": "Funding",
+  "pages/settings/Permissions.tsx": "Permissions",
+  "pages/settings/Projects.tsx": "Projects",
+  "pages/settings/Runner.tsx": "Server and runner",
+  "pages/settings/System.tsx": "Server and runner",
+  "pages/settings/Team.tsx": "Team and CEO",
+  "pages/settings/ThisHost.tsx": "Server and runner",
+  "pages/settings/Tools.tsx": "Tools and deploys",
+  "pages/settings/Transfer.tsx": "Import and export",
+  "pages/settings/Watchdog.tsx": "Watchdog",
+  "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
@@ -124,7 +139,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
 
 /** A page component the router (App.tsx) shows as its own screen, where that isn't its file's screen. */
 const PAGE_SCREEN: Record<string, OwnerScreen> = {
-  "pages/Settings.tsx#ProjectsPage": "Projects",
+  "pages/settings/Projects.tsx#ProjectsPage": "Projects",
 };
 /** A render site that is a tab of its page: `file>Component` is that component as that file renders it. */
 const SITE_SCREEN: Record<string, OwnerScreen> = {
@@ -144,7 +159,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
-  "pages/Settings.tsx>WrapUpAction": "Server and runner",
+  "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
@@ -406,12 +421,12 @@ describe("OWNER_CONTROLS matches the web app", () => {
   });
 
   it("puts a component on the screens it's shown on, not its file's", () => {
-    expect([...screensOf("pages/Settings.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
-    expect([...screensOf("pages/Settings.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
+    expect([...screensOf("pages/settings/Projects.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
+    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
     // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
-    expect([...screensOf("pages/Settings.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
-    expect([...screensOf("pages/Settings.tsx#Credentials")].sort()).toEqual(["Secrets", "Setup"]);
+    expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
+    expect([...screensOf("pages/settings/Credentials.tsx#Credentials")].sort()).toEqual(["Secrets", "Setup"]);
     // Each override still names a real component, and each tab override a file that renders it.
     for (const id of Object.keys(PAGE_SCREEN)) expect(defined.has(id), id).toBe(true);
     for (const site of Object.keys(SITE_SCREEN)) {
