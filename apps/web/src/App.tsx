@@ -15,11 +15,10 @@ import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
 import { MergeQueue } from "./pages/MergeQueue";
-import { ProjectsPage, Settings } from "./pages/Settings";
+import { ProjectsPage, Settings, settingsRedirect } from "./pages/Settings";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
-import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { ScrumMaster } from "./pages/ScrumMaster";
 import { Workflow } from "./pages/Workflow";
@@ -212,9 +211,17 @@ export function ServerBanner() {
 }
 
 function Signed({ onLogout }: { onLogout: () => void }) {
-  const [route, go] = useRoute();
-  const page = route[0] ?? "dashboard";
+  const [rawRoute, go] = useRoute();
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
+  // The old Settings addresses keep working (BOS-1019): the redirect runs before anything renders, so an old
+  // link lands on the new page and a bookmarked #/rules/a1 opens Permissions for that company.
+  const route = rawRoute;
+  const page = route[0] ?? "dashboard";
+  const routeCompany = route[1] && route[1] !== "all" ? companies.data?.find((c) => c.id === route[1]) : undefined;
+  const redirect = page ? settingsRedirect(route, routeCompany?.id) : null;
+  useEffect(() => {
+    if (redirect) go(redirect);
+  }, [redirect, go]);
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
@@ -338,7 +345,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
-        {page === "board" ? (
+        {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
@@ -368,14 +375,12 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Workflow company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
-        ) : page === "funding" || page === "rules" || page === "secrets" ? (
-          <Settings companies={list} companyId={companyId} tab={page} go={go} onChanged={companies.reload}>
-            {page === "funding" ? <Funding companies={list} /> : page === "rules" ? <Rules companies={list} companyId={companyId} go={go} /> : <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />}
-          </Settings>
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
-          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload} />
+          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload}>
+            {route[2] === "secrets" ? <Secrets companies={list} companyId={companyId} onChanged={companies.reload} /> : route[2] === "permissions" ? <Rules companies={list} companyId={companyId} go={go} /> : null}
+          </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
         ) : page === "setup" ? (

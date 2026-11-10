@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { FENCE_OFF_CONSEQUENCE, RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type DeviceProfile, type FundingSource, type Project } from "../api";
 import { collect } from "../devices";
@@ -14,6 +14,7 @@ import { toBase64 } from "./Skills";
 import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../host-facts-display";
 import { clearDraft, readDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { ProjectBudget } from "./ProjectBudget";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
@@ -1014,7 +1015,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         {editing && <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 14 }}>Spend already recorded stays, but it's counted by this source's current kind, so changing the kind changes how past spend counts too (for example, a subscription's spend never counts toward money caps).</p>}
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn primary" type="submit" disabled={act.busy}>
-            {editing ? "Save" : "Add"}
+            {editing ? "Save" : "Add funding source"}
           </button>
           {editing && (
             <button className="btn" type="button" onClick={() => (setEditing(null), setForm(blank))}>
@@ -1024,6 +1025,30 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         </div>
       </form>
       {act.view}
+    </Section>
+  );
+}
+
+/** Each project's budget (Funding → Budgets, BOS-1018): the same figures the project's Budget tab shows. */
+function ProjectBudgets({ company }: { company: Company }) {
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `settings-budgets-${company.id}`);
+  const rows = (projects.data ?? []).filter((p) => !p.archivedAt);
+  return (
+    <Section id="budgets-h" title="Budgets">
+      <p className="muted" style={{ fontSize: 14 }}>
+        What each project has cost, and its cap per task and per month. Set a project's caps on its Config tab.
+      </p>
+      {projects.error ? <p className="error" role="alert">{projects.error.message}</p> : null}
+      {projects.data === null ? <p className="muted">Loading…</p> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {rows.map((p) => (
+            <div key={p.id}>
+              <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{p.name}</h3>
+              <ProjectBudget project={p} />
+            </div>
+          ))}
+        </div>
+      )}
     </Section>
   );
 }
@@ -3183,18 +3208,6 @@ function ColourRow({ c }: { c: Colour }) {
   );
 }
 
-const TABS = [
-  { id: "system", label: "Server and runner", help: "This install's server and updates, and the company's runner." },
-  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts, and where they deploy." },
-  { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
-  { id: "transfer", label: "Import and export", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template." },
-  // These three are pages of their own (#/funding, #/rules, #/secrets), shown inside Settings.
-  { id: "funding", label: "Funding", help: "Where agent work is paid from, and how much is left this cycle." },
-  { id: "rules", label: "Rules", help: "What happens when an agent asks to use a tool." },
-  { id: "secrets", label: "Secrets", help: "Every stored credential, who gets it, and when it was used." },
-] as const;
-const OWN_PAGE = new Set<string>(["funding", "rules", "secrets"]);
-
 type ImportPreview = {
   company: { name: string; nameTaken: boolean };
   counts: Record<"agents" | "skills" | "projects" | "objectives" | "features" | "toolServers" | "wikiPages" | "tickets", number>;
@@ -3493,102 +3506,320 @@ export function Devices() {
   );
 }
 
+// The Settings menu (BOS-1019, from the approved structure in BOS-1018): 9 pages in 3 groups, each a URL of its own.
+// "On wide screens it is a sticky menu column; on a phone #/settings opens on the menu itself.
+export type SettingsPage = "funding" | "secrets" | "tools" | "reviews" | "team" | "watchdog" | "permissions" | "system" | "transfer";
+type SettingsEntry = { id: SettingsPage; label: string; hint: string; help: string; allCompanies?: boolean; jump?: Array<{ id: string; label: string }> };
+export const SETTINGS_GROUPS: ReadonlyArray<{ label: string; items: readonly SettingsEntry[] }> = [
+  {
+    label: "Money and access",
+    items: [
+      { id: "funding", label: "Funding", hint: "Accounts agents run on, and budgets", help: "The subscriptions and API accounts agents run on, so their cost and quota are tracked, and each project's budget." },
+      { id: "secrets", label: "Secrets", hint: "Keys and tokens, and who gets them", help: "Every stored credential, who gets it, and when it was used." },
+      { id: "tools", label: "Tools and deploys", hint: "Tool servers and deploy targets", help: "Tool servers (MCP) that give agents extra tools, and the deploy targets work can ship to." },
+    ],
+  },
+  {
+    label: "How the team works",
+    items: [
+      { id: "reviews", label: "Reviews", hint: "Who approves work at each risk level", help: "For each risk level, who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page." },
+      {
+        id: "team",
+        label: "Team and CEO",
+        hint: "Standing rules, the CEO, nudges, time limits",
+        help: "How the team works together: its standing rules, the CEO's chapters, nudges, run time limit, workflow retros and ticket references.",
+        jump: [
+          { id: "standing-rules-h", label: "Standing rules" },
+          { id: "chapters-h", label: "CEO chapters" },
+          { id: "advice-timeout-h", label: "Asking the CEO for advice" },
+          { id: "nudge-cap-h", label: "Nudges" },
+          { id: "run-time-limit-h", label: "Run time limit" },
+          { id: "retro-h", label: "Workflow retros" },
+          { id: "ticket-prefix-h", label: "Ticket references" },
+        ],
+      },
+      { id: "watchdog", label: "Watchdog", hint: "When the Scrum Master steps in", help: "The Scrum Master's watchdog: who it wakes, its limits and its safety cap." },
+      {
+        id: "permissions",
+        label: "Permissions",
+        hint: "What agents may do, and the fence",
+        help: "Permission rules for what agents may do, advice on permission cards, the second opinion, and the agent fence.",
+        jump: [
+          { id: "rules-h", label: "Permission rules" },
+          { id: "permission-judge-h", label: "Advice on permission cards" },
+          { id: "second-opinion-h", label: "Second opinion" },
+          { id: "fence-h", label: "Agent fence" },
+        ],
+      },
+    ],
+  },
+  {
+    label: "Boss Man",
+    items: [
+      {
+        id: "system",
+        label: "Server and runner",
+        hint: "Updates, the runner, stop all work",
+        help: "This install's server and updates, and the company's runner.",
+        allCompanies: true,
+        jump: [
+          { id: "stop-all-h", label: "Stop all work" },
+          { id: "deploy-h", label: "Updates" },
+          { id: "runner-h", label: "Runner" },
+          { id: "run-limits-h", label: "Agents at once" },
+          { id: "check-queue-h", label: "Checks" },
+          { id: "server-h", label: "Server" },
+          { id: "this-host-h", label: "This host" },
+          { id: "netguard-allow-h", label: "Network guard" },
+          { id: "devices-h", label: "Your devices" },
+        ],
+      },
+      { id: "transfer", label: "Import and export", hint: "Move a company in or out as one file", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template.", allCompanies: true },
+    ],
+  },
+];
+export const SETTINGS_PAGES = SETTINGS_GROUPS.flatMap((g) => g.items);
+const settingsEntry = (id: string | undefined) => SETTINGS_PAGES.find((p) => p.id === id);
+/** The address of a Settings page: its own URL for a company, else the menu. */
+export const settingsPath = (companyId: string | undefined, page: SettingsPage) => (companyId ? `settings/${companyId}/${page}` : "settings");
+
+/**
+ * The old Settings addresses and anchors, kept working forever (BOS-1018 build notes). A route as the URL reader
+ * makes it (`useRoute` splits on "/"), answered with the address that replaces it, or null for one that still works.
+ */
+export function settingsRedirect(route: readonly string[], companyId: string | undefined): string | null {
+  const [page, ...rest] = route;
+  if (page === "settings") {
+    // The company's id is the first part after "settings"; the page is the second.
+    if (rest.length <= 1) return null;
+    const [company, tab] = [rest[0], rest[1]];
+    if (settingsEntry(tab)) return null;
+    // The two tabs that were split up (BOS-1018's old → new map): their links land on the page that took each part.
+    if (tab === "access") return `settings/${company}/tools`;
+    if (tab === "workflow") return `settings/${company}/reviews`;
+    // Any other page that no longer exists opens the menu rather than a page that is gone.
+    return "settings";
+  }
+  if (page === "funding") return settingsPath(companyId, "funding");
+  if (page === "secrets") return settingsPath(companyId, "secrets");
+  // The Rules page was its own page; it is now Permissions, and its scope (a company id, or "all") is kept.
+  if (page === "rules") return settingsPath(rest[0] && rest[0] !== "all" ? rest[0] : companyId, "permissions");
+  return null;
+}
+
+/** "On this page" jump links: Tab reaches each one, and Enter moves focus to the section's heading. */
+function JumpLinks({ items }: { items: NonNullable<SettingsEntry["jump"]> }) {
+  return (
+    <nav aria-label="On this page" className="set-jump">
+      <span className="muted">On this page:</span>
+      <ul>
+        {items.map((j) => (
+          <li key={j.id}>
+            <a
+              href={`#${j.id}`}
+              onClick={() => {
+                document.getElementById(j.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                document.getElementById(j.id)?.focus?.({ preventScroll: true });
+              }}
+            >
+              {j.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+/**
+ * The Settings page shell: the menu of pages and the page itself. Each item is a page with its own URL, so the
+ * menu is a list of links, not a tablist (BOS-1018 §3). Below 900 px the address `#/settings` opens the menu and a
+ * page shows "‹ Settings" at the top.
+ */
 export function Settings({ companies, companyId, tab, go, onChanged, children }: { companies: Company[]; companyId: string | undefined; tab: string | undefined; go: (to: string) => void; onChanged: () => void; children?: ReactNode }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
-  const current = TABS.find((t) => t.id === tab) ?? TABS[0];
+  const current = settingsEntry(tab);
+  const heading = useRef<HTMLHeadingElement>(null);
+  // Focus goes to the page's title when the page changes (BOS-1018 §3), not on the first draw.
+  const shown = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!current) return;
+    if (shown.current === undefined) shown.current = current.id;
+    else if (shown.current !== current.id) {
+      shown.current = current.id;
+      heading.current?.focus?.({ preventScroll: false });
+    }
+  }, [current]);
+  const wizard = (
+    <button type="button" className="btn" onClick={() => go("setup")}>
+      Run the setup wizard
+    </button>
+  );
+  const menu = (
+    <nav aria-label="Settings" className="set-nav">
+      {SETTINGS_GROUPS.map((g) => (
+        <div key={g.label} className="set-group">
+          <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">
+            {g.label}
+          </h2>
+          <ul aria-labelledby={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`}>
+            {g.items.map((p) => (
+              <li key={p.id}>
+                <a href={`#/${settingsPath(company?.id, p.id)}`} aria-current={current?.id === p.id ? "page" : undefined} onClick={() => { if (p.id === current?.id) heading.current?.focus?.({ preventScroll: false }); }}>
+                  <span className="set-item-label">{p.label}</span>
+                  <span className="set-item-hint">{p.hint}</span>
+                  <span className="set-item-chevron" aria-hidden="true">›</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <div className="set-wizard">{wizard}</div>
+    </nav>
+  );
+  const line = !company ? (
+    <p>
+      Create a company on the Kanban first, or{" "}
+      <button type="button" className="linkish" onClick={() => go("setup")}>
+        run the setup wizard
+      </button>
+      .
+    </p>
+  ) : null;
+  const panels: Record<SettingsPage, ReactNode> = {
+    funding: (
+      <>
+        {company ? (
+          <div key={company.id} style={{ display: "contents" }}>
+            <Funding company={company} onChanged={onChanged} />
+            <ProjectBudgets company={company} />
+          </div>
+        ) : (
+          line
+        )}
+        <p className="muted" style={{ fontSize: 14 }}>
+          Runs going now are on the <a href="#/runs">Runs page</a>.
+        </p>
+      </>
+    ),
+    secrets: <div className="embedded-page">{children}</div>,
+    tools: company ? (
+      <div key={company.id} style={{ display: "contents" }}>
+        <ToolServers company={company} />
+        <DeployTargets company={company} />
+      </div>
+    ) : (
+      line
+    ),
+    reviews: company ? (
+      <div key={company.id} style={{ display: "contents" }}>
+        <Section id="reviews-h" title="Reviews">
+          <p className="muted" style={{ fontSize: 14 }}>
+            For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
+          </p>
+          <CompanyReviews companyId={company.id} agents={company.agents} />
+        </Section>
+        <GoalCheck company={company} onChanged={onChanged} />
+      </div>
+    ) : (
+      line
+    ),
+    team: company ? (
+      <div key={company.id} style={{ display: "contents" }}>
+        <StandingRules company={company} onChanged={onChanged} />
+        <Chapters company={company} />
+        <AdviceTimeout company={company} onChanged={onChanged} />
+        <NudgeCap company={company} onChanged={onChanged} />
+        <RunTimeLimit company={company} onChanged={onChanged} />
+        <WorkflowRetros company={company} />
+        <TicketPrefix company={company} onChanged={onChanged} />
+      </div>
+    ) : (
+      line
+    ),
+    watchdog: company ? <Watchdog key={company.id} company={company} /> : line,
+    permissions: company ? (
+      <div key={company.id} style={{ display: "contents" }}>
+        <div className="embedded-page">{children}</div>
+        <PermissionJudgeSetting company={company} onChanged={onChanged} />
+        <SecondOpinionSetting company={company} />
+        <FenceSetting company={company} onChanged={onChanged} />
+      </div>
+    ) : (
+      line
+    ),
+    system: (
+      <>
+        <StopAllWork />
+        <SelfDeploy go={go} />
+        {company ? (
+          <div key={company.id} style={{ display: "contents" }}>
+            <RunnerUpdate />
+            <Runner company={company} />
+            <WorkspaceDisk company={company} onChanged={onChanged} />
+          </div>
+        ) : (
+          <div style={{ display: "contents" }}>
+            <RunnerUpdate />
+            {line}
+          </div>
+        )}
+        <RunLimits />
+        <WipLimits />
+        <CheckQueueSetting />
+        <ServerPanel />
+        <ThisHost />
+        <NetguardAllow />
+        <Devices />
+      </>
+    ),
+    transfer: (
+      <>
+        {company ? <ExportCompany key={company.id} company={company} /> : line}
+        <ImportCompany go={go} onChanged={onChanged} />
+      </>
+    ),
+  };
+  if (!current) {
+    // The menu itself (BOS-1018 §3): the phone's opening screen, and where a bare #/settings lands.
+    return (
+      <>
+        <header className="page-head">
+          <div>
+            <h1>Settings</h1>
+            <p className="sub">How {company?.name ?? "this company"} and this Boss Man are set up. Projects and their repos are on the Projects page.</p>
+          </div>
+          <div className="set-head-wizard">{wizard}</div>
+        </header>
+        {menu}
+      </>
+    );
+  }
   return (
     <>
       <header className="page-head">
         <div>
-          <h1>Settings</h1>
-          <p className="sub">What each company needs to run: a runner, credentials and funding. Repos are set per project on the Projects page.</p>
+          <a className="set-back" href="#/settings" onClick={(e) => { e.preventDefault(); go("settings"); }}>
+            ‹ Settings
+          </a>
+          <h1>
+            {current.label}
+            {current.allCompanies && <span className="tag set-scope">All companies</span>}
+          </h1>
+          <p className="sub">{current.help}</p>
         </div>
-        <button type="button" className="btn" onClick={() => go("setup")}>
-          Run the setup wizard
-        </button>
+        <div className="set-head-wizard">{wizard}</div>
       </header>
-      <div className="tabs" role="tablist" aria-label="Settings pages">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" role="tab" id={`set-tab-${t.id}`} aria-selected={current.id === t.id} aria-controls="set-panel" onClick={() => go(OWN_PAGE.has(t.id) ? t.id : company ? `settings/${company.id}/${t.id}` : "settings")}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-      <div id="set-panel" role="tabpanel" aria-labelledby={`set-tab-${current.id}`} style={{ display: "flex", flexDirection: "column", gap: 20, marginTop: 16 }}>
-        <p className="muted" style={{ fontSize: 13 }}>
-          {current.help}
-        </p>
-        {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
-        {current.id === "system" && (
-          <>
-            <StopAllWork />
-            <ServerPanel />
-            <SelfDeploy go={go} />
-            <ThisHost />
-            <NetguardAllow />
-            <RunLimits />
-            <WipLimits />
-            <CheckQueueSetting />
-          </>
-        )}
-        {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
-        {OWN_PAGE.has(current.id) ? null : !company ? (
-          current.id === "transfer" ? null : (
-          <p>
-            Create a company on the Kanban first, or{" "}
-            <button type="button" className="linkish" onClick={() => go("setup")}>
-              run the setup wizard
-            </button>
-            .
-          </p>
-          )
-        ) : current.id === "system" ? (
-          <div key={company.id} style={{ display: "contents" }}>
-            <Runner company={company} />
-            <RunnerUpdate />
-            <Devices />
-          </div>
-        ) : current.id === "transfer" ? (
-          <ExportCompany key={company.id} company={company} />
-        ) : current.id === "access" ? (
-          <div key={company.id} style={{ display: "contents" }}>
-            <section className="card">
-              <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
-              <p className="muted" style={{ fontSize: 14 }}>
-                Credentials are added, granted and rotated on the{" "}
-                <button type="button" className="linkish" onClick={() => go("secrets")}>
-                  Secrets
-                </button>{" "}
-                page.
-              </p>
-            </section>
-            <ToolServers company={company} />
-            <DeployTargets company={company} />
-            <Funding company={company} onChanged={onChanged} />
-          </div>
-        ) : (
-          <div key={company.id} style={{ display: "contents" }}>
-            <Section id="reviews-h" title="Reviews">
-              <p className="muted" style={{ fontSize: 14 }}>
-                For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
-              </p>
-              <CompanyReviews companyId={company.id} agents={company.agents} />
-            </Section>
-            <TicketPrefix company={company} onChanged={onChanged} />
-            <GoalCheck company={company} onChanged={onChanged} />
-            <NudgeCap company={company} onChanged={onChanged} />
-            <RunTimeLimit company={company} onChanged={onChanged} />
-            <WorkspaceDisk company={company} onChanged={onChanged} />
-            <AdviceTimeout company={company} onChanged={onChanged} />
-            <StandingRules company={company} onChanged={onChanged} />
-            <PermissionJudgeSetting company={company} onChanged={onChanged} />
-            <FenceSetting company={company} onChanged={onChanged} />
-            <SecondOpinionSetting company={company} />
-            <Watchdog company={company} />
-            <WorkflowRetros company={company} />
-            <Chapters company={company} />
-          </div>
-        )}
+      <div className="set-layout">
+        {menu}
+        <div className="set-page">
+          {current.jump && <JumpLinks items={current.jump} />}
+          <h2 ref={heading} tabIndex={-1} className="set-page-title" style={{ display: "none" }}>
+            {current.label}
+          </h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>{panels[current.id]}</div>
+        </div>
       </div>
     </>
   );

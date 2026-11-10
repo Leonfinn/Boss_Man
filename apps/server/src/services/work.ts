@@ -418,7 +418,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
 
     async createTicket(projectId: string, input: TicketPatch & { title: string }) {
       const p = await project(projectId);
-      if (p.archivedAt) throw new WorkError(409, `${p.name} is archived. Unarchive it in Settings → Projects to add tasks to it.`);
+      if (p.archivedAt) throw new WorkError(409, `${p.name} is archived. Unarchive it on the Projects page to add tasks to it.`);
       if (input.assigneeAgentId) await assertAgentInCompany(input.assigneeAgentId, p.companyId);
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
