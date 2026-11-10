@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
-import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
+import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, TOOL_KINDS, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -16,7 +16,6 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
-import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "./services/agent-wip.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
@@ -92,9 +91,10 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
-import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS, type CheckQueueMode } from "./services/check-queue.js";
+import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
+import { settingsLimitsRoutes } from "./routes/settings-limits.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -890,6 +890,11 @@ export async function buildApp(opts: AppOptions) {
   const mergeJam = mergeJamService(db, {
     view: (companyId) => mergeQueue.get(companyId),
     notify: (input) => notes.notify(input),
+    // A card holding an approved merge that looks stale goes to the CEO once (BOS-1078).
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -1141,17 +1146,7 @@ export async function buildApp(opts: AppOptions) {
       return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id), projects: allProjects.filter((p) => p.companyId === c.id) }));
     });
 
-    /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
-    // With ?companyId the reviewer and sign-off come from that company's review policy.
-    owner.get("/api/risk-tiers", async (req) => {
-      const { companyId } = z.object({ companyId: Uuid.optional() }).parse(req.query);
-      if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
-      const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
-      if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
-      const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
-      const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
-      return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
-    });
+    // What each risk tier means (R61) is served from routes/settings-limits.ts, registered below with the limits.
 
     // Review routing: per risk tier, who approves plans, who reviews code and whether the owner signs off.
     // Validates the policy, and that every agent it names belongs to the company.
@@ -1275,103 +1270,9 @@ export async function buildApp(opts: AppOptions) {
 
     // Notifications (R44): the feed.
     notificationRoutes(owner, { notes });
-    // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
-    // Infinite-mode agents have their own "background" slots instead (BOS-279), so slow free runs never take a normal one.
-    const runLimits = async () => {
-      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-      const v = row?.value as { instance?: number; company?: number; background?: number } | undefined;
-      return {
-        instance: v?.instance ?? scheduler.limits.instance,
-        company: v?.company ?? scheduler.limits.company,
-        background: v?.background ?? scheduler.limits.background,
-        defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
-      };
-    };
-    owner.get("/api/run-limits", async () => runLimits());
-    owner.put("/api/run-limits", async (req) => {
-      const value = z
-        .object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16), background: z.number().int().min(0).max(16).optional() })
-        .refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." })
-        .parse(req.body);
-      // A saved value without background (an older save) keeps whatever is stored, so this write never resets it to the default.
-      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-      const before = row?.value as { background?: number } | undefined;
-      const merged = { instance: value.instance, company: value.company, background: value.background ?? before?.background ?? DEFAULT_LIMITS.background };
-      await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
-      return runLimits();
-    });
-    // Tickets in progress per agent, and (optionally) in the whole company (BOS-1029). null is "No limit".
-    owner.get("/api/wip-limits", async () => ({ ...(await readWipLimits(db)), defaultAgent: DEFAULT_AGENT_WIP_LIMIT }));
-    owner.put("/api/wip-limits", async (req) => {
-      const value = z.object({ agent: z.number().int().min(1).max(50).nullable(), company: z.number().int().min(1).max(1000).nullable() }).parse(req.body);
-      await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
-      return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
-    });
-    // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
-    // Owner only: no agent tool or route writes these settings.
-    const checkQueueView = async () => {
-      const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
-      const live = rows.filter((r) => runners.isConnected(r.id));
-      const slots = await checkQueueSvc.slots();
-      // BOS-993: the limit a runner really gets (the launcher works it out from the setting, .env bounds and host memory) and whether runners already have it.
-      const lc = await launch.checks();
-      const hold = await getHold(db);
-      const runner = lc
-        ? {
-            slots: lc.slots,
-            memoryBytes: lc.memoryBytes,
-            // Only meaningful once the launcher has been sent the setting; before that it is the .env value.
-            reason: lc.requested === slots ? lc.reason : null,
-            // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
-            runnerCount: lc.runners.length,
-            pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,
-            applying: hold?.kind === "settings",
-          }
-        : null;
-      return {
-        mode: await checkQueueSvc.mode(),
-        slots,
-        runner,
-        maxSlots: MAX_CHECK_SLOTS,
-        defaultSlots: DEFAULT_CHECK_SLOTS,
-        // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
-        runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
-      };
-    };
-    owner.get("/api/settings/check-queue", async () => checkQueueView());
-    owner.put("/api/settings/check-queue", async (req) => {
-      const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
-      const was = await checkQueueSvc.mode();
-      const slotsWere = await checkQueueSvc.slots();
-      await checkQueueSvc.setSlots(b.slots);
-      await checkQueueSvc.setMode(b.mode);
-      // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
-      // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
-      let applying = false;
-      if (launch.enabled && b.slots !== slotsWere) {
-        try {
-          await launch.setChecks(b.slots);
-          const lc = await launch.checks();
-          if (lc?.runners.some((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes)) {
-            await maintenance.start({ kind: "settings" }); // leader-only
-            applying = true;
-          }
-        } catch (e) {
-          app.log.error(`check slots: could not apply to the runners: ${(e as Error).message}`);
-        }
-      }
-      // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
-      // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
-      let cancelled = 0;
-      if (was === "server" && b.mode === "legacy")
-        for (const id of await checkQueueSvc.queuedIds())
-          if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
-      if (b.mode === "server") await checks.pump();
-      return { ...(await checkQueueView()), cancelled, applying };
-    });
-    // BOS-313: check the merged result before pushing it (off by default while it rolls out).
-    owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
-    owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
+    // The run and WIP limits and the check-queue and merged-result settings: routes/settings-limits.ts, on this owner scope.
+    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
+
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
     // BOS-770: Settings → Server and runner. The .env network-guard allow entries and which ones Boss Man already covers. Read only.

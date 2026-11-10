@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Write your first ticket: Boss Man guides</title>
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body class="guide-page">
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
+    <nav aria-label="Main" id="main-menu">
+      <a href="#" aria-current="page">Guides</a>
+      <a href="#" class="ext">Roadmap<span class="sr"> and feedback, on our feedback portal</span><span class="arrow" aria-hidden="true">↗</span><span class="menu-sub" aria-hidden="true">See what's planned, vote and suggest</span></a>
+      <a href="about.html">About</a>
+      <a href="#">FAQ</a>
+      <a href="#">GitHub</a>
+      <a class="btn small" href="#">Install</a>
+    </nav>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="main-menu">Menu</button>
+  </div>
+</header>
+
+<div class="wrap guide">
+  <!-- Left: every guide, grouped. On a phone this folds into the "All guides" button. -->
+  <nav class="g-nav" aria-label="Guides">
+    <details class="g-toggle" open>
+      <summary>All guides</summary>
+      <p class="g-group">Start here</p>
+      <ul>
+        <li><a href="#">What Boss Man is</a></li>
+        <li><a href="#">Install Boss Man</a></li>
+        <li><a href="#">Your first company</a></li>
+        <li><a href="#" aria-current="page">Write your first ticket</a></li>
+      </ul>
+      <p class="g-group">Everyday use</p>
+      <ul>
+        <li><a href="#">The board</a></li>
+        <li><a href="#">The decision queue</a></li>
+        <li><a href="#">Reviews and merging</a></li>
+        <li><a href="#">Phone notifications</a></li>
+      </ul>
+      <p class="g-group">Set it up your way</p>
+      <ul>
+        <li><a href="#">Agents and models</a></li>
+        <li><a href="#">Permissions and the CEO</a></li>
+        <li><a href="#">Add-ons</a></li>
+        <li><a href="#">Updates and backups</a></li>
+        <li><a href="#">FAQ</a></li>
+      </ul>
+    </details>
+  </nav>
+
+  <main id="main" class="g-main">
+    <p class="crumbs"><a href="#">Guides</a> <span aria-hidden="true">/</span> Start here</p>
+    <h1>Write your first ticket</h1>
+    <p class="g-lead">A ticket is one piece of work for an agent. This guide gives your CEO its first job and shows you where to watch it happen.</p>
+    <p class="g-meta">About 5 minutes. You need Boss Man installed and a company set up.</p>
+
+    <aside class="note">
+      <h2>Before you start</h2>
+      <p>Check the runner says <strong>Connected</strong> in Settings, then Server and runner. Without it, agents can't start.</p>
+    </aside>
+
+    <h2 id="add">1. Add the ticket</h2>
+    <ol class="g-steps">
+      <li>Open <strong>Projects</strong> in the side menu, then your project.</li>
+      <li>Choose <strong>Add task</strong>.</li>
+      <li>Type a <strong>Title</strong>, for example "Read the repo and propose a roadmap".</li>
+      <li>Pick your CEO under <strong>Assign to</strong>.</li>
+      <li>Choose <strong>Add and start</strong>. To add it without starting it, choose <strong>Add to backlog</strong> instead.</li>
+    </ol>
+    <p class="check"><span aria-hidden="true">✓</span> <strong>It worked if</strong> the ticket shows on the board and the page says "Added".</p>
+
+    <figure class="g-fig">
+      <img src="img/board-crop.png" width="3072" height="1120" alt="The board with tickets in Backlog, Ready, In progress and Blocked, and two tickets waiting in Your review.">
+      <figcaption>The board. New tasks wait in Backlog until they can start, then move right as agents work on them.</figcaption>
+    </figure>
+
+    <h2 id="watch">2. Watch it run</h2>
+    <p>Within a minute or two the CEO picks the ticket up and it moves to <strong>In progress</strong>. Open the ticket to follow what the agent is doing and talk to it.</p>
+    <ul class="g-list">
+      <li><strong>Runs</strong> lists every agent run, running and recent.</li>
+      <li><strong>Decisions</strong> is where agents ask you things: a plan to approve, a review, a question.</li>
+      <li><strong>Notifications</strong> shows anything else that needs a look.</li>
+    </ul>
+
+    <h2 id="answer">3. Answer the first question</h2>
+    <p>Most first tickets end with a question for you. It shows in Decisions with the agent's recommendation on a button.</p>
+    <figure class="g-fig small">
+      <img src="img/card-wide.png" width="1912" height="738" alt="A decision card with the agent's recommendation and answer buttons.">
+      <figcaption>A decision card. Tap the recommended answer, pick another, or write your own.</figcaption>
+    </figure>
+
+    <h2 id="stuck">If nothing happens</h2>
+    <dl class="g-trouble">
+      <dt>The ticket stays in Ready</dt>
+      <dd>The agent may be paused. Open Agents and choose <strong>Start</strong> on its row.</dd>
+      <dt>The runner says Disconnected</dt>
+      <dd>Restart it from Settings, then Server and runner. The install guide's troubleshooting part has more.</dd>
+    </dl>
+
+    <div class="g-code">
+      <p class="g-code-label">See which parts are running, from the machine's terminal</p>
+      <pre><code>docker compose ps</code></pre>
+      <button type="button" class="copy">Copy</button>
+    </div>
+
+    <nav class="g-next" aria-label="Next and previous guides">
+      <a href="#"><span>Previous</span>Your first company</a>
+      <a href="#" class="next"><span>Next</span>The board</a>
+    </nav>
+    <p class="g-edit muted">Something wrong or missing? <a href="#">Tell us on GitHub</a>.</p>
+  </main>
+
+  <!-- Right: this page's headings, desktop only -->
+  <nav class="g-toc" aria-label="On this page">
+    <p class="g-group">On this page</p>
+    <ul>
+      <li><a href="#add" aria-current="true">1. Add the ticket</a></li>
+      <li><a href="#watch">2. Watch it run</a></li>
+      <li><a href="#answer">3. Answer the first question</a></li>
+      <li><a href="#stuck">If nothing happens</a></li>
+    </ul>
+    <img src="img/boss-setup.webp" width="640" height="634" alt="">
+  </nav>
+</div>
+
+<footer class="foot dark">
+  <div class="wrap">
+    <div>
+      <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
+      <p>Boss Man is in alpha: it works, and it still changes often. Free and open source under the Apache 2.0 licence.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="#">Guides</a><a href="#">Roadmap and feedback</a><a href="about.html">About</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
+    </nav>
+  </div>
+</footer>
+<script src="menu.js"></script>
+<script>if (innerWidth <= 760) document.querySelector(".g-toggle").removeAttribute("open");</script>
+</body>
+</html>
