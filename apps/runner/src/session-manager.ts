@@ -729,7 +729,10 @@ export class SessionManager {
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
     // The daemon's own temp folder goes on even when the base env is a trimmed one: in a fenced check job /tmp
     // is refused, and Claude Code's own /tmp/claude-<uid> then ends the session with "Internal error" (BOS-1067).
-    if (env.CLAUDE_CODE_TMPDIR === undefined && process.env.CLAUDE_CODE_TMPDIR !== undefined) env.CLAUDE_CODE_TMPDIR = process.env.CLAUDE_CODE_TMPDIR;
+    // Only a fenced check job sets CLAUDE_CODE_TMPDIR on the daemon, so a normal runner changes nothing.
+    if (process.env.CLAUDE_CODE_TMPDIR !== undefined) {
+      for (const k of ["TMPDIR", "CLAUDE_CODE_TMPDIR"]) if (env[k] === undefined && process.env[k] !== undefined) env[k] = process.env[k];
+    }
     // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
     // every other granted secret, and a push from inside it fails fast instead of prompting.
     Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
