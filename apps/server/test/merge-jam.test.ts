@@ -299,4 +299,23 @@ describe("merge line jam alert (BOS-766)", () => {
     expect((await c.sweep()).mergeJam).toEqual({ alerted: 0, reminded: 0, cleared: 0 });
     expect(await c.allNotes()).toHaveLength(0);
   });
+
+  it("tells the CEO once about a card holding an approved merge that names a done ticket (BOS-1078)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.waitingSince("Held by an old card", 5);
+    const done = await c.ticket("What the card asked for");
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, done.id));
+    const [co] = await c.db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, c.company.id));
+    const card = await c.decisions.raise({ companyId: c.company.id, agentId: null, question: `Wait for ${co!.prefix}-${done.number} first?`, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, holdsMerge: true, triedFirst: "Checked the other ticket" });
+    // A plain card naming the same done ticket holds nothing, so it isn't flagged.
+    await c.decisions.raise({ companyId: c.company.id, agentId: null, question: `Is ${co!.prefix}-${done.number} live?`, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: (await c.waitingSince("Not held", 5)).id, triedFirst: "Checked" });
+    const told: Array<{ companyId: string; ticketId: string; note: string }> = [];
+    const service = mergeJamService(c.db, { view: (id) => c.mergeQueue.get(id), notify: async () => null, tellCeo: async (input) => void told.push(input), now: c.clock });
+    await service.run();
+    await service.run();
+    expect(told).toHaveLength(1);
+    expect(told[0]).toMatchObject({ companyId: c.company.id, ticketId: t.id });
+    expect(told[0]!.note).toContain(card.id);
+    expect(told[0]!.note).toContain(`It names ${co!.prefix}-${done.number}, which is done now`);
+  });
 });

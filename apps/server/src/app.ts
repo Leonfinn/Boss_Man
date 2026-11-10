@@ -890,6 +890,11 @@ export async function buildApp(opts: AppOptions) {
   const mergeJam = mergeJamService(db, {
     view: (companyId) => mergeQueue.get(companyId),
     notify: (input) => notes.notify(input),
+    // A card holding an approved merge that looks stale goes to the CEO once (BOS-1078).
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
