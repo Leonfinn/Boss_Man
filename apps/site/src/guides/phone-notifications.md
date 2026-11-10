@@ -44,7 +44,7 @@ You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your p
 
 Under **Send to my phone**, choose **Urgent only (default)** or **All decisions**.
 
-- **Urgent only** sends a decision that holds up work only you can answer, a deploy that carries the fix for a live problem, a "server unusable" page, and the test button. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android.
+- **Urgent only** sends a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO has marked urgent because you must act now, and the test button. A card that merely holds up a ticket (plans, merge sign-offs, after-merge checks) does not push, and a card still with the CEO never does. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. When a pushed card is answered or withdrawn, Boss Man removes it from your phone (needs ntfy 2.14 or newer), and **Notifications → Recent phone pushes** lists the last 20 with why each was sent.
 - **All decisions** also sends routine cards, such as plans, hires and ordinary deploys, at the normal priority (3).
 - Everything stays on the Decisions and Notifications pages either way.
 - Tick **Also send flags (normal priority)** if you want flags on your phone too.

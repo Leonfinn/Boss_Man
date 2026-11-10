@@ -529,6 +529,16 @@ export async function raiseOwnerTodo(
  */
 export async function markDecisionNotificationRead(db: Db, decisionId: string, at: Date = new Date()) {
   await db.update(notifications).set({ readAt: at }).where(and(eq(notifications.decisionId, decisionId), isNull(notifications.readAt)));
+  // BOS-1097: the card is settled, so take its push off the phone. Fire and forget: the answer never waits
+  // on ntfy and never fails because of it (the clear writes its own failure on the notification).
+  if (settledListener) void Promise.resolve(settledListener(decisionId)).catch(() => undefined);
+}
+
+// lost on restart, harmless because app.ts wires the listener again at every start
+let settledListener: ((decisionId: string) => unknown) | null = null;
+/** Wired in app.ts to the notifications service's clearPush (BOS-1097). */
+export function setDecisionSettledListener(fn: ((decisionId: string) => unknown) | null) {
+  settledListener = fn;
 }
 
 /** The dedupe key for a ticket's owner setup card (DR-011): one per ticket, ever. */

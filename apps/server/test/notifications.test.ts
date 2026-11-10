@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
@@ -20,12 +20,18 @@ afterEach(async () => {
 
 type Pushed = { url: string; headers: Record<string, string>; body: Record<string, unknown> };
 
-async function setup(opts: { listen?: boolean; pushStatus?: number; deployerDir?: string } = {}) {
+async function setup(opts: { listen?: boolean; pushStatus?: number; clearStatus?: number; deployerDir?: string } = {}) {
   const { db, close } = await openPglite();
   // 23:30 UTC is 00:30 in London (BST) on 16-17 Oct 2026.
   let clock = new Date("2026-10-16T23:30:00Z");
   const pushed: Pushed[] = [];
+  const cleared: string[] = [];
   const fakeFetch = (async (input: URL | string, init?: RequestInit) => {
+    // A clear (BOS-1097) is a body-less PUT to /<topic>/<sequence id>/clear, not a publish.
+    if (init?.method === "PUT" && String(input).endsWith("/clear")) {
+      cleared.push(String(input));
+      return new Response("{}", { status: opts.clearStatus ?? 200 });
+    }
     pushed.push({ url: String(input), headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)), body: JSON.parse(String(init?.body)) });
     return new Response("{}", { status: opts.pushStatus ?? 200 });
   }) as typeof fetch;
@@ -47,7 +53,7 @@ async function setup(opts: { listen?: boolean; pushStatus?: number; deployerDir?
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, req, company, ceo, worker, mcp, pushed, setClock: (d: Date) => (clock = d) };
+  return { ...built, db, req, company, ceo, worker, mcp, pushed, cleared, setClock: (d: Date) => (clock = d) };
 }
 
 const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, phonePush: "all", publicUrl: "https://bossman.example.ts.net/" };
@@ -119,7 +125,7 @@ describe("notification ladder (R44)", () => {
     const [p] = c.pushed;
     expect(p!.url).toBe("https://ntfy.example.ts.net/");
     expect(p!.headers.authorization).toBe("Bearer tk_secret_value_123");
-    expect(p!.body).toEqual({ topic: "bossman", title: "App Co needs a decision", message: "Ship the beta?", priority: 3, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions", actions: [{ action: "view", label: "Open in Boss Man", url: "https://bossman.example.ts.net/#/decisions", clear: false }] });
+    expect(p!.body).toEqual({ topic: "bossman", sequence_id: rows.find((r) => r.level === "ask")!.id, title: "App Co needs a decision", message: "Ship the beta?", priority: 3, tags: ["question"], click: "https://bossman.example.ts.net/#/decisions", actions: [{ action: "view", label: "Open in Boss Man", url: "https://bossman.example.ts.net/#/decisions", clear: false }] });
     expect(rows.find((r) => r.level === "ask")!.pushedAt).not.toBeNull();
 
     const feed = (await c.req("GET", "/api/notifications")).json();
@@ -146,13 +152,21 @@ describe("notification ladder (R44)", () => {
     await c.notes.syncDecisions();
     expect(c.pushed).toHaveLength(0);
 
-    // A card that blocks a ticket and only the owner can answer: urgent, at priority 5.
+    // BOS-1097: a card that blocks a ticket is no longer urgent by itself.
     const blocking = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which database should I use?", options: ["Postgres", "SQLite"], recommended: "Postgres", blocksTicketId: ticket.id, triedFirst: "Compared both on the docs." });
     expect(blocking.id).toBeTruthy();
     await c.notes.syncDecisions();
-    const urgentPush = c.pushed.find((p) => p.body.message === "Which database should I use?");
+    expect(c.pushed).toHaveLength(0);
+
+    // The same kind of card, marked urgent by the CEO: priority 5, with the reason recorded.
+    const marked = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Disk is nearly full, may I delete old backups?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: ticket.id, triedFirst: "Looked for other space." });
+    await c.db.update(decisions).set({ context: { type: "question", urgentPush: { by: "CEO", at: "2026-10-16T23:00:00Z", why: "the disk fills tonight" } } }).where(eq(decisions.id, marked.id));
+    await c.notes.syncDecisions();
+    const urgentPush = c.pushed.find((p) => p.body.message === "Disk is nearly full, may I delete old backups?");
     expect(urgentPush).toBeDefined();
     expect(urgentPush!.body.priority).toBe(5);
+    const [pushedRow] = await c.db.select().from(notifications).where(eq(notifications.decisionId, marked.id));
+    expect(pushedRow!.pushReason).toBe("The CEO marked it urgent: the disk fills tonight");
 
     // A live-problem deploy (fixesLive) is urgent at priority 5; its heading is the push title.
     c.pushed.length = 0;
@@ -200,12 +214,88 @@ describe("notification ladder (R44)", () => {
     await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined, quietHours: { start: "22:00", end: "07:00", timeZone: "Europe/London" } });
     const project = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Site" })).json() as { id: string };
     const ticket = (await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Rate limiting" })).json() as { id: string };
-    await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which database?", options: ["Postgres", "SQLite"], recommended: "Postgres", blocksTicketId: ticket.id, triedFirst: "Compared both." });
+    const q = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which database?", options: ["Postgres", "SQLite"], recommended: "Postgres", blocksTicketId: ticket.id, triedFirst: "Compared both." });
+    await c.db.update(decisions).set({ context: { type: "question", urgentPush: { by: "CEO", at: "2026-10-16T23:00:00Z", why: "needed now" } } }).where(eq(decisions.id, q.id));
     // 00:30 in London: quiet hours, so the urgent ask becomes a flag and doesn't reach the phone.
     await c.notes.syncDecisions();
     expect(c.pushed).toHaveLength(0);
     const row = (await c.db.select().from(notifications)).find((n) => n.body === "Which database?");
     expect(row).toMatchObject({ requested: "ask", level: "flag", demotedBy: "quiet hours", pushedAt: null });
+  });
+
+  it("never pushes a card still with the CEO, a Got it notice, or one settled before the send, even when marked urgent (BOS-1097)", async () => {
+    const c = await setup();
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    const urgentPush = { by: "CEO", at: "2026-10-16T23:00:00Z", why: "needed now" };
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "ceo", question: "CEO-tier card", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question", urgentPush } });
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Disk is full.", options: ["Got it"], recommendedOption: "Got it", context: { type: "question", urgentPush } });
+    await c.notes.syncDecisions();
+    expect(c.pushed).toHaveLength(0);
+
+    // Re-check before sending: the card was answered between being picked and being sent.
+    const [settled] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Already answered", options: ["Yes", "No"], recommendedOption: "Yes", status: "answered", answer: "Yes", context: { type: "question", urgentPush } }).returning();
+    await c.notes.notify({ companyId: c.company.id, level: "ask", title: "x", body: "Already answered", link: "#/decisions", decisionId: settled!.id, urgentReason: "The CEO marked it urgent: needed now" });
+    expect(c.pushed).toHaveLength(0);
+    const [row] = await c.db.select().from(notifications).where(eq(notifications.decisionId, settled!.id));
+    expect(row!.pushedAt).toBeNull();
+  });
+
+  it("a CEO escalation with urgent:true stores the mark and the card pushes; without it the same card stays off the phone (BOS-1097)", async () => {
+    const c = await setup({ listen: true });
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    const ceo = await c.mcp(c.ceo.id);
+    const alert = (question: string) => c.alerts.raise({ companyId: c.company.id, kind: "owner", question, from: "scrum_master", options: ["Got it", "Keep waiting"] });
+    const plain = await alert("Plain alert the CEO could not settle");
+    const urgent = await alert("Urgent alert the CEO could not settle");
+    const triedFirst = "Looked at both agents' last runs and the host";
+    // urgent:true without a reason is refused and nothing moves.
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: urgent!.id, triedFirst, urgent: true } }))).toMatch(/urgentWhy/);
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, urgent!.id)))[0]!.tier).toBe("ceo");
+
+    expect((await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: plain!.id, triedFirst } }) as { isError?: boolean }).isError).toBeFalsy();
+    expect((await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: urgent!.id, triedFirst, urgent: true, urgentWhy: "The runner is down and nothing can ship" } }) as { isError?: boolean }).isError).toBeFalsy();
+    const [row] = await c.db.select().from(decisions).where(eq(decisions.id, urgent!.id));
+    expect(row!.tier).toBe("owner");
+    expect((row!.context as { urgentPush?: { why: string } }).urgentPush).toMatchObject({ why: "The runner is down and nothing can ship" });
+
+    await c.notes.syncDecisions();
+    expect(c.pushed.map((p) => p.body.message)).toEqual(["Urgent alert the CEO could not settle"]);
+    expect(c.pushed[0]!.body.priority).toBe(5);
+    const [n] = await c.db.select().from(notifications).where(eq(notifications.decisionId, urgent!.id));
+    expect(n!.pushReason).toBe("The CEO marked it urgent: The runner is down and nothing can ship");
+    await ceo.close();
+  });
+
+  it("clears a pushed card from the phone when it is answered, and a failed or unsupported clear never fails the answer (BOS-1097)", async () => {
+    for (const clearStatus of [200, 404]) {
+      const c = await setup({ clearStatus });
+      await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+      const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Delete old backups?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Looked for other space." });
+      await c.db.update(decisions).set({ context: { type: "question", urgentPush: { by: "CEO", at: "2026-10-16T23:00:00Z", why: "disk fills tonight" } } }).where(eq(decisions.id, d.id));
+      await c.notes.syncDecisions();
+      expect(c.pushed).toHaveLength(1);
+      const [n] = await c.db.select().from(notifications).where(eq(notifications.decisionId, d.id));
+      expect(c.pushed[0]!.body.sequence_id).toBe(n!.id);
+
+      // The answer goes through; the clear runs after it, in the background.
+      expect(await c.decisions.answer(d.id, "Yes")).toBeTruthy();
+      await vi.waitFor(async () => {
+        const [after] = await c.db.select().from(notifications).where(eq(notifications.id, n!.id));
+        expect(after!.pushClearedAt !== null || after!.pushClearNote !== null).toBe(true);
+      });
+      expect(c.cleared).toEqual([`https://ntfy.example.ts.net/bossman/${n!.id}/clear`]);
+      const [after] = await c.db.select().from(notifications).where(eq(notifications.id, n!.id));
+      if (clearStatus === 200) expect(after).toMatchObject({ pushClearNote: null });
+      else expect(after!.pushClearNote).toContain("too old");
+      const recent = (await c.req("GET", "/api/notifications/pushes")).json().items;
+      expect(recent).toHaveLength(1);
+      expect(recent[0]).toMatchObject({ reason: "The CEO marked it urgent: disk fills tonight", state: "settled" });
+      // A second sweep does not try again (cleared, or an old server that can't).
+      await c.notes.clearSettledPushes();
+      expect(c.cleared).toHaveLength(1);
+      await ctx?.close();
+      ctx = undefined;
+    }
   });
 
   it("records a failed push without losing the notification, and the test button reports it", async () => {
