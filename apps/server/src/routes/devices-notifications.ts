@@ -1,9 +1,9 @@
 // Phone Approve, device profiles and notifications (R44, BOS-243, BOS-641).
-// Moved out of app.ts unchanged (BOS-298 step 15). deviceNotificationRoutes registers on the caller's
-// owner scope, so requireOwner and the app's error handler still apply: it adds routes on that
-// instance rather than through app.register, which would add a new scope. phoneApproveRoutes opens
-// its own scope for the ntfy taps, exactly as app.ts did, so their own JSON parsers and error handler
-// still answer a bad body with plain JSON rather than the error handler's message.
+// Moved out of app.ts unchanged (BOS-298 step 15). The owner functions register on the caller's owner
+// scope, so requireOwner and the app's error handler still apply: they add routes on that instance
+// rather than through app.register, which would add a new scope. phoneApproveRoutes opens its own
+// scope for the ntfy taps, exactly as app.ts did, so their own JSON parsers and error handler still
+// answer a bad body with plain JSON rather than the error handler's message.
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { deviceProfilesService } from "../services/device-profiles.js";
@@ -65,22 +65,17 @@ export function phoneApproveRoutes(
   });
 }
 
-export function deviceNotificationRoutes(
+// Device profiles (BOS-641): the owner's browsers report their measured screens so a layout
+// ticket can be checked at the real device. Only screen facts; one row per signed-in browser.
+export function deviceRoutes(
   owner: FastifyInstance,
   deps: {
-    notes: ReturnType<typeof notificationsService>;
-    phoneApprove: ReturnType<typeof phoneApproveService>;
     deviceProfiles: ReturnType<typeof deviceProfilesService>;
-    secretsSvc: ReturnType<typeof secretsService>;
-    hostFacts: ReturnType<typeof hostFactsService>;
-    /** The signed-in owner's id, for rows kept per owner (device profiles). Only valid behind requireOwner. */
+    /** The signed-in owner's id, for rows kept per owner. Only valid behind requireOwner. */
     currentOwnerId: (req: FastifyRequest) => Promise<string | null>;
   },
 ) {
-  const { notes, phoneApprove, deviceProfiles, secretsSvc, hostFacts, currentOwnerId } = deps;
-
-  // Device profiles (BOS-641): the owner's browsers report their measured screens so a layout
-  // ticket can be checked at the real device. Only screen facts; one row per signed-in browser.
+  const { deviceProfiles, currentOwnerId } = deps;
   owner.get("/api/devices", async (req) => {
     const ownerId = await currentOwnerId(req);
     return ownerId ? deviceProfiles.list(ownerId) : [];
@@ -104,8 +99,16 @@ export function deviceNotificationRoutes(
     const { id } = IdParam.parse(req.params);
     return (await deviceProfiles.remove(ownerId, id)) ? { ok: true } : reply.code(404).send({ error: "not_found" });
   });
+}
 
-  // Notifications (R44): the feed, settings and a test push.
+// Notifications (R44): the feed.
+export function notificationRoutes(
+  owner: FastifyInstance,
+  deps: {
+    notes: ReturnType<typeof notificationsService>;
+  },
+) {
+  const { notes } = deps;
   owner.get("/api/notifications", async (req) => {
     const q = z
       .object({
@@ -123,6 +126,19 @@ export function deviceNotificationRoutes(
     await notes.markRead(b.all ? "all" : (b.ids ?? []));
     return { unread: await notes.unread() };
   });
+}
+
+// Notifications settings (R44): what is on, which ntfy server and topic, and a test push (BOS-243).
+export function notificationSettingsRoutes(
+  owner: FastifyInstance,
+  deps: {
+    notes: ReturnType<typeof notificationsService>;
+    phoneApprove: ReturnType<typeof phoneApproveService>;
+    secretsSvc: ReturnType<typeof secretsService>;
+    hostFacts: ReturnType<typeof hostFactsService>;
+  },
+) {
+  const { notes, phoneApprove, secretsSvc, hostFacts } = deps;
 
   /** Whether phone Approve buttons are on, and if not why, for Notifications (BOS-243). */
   const approveStatus = async (s: NotifySettings) => {

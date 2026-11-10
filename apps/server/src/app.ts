@@ -100,7 +100,7 @@ import { skillRoutes } from "./routes/skills.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
-import { deviceNotificationRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { logoType } from "./services/image-type.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -1075,8 +1075,8 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
-    // Device profiles, notifications and notification settings (BOS-641, R44, BOS-243).
-    deviceNotificationRoutes(owner, { notes, phoneApprove, deviceProfiles, secretsSvc, hostFacts, currentOwnerId });
+    // Device profiles (BOS-641): the owner's browsers report their measured screens.
+    deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({
@@ -1273,6 +1273,8 @@ export async function buildApp(opts: AppOptions) {
       return secretsSvc.accessLog(id, limit);
     });
 
+    // Notifications (R44): the feed.
+    notificationRoutes(owner, { notes });
     // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
     // Infinite-mode agents have their own "background" slots instead (BOS-279), so slow free runs never take a normal one.
     const runLimits = async () => {
@@ -1382,6 +1384,9 @@ export async function buildApp(opts: AppOptions) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
       }
     });
+    // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
+
     // Decision rules (R19): what happens when an agent asks to use a tool.
     const Match = z.object({
       kinds: z.array(z.string()).max(10).optional(),
