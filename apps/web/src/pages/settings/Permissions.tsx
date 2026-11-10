@@ -97,11 +97,38 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
 }
 
 type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
+type SecondOpinionStats = { answered: number; allowed: number; denied: number; fellBack: number; pending: number; reasons: Array<{ reason: string; count: number }> };
+
+const cards = (n: number) => `${n} card${n === 1 ? "" : "s"}`;
+
+/** BOS-1052: whether the model is really answering, from the last 24 h of cards. */
+function SecondOpinionLast24h({ stats }: { stats: SecondOpinionStats | undefined }) {
+  if (!stats) return null;
+  const total = stats.answered + stats.fellBack;
+  if (total === 0) return <p className="muted" style={{ fontSize: 14 }}>Last 24 hours: the model wasn't asked about any cards.</p>;
+  return (
+    <div style={{ fontSize: 14 }}>
+      <p style={{ margin: 0 }}>
+        <strong>Last 24 hours:</strong> the model answered {cards(stats.answered)} ({stats.allowed} allow, {stats.denied} deny); {cards(stats.fellBack)} fell back to the rules judge alone.
+      </p>
+      {stats.reasons.length > 0 && (
+        <ul style={{ margin: "4px 0", paddingLeft: 20 }} className="muted">
+          {stats.reasons.map((r) => (
+            <li key={r.reason}>
+              {r.count}× {r.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /** The optional model second opinion on permission cards (BOS-338): off by default. The key is a secret from the encrypted store. */
 export function SecondOpinionSetting({ company }: { company: Company }) {
   const cur = usePoll((signal) => api<SecondOpinion>(`/api/companies/${company.id}/second-opinion`, { signal }), 600_000, `second-${company.id}`);
   const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
+  const stats = usePoll((signal) => api<SecondOpinionStats>(`/api/companies/${company.id}/second-opinion/stats`, { signal }), 60_000, `second-stats-${company.id}`);
   const [v, setV] = useState<SecondOpinion | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -138,7 +165,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
     <Section id="second-opinion-h" title="Second opinion from a model (optional)">
       <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <p className="muted" style={{ fontSize: 14 }}>
-          Off by default. When it's on, a card the rules above would suggest allowing is also shown to a model you pick. It can only make the advice stricter: a card is suggested Allow only when both agree. If the model is slow (over 5 seconds), down, out of credit or gives an answer Boss Man can't read, the rules decide alone. It never presses a button. The card's text is sent to the provider, with tokens, keys and passwords removed first.
+          Off by default. When it's on, a card the rules above would suggest allowing is also shown to a model you pick. It can only make the advice stricter: a card is suggested Allow only when both agree. If the model is slow (over 5 seconds), down, busy, out of credit or gives an answer Boss Man can't read, the rules decide alone. It never presses a button. The card's text is sent to the provider, with tokens, keys and passwords removed first.
         </p>
         {judgeOff && <p className="muted" style={{ fontSize: 14 }}>Advice on permission cards is off, so the model isn't asked. Set it to Watch or Advise first.</p>}
         <label>
@@ -186,6 +213,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
           </button>
         </div>
         {msg && <p role="status">{msg}</p>}
+        {(cur.data?.enabled || (stats.data && stats.data.answered + stats.data.fellBack > 0)) && <SecondOpinionLast24h stats={stats.data} />}
       </form>
     </Section>
   );
