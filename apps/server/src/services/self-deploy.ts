@@ -513,7 +513,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // Only when the runner's files changed: the same flag drives the summary line on the card.
       if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined

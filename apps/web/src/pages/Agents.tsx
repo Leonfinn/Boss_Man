@@ -301,7 +301,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
         <small className="muted">Given to the agent at the start of every run. Tailor them to your company.</small>
       </div>
       <small className="muted">
-        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/workflow`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
+        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/reviews`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
       </small>
       {error && (
         <p className="error" role="alert">
@@ -394,7 +394,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
               <div className="field">
                 <span className="label">Reviews</span>
                 <p style={{ margin: 0 }}>
-                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/workflow`}>Change in Settings › Reviews</a>
+                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/reviews`}>Change in Settings › Reviews</a>
                 </p>
               </div>
             )}
@@ -423,7 +423,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
             <small className="muted">{a.role === "ceo"
-                ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
+                ? "The CEO picks up new instructions in its next chapter (Settings › Team and CEO › CEO chapters)."
                 : a.duty === "wiki"
                   ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
                   : "Used from the agent's next run."}</small>
@@ -750,7 +750,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               {isInfiniteModel(a.model) && (
                 <>
                   {" "}
-                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › How many agents run at once.">
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Agents at once.">
                     Infinite mode · free, slow
                   </span>
                 </>

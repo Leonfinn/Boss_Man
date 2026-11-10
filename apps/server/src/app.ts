@@ -1382,7 +1382,7 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
       return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
     });
-    /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
+    /** Whether phone Approve buttons are on, and if not why, for Notifications (BOS-243). */
     const approveStatus = async (s: NotifySettings) => {
       const { gate: g } = await phoneApprove.gate(s);
       return g.on ? { on: true } : { on: false, why: g.why };

@@ -11,7 +11,7 @@
 # Back up secrets/master.key: without it, stored secrets cannot be decrypted.
 #
 # Runners, the easy way (R55): turn on the launcher, and each company's runner starts by itself
-# when the company is created (Settings › Runner shows it). In .env:
+# when the company is created (Settings › Server and runner › Runner shows it). In .env:
 #   BOSSMAN_LAUNCHER=1
 #   COMPOSE_PROFILES=launcher
 #   BOSSMAN_DATA=/absolute/host/folder          # company data lives in $BOSSMAN_DATA/companies

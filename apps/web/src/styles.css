@@ -460,6 +460,65 @@ details > summary { cursor: pointer; font-size: 14px; }
 .tabs .tab-count { font-family: var(--mono); font-size: 12px; min-width: 22px; padding: 1px 6px; border-radius: 999px; background: var(--grey-soft); color: var(--muted); text-align: center; }
 .tabs button[aria-selected="true"] .tab-count { background: var(--accent-soft); color: var(--accent-ink); }
 
+/* ---------- Settings menu (BOS-1019, from BOS-1018 §3) ---------- */
+/* A menu of pages, each with its own URL: a list of links, not a tablist. Below 900 px the address
+   #/settings opens on the menu itself, and a page starts with "‹ Settings" at the top. */
+.set-layout { display: flex; flex-direction: column; gap: 18px; margin-top: 18px; }
+.set-nav { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.set-group { display: flex; flex-direction: column; gap: 6px; }
+.set-group-label { font-family: var(--sans); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; padding: 0 4px; }
+.set-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-nav li > a { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 12px; border-radius: 8px; border-left: 4px solid transparent; color: var(--ink); text-decoration: none; font-size: 15px; font-weight: 500; }
+.set-nav li > a:hover { background: var(--grey-soft); }
+.set-nav li > a[aria-current="page"] { background: var(--accent-soft); border-left-color: var(--accent); font-weight: 700; color: var(--accent-ink); }
+.set-nav li > a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.set-item-label { flex: 1 1 auto; min-width: 0; }
+/* The one-line hint shows on the phone menu and as the page's help line; a menu row on a wide screen is just the name. */
+.set-item-hint { display: none; color: var(--muted); font-size: 13px; font-weight: 400; }
+.set-item-chevron { color: var(--muted); font-size: 20px; line-height: 1; }
+.set-wizard .btn { width: 100%; }
+.set-head-wizard .btn { white-space: nowrap; }
+.set-back { display: none; align-items: center; min-height: 44px; color: var(--muted); text-decoration: none; font-size: 15px; }
+.set-back:hover { color: var(--ink); }
+.set-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
+.page-head h1:focus { outline: none; }
+.set-scope { margin-left: 10px; vertical-align: middle; }
+.set-jump { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
+.set-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.set-jump a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
+
+@media (min-width: 900px) {
+  .set-layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .set-nav { position: sticky; top: 16px; align-self: start; }
+  .set-nav li > a { min-height: 40px; padding: 8px 12px; }
+  .set-nav .set-wizard { display: none; }
+  .set-head-wizard { display: none; }
+  .set-jump a { min-height: 24px; }
+}
+/* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */
+@media (pointer: coarse) {
+  .set-nav li > a, .set-jump a { min-height: 44px; }
+}
+@media (max-width: 899px) {
+  /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
+  .set-back { display: inline-flex; }
+  /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
+  .set-nav li > a { min-height: 56px; flex-wrap: wrap; }
+  .set-item-label { flex: 0 0 100%; }
+  .set-item-hint { display: block; flex: 1 1 auto; }
+  .set-nav li > a { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; row-gap: 2px; }
+  .set-item-label { grid-column: 1; grid-row: 1; }
+  .set-item-hint { grid-column: 1; grid-row: 2; }
+  .set-item-chevron { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  .set-head-wizard { display: none; }
+  .set-nav .set-wizard { margin-top: 8px; }
+  .set-jump a { min-height: 44px; }
+  .set-page .field .btn, .set-page .btn.primary { min-height: 44px; }
+}
+/* The menu itself is the only page footer; the wizard sits under it (wide screens put it top right). */
+@media (min-width: 900px) { .set-layout .set-wizard { display: none; } }
+
 /* ---------- Roadmap cards (Now / Next / Later) ---------- */
 .rm-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .rm-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 8px; background: var(--card); }

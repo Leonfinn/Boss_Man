@@ -74,7 +74,7 @@ describe("workspace clean-up and disk caps (R54)", () => {
     const alerts = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.question).toBe(
-      `App Co's workspaces use 10.5 GB, over its 10.0 GB disk cap. The biggest ticket workspaces are "Video pipeline" (9.0 GB), "Typo fix" (0.5 GB). This is a warning: nothing is stopped by it. To raise it, open Settings → Reviews and CEO → Workspace disk and set "Disk cap (GB)" higher than its current 10.0 GB; it takes effect at the next hourly clean-up. Otherwise, finish or cancel tickets; worktrees of tickets done more than 7 days ago are removed automatically.`,
+      `App Co's workspaces use 10.5 GB, over its 10.0 GB disk cap. The biggest ticket workspaces are "Video pipeline" (9.0 GB), "Typo fix" (0.5 GB). This is a warning: nothing is stopped by it. To raise it, open Settings → Server and runner → Runner → Workspace disk and set "Disk cap (GB)" higher than its current 10.0 GB; it takes effect at the next hourly clean-up. Otherwise, finish or cancel tickets; worktrees of tickets done more than 7 days ago are removed automatically.`,
     );
 
     c.advance(DAY);
@@ -102,7 +102,7 @@ describe("workspace clean-up and disk caps (R54)", () => {
     const big = await c.ticket("Video pipeline");
     await c.report([{ ticketId: big.id, bytes: 21 * GB }], 0);
     const [alert] = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
-    expect(alert!.question).toContain("Settings → Reviews and CEO → Workspace disk");
+    expect(alert!.question).toContain("Settings → Server and runner → Runner → Workspace disk");
     expect(alert!.question).toContain('"Disk cap (GB)" higher than its current 10.0 GB');
     expect(alert!.question).toContain("This is a warning: nothing is stopped by it.");
   });

@@ -104,7 +104,7 @@ describe("reviews line (BOS-198)", () => {
     render(<Agents company={company} onChanged={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     expect(await screen.findByText(/Code \(Low\+\), Security \(High\+\)/)).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Change in Settings › Reviews" }).getAttribute("href")).toBe("#/settings/c1/workflow");
+    expect(screen.getByRole("link", { name: "Change in Settings › Reviews" }).getAttribute("href")).toBe("#/settings/c1/reviews");
     // The old setting is gone: nothing on the agent page chooses reviews.
     expect(screen.queryByLabelText("Company's reviewer for")).toBeNull();
   });
