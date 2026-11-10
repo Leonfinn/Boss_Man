@@ -41,7 +41,13 @@ scratch_log() {
   if [ -z "$out" ]; then
     [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
     tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$tmp" 2>/dev/null || return 0
+    if ! { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+      # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
+      # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
+      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
+      echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
+    fi
   fi
   if [ -z "$tmp" ]; then
     [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
@@ -137,7 +143,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true

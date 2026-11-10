@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, shortTmpName, SOCKET_SUFFIX_ROOM, SUN_PATH_MAX, worktreeAdmin } from "../src/fence.js";
+import { randomUUID } from "node:crypto";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -65,6 +66,33 @@ describe("fence profile", () => {
 
   it("names Claude Code's project folder the way Claude Code does", () => {
     expect(claudeProjectSlug("/home/node/workspaces/repos/473754fd-edfe-4179-96d6-267ebd93e294.git")).toBe("-home-node-workspaces-repos-473754fd-edfe-4179-96d6-267ebd93e294-git");
+  });
+});
+
+// BOS-1087: headless Chromium makes <TMPDIR>/org.chromium.Chromium.XXXXXX/SingletonSocket (~45 bytes); a Unix socket path
+// may be 107 bytes at most. The old TMPDIR (run-tmp/<36-char uuid>) was 67 bytes on the usual /home/node/runner-data.
+describe("temp folders leave room for a Unix socket", () => {
+  const DATA = "/home/node/runner-data";
+  it("keeps a fenced run's TMPDIR at 40 bytes or fewer, for any run id, on the usual data folder", () => {
+    const { runTmpRoot } = runnerFence("full", DATA, "/home/node/workspaces");
+    for (const id of ["ffffffff-ffff-4fff-8fff-ffffffffffff", "00000000-0000-4000-8000-000000000000", randomUUID()]) {
+      const tmp = path.join(runTmpRoot, shortTmpName(id));
+      expect(Buffer.byteLength(tmp)).toBeLessThanOrEqual(40);
+      expect(Buffer.byteLength(tmp) + SOCKET_SUFFIX_ROOM).toBeLessThanOrEqual(SUN_PATH_MAX);
+    }
+  });
+
+  it("a Chromium-style singleton socket really fits under it", () => {
+    const tmp = path.join(runnerFence("full", DATA, "/home/node/workspaces").runTmpRoot, shortTmpName(randomUUID()));
+    const socket = path.join(tmp, "org.chromium.Chromium.AbC123", "SingletonSocket");
+    expect(Buffer.byteLength(socket)).toBeLessThanOrEqual(SUN_PATH_MAX);
+  });
+
+  it("picks the next slice of the id when a live run already uses the first, and never two the same", () => {
+    const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    expect(shortTmpName(id)).toBe("aaaaaaaa");
+    expect(shortTmpName(id, new Set(["aaaaaaaa"]))).toBe("bbbb4ccc");
+    expect(shortTmpName(id, new Set(["aaaaaaaa", "bbbb4ccc"]))).toBe("8dddeeee");
   });
 });
 

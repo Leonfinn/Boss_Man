@@ -13,9 +13,10 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { FENCE_DENIED_PATTERN, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
-import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
+import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { gitAuthorEnv, isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
@@ -228,7 +229,7 @@ export const stderrTail = (stderr: string) =>
 
 // The add-ons' settings from the image (docs/12) go through too: without them an agent's agent-browser
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
-export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "BOSSMAN_CLAUDE_PACK", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
+export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "BOSSMAN_CLAUDE_PACK", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
 /**
  * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
@@ -336,6 +337,8 @@ export function killGroup(child: ChildProcess, graceMs = 5000) {
 
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
+  /** Short names of the temp folders live fenced runs use (BOS-1087), so two runs never share one and the sweep spares them. */
+  private readonly liveTmpNames = new Set<string>();
   /** The model list last reported per agent kind, so it's sent only when it changes. */
   private readonly reportedModels = new Map<string, string>();
 
@@ -388,14 +391,16 @@ export class SessionManager {
     const fence = this.opts.fence;
     if (!fence) return;
     const isRun = (name: string) => /^[0-9a-f-]{36}$/i.test(name);
-    const dropOld = (parent: string) => {
+    // The run-tmp root also holds the short names (BOS-1087); never a live run's.
+    const isRunTmp = (name: string) => isRun(name) || (/^[0-9a-f]{8,32}$/i.test(name) && !this.liveTmpNames.has(name));
+    const dropOld = (parent: string, match: (name: string) => boolean) => {
       let names: string[] = [];
       try {
         names = readdirSync(parent);
       } catch {
         return;
       }
-      for (const name of names.filter(isRun)) {
+      for (const name of names.filter(match)) {
         const dir = path.join(parent, name);
         try {
           if (Date.now() - lstatSync(dir).mtimeMs < 600_000) continue;
@@ -405,7 +410,7 @@ export class SessionManager {
         }
       }
     };
-    dropOld(runTmpRoot(fence));
+    dropOld(runTmpRoot(fence), isRunTmp);
     let agents: string[] = [];
     try {
       agents = readdirSync(fence.agentsRoot).filter(isRun);
@@ -415,7 +420,7 @@ export class SessionManager {
     for (const agent of agents) {
       const old = path.join(fence.agentsRoot, agent, "tmp");
       try {
-        if (lstatSync(old, { throwIfNoEntry: false })?.isDirectory()) dropOld(old);
+        if (lstatSync(old, { throwIfNoEntry: false })?.isDirectory()) dropOld(old, isRun);
       } catch {
         /* best effort */
       }
@@ -735,6 +740,14 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
+    // The daemon's own temp folder goes on even when the base env is a trimmed one: in a fenced check job /tmp
+    // is refused, and Claude Code's own /tmp/claude-<uid> then ends the session with "Internal error" (BOS-1067).
+    // Only a caller that hands in its own trimmed base env gets this (the daemon passes none, so a normal runner
+    // changes nothing). The check job's code may be older than the branch, so only TMPDIR can be counted on.
+    if (this.opts.baseEnv !== undefined && process.env.TMPDIR !== undefined) {
+      env.TMPDIR ??= process.env.TMPDIR;
+      env.CLAUDE_CODE_TMPDIR ??= process.env.CLAUDE_CODE_TMPDIR ?? process.env.TMPDIR;
+    }
     // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
     // every other granted secret, and a push from inside it fails fast instead of prompting.
     Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
@@ -789,7 +802,10 @@ export class SessionManager {
     // The run's temp folder (it holds the run's mcp.json while the session opens) sits outside the agent's home:
     // the home is granted to every run of that agent, so two runs of one agent at once could read each other's (BOS-555 G1).
     const tmpRoot = runTmpRoot(fence);
-    const tmp = path.join(tmpRoot, cmd.runId);
+    // A short name, not the 36-character run id: a Unix socket under TMPDIR must fit in 107 bytes (BOS-1087).
+    const tmpName = shortTmpName(cmd.runId, this.liveTmpNames);
+    this.liveTmpNames.add(tmpName);
+    const tmp = path.join(tmpRoot, tmpName);
     const dirs = { CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"), XDG_CONFIG_HOME: path.join(home, ".config"), XDG_CACHE_HOME: path.join(home, ".cache"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state") };
     mkdirSync(home, { recursive: true });
     for (const d of Object.values(dirs)) {
@@ -799,9 +815,9 @@ export class SessionManager {
     mkdirSync(tmpRoot, { recursive: true, mode: 0o700 });
     // A leftover with this run's id (a crash mid-start) goes first; rmSync removes a link, never what it points at.
     rmSync(tmp, { recursive: true, force: true });
-    if (!realDirsUnder(tmpRoot, cmd.runId)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
+    if (!realDirsUnder(tmpRoot, tmpName)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
     chmodSync(tmp, 0o700);
-    Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
+    Object.assign(env, { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
 
@@ -987,7 +1003,11 @@ export class SessionManager {
     // A proof or log an older run of this ticket left in /tmp moves into its kept scratch, which the restart
     // and the tmp sweep leave alone: /tmp is gone at the next restart, and so is the session's own temp folder.
     if (cmd.workspace) this.rescueTmp(cmd.workspace.ticketId, [tmpdir(), ...(runTmp ? [runTmp] : [])]);
-    const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
+    const dropTmp = () => {
+      if (!runTmp) return;
+      rmSync(runTmp, { recursive: true, force: true });
+      this.liveTmpNames.delete(path.basename(runTmp));
+    };
     // Where this run's MCP config file lives (Claude only): its own 0700 folder, removed when the run ends.
     let mcpDir: string | null = null;
     const dropMcp = () => mcpDir && rmSync(mcpDir, { recursive: true, force: true });
@@ -1005,7 +1025,8 @@ export class SessionManager {
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
-    const child = spawn(launch.bin, launch.args, { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const noCore = withoutCoreDumps(launch);
+    const child = spawn(noCore.bin, noCore.args, { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
@@ -1167,6 +1188,12 @@ export class SessionManager {
     });
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
+      // The no-core-dump shell wrapper (BOS-1059) turns a tool that can't be started into exit 127 / 126, not an "error".
+      const noStart = (code === 127 && /exec: .*not found/.test(stderr)) || (code === 126 && /exec: .*(Permission denied|not executable)/i.test(stderr));
+      if (noStart && this.runs.has(cmd.runId)) {
+        finish(null, `Couldn't start ${cmd.agentKind === "claude" ? "claude-code-acp" : cmd.agentKind}: ${code === 127 ? "not found" : "not allowed to run"}.`);
+        return;
+      }
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());
     });
 

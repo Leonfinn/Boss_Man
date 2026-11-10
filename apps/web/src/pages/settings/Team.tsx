@@ -4,6 +4,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { clearDraft, readDraft } from "../../drafts";
 import { DraftTextarea } from "../../components/DraftTextarea";
+import { ReadOnlyText } from "../../components/ReadOnlyText";
 import { Section, useAction } from "./shared";
 
 type Chapter = {
@@ -260,7 +261,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
       ) : (
         <>
           {rules.text ? (
-            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 14, padding: 12, background: "var(--panel, #f6f6f6)", borderRadius: 6 }}>{rules.text}</pre>
+            <ReadOnlyText text={rules.text} label="Standing rules" />
           ) : (
             <p className="muted">No standing rules are set yet.</p>
           )}

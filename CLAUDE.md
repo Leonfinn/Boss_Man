@@ -18,6 +18,16 @@ Boss Man runs the full check before it merges approved work, so anything it repo
 - Main took your migration number? Leave it. Do not renumber by hand: the merge gate renumbers a branch whose only clash is migration bookkeeping (`rebaseMigrations`, BOS-690), and `scripts/check-quick.sh` accepts that case, printing "migration NNNN will be renumbered to MMMM by the merge gate". A real clash (code, or the same table or column changed on both sides) still fails; see `docs/10-migrations.md`.
 - Added a shell script? Add it to `scripts/check-shell.sh`. Added a `*.test.sh`? Add it to `scripts/test-shell.sh`.
 
+## Writing tests: they must pass on GitHub's runners too
+
+A pass at the merge gate is not enough: GitHub CI runs every test again on main, on machines 2.5 to 5 times slower, with a newer git and a cold browser. Authors follow this rule and reviewers check every new or changed test against it:
+
+- **No wall-clock limits tuned to a dev machine.** Time the work against a baseline run in turn on the same machine (`packages/shared/test/permission-judge.test.ts`, "stays fast on a 10,000-char line"), or give GitHub its own limit and say why (`apps/server/test/hot-path-budget.test.ts`, `LIMIT_MS`). Either way, say in a comment what the limit still catches.
+- **No fixed sleeps standing in for "the other side is ready".** Wait for the event: the port answering, the line in the log, the file appearing, with a deadline.
+- **No hidden stderr** (`2>/dev/null`) on a step whose failure would end the test silently.
+- **A test that needs a build or a browser runs at the gate, not quietly skips there.** Make sure the gate (and CI) supply what it needs before relying on it.
+- **Don't depend on git's version.** Tests that read git output must not rely on its ordering or on refs a newer git adds; sort, or ask for exactly the refs you need.
+
 ## Running a full check by hand
 
 Inside an agent session `check-all.sh` refuses to run: use `scripts/check-quick.sh` (above). When the CEO asks for a full run, set `CHECK_ALL_FORCE=1` and start it detached, never as a harness background task (the harness kills those when your run ends):
