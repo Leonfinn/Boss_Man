@@ -27,6 +27,7 @@ import { promisify } from "node:util";
 import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
+import { withoutCoreDumps } from "./no-core.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
@@ -1328,7 +1329,8 @@ export class Workspaces {
       // the shared one: the fenced check may write its store, and the unfenced gate must never install from one it could write.
       if (fence && !job && this.checkFence) ({ env, launch, tmp } = this.fenceCheck(fenceProject, dir, env, launch));
       const fenced = fence ? { fenced: tmp !== null } : {};
-      const child = spawn(launch.bin, launch.args, {
+      const noCore = withoutCoreDumps(launch);
+      const child = spawn(noCore.bin, noCore.args, {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],

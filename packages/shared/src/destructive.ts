@@ -629,8 +629,10 @@ export function commandRisks(command: string | string[]): Risk[] {
       let w = cmd.words;
       let wrapped = false;
       let named = !!cmd.named;
+      // VAR=value words in front of the command: git reads its config from GIT_CONFIG_* among them (BOS-1061).
+      const envPrefix: Word[] = [];
       for (let hops = 0; hops < 12; hops++) {
-        while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) w = w.slice(1);
+        while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) envPrefix.push(w[0]!), (w = w.slice(1));
         // A keyword after a wrapper (time { rm …; }, time ! rm …) starts the command that follows it.
         while (w.length && !w[0]!.quoted && KEYWORDS.has(w[0]!.text)) {
           if (w[0]!.text === "function" || w[0]!.text === "coproc") named = true;
@@ -890,19 +892,54 @@ export function commandRisks(command: string | string[]): Risk[] {
           const valued = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
           // git -c can set a command git then runs: an alias starting with !, a pager, an editor, a hook path…
           const aliases = new Map<string, string>();
-          for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
-            if (args[i]!.text !== "-c") {
-              if (valued.includes(args[i]!.text)) i++;
-              continue;
-            }
-            const setWord = args[++i];
-            const set = setWord?.text ?? "";
+          // -c gc.pruneExpire / gc.reflogExpire* / gc.worktreePruneExpire set to anything but "never" makes a plain gc discard (BOS-954).
+          let gcConfigPrunes = false;
+          // The gc settings that decide what gc throws away; a subsection (gc.refs/*.reflogExpire) counts too (BOS-1061).
+          const GC_KEY = "gc\\.(?:[^=]*\\.)?(?:pruneexpire|reflogexpire\\w*|worktreepruneexpire)";
+          const GC_SET = new RegExp(`^${GC_KEY}(=(?!never$)|$)`, "i");
+          let configError: string | undefined;
+          // One `key=value` setting from -c, --config-env or the GIT_CONFIG_* variables.
+          const applySet = (set: string, dynamic: boolean) => {
+            if (GC_SET.test(set) || (dynamic && /[$`]/.test(set.split("=")[0]!))) gcConfigPrunes = true;
             const alias = /^alias\.([^=]*)=(.*)$/is.exec(set);
             const m = /^[^=]*\.(fsmonitor|sshcommand|pager|editor|hookspath|cmd|command|program|helper|textconv|clean|smudge|process)=(.*)$/i.exec(set);
-            if ((alias || m) && setWord!.dynamic) return destroys("sets a git command only known when it runs");
-            if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
+            if ((alias || m) && dynamic) configError = "sets a git command only known when it runs";
+            else if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
             else if (m) readScript(m[2]!, depth + 1, cmd.elsewhere);
+          };
+          for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
+            const t = args[i]!.text;
+            if (t === "-c") {
+              const setWord = args[++i];
+              applySet(setWord?.text ?? "", !!setWord?.dynamic);
+            } else if (t === "--config-env" || t.startsWith("--config-env=")) {
+              // --config-env=NAME=ENVVAR takes the value from the environment: any value, so it may be "now".
+              const word = t === "--config-env" ? args[++i] : undefined;
+              const spec = t === "--config-env" ? word?.text ?? "" : t.slice("--config-env=".length);
+              const eq = spec.lastIndexOf("=");
+              applySet(`${eq < 0 ? spec : spec.slice(0, eq)}=${eq < 0 ? "" : spec.slice(eq + 1)}`, true);
+            } else if (valued.includes(t)) i++;
           }
+          // GIT_CONFIG_COUNT / KEY_n / VALUE_n and GIT_CONFIG_PARAMETERS set the same things as -c (BOS-1061).
+          const envKeys = new Map<string, Word>();
+          const envValues = new Map<string, Word>();
+          for (const e of envPrefix) {
+            const [, name, text] = /^([A-Za-z_]\w*)\+?=(.*)$/s.exec(e.text) ?? [];
+            const idx = /^GIT_CONFIG_(KEY|VALUE)_(\d+)$/.exec(name ?? "");
+            if (idx) (idx[1] === "KEY" ? envKeys : envValues).set(idx[2]!, { ...e, text: text! });
+            else if (name === "GIT_CONFIG_PARAMETERS") {
+              for (const p of text!.matchAll(/'([^']*)'(?:='([^']*)')?/g)) applySet(p[2] === undefined ? p[1]! : `${p[1]}=${p[2]}`, e.dynamic);
+              if (e.dynamic) applySet("$=", true);
+            }
+          }
+          for (const [n, key] of envKeys) {
+            const value = envValues.get(n);
+            applySet(`${key.text}=${value?.text ?? ""}`, key.dynamic || !!value?.dynamic);
+          }
+          // Exported on an earlier line (`export GIT_CONFIG_PARAMETERS=…; git gc`): the value can't be tied to this command,
+          // so the setting being there at all goes to the owner.
+          if (!envPrefix.some((e) => e.text.startsWith("GIT_CONFIG_")) && new RegExp(`GIT_CONFIG_(?:PARAMETERS|KEY_\\d+)=[^\\n;&|]*${GC_KEY}`, "i").test(whole)) gcConfigPrunes = true;
+          if (configError) return destroys(configError);
           const rest = afterOptions(args, valued);
           if (rest[0]?.dynamic) return destroys("runs a git command only known when it runs");
           const sub = rest[0]?.text;
@@ -925,6 +962,28 @@ export function commandRisks(command: string | string[]): Risk[] {
           const before = dashes < 0 ? opts : opts.slice(0, dashes);
           const paths = dashes < 0 ? [] : opts.slice(dashes + 1);
           const force = before.some((o) => /^-[a-zA-Z]*f/.test(o) || longOf(o, ["force"]));
+          // A gc setting that discards, carried by any git command: gc, `maintenance run --task=gc`, or the auto gc that
+          // commit, fetch, merge and the like start (BOS-1061).
+          if (gcConfigPrunes && sub !== "config") return destroys("discards unreachable commits for good (a gc expire setting other than never)");
+          if (sub === "config") {
+            // Writing the setting to the repo's config makes a later plain `git gc` discard (BOS-1061). Read, unset and list stay allowed.
+            const OPTS_WITH_VALUE = ["-f", "--file", "--blob", "-t", "--type", "--default", "--comment", "--includes"];
+            const operands: Word[] = [];
+            const given = rest.slice(1);
+            for (let i = 0; i < given.length; i++) {
+              if (given[i]!.text === "--") continue;
+              if (/^-./.test(given[i]!.text)) i += OPTS_WITH_VALUE.includes(given[i]!.text) ? 1 : 0;
+              else operands.push(given[i]!);
+            }
+            const reads = before.some((o) => /^--(get|get-all|get-regexp|get-urlmatch|unset|unset-all|list|edit|remove-section|rename-section)$/.test(o) || /^-[a-z]*l$/.test(o));
+            const op = operands[0]?.text;
+            const [key, value] = op === "set" ? operands.slice(1) : operands;
+            if (!reads && !["get", "unset", "list", "edit"].includes(op ?? "") && key && value) {
+              const keyMatches = new RegExp(`^${GC_KEY}$`, "i").test(key.text) || (key.dynamic && /[$`]/.test(key.text));
+              if (keyMatches && (value.text !== "never" || value.dynamic)) destroys("sets a gc expire time that discards unreachable commits for good (git config gc.pruneExpire)");
+            }
+            return;
+          }
           if (sub === "push") {
             add("pushes", "pushes to a remote (git push)", all, plain);
             if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^[+:]/.test(o) || longOf(o, ["force", "force-with-lease", "force-if-includes", "mirror", "delete", "prune"]))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
@@ -975,8 +1034,9 @@ export function commandRisks(command: string | string[]): Risk[] {
             // whatever the date (=now, =all, =1.second.ago); only --prune=never leaves them. A bare --prune prunes the
             // default two weeks. An option only known when it runs could be that one. A plain gc, --auto and --quiet
             // leave them alone (BOS-571).
-            const prunesNow = before.some((o) => /^--prun(e)?$/.test(o) || (/^--prun(e)?=/.test(o) && !/^--prun(e)?=never$/.test(o)));
-            if (unknownOpt || prunesNow) destroys("discards unreachable commits for good (git gc --prune=now)");
+            // git takes any unambiguous start of --prune (--pru=now), and `-c gc.pruneExpire=now` does the same (BOS-954).
+            const prunesNow = before.some((o) => longOf(o, ["prune"]) && !/^--[^=]*=never$/.test(o));
+            if (unknownOpt || prunesNow || gcConfigPrunes) destroys("discards unreachable commits for good (git gc --prune=now)");
           } else if (sub === "prune") {
             // The standalone `git prune` discards unreachable objects just as gc --prune does (BOS-571 review).
             if (!before.some((o) => longOf(o, ["dry-run"]))) destroys("discards unreachable commits for good (git prune)");
@@ -1010,7 +1070,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (at >= 0) inside(args.slice(at + 1));
           return;
         }
-        if (prog === "terraform") {
+        if (prog === "terraform" || prog === "tofu") {
           // terraform destroy, and apply/plan -destroy, delete the infrastructure the state describes (BOS-571).
           const cmdWords = afterOptions(args, ["-chdir", "-var", "-var-file", "--var", "--var-file"]);
           const verb = cmdWords[0];
@@ -1022,10 +1082,12 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (verb?.text === "apply" && args.some((a) => /^-{1,2}replace(=|$)/.test(a.text))) return destroys("destroys and recreates resources (terraform apply -replace)");
           if (verb?.text === "apply" && cmdWords.slice(1).some((a) => a.dynamic && (a.split || a.text.startsWith("-")))) return destroys("terraform apply with an option only known when it runs");
           // BOS-856: state rm makes terraform forget resources (a later apply recreates them beside the old ones), and
-          // workspace delete drops a workspace's state.
+          // workspace delete drops a workspace's state. state push overwrites the remote state with a local file, with
+          // -force even when the lineage or serial is older (BOS-1061).
           const sub = verb?.text === "state" || verb?.text === "workspace" ? afterOptions(cmdWords.slice(1))[0] : undefined;
           if (sub?.dynamic) return destroys(`runs a terraform ${verb!.text} command only known when it runs`);
           if (verb?.text === "state" && sub?.text === "rm") return destroys("makes terraform forget resources (terraform state rm)");
+          if (verb?.text === "state" && sub?.text === "push") return destroys("overwrites the stored infrastructure state (terraform state push)");
           if (verb?.text === "workspace" && sub?.text === "delete") return destroys("deletes a workspace's state (terraform workspace delete)");
           return;
         }
@@ -1060,6 +1122,8 @@ export function commandRisks(command: string | string[]): Risk[] {
           // `rm` is gcloud storage's delete (BOS-856).
           const del = (a: Word) => a.text === "delete" || a.text === "rm";
           if (words.some(del) || args.some((a) => !a.dynamic && del(a))) return destroys("deletes cloud resources (gcloud … delete)");
+          // gcloud storage mv copies, then removes the source objects (BOS-1061).
+          if (words.some((a) => a.text === "mv")) return destroys("removes the source after copying (gcloud storage mv)");
           // storage rsync deletes what the source lacks with --delete-unmatched-destination-objects, like aws s3 sync --delete (BOS-856).
           if (words[0]?.text === "storage" || words[1]?.text === "storage") {
             if (words.some((a) => a.text === "rsync") && args.some((a) => longOf(a.text, ["delete-unmatched-destination-objects"]) || mayBeOption(a))) return destroys("deletes in the cloud (gcloud storage rsync)");
@@ -1067,12 +1131,14 @@ export function commandRisks(command: string | string[]): Risk[] {
           return;
         }
         if (prog === "gsutil") {
-          // gsutil (BOS-856): rm and its aliases delete objects and buckets; rsync -d deletes what the source lacks.
+          // gsutil [-m] [-h header] [-o section:key=value] VERB (BOS-856, BOS-1061): rm and its aliases delete objects and
+          // buckets; rsync -d deletes what the source lacks; mv removes the source after copying.
           // rb is left alone: gsutil only removes an empty bucket.
           const cmdWords = afterOptions(args, ["-h", "-o", "-u", "-i"]);
           const verb = cmdWords[0];
           if (verb?.dynamic) return destroys("runs a gsutil command only known when it runs");
           if (verb && ["rm", "del", "delete", "remove"].includes(verb.text)) return destroys("deletes in the cloud (gsutil rm)");
+          if (verb?.text === "mv") return destroys("removes the source after copying (gsutil mv)");
           if (verb?.text === "rsync" && cmdWords.slice(1).some((a) => shortHas(a.text, "d") || mayBeOption(a))) return destroys("deletes in the cloud (gsutil rsync -d)");
           return;
         }
@@ -1093,6 +1159,14 @@ export function commandRisks(command: string | string[]): Risk[] {
             );
             if (!values.length || values.some((v) => !v || v.dynamic || !/^false$/i.test(v.text))) return destroys("deletes in the cloud (az storage blob sync)");
           }
+          // --mode Complete makes a deployment delete every resource in the group that the template doesn't list (BOS-1061).
+          // az (Python argparse) takes any unambiguous start of the option, and the value from the next word or after =.
+          for (let i = 0; i < args.length; i++) {
+            const t = args[i]!.text;
+            if (!t.startsWith("--") || !longOf(t, ["mode"]) || t.length < 4) continue;
+            const value = t.includes("=") ? { text: t.slice(t.indexOf("=") + 1), dynamic: args[i]!.dynamic } : args[i + 1];
+            if (value && (value.dynamic || /^complete$/i.test(value.text))) return destroys("deletes resources the template doesn't list (az deployment … --mode Complete)");
+          }
           return;
         }
         if (prog === "aws") {
@@ -1102,7 +1176,8 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (service?.dynamic || op?.dynamic) return destroys("runs an aws command only known when it runs");
           const has = (o: string) => cmdWords.some((x) => x.text === o);
           // An S3 object delete can't be undone unless the bucket keeps versions, so every `s3 rm` goes to the owner.
-          if (service?.text === "s3" && (op?.text === "rm" || (op?.text === "rb" && has("--force")) || (op?.text === "sync" && has("--delete")))) return destroys(`deletes in the cloud (aws s3 ${op.text})`);
+          // s3 mv copies, then deletes the source object (BOS-1061).
+          if (service?.text === "s3" && (op?.text === "rm" || op?.text === "mv" || (op?.text === "rb" && has("--force")) || (op?.text === "sync" && has("--delete")))) return destroys(`deletes in the cloud (aws s3 ${op.text})`);
           if (service?.text === "s3" && /^(rb|sync)$/.test(op?.text ?? "") && cmdWords.some(mayBeOption)) return destroys("aws s3 with an option only known when it runs");
           if (op && /^(delete|terminate)-/.test(op.text)) return destroys(`deletes in the cloud (aws ${service!.text} ${op.text})`);
           return;
