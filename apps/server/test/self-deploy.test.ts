@@ -1511,6 +1511,14 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect((await c.db.select().from(decisions).where(eq(decisions.dedupeKey, "self-deploy:deployer-script"))).length).toBe(0);
     });
 
+    it("keeps the line (BOS-1057) when host.json is unreadable after a report was recorded", async () => {
+      const c = (ctx = await setup());
+      await report(c, { scriptSha: OLD, repoSha: NEW });
+      await c.req("GET", "/api/host-facts"); // records the facts
+      await writeFile(path.join(c.dir, "outbox", "host.json"), "{ half written");
+      expect((await c.req("GET", "/api/host-facts")).json()).toMatchObject({ deployerScript: { state: "behind" } });
+    });
+
     it("shows the line in Settings → This host's facts", async () => {
       const c = (ctx = await setup());
       await report(c, { scriptSha: OLD, repoSha: NEW });

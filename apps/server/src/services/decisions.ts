@@ -199,7 +199,7 @@ export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>)
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -1011,7 +1011,7 @@ async function postAnswerOnTickets(
  * which the done gate reads however the criterion is worded; the owner's words are quoted too.
  * Returns the tickets it wrote to.
  */
-async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null; options?: string[] | null; criterionIndexes?: number[] | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
+async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null; options?: string[] | null; recommended?: string | null; criterionIndexes?: number[] | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
   const answer = (d.answer ?? "").trim();
   if (!ticketIds.length || !answer) return [];
   const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
@@ -1020,7 +1020,15 @@ async function recordOwnerHostChecks(db: Db, d: { question: string; answer: stri
   // owner's plain words are quoted on the note either way.
   const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
   const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
-  const verdict = fail || !pass ? "fail" : "pass";
+  // (BOS-1056) A multiple-choice card names its passing answer: the recommended option. Choosing it is a pass
+  // whatever its wording ("on" on a "What does the Network guard row say?" card). When the card has no
+  // recommended option and the answer is one of its options with no pass or fail word, nothing says which
+  // way it counts, so nothing is recorded rather than a fail.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const isOption = (d.options ?? []).some((o) => norm(o) === norm(answer));
+  const chosenRecommended = !!d.recommended && norm(d.recommended) === norm(answer);
+  if (!chosenRecommended && !d.recommended && isOption && !fail && !pass) return [];
+  const verdict = chosenRecommended ? "pass" : fail || !pass ? "fail" : "pass";
   const said = answer.replace(/\s+/g, " ").slice(0, 200);
   const wrote: string[] = [];
   for (const r of rows) {
@@ -1792,7 +1800,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
       // Ordering links may only point at open cards in the raiser's own company (BOS-625).
       const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
       const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
@@ -1809,7 +1817,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
@@ -2564,7 +2572,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             recommendedOption: input.recommended,
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
-            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
+            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;
@@ -3167,7 +3176,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // question isn't the owner looking at the host, and the assignee still reports that one.
       if (!extra.settledBy && ctx.type === "question") {
         try {
-          await recordOwnerHostChecks(db, { question: d.question, answer, options: d.options as string[] | null, criterionIndexes: (ctx as { criterionIndexes?: number[] }).criterionIndexes ?? null }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
+          await recordOwnerHostChecks(db, { question: d.question, answer, options: d.options as string[] | null, recommended: d.recommendedOption, criterionIndexes: (ctx as { criterionIndexes?: number[] }).criterionIndexes ?? null }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
         } catch (err) {
           // The answer is saved; a failed write here must not stop it reaching the asker.
           log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);

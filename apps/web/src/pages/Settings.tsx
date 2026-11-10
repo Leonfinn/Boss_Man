@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Company } from "../api";
 import { CompanyReviews } from "../components/ReviewPolicy";
 
@@ -7,6 +7,7 @@ import { Runner } from "./settings/Runner";
 import { Credentials } from "./settings/Credentials";
 import { ToolServers, DeployTargets } from "./settings/Tools";
 import { Funding, ProjectBudgets } from "./settings/Funding";
+import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
 import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
@@ -132,7 +133,22 @@ export function settingsRedirect(route: readonly string[], companyId: string | u
 }
 
 /** "On this page" jump links: Tab reaches each one, and Enter moves focus to the section's heading. */
-function JumpLinks({ items }: { items: NonNullable<SettingsEntry["jump"]> }) {
+function JumpLinks({ items: all }: { items: NonNullable<SettingsEntry["jump"]> }) {
+  // A section that is hidden (Updates when self-deploy is off) or still loading has no heading to jump to, so its
+  // link is left out until it appears (BOS-1063).
+  const [present, setPresent] = useState<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    const read = () => {
+      const next = new Set(all.filter((j) => document.getElementById(j.id)).map((j) => j.id));
+      setPresent((old) => (old && old.size === next.size && [...next].every((i) => old.has(i)) ? old : next));
+    };
+    read();
+    const watch = typeof MutationObserver === "function" ? new MutationObserver(read) : null;
+    watch?.observe(document.body, { childList: true, subtree: true });
+    return () => watch?.disconnect();
+  }, [all]);
+  const items = present ? all.filter((j) => present.has(j.id)) : all;
+  if (items.length === 0) return null;
   return (
     <nav aria-label="On this page" className="set-jump">
       <span className="muted">On this page:</span>
@@ -141,7 +157,10 @@ function JumpLinks({ items }: { items: NonNullable<SettingsEntry["jump"]> }) {
           <li key={j.id}>
             <a
               href={`#${j.id}`}
-              onClick={() => {
+              onClick={(e) => {
+                // The app routes on the URL hash, so letting the browser follow "#checks-h" would replace the route
+                // (#/settings/c1/system) with an unknown one and fall back to the dashboard (BOS-1063). Scroll instead.
+                e.preventDefault();
                 document.getElementById(j.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
                 document.getElementById(j.id)?.focus?.({ preventScroll: true });
               }}
@@ -217,7 +236,9 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {company ? (
           <div key={company.id} style={{ display: "contents" }}>
             <Funding company={company} onChanged={onChanged} />
+            <FundingCards />
             <ProjectBudgets company={company} />
+            <BudgetLimits companies={companies} />
           </div>
         ) : (
           line

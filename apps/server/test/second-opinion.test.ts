@@ -205,6 +205,86 @@ describe("model second opinion (BOS-338)", () => {
     expect(judgeOf(d!)?.second).toMatchObject({ state: "failed" });
   });
 
+  // BOS-1052: OpenRouter's real 429 bodies. Upstream: the one provider serving the model is busy.
+  const UPSTREAM_429 = JSON.stringify({ error: { message: "Provider returned error", code: 429, metadata: { raw: "openai/gpt-oss-safeguard-20b is temporarily rate-limited upstream. Please retry shortly.", provider_name: "Groq" } } });
+  const KEY_429 = JSON.stringify({ error: { message: "Rate limit exceeded: limit_rpm/openai/gpt-oss-safeguard-20b", code: 429 } });
+  const testOn = (ctx2: NonNullable<typeof ctx>, extra: Record<string, unknown> = {}) =>
+    ctx2.req("POST", `/api/companies/${ctx2.companyId}/second-opinion/test`, { enabled: true, baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-oss-safeguard-20b", secretId: null, ...extra }).then((r) => r.json() as { ok: boolean; message: string });
+
+  it("an upstream 429 names the busy provider and its words, says it isn't the key, and is retried once", async () => {
+    ctx = await setup(async () => new Response(UPSTREAM_429, { status: 429, headers: { "content-type": "application/json" } }));
+    const t = await testOn(ctx);
+    expect(t.ok).toBe(false);
+    expect(t.message).toContain("Groq, the company that runs this model for OpenRouter, is too busy");
+    expect(t.message).toContain("temporarily rate-limited upstream");
+    expect(t.message).toContain("not a limit on your key");
+    expect(t.message).toContain("pick another suggested model");
+    expect(t.message).toContain("tried twice");
+    expect(ctx.calls).toHaveLength(2);
+  });
+
+  it("a 429 on the key or account says so, with where to look, and isn't retried without Retry-After", async () => {
+    ctx = await setup(async () => new Response(KEY_429, { status: 429 }));
+    const t = await testOn(ctx);
+    expect(t.message).toContain("your key or account has hit the provider's rate limit (429)");
+    expect(t.message).toContain("limit_rpm");
+    expect(t.message).toContain("openrouter.ai/settings/keys");
+    expect(ctx.calls).toHaveLength(1);
+  });
+
+  it("a 429 whose Retry-After is short is retried once and the answer is used", async () => {
+    let n = 0;
+    ctx = await setup(async () => (++n === 1 ? new Response(KEY_429, { status: 429, headers: { "retry-after": "0" } }) : answer('{"verdict":"allow","reason":"ok"}')()));
+    const t = await testOn(ctx);
+    expect(t).toMatchObject({ ok: true, message: expect.stringContaining("valid verdict") });
+    expect(ctx.calls).toHaveLength(2);
+  });
+
+  it("a 429 whose Retry-After won't fit in the 5 s deadline isn't retried", async () => {
+    ctx = await setup(async () => new Response(UPSTREAM_429, { status: 429, headers: { "retry-after": "30" } }));
+    const t = await testOn(ctx);
+    expect(t.ok).toBe(false);
+    expect(t.message).not.toContain("tried twice");
+    expect(ctx.calls).toHaveLength(1);
+  });
+
+  it("the key never shows in the message, even if the provider echoes it; a 200 with only an error is read too", async () => {
+    const key = "sk-or-v1-ECHOEDKEY0123456789abcdefABCDEF";
+    let n = 0;
+    ctx = await setup(async () =>
+      ++n === 1
+        ? new Response(JSON.stringify({ error: { message: `Key ${key} is over its limit: $5 of $5 used`, code: 403 } }), { status: 403 })
+        : new Response(JSON.stringify({ id: "gen-1", error: { message: "Provider disconnected", code: 502 } }), { status: 200 }),
+    );
+    const secret = (await ctx.req("POST", "/api/secrets", { name: "router key", kind: "generic", value: key })).json() as { secret: { id: string } };
+    const t = await testOn(ctx, { secretId: secret.secret.id });
+    expect(t.message).toContain("refused the key (403)");
+    expect(t.message).toContain("$5 of $5 used");
+    expect(t.message).not.toContain("ECHOEDKEY");
+    const t2 = await testOn(ctx, { secretId: secret.secret.id });
+    expect(t2.message).toContain('sent an error instead of an answer: "Provider disconnected"');
+  });
+
+  it("a live card that hits an upstream 429 records the plain reason, and stats count answered vs fell back for 24 h", async () => {
+    let busy = true;
+    ctx = await setup(async () => (busy ? new Response(UPSTREAM_429, { status: 429, headers: { "retry-after": "60" } }) : answer('{"verdict":"deny","reason":"no"}')()));
+    await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge: "advise" });
+    await ctx.turnOn();
+    const empty = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json();
+    expect(empty).toEqual({ answered: 0, allowed: 0, denied: 0, fellBack: 0, pending: 0, reasons: [] });
+    const failed = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    expect(judgeOf(failed)?.second).toMatchObject({ state: "failed", reason: expect.stringContaining("Groq") });
+    await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    busy = false;
+    await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    // A card from two days ago doesn't count.
+    const old = await ctx.settled((await ctx.raise(JUDGE_ALLOWS)).id);
+    await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 48 * 3600_000) }).where(eq(decisions.id, old.id));
+    const s = (await ctx.req("GET", `/api/companies/${ctx.companyId}/second-opinion/stats`)).json() as { answered: number; denied: number; fellBack: number; reasons: Array<{ reason: string; count: number }> };
+    expect(s).toMatchObject({ answered: 1, denied: 1, fellBack: 2 });
+    expect(s.reasons).toEqual([{ reason: expect.stringContaining("too busy"), count: 2 }]);
+  });
+
   it("settings: needs an address and model to switch on; Test reports a working model", async () => {
     ctx = await setup(answer('{"verdict":"allow","reason":"Runs tests."}'));
     expect((await ctx.req("PUT", `/api/companies/${ctx.companyId}/second-opinion`, { enabled: true, baseUrl: "", model: "", secretId: null })).statusCode).toBe(400);

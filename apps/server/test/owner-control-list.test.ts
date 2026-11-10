@@ -168,6 +168,8 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
   "pages/Settings.tsx>Funding": "Funding",
   "pages/Settings.tsx>ProjectBudgets": "Funding",
+  "pages/Settings.tsx>FundingCards": "Funding",
+  "pages/Settings.tsx>BudgetLimits": "Funding",
   "pages/Settings.tsx>CompanyReviews": "Reviews",
   "pages/Settings.tsx>TicketPrefix": "Team and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews",

@@ -411,6 +411,12 @@ const WRAPPERS: Record<string, string[]> = {
   "systemd-run": ["-u", "-p", "-M", "-H", "-E", "--unit", "--property", "--machine", "--host", "--setenv", "--description", "--slice", "--uid", "--gid", "--nice", "--working-directory"],
   setpriv: ["--reuid", "--regid", "--ruid", "--rgid", "--euid", "--egid", "--groups", "--inh-caps", "--ambient-caps", "--bounding-set", "--securebits", "--pdeathsig", "--selinux-label", "--apparmor-profile", "--landlock-access", "--landlock-rule"],
   entr: [],
+  // firejail runs the program after its own options in the same filesystem (BOS-571). Its options take a value only
+  // after `=` (--net=none), never as the next word, so none may be listed here: a word after `--private` is the
+  // program (firejail --private rm -rf /x) and must be judged, not skipped (BOS-571 review).
+  firejail: [],
+  // bwrap builds a new filesystem view from its --bind/--ro-bind/… options and runs the program there: see the bwrap case (BOS-571).
+  bwrap: ["--ro-bind", "--bind", "--dev-bind", "--ro-bind-try", "--bind-try", "--dev-bind-try", "--tmpfs", "--proc", "--dev", "--dir", "--mqueue", "--chdir", "--setenv", "--unsetenv", "--clearenv", "--uid", "--gid", "--hostname", "--args", "--file", "--bind-data", "--ro-bind-data", "--seccomp", "--add-seccomp-fd", "--userns", "--userns-block-fd", "--info-fd", "--json-status-fd", "--cap-add", "--cap-drop", "--perms", "--size", "--lock-file", "--sync-fd", "--level-prefix", "--log-file", "--exec-label", "--file-label", "--unshare-user-try", "--userns-try"],
 };
 // Wrappers whose first word after their options is a value (a CPU mask, a priority), not the program.
 const WRAPPERS_WITH_VALUE = new Set(["taskset", "chrt"]);
@@ -421,6 +427,8 @@ const SCRIPT_OPTION: Record<string, (args: Word[]) => Word[]> = {
   flock: (args) => afterOptions(args, ["-w", "--timeout", "-E", "--conflict-exit-code"]).slice(1),
   script: () => [],
   npx: (args) => afterOptions(args, ["-p", "--package"]),
+  // sg GROUP cmd runs cmd as the group; with -c the SCRIPT_OPTION check reads its command. Either way the group is dropped.
+  sg: (args) => afterOptions(args).slice(1),
 };
 // ssh's options that take a value; the words after the host are a command for the remote shell.
 const SSH_VALUED = "-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w".split(" ");
@@ -502,6 +510,99 @@ function safeEditPath(w: Word): boolean {
 }
 
 /**
+ * The command words of a gcloud/az command: its global options (which may take a value) and every other option are
+ * dropped, so what's left is the resource path that ends with the verb (`compute instances delete`). A word only known
+ * when it runs is kept so it can be flagged (BOS-571).
+ */
+function gcloudWords(args: Word[]): Word[] {
+  // az's short flags that take a value (gcloud has none at global level). Only these skip the next word: an unknown
+  // short flag is boolean, so `gcloud compute instances -q delete i` must keep `delete` (BOS-571 review).
+  const valued = new Set([
+    "--project", "--account", "--configuration", "--filter", "--format", "--impersonate-service-account", "--billing-project",
+    "--subscription", "--output", "--query", "--resource-group", "-g", "-s", "--location", "-l",
+    "-n", "--name", "-o", "--sub",
+  ]);
+  const out: Word[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const t = a.text;
+    if (t === "--") continue;
+    if (t.startsWith("-")) {
+      if (valued.has(t)) i++; // its value is the next word
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+/**
+ * Reads an interpreter's switches up to its first operand (BOS-571): `inPlace` when -i appears (a suffix may be
+ * joined to it, -pi.bak), `code` when -e/-E was given (so the first operand is a file, not the script), and `end`
+ * the index of that first operand. `joined` lists the other letters whose value is joined to them (-I, -M, -m),
+ * so the switch cluster ends there; "0" and "l" take optional digits and more switches may follow (-0777pi).
+ * `valued` lists letters whose value may be joined OR given as the next word (-r lib / -rlib), so the word after them
+ * is not read as a switch cluster (BOS-571: a value like -rdate must not hide a later -i).
+ */
+function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE", longValued: string[] = []): { inPlace: boolean; code: boolean; end: number; unknownLong: boolean } {
+  let inPlace = false;
+  let code = false;
+  let unknownLong = false;
+  let i = 0;
+  for (; i < args.length && /^-./.test(args[i]!.text); i++) {
+    const t = args[i]!.text;
+    if (t === "--") {
+      i++;
+      break;
+    }
+    // A long option (--encoding): its value is joined (--encoding=x) or, for the ones listed, the next word. An
+    // unknown long option could take the next word as its value too, which would hide a following -i, so the read
+    // stops and the caller flags it (BOS-571 security review round 3).
+    if (t.startsWith("--")) {
+      if (t.includes("=")) {
+        if (/^--inplace=/.test(t)) inPlace = true;
+        continue;
+      }
+      // --inplace is ruby's long form of -i.
+      if (t === "--inplace") {
+        inPlace = true;
+        continue;
+      }
+      if (longValued.includes(t)) i++;
+      else {
+        unknownLong = true;
+        break;
+      }
+      continue;
+    }
+    for (let j = 1; j < t.length; j++) {
+      const c = t[j]!;
+      if (c === "i") {
+        inPlace = true;
+        break;
+      }
+      if (codeLetters.includes(c)) {
+        code = true;
+        if (j + 1 === t.length) i++;
+        break;
+      }
+      // -0 and -l take optional digits, then more switches may follow: -0pi, -lpi, -0777pi.
+      if (c === "0" || c === "l") {
+        if (c === "0" && /[xX]/.test(t[j + 1] ?? "")) for (j++; /[0-9a-fA-F]/.test(t[j + 1] ?? ""); ) j++;
+        else while (/[0-7]/.test(t[j + 1] ?? "")) j++;
+        continue;
+      }
+      if (valued.includes(c)) {
+        if (j + 1 === t.length) i++;
+        break;
+      }
+      if (joined.includes(c)) break;
+    }
+  }
+  return { inPlace, code, end: i, unknownLong };
+}
+
+/**
  * What in a shell command destroys data or pushes it out. A command given as an argv array
  * (["bash", "-lc", "…"]) is read as those words; a string is read the way the shell reads it.
  * A command Boss Man can't read (unbalanced quotes, nesting too deep, an error) counts as destroying.
@@ -528,8 +629,10 @@ export function commandRisks(command: string | string[]): Risk[] {
       let w = cmd.words;
       let wrapped = false;
       let named = !!cmd.named;
+      // VAR=value words in front of the command: git reads its config from GIT_CONFIG_* among them (BOS-1061).
+      const envPrefix: Word[] = [];
       for (let hops = 0; hops < 12; hops++) {
-        while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) w = w.slice(1);
+        while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) envPrefix.push(w[0]!), (w = w.slice(1));
         // A keyword after a wrapper (time { rm …; }, time ! rm …) starts the command that follows it.
         while (w.length && !w[0]!.quoted && KEYWORDS.has(w[0]!.text)) {
           if (w[0]!.text === "function" || w[0]!.text === "coproc") named = true;
@@ -591,6 +694,17 @@ export function commandRisks(command: string | string[]): Risk[] {
           const script = afterOptions(args)[0];
           if (script?.dynamic) return destroys("runs a script only known when it runs");
           return script ? readScript(script.text, depth + 1, cmd.elsewhere) : undefined;
+        }
+        if (prog === "bwrap") {
+          // bwrap runs the program after its options in a new namespace over the files it was given, so a relative
+          // path isn't the agent's checkout. Its options take one or two values (--setenv VAR VAL), so which word is
+          // the program can't be told: judge every position as elsewhere, like docker exec (BOS-571).
+          const rest = afterOptions(args);
+          rest.forEach((x, i) => {
+            if (x.text.startsWith("-") || (x.dynamic && i > 0 && rest[i - 1]!.text.startsWith("-"))) return;
+            judge({ ...cmd, words: rest.slice(i), nested: true, elsewhere: true }, depth + 1, bulk);
+          });
+          return;
         }
         if (WRAPPERS_WITH_VALUE.has(prog)) {
           if (args.some((a) => a.text === "-p" || a.text === "--pid")) return; // changes a running process, runs nothing
@@ -691,8 +805,37 @@ export function commandRisks(command: string | string[]): Risk[] {
         }
         if (prog === "tar") {
           if (args.some((a) => longOf(a.text, ["remove-files", "recursive-unlink"]))) return destroys("deletes the files it archives (tar --remove-files)");
+          // BOS-571: --delete removes entries inside the archive; the options below run a command while it archives. Both
+          // are matched by name (any unambiguous start, --delet) and after --, and by a word only known when it runs.
+          const rm = (t: string) => t === "--" ? false : longOf(t, ["delete"]);
+          // -I/-F and --rsh-command run a program (local for -I/-F, remote for --rsh-command), and GNU tar reads options
+          // after the file name too, so a dashed one counts in any position (BOS-571 review); the bundled tar cIf is only
+          // the first word, so an archive name like Installer.tgz stays allowed.
+          const run = (t: string) => t === "--" ? false : longOf(t, ["to-command", "use-compress-program", "info-script", "new-volume-script", "rsh-command"]);
+          const dashed = (t: string) => /^-[a-zA-Z]*[IF]/.test(t);
+          // --checkpoint-action=exec=CMD runs CMD; only exec does, so other actions are left alone. The option name may
+          // be abbreviated (--checkpoint-act=exec), and GNU tar accepts the value as the next word too
+          // (--checkpoint-action exec=CMD), so check both forms (BOS-571 review).
+          const execAction = (t: string) => {
+            if (!t.startsWith("--") || !t.includes("=")) return false;
+            if (!longOf(t, ["checkpoint-action"])) return false;
+            const value = t.slice(t.indexOf("=") + 1);
+            return /^exec(=|$)/.test(value);
+          };
+          const execActionNext = (i: number) => {
+            const t = args[i]!.text;
+            if (!longOf(t, ["checkpoint-action"])) return false;
+            if (t.includes("=")) return false;
+            return /^exec(=|$)/.test(args[i + 1]?.text ?? "");
+          };
+          // -I PROGRAM runs it (tar -I gzip, and the bundled tar cIf PROGRAM). Only the first word can be that bundle;
+          // a later archive name like Installer.tgz is not an option (BOS-571 review). A dashed word in any position is
+          // an option, so it is checked everywhere.
+          const bundled = (t: string) => t === "--" ? false : /^[a-zA-Z]*[IF]/.test(t);
+          if (args.some((a, i) => rm(a.text) || execAction(a.text) || execActionNext(i))) return destroys("deletes files or runs a command while it archives (tar --delete)");
           // A word only known when it runs could be that option, unless it is the value of -f or -C (tar czf "$OUT" dir).
           const valued = (i: number) => i > 0 && (/^(-[a-zA-Z]*[fC]|--file|--directory)$/.test(args[i - 1]!.text) || (i === 1 && /^[a-zA-Z]*f$/.test(args[0]!.text)));
+          if ((args[0] && bundled(args[0].text)) || args.some((a) => run(a.text) || dashed(a.text))) return destroys("runs a command while it archives (tar --to-command)");
           if (args.some((a, i) => mayBeOption(a) && !(valued(i) && !a.split && !a.many))) return destroys("tar with an option only known when it runs");
           return;
         }
@@ -737,19 +880,54 @@ export function commandRisks(command: string | string[]): Risk[] {
           const valued = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
           // git -c can set a command git then runs: an alias starting with !, a pager, an editor, a hook path…
           const aliases = new Map<string, string>();
-          for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
-            if (args[i]!.text !== "-c") {
-              if (valued.includes(args[i]!.text)) i++;
-              continue;
-            }
-            const setWord = args[++i];
-            const set = setWord?.text ?? "";
+          // -c gc.pruneExpire / gc.reflogExpire* / gc.worktreePruneExpire set to anything but "never" makes a plain gc discard (BOS-954).
+          let gcConfigPrunes = false;
+          // The gc settings that decide what gc throws away; a subsection (gc.refs/*.reflogExpire) counts too (BOS-1061).
+          const GC_KEY = "gc\\.(?:[^=]*\\.)?(?:pruneexpire|reflogexpire\\w*|worktreepruneexpire)";
+          const GC_SET = new RegExp(`^${GC_KEY}(=(?!never$)|$)`, "i");
+          let configError: string | undefined;
+          // One `key=value` setting from -c, --config-env or the GIT_CONFIG_* variables.
+          const applySet = (set: string, dynamic: boolean) => {
+            if (GC_SET.test(set) || (dynamic && /[$`]/.test(set.split("=")[0]!))) gcConfigPrunes = true;
             const alias = /^alias\.([^=]*)=(.*)$/is.exec(set);
             const m = /^[^=]*\.(fsmonitor|sshcommand|pager|editor|hookspath|cmd|command|program|helper|textconv|clean|smudge|process)=(.*)$/i.exec(set);
-            if ((alias || m) && setWord!.dynamic) return destroys("sets a git command only known when it runs");
-            if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
+            if ((alias || m) && dynamic) configError = "sets a git command only known when it runs";
+            else if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
             else if (m) readScript(m[2]!, depth + 1, cmd.elsewhere);
+          };
+          for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
+            const t = args[i]!.text;
+            if (t === "-c") {
+              const setWord = args[++i];
+              applySet(setWord?.text ?? "", !!setWord?.dynamic);
+            } else if (t === "--config-env" || t.startsWith("--config-env=")) {
+              // --config-env=NAME=ENVVAR takes the value from the environment: any value, so it may be "now".
+              const word = t === "--config-env" ? args[++i] : undefined;
+              const spec = t === "--config-env" ? word?.text ?? "" : t.slice("--config-env=".length);
+              const eq = spec.lastIndexOf("=");
+              applySet(`${eq < 0 ? spec : spec.slice(0, eq)}=${eq < 0 ? "" : spec.slice(eq + 1)}`, true);
+            } else if (valued.includes(t)) i++;
           }
+          // GIT_CONFIG_COUNT / KEY_n / VALUE_n and GIT_CONFIG_PARAMETERS set the same things as -c (BOS-1061).
+          const envKeys = new Map<string, Word>();
+          const envValues = new Map<string, Word>();
+          for (const e of envPrefix) {
+            const [, name, text] = /^([A-Za-z_]\w*)\+?=(.*)$/s.exec(e.text) ?? [];
+            const idx = /^GIT_CONFIG_(KEY|VALUE)_(\d+)$/.exec(name ?? "");
+            if (idx) (idx[1] === "KEY" ? envKeys : envValues).set(idx[2]!, { ...e, text: text! });
+            else if (name === "GIT_CONFIG_PARAMETERS") {
+              for (const p of text!.matchAll(/'([^']*)'(?:='([^']*)')?/g)) applySet(p[2] === undefined ? p[1]! : `${p[1]}=${p[2]}`, e.dynamic);
+              if (e.dynamic) applySet("$=", true);
+            }
+          }
+          for (const [n, key] of envKeys) {
+            const value = envValues.get(n);
+            applySet(`${key.text}=${value?.text ?? ""}`, key.dynamic || !!value?.dynamic);
+          }
+          // Exported on an earlier line (`export GIT_CONFIG_PARAMETERS=…; git gc`): the value can't be tied to this command,
+          // so the setting being there at all goes to the owner.
+          if (!envPrefix.some((e) => e.text.startsWith("GIT_CONFIG_")) && new RegExp(`GIT_CONFIG_(?:PARAMETERS|KEY_\\d+)=[^\\n;&|]*${GC_KEY}`, "i").test(whole)) gcConfigPrunes = true;
+          if (configError) return destroys(configError);
           const rest = afterOptions(args, valued);
           if (rest[0]?.dynamic) return destroys("runs a git command only known when it runs");
           const sub = rest[0]?.text;
@@ -772,6 +950,28 @@ export function commandRisks(command: string | string[]): Risk[] {
           const before = dashes < 0 ? opts : opts.slice(0, dashes);
           const paths = dashes < 0 ? [] : opts.slice(dashes + 1);
           const force = before.some((o) => /^-[a-zA-Z]*f/.test(o) || longOf(o, ["force"]));
+          // A gc setting that discards, carried by any git command: gc, `maintenance run --task=gc`, or the auto gc that
+          // commit, fetch, merge and the like start (BOS-1061).
+          if (gcConfigPrunes && sub !== "config") return destroys("discards unreachable commits for good (a gc expire setting other than never)");
+          if (sub === "config") {
+            // Writing the setting to the repo's config makes a later plain `git gc` discard (BOS-1061). Read, unset and list stay allowed.
+            const OPTS_WITH_VALUE = ["-f", "--file", "--blob", "-t", "--type", "--default", "--comment", "--includes"];
+            const operands: Word[] = [];
+            const given = rest.slice(1);
+            for (let i = 0; i < given.length; i++) {
+              if (given[i]!.text === "--") continue;
+              if (/^-./.test(given[i]!.text)) i += OPTS_WITH_VALUE.includes(given[i]!.text) ? 1 : 0;
+              else operands.push(given[i]!);
+            }
+            const reads = before.some((o) => /^--(get|get-all|get-regexp|get-urlmatch|unset|unset-all|list|edit|remove-section|rename-section)$/.test(o) || /^-[a-z]*l$/.test(o));
+            const op = operands[0]?.text;
+            const [key, value] = op === "set" ? operands.slice(1) : operands;
+            if (!reads && !["get", "unset", "list", "edit"].includes(op ?? "") && key && value) {
+              const keyMatches = new RegExp(`^${GC_KEY}$`, "i").test(key.text) || (key.dynamic && /[$`]/.test(key.text));
+              if (keyMatches && (value.text !== "never" || value.dynamic)) destroys("sets a gc expire time that discards unreachable commits for good (git config gc.pruneExpire)");
+            }
+            return;
+          }
           if (sub === "push") {
             add("pushes", "pushes to a remote (git push)", all, plain);
             if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^[+:]/.test(o) || longOf(o, ["force", "force-with-lease", "force-if-includes", "mirror", "delete", "prune"]))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
@@ -784,8 +984,11 @@ export function commandRisks(command: string | string[]): Risk[] {
             const operands = before.filter((o, i) => !o.startsWith("-") && !(i > 0 && ["-b", "-B", "--orphan"].includes(before[i - 1]!)));
             if (unknownOpt || force || paths.length || operands.length > 1 || operands.some((o) => /^(\.\/?|:\/.*)$/.test(o)) || before.some((o) => longOf(o, ["pathspec-from-file"])))
               destroys("overwrites uncommitted changes (git checkout -- paths)");
-          } else if (sub === "switch" && (unknownOpt || force || before.some((o) => longOf(o, ["discard-changes"])))) destroys("throws away uncommitted changes (git switch --discard-changes)");
-          else if (sub === "restore") {
+          } else if (sub === "switch") {
+            // -C/--force-create resets an existing branch to the start point, unlike -c (BOS-571).
+            if (unknownOpt || force || before.some((o) => shortHas(o, "C") || longOf(o, ["discard-changes", "force-create"])))
+              destroys("throws away uncommitted changes or overwrites an existing branch (git switch -C/--discard-changes)");
+          } else if (sub === "restore") {
             // Only restoring the index (--staged without --worktree) keeps the files as they are.
             const staged = before.some((o) => shortHas(o, "S") || longOf(o, ["staged"]));
             const worktree = before.some((o) => shortHas(o, "W") || longOf(o, ["worktree"]));
@@ -795,7 +998,36 @@ export function commandRisks(command: string | string[]): Risk[] {
             if (op?.dynamic || op?.text === "drop" || op?.text === "clear") destroys("throws away saved changes (git stash drop/clear)");
           } else if (sub === "branch") {
             const del = before.some((o) => shortHas(o, "d") || longOf(o, ["delete"]));
-            if (unknownOpt || before.some((o) => shortHas(o, "D")) || (del && force)) destroys("deletes a branch that may not be merged (git branch -D)");
+            // -C (and its long form) overwrites an existing branch; lowercase -c only copies or creates one (BOS-571).
+            const overwrite = before.some((o) => shortHas(o, "C") || longOf(o, ["force-create"]));
+            if (unknownOpt || overwrite || before.some((o) => shortHas(o, "D")) || (del && force)) destroys("deletes or overwrites a branch that may not be merged (git branch -D/-C)");
+          } else if (sub === "worktree") {
+            // Removing a worktree deletes its files, with -f or not (BOS-571). prune only drops metadata of worktrees
+            // whose directories are already gone, so it is left alone.
+            const op = afterOptions(rest.slice(1))[0];
+            if (op?.dynamic || op?.text === "remove") destroys("deletes a worktree's files (git worktree remove)");
+          } else if (sub === "update-ref") {
+            // -d deletes the ref, and with it the only pointer to the commits it held (BOS-571). --stdin reads the
+            // commands from input, which can't be seen, and an all-zero new value deletes the ref (git update-ref x
+            // 0000…) (BOS-571 review), so both go to the owner too.
+            const words = afterOptions(rest.slice(1));
+            if (unknownOpt || before.some((o) => shortHas(o, "d") || longOf(o, ["delete"]))) destroys("deletes a ref (git update-ref -d)");
+            else if (args.some((a) => longOf(a.text, ["stdin"])) || words.some((a) => a.text === "--stdin" || /^0+$/.test(a.text))) destroys("deletes or rewrites a ref the checker can't read (git update-ref --stdin/zero)");
+          } else if (sub === "reflog") {
+            // expire (and delete) throw away the reflogs that make a lost commit recoverable (BOS-571).
+            const op = afterOptions(rest.slice(1))[0];
+            if (op?.dynamic || op?.text === "expire" || op?.text === "delete") destroys("expires the reflogs that make resets recoverable (git reflog expire)");
+          } else if (sub === "gc") {
+            // --prune=<date> reaches the unreachable objects a reset or branch -D left behind, so it can't be undone
+            // whatever the date (=now, =all, =1.second.ago); only --prune=never leaves them. A bare --prune prunes the
+            // default two weeks. An option only known when it runs could be that one. A plain gc, --auto and --quiet
+            // leave them alone (BOS-571).
+            // git takes any unambiguous start of --prune (--pru=now), and `-c gc.pruneExpire=now` does the same (BOS-954).
+            const prunesNow = before.some((o) => longOf(o, ["prune"]) && !/^--[^=]*=never$/.test(o));
+            if (unknownOpt || prunesNow || gcConfigPrunes) destroys("discards unreachable commits for good (git gc --prune=now)");
+          } else if (sub === "prune") {
+            // The standalone `git prune` discards unreachable objects just as gc --prune does (BOS-571 review).
+            if (!before.some((o) => longOf(o, ["dry-run"]))) destroys("discards unreachable commits for good (git prune)");
           }
           return;
         }
@@ -812,11 +1044,76 @@ export function commandRisks(command: string | string[]): Risk[] {
           return;
         }
         if (prog === "kubectl") {
-          if (afterOptions(args, KUBE_VALUED)[0]?.dynamic) return destroys("runs a kubectl command only known when it runs");
+          const cmdWords = afterOptions(args, KUBE_VALUED);
+          if (cmdWords[0]?.dynamic) return destroys("runs a kubectl command only known when it runs");
           const at = args.findIndex((a) => a.text === "exec" || a.text === "delete");
           if (args[at]?.text === "delete") return destroys("deletes cluster resources (kubectl delete)");
+          // BOS-571: --prune deletes what the manifests no longer list; replace --force deletes and recreates an object.
+          const verb = cmdWords[0]?.text;
+          if (verb === "apply" && args.some((a) => longOf(a.text, ["prune"]) || a.text.startsWith("--prune-"))) return destroys("deletes resources missing from the manifests (kubectl apply --prune)");
+          if (verb === "replace" && args.some((a) => longOf(a.text, ["force"]))) return destroys("deletes and recreates a resource (kubectl replace --force)");
           // kubectl exec runs a command in a pod: see `inside` above.
           if (at >= 0) inside(args.slice(at + 1));
+          return;
+        }
+        if (prog === "terraform" || prog === "tofu") {
+          // terraform destroy, and apply/plan -destroy, delete the infrastructure the state describes (BOS-571).
+          const cmdWords = afterOptions(args, ["-chdir", "-var", "-var-file", "--var", "--var-file"]);
+          const verb = cmdWords[0];
+          if (verb?.dynamic) return destroys("runs a terraform command only known when it runs");
+          // state push overwrites the remote state with a local file, with -force even when the lineage or serial is older (BOS-1061).
+          if (verb?.text === "state") {
+            const op = afterOptions(cmdWords.slice(1))[0];
+            if (op?.dynamic || op?.text === "push") return destroys("overwrites the stored infrastructure state (terraform state push)");
+          }
+          if (verb?.text === "destroy") return destroys("destroys the infrastructure it manages (terraform destroy)");
+          if (verb?.text === "apply" && args.some((a) => /^-{1,2}destroy(=true)?$/.test(a.text))) return destroys("destroys the infrastructure it manages (terraform apply -destroy)");
+          return;
+        }
+        if (prog === "pulumi") {
+          const verb = afterOptions(args, ["-C", "--cwd", "--stack", "-s"]).find((a) => !a.text.startsWith("-"));
+          if (verb?.dynamic) return destroys("runs a pulumi command only known when it runs");
+          if (verb?.text === "destroy" || verb?.text === "down" || verb?.text === "dn") return destroys("destroys the infrastructure it manages (pulumi destroy)");
+          return;
+        }
+        if (prog === "helm") {
+          // uninstall (and its aliases del, delete, un) deletes the release's resources (BOS-571).
+          const verb = afterOptions(args, ["-n", "--namespace", "--kube-context", "--kubeconfig"]).find((a) => !a.text.startsWith("-"));
+          if (verb?.dynamic) return destroys("runs a helm command only known when it runs");
+          if (verb && ["uninstall", "del", "delete", "un"].includes(verb.text)) return destroys("deletes a release's resources (helm uninstall)");
+          return;
+        }
+        if (prog === "gcloud") {
+          // gcloud GROUP … delete: strip the global options and look for `delete` among the command's own words (BOS-571).
+          const words = gcloudWords(args);
+          if (words.some((a) => a.dynamic)) return destroys("runs a gcloud command only known when it runs");
+          // A bare `delete` anywhere (even where an option was thought to take it as a value) is never a value in
+          // gcloud, so flag it: a wrong entry in the value list can then only over-flag, never miss a delete.
+          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (gcloud … delete)");
+          // gcloud storage mv copies, then removes the source objects (BOS-1061).
+          if (words.some((a) => a.text === "mv")) return destroys("removes the source after copying (gcloud storage mv)");
+          return;
+        }
+        if (prog === "gsutil") {
+          // gsutil [-m] [-h header] [-o section:key=value] mv … removes the source after copying (BOS-1061).
+          const verb = afterOptions(args, ["-h", "-o", "-u", "-i"])[0];
+          if (verb?.dynamic) return destroys("runs a gsutil command only known when it runs");
+          if (verb?.text === "mv") return destroys("removes the source after copying (gsutil mv)");
+          return;
+        }
+        if (prog === "az") {
+          // az GROUP … delete: same shape as gcloud (BOS-571).
+          const words = gcloudWords(args);
+          if (words.some((a) => a.dynamic)) return destroys("runs an az command only known when it runs");
+          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (az … delete)");
+          // --mode Complete makes a deployment delete every resource in the group that the template doesn't list (BOS-1061).
+          // az (Python argparse) takes any unambiguous start of the option, and the value from the next word or after =.
+          for (let i = 0; i < args.length; i++) {
+            const t = args[i]!.text;
+            if (!t.startsWith("--") || !longOf(t, ["mode"]) || t.length < 4) continue;
+            const value = t.includes("=") ? { text: t.slice(t.indexOf("=") + 1), dynamic: args[i]!.dynamic } : args[i + 1];
+            if (value && (value.dynamic || /^complete$/i.test(value.text))) return destroys("deletes resources the template doesn't list (az deployment … --mode Complete)");
+          }
           return;
         }
         if (prog === "aws") {
@@ -826,7 +1123,8 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (service?.dynamic || op?.dynamic) return destroys("runs an aws command only known when it runs");
           const has = (o: string) => cmdWords.some((x) => x.text === o);
           // An S3 object delete can't be undone unless the bucket keeps versions, so every `s3 rm` goes to the owner.
-          if (service?.text === "s3" && (op?.text === "rm" || (op?.text === "rb" && has("--force")) || (op?.text === "sync" && has("--delete")))) return destroys(`deletes in the cloud (aws s3 ${op.text})`);
+          // s3 mv copies, then deletes the source object (BOS-1061).
+          if (service?.text === "s3" && (op?.text === "rm" || op?.text === "mv" || (op?.text === "rb" && has("--force")) || (op?.text === "sync" && has("--delete")))) return destroys(`deletes in the cloud (aws s3 ${op.text})`);
           if (service?.text === "s3" && /^(rb|sync)$/.test(op?.text ?? "") && cmdWords.some(mayBeOption)) return destroys("aws s3 with an option only known when it runs");
           if (op && /^(delete|terminate)-/.test(op.text)) return destroys(`deletes in the cloud (aws ${service!.text} ${op.text})`);
           return;
@@ -971,37 +1269,28 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (/^perl[\d.]*$/.test(prog)) {
           // perl's switches end at the first word that isn't one; -i takes an optional suffix joined to it (-pi.bak;
           // -pie means suffix "e"), and -e/-E take the next word, -I/-M/-m/-l/-0/-x/-d/-C/-F a joined value.
-          let inPlace = false;
-          let code = false;
-          let i = 0;
-          for (; i < args.length && /^-./.test(args[i]!.text); i++) {
-            const t = args[i]!.text;
-            if (t === "--") {
-              i++;
-              break;
-            }
-            for (let j = 1; j < t.length; j++) {
-              const c = t[j]!;
-              if (c === "i") {
-                inPlace = true;
-                break;
-              }
-              if (c === "e" || c === "E") {
-                code = true;
-                if (j + 1 === t.length) i++;
-                break;
-              }
-              // -0 and -l take optional digits, then more switches may follow: -0pi, -lpi, -0777pi.
-              if (c === "0" || c === "l") {
-                if (c === "0" && /[xX]/.test(t[j + 1] ?? "")) for (j++; /[0-9a-fA-F]/.test(t[j + 1] ?? ""); ) j++;
-                else while (/[0-7]/.test(t[j + 1] ?? "")) j++;
-                continue;
-              }
-              if ("IMmxdCF".includes(c)) break;
-            }
-          }
+          const edit = inPlaceSwitches(args, "IE0lIMmxdCF");
           // Without -e the first word left is the script file; the rest are the files edited.
-          if (inPlace) editsInPlace(args.slice(code ? i : i + 1), "edits files outside the working copy and /tmp (perl -i)");
+          if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (perl -i)");
+        }
+        if (/^ruby[\d.]*$/.test(prog)) {
+          // ruby reads a script from a file or -e code and edits its files in place with -i[SUFFIX]; its switches end
+          // at the first word that isn't one (the script file, unless -e was given), as perl's do (BOS-571).
+          // -r/-I/-C/-E take a value (joined or the next word; -E is an encoding, not code), so their value must not
+          // be read as a switch cluster: `ruby -rdate -i …` and `ruby -Fe -i …` still see the -i. But -F/-K/-W/-T/-x
+          // take their value joined only (-Fe, never `-F e`), so a word after them is the next switch: `ruby -W -i`
+          // is the -i (BOS-571 security review round 2).
+          // ruby also has long options (--encoding, --external-encoding, --internal-encoding) whose value is the next
+          // word, and --inplace is its long form of -i; an unknown long option could hide a following -i too.
+          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e", ["--encoding", "--external-encoding", "--internal-encoding"]);
+          // -C/--chdir changes the directory before the files resolve, so a relative path no longer names a file in
+          // the checkout; its base is unknown, so a -i edit goes to the owner (BOS-571 review).
+          const chdirs = args.slice(0, edit.end).some((a) => a.text === "-C" || a.text === "--chdir" || /^-C./.test(a.text) || /^--chdir=/.test(a.text));
+          // An unknown long option stops the read, so a -i after it can't be shown absent: send it to the owner.
+          if (edit.unknownLong) destroys("edits files outside the working copy and /tmp (ruby -i after an unknown long option)");
+          // Without -e the first word left is the script file; the rest are the files edited.
+          else if (edit.inPlace && chdirs) destroys("edits files outside the working copy and /tmp (ruby -C with -i)");
+          else if (edit.inPlace) editsInPlace(args.slice(edit.code ? edit.end : edit.end + 1), "edits files outside the working copy and /tmp (ruby -i)");
         }
 
         if (SHELLS.has(prog)) {
