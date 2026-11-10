@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { Funding } from "../src/pages/Settings";
+import { Funding, Settings } from "../src/pages/Settings";
 
 afterEach(() => {
   cleanup();
@@ -56,5 +56,29 @@ describe("editing and deleting a funding source", () => {
     fireEvent.click(screen.getByLabelText("Delete Router"));
     expect((await screen.findByRole("alert")).textContent).toBe("It has spend. Edit it instead.");
     expect(fetchMock).toHaveBeenCalledWith("/api/funding-sources/f1", expect.objectContaining({ method: "DELETE" }));
+  });
+});
+
+// BOS-1053: the Settings → Funding page lost its per-source status cards and spend tables once, and a heading check
+// could not see it ("Budgets" is a heading on both versions). So assert the reads and the cards themselves.
+describe("Settings → Funding page", () => {
+  it("shows a status card per source and the budget-policy table, not just the sources list and project budgets", async () => {
+    const source = { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic", monthlyGrantMicros: null, cycleAnchor: null };
+    const status = { source, credit: null, quota: [{ window: "five_hour", utilization: 0.42, resetsAt: null, status: null }], windowsSeen: ["five_hour"], forecasts: {}, daily: [], totalSpentMicros: 0, coverage: "all" };
+    const budgets = [{ policy: { id: "b1", scopeKind: "instance", scopeId: "x", windowKind: "calendar_month", limitMicros: 5_000_000, onLimit: "pause" }, status: { usedMicros: 1_000_000, limitMicros: 5_000_000, fractionUsed: 0.2, state: "ok" } }];
+    const fetchMock = vi.fn(async (url: string) => {
+      const body = url.includes("/status") ? status : url.startsWith("/api/funding-sources") ? [source] : url === "/api/budgets" ? budgets : [];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const company = { id: "c1", name: "Co", mission: null, paused: false, agents: [] } as unknown as Company;
+    const { container } = render(<Settings companies={[company]} companyId="c1" tab="funding" go={() => {}} onChanged={() => {}} />);
+    await waitFor(() => expect(container.querySelectorAll(".source-card").length).toBe(1));
+    expect(container.querySelector(".source-card")!.textContent).toContain("42%");
+    expect(await screen.findByText("Spending limits")).toBeTruthy();
+    expect(screen.getByText("All companies")).toBeTruthy();
+    const urls = fetchMock.mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => /^\/api\/funding-sources\/f1\/status/.test(u))).toBe(true);
+    expect(urls).toContain("/api/budgets");
   });
 });

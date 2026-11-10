@@ -15,6 +15,8 @@ const built = existsSync(path.join(DIST, "index.html"));
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOSS", nextTicketNumber: 12, agents: [], projects: [] };
 
+const fundingSource = { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic", monthlyGrantMicros: null, cycleAnchor: null };
+
 function answer(p: string): unknown {
   if (p === "/api/setup") return { needsSetup: false };
   if (p === "/api/me") return { username: "owner" };
@@ -22,7 +24,10 @@ function answer(p: string): unknown {
   if (p === "/api/companies") return [company];
   if (p === "/api/notifications") return { items: [], unread: 0 };
   if (p === "/api/notifications/unseen") return { count: 0 };
-  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices", "/api/funding-sources"].includes(p)) return [];
+  if (p === "/api/funding-sources") return [fundingSource];
+  if (p === "/api/funding-sources/f1/status") return { source: fundingSource, credit: null, quota: [{ window: "five_hour", utilization: 0.42, resetsAt: null, status: null }], windowsSeen: ["five_hour"], forecasts: {}, daily: [], totalSpentMicros: 0, coverage: "all" };
+  if (p === "/api/budgets") return [{ policy: { id: "b1", scopeKind: "instance", scopeId: "x", windowKind: "calendar_month", limitMicros: 5_000_000, onLimit: "pause" }, status: { usedMicros: 1_000_000, limitMicros: 5_000_000, fractionUsed: 0.2, state: "ok" } }];
+  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices"].includes(p)) return [];
   if (p === "/api/health") return { role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() };
   if (p === "/api/bluegreen") return { enabled: false };
   if (p === "/api/kill-switch") return { paused: false };
@@ -125,6 +130,12 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           const found = (await page.locator(".set-page h2, .set-page h3").allInnerTexts()).map((t: string) => t.trim());
           for (const h of headings) {
             expect(found.some((f: string) => f === h || f.startsWith(h)), `${vp.name}: "${h}" on ${id}; found ${JSON.stringify(found)}; errors ${JSON.stringify(errors)}; body ${JSON.stringify((await page.locator("main, body").first().innerText()).split("TypeError")[1]?.slice(0, 200))}`).toBe(true);
+          }
+          // BOS-1053: headings alone missed the Funding page losing its status cards and the budget-policy table.
+          if (id === "funding") {
+            expect(await page.locator(".set-page .source-card").count(), `${vp.name}: a status card per funding source on funding`).toBe(1);
+            expect(await page.locator(".set-page table").count(), `${vp.name}: the budget-policy table on funding`).toBeGreaterThan(0);
+            expect(found, `${vp.name}: Spending limits on funding`).toContain("Spending limits");
           }
           // No page sideways-scrolls (a phone with a wide table would).
           const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
