@@ -125,12 +125,18 @@ export function parseAllow(text) {
 // diff: output of `git diff -U0 --no-color`. Returns [{file, line, text}] of added lines.
 export function addedLines(diff) {
   const out = []
-  let file = null, ln = 0
+  let file = null, ln = 0, inHeader = false
+  // File headers (---/+++) only exist between a "diff --git" line and the first "@@": inside a hunk every line starting
+  // with "+" is an ADDED line, even one whose text begins "++ " (git shows it as "+++ ..."). Reading it as a header would
+  // let a branch hide a token (Freddy's finding on BOS-979).
   for (const l of diff.split('\n')) {
-    if (l.startsWith('+++ ')) { file = l === '+++ /dev/null' ? null : l.slice(6); continue }
-    if (l.startsWith('--- ') || l.startsWith('diff --git') || l.startsWith('index ')) continue
+    if (l.startsWith('diff --git ')) { inHeader = true; file = null; continue }
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l)
-    if (h) { ln = Number(h[1]); continue }
+    if (h) { inHeader = false; ln = Number(h[1]); continue }
+    if (inHeader) {
+      if (l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6)
+      continue
+    }
     if (file && l.startsWith('+')) { out.push({ file, line: ln, text: l.slice(1) }); ln++ }
   }
   return out
@@ -178,7 +184,7 @@ const git = (args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 2
 function main() {
   const base = process.argv[2] ?? 'origin/main'
   const range = `${base}...HEAD`
-  const diff = git(['diff', '-U0', '--no-color', '--no-ext-diff', '--diff-filter=ACMR', range])
+  const diff = git(['diff', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--diff-filter=ACMR', range])
   const newFiles = git(['diff', '--name-only', '--diff-filter=AR', range]).split('\n').filter(Boolean)
   const extra = []
   const log = git(['log', '--no-merges', '--format=%x00%h%x01%ae%x01%ce%x01%B', `${base}..HEAD`])

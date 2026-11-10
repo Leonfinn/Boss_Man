@@ -87,3 +87,22 @@ test('commit message text is scanned too', () => {
   const r = scan({ items: [], extra: [{ where: 'commit abc1234 message', text: `oops ${fakeGithub}` }] })
   assert.match(format(r), /commit abc1234 message/)
 })
+
+// Freddy's finding: an added line whose text starts "++ " shows up in a diff as "+++ ...". It is content, not a file header.
+test('an added line that looks like a +++ header is still scanned', () => {
+  const r = run([`++ ${fakeGithub}`, 'after'])
+  assert.equal(r.blocked.length, 1)
+  assert.match(format(r), /src\/a\.ts:1/)
+})
+
+test('an added "++ b/x.png" line does not make the scan skip the rest of the hunk', () => {
+  const r = run(['++ b/x.png', `token ${fakeGithub}`])
+  assert.equal(r.blocked.length, 1)
+  assert.match(format(r), /src\/a\.ts:2/)
+})
+
+test('a "-- " removed line and a "++ /dev/null" added line do not change the file', () => {
+  const diff = `diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,2 @@\n--- gone\n+++ /dev/null\n+${fakeGithub}\n`
+  const r = scan({ items: addedLines(diff) })
+  assert.equal(r.blocked.length, 1)
+})

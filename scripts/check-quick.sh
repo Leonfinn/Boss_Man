@@ -122,20 +122,10 @@ done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
   step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
-  # BOS-979: no secret and none of the owner's listed private details in what this branch adds. The merge gate gets the
-  # owner's list in BOSSMAN_SCAN_DENYLIST_FILE; a hand run has none and runs the secret rules only. Skipped if the script
-  # is absent (a branch based on an older main).
-  # The runner passes the list in BOSSMAN_SCAN_DENYLIST: it goes into a private (0600) file and out of the environment at
-  # once, so no later step (tests run branch code) inherits it, and the file is deleted when the scan ends.
+  # BOS-979: a hand run's early warning for the secret rules (it has no owner's list). Convenience only: the merge line's
+  # scan is the runner's own installed copy, run before this script starts, and it does not depend on this step.
   if [ -f scripts/scan-added-lines.mjs ]; then
-    scan_list=""
-    if [ -n "${BOSSMAN_SCAN_DENYLIST:-}" ]; then
-      scan_list=$(umask 077 && mktemp) && printf '%s\n' "$BOSSMAN_SCAN_DENYLIST" >"$scan_list" && export BOSSMAN_SCAN_DENYLIST_FILE="$scan_list"
-    fi
-    unset BOSSMAN_SCAN_DENYLIST
-    step "secrets and private-details scan" node scripts/scan-added-lines.mjs "$base"
-    if [ -n "$scan_list" ]; then rm -f "$scan_list"; fi
-    unset BOSSMAN_SCAN_DENYLIST_FILE
+    step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
   if has '^apps/server/drizzle/|^scripts/lint-migrations'; then step "migration lint" node scripts/lint-migrations.mjs; fi
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
