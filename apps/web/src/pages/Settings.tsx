@@ -7,6 +7,7 @@ import { Runner } from "./settings/Runner";
 import { Credentials } from "./settings/Credentials";
 import { ToolServers, DeployTargets } from "./settings/Tools";
 import { Funding, ProjectBudgets } from "./settings/Funding";
+import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
 import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
@@ -217,7 +218,9 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {company ? (
           <div key={company.id} style={{ display: "contents" }}>
             <Funding company={company} onChanged={onChanged} />
+            <FundingCards />
             <ProjectBudgets company={company} />
+            <BudgetLimits companies={companies} />
           </div>
         ) : (
           line
