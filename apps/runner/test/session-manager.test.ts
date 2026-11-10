@@ -1,5 +1,6 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
+// Under the merge check these tests run in a bare environment (PATH, a job HOME and TMPDIR, CI=1); see BOS-1114.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
