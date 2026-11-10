@@ -189,7 +189,7 @@ describe("a run that isn't asked to be fenced", () => {
     const r = await reachRun({ runnerLevel: live ? level : "full" });
     // Today's reach: the agent can change another ticket's file and read other agents' transcripts.
     expect(r.reach).toMatchObject({ wroteInside: true, wroteOutside: true, readSharedClaude: true });
-    expect(r.reach.env).toMatchObject({ HOME: r.sharedHome, TMPDIR: process.env.CLAUDE_CODE_TMPDIR !== undefined ? (process.env.TMPDIR ?? null) : null, CLAUDE_CONFIG_DIR: path.join(r.sharedHome, ".claude"), CODEX_HOME: null, npm_config_store_dir: null, GIT_CONFIG_COUNT: null });
+    expect(r.reach.env).toMatchObject({ HOME: r.sharedHome, TMPDIR: process.env.TMPDIR ?? null, CLAUDE_CONFIG_DIR: path.join(r.sharedHome, ".claude"), CODEX_HOME: null, npm_config_store_dir: null, GIT_CONFIG_COUNT: null });
     // The check queue's folder is the one change every session gets, so fenced and unfenced checks take turns.
     expect(r.reach.env.CHECK_ALL_LOCK).toBe(path.join(r.coordDir, "queue", "check-all"));
     expect(r.events.find((e) => e.type === "run.started")).not.toHaveProperty("fenced");

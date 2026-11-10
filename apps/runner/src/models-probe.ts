@@ -39,7 +39,10 @@ export async function probeModels(
     env.HOME = home;
     env.CLAUDE_CONFIG_DIR = path.join(home, ".claude");
     // In a fenced check job /tmp is refused and Claude Code's own /tmp/claude-<uid> ends the probe with "Internal error" (BOS-1067).
-    if (process.env.CLAUDE_CODE_TMPDIR !== undefined) env.CLAUDE_CODE_TMPDIR = process.env.CLAUDE_CODE_TMPDIR;
+    if (opts.baseEnv !== undefined) {
+      const t = process.env.CLAUDE_CODE_TMPDIR ?? process.env.TMPDIR;
+      if (t !== undefined) env.CLAUDE_CODE_TMPDIR = t;
+    }
   } else {
     // Codex keeps its login in CODEX_HOME, so the runner's own settings are kept.
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
