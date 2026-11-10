@@ -369,12 +369,8 @@ export function reviewService(
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
     if (await openHold(db, ticketId)) return false;
-    const [signoff] = await db
-      .select({ id: decisions.id })
-      .from(ticketDependencies)
-      .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-    return !signoff;
+    // Only a card that really holds the merge counts (BOS-1078): the sign-off, or a card marked as holding it.
+    return !(await openSignoffCard(db, ticketId)) && !(await openHoldingCard(db, ticketId));
   }
 
   /**
@@ -785,12 +781,9 @@ export function reviewService(
           return { verdict: "approved" as const, outcome: "held" as const, delivered: `the pass stands; the merge is held: ${input.hold.reason.trim()}` };
         }
         if (await openHold(db, ticketId)) return { verdict: "approved" as const, outcome: "held" as const, delivered: "the merge is held by a reviewer; it goes on once the hold is released" };
-        const [signoff] = await db
-          .select({ id: decisions.id })
-          .from(ticketDependencies)
-          .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-          .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-        if (signoff || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
+        // The same holding rule as the gate (BOS-1078): a plain question on the ticket doesn't stop this merge.
+        const holding = (await openSignoffCard(db, ticketId)) ?? (await openHoldingCard(db, ticketId));
+        if (holding || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, `Every review is in; the ticket is waiting on the owner's decision${holding ? ` (card ${holding})` : ""} before it merges.`);
         if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "Every review is in and the merge is running now.");
         await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
         return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
@@ -1092,9 +1085,12 @@ export function reviewService(
     },
 
     /**
-     * The files this ticket's branch would clash with on the default branch, or null when that can't be
-     * told (no repo, no connected runner, an older runner, or a failed check). Null means "carry on as
-     * if it merges": a check that can't answer never holds a reviewer back (BOS-426).
+     * The files this ticket's branch would clash with on the default branch. Null when it merges cleanly
+     * or when that can't be told (no repo, no connected runner, an older runner, or a failed check): null
+     * means "carry on as if it merges", so a check that can't answer never holds a reviewer back (BOS-426).
+     * A real clash whose file list is unknown is an empty array, which callers must read as a clash.
+     * A clean merge must never come back as [] (BOS-1074: [] is truthy, so every idle review woke its
+     * author with "no longer merges").
      */
     async branchClash(ticketId: string): Promise<string[] | null> {
       try {
@@ -1104,7 +1100,7 @@ export function reviewService(
         if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
         const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
         if (typeof r?.clashes !== "boolean") return null;
-        return r.clashes ? (r.files ?? []) : [];
+        return r.clashes ? (r.files ?? []) : null;
       } catch {
         return null;
       }

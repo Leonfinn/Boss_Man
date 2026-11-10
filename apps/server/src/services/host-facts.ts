@@ -247,8 +247,11 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
   /** BOS-990: the deployer script's fingerprints from the host's last report. null = no report at all; an empty
    * `scriptSha` = the host reported but its deployer is too old to say what script it runs. */
   async function deployerScript(): Promise<{ scriptSha: string; repoSha: string; reportedAt: string } | null> {
-    const r = await read();
-    return r ? { scriptSha: r.deployer?.scriptSha ?? "", repoSha: r.deployer?.repoSha ?? "", reportedAt: r.writtenAt } : null;
+    // BOS-1057: read the same record the "This host" facts come from (sync keeps the last report when host.json is
+    // missing or unreadable right now), so the line shows whenever the facts do instead of vanishing as "none".
+    const rec = await sync();
+    if (!rec.reportedAt) return null;
+    return { scriptSha: rec.facts["deployer.scriptSha"]?.value ?? "", repoSha: rec.facts["deployer.repoSha"]?.value ?? "", reportedAt: rec.reportedAt };
   }
 
   return { read, hosts, serverHost, deployerScript, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };

@@ -459,8 +459,32 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   );
 }
 
+/** The card id in a #/decisions/<id> link (BOS-1078), or null. Safe where there is no window (a static render). */
+export function linkedCardOf(hash: string): string | null {
+  const [page, id] = hash.replace(/^#\/?/, "").split("/");
+  return page === "decisions" && id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}
+
+function useLinkedCard(): string | null {
+  const read = () => (typeof window === "undefined" ? null : linkedCardOf(window.location.hash));
+  const [id, setId] = useState(read);
+  useEffect(() => {
+    const on = () => setId(read());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return id;
+}
+
 export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
+  // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
+  // that card is scrolled to and marked once it is on the page.
+  const linkedId = useLinkedCard();
+  useEffect(() => {
+    if (!linkedId) return;
+    document.getElementById(`decision-${linkedId}`)?.scrollIntoView?.({ block: "start" });
+  }, [linkedId, loaded, decisions.length]);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -765,7 +789,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const checking = land?.state === "running" && !land.stale;
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
-                <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="score" title={why(d) ?? undefined}>
                     {Math.round(d.score) > 0 && (
                       <>

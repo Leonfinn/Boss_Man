@@ -3,13 +3,14 @@
 // gate that stops can be seen rather than asked about. Reads only what the server already records:
 // the tickets in review, their latest check results, the one open merge card per ticket, and the
 // merges this process is running. Nothing here changes the queue.
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold } from "./deploy-wait-hold.js";
 import { heldTicketIds, holdView } from "./review-holds.js";
+import { holdsMergeSql } from "./ticket-links.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -66,7 +67,31 @@ export type WaitingRow = {
   failedCheck: boolean;
   /** The tickets this one waits for, when its branch carries their unapproved work (waiting_for_other_ticket). */
   carried?: CarriedHold[];
+  /** The card that holds the merge (BOS-1078), so the screen names it and links straight to it. */
+  card?: HoldingCardView | null;
+  /** When the owner's sign-off for this round was given, if it was: a merge held by another card says so. */
+  signedOffAt?: string | null;
 };
+
+/** The card a waiting merge is held by, in the owner's words (BOS-1078). */
+export type HoldingCardView = {
+  id: string;
+  /** sign_off: the owner's sign-off; hold: a card that holds the merge on purpose; merge: the merge's own card (a stuck check). */
+  kind: "sign_off" | "hold" | "merge";
+  /** The card's question, first line, shortened. */
+  question: string;
+  /** Who raised it: an agent's name, or null for Boss Man itself. */
+  raisedBy: string | null;
+  raisedAt: string;
+  /** Set when the card looks stale (it names a ticket that is done): the CEO is told. */
+  staleHint: string | null;
+};
+
+/** A card's question as one short line for the screen. */
+export function shortQuestion(q: string, max = 140): string {
+  const line = q.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+}
 
 export type RecentRow = {
   ticketId: string;
@@ -221,26 +246,57 @@ export function mergeQueueService(
   const now = deps.now ?? (() => new Date());
   const mins = (ms: number) => Math.max(0, Math.round(ms / 60_000));
 
-  /** The open card in the owner's Decisions that holds this ticket, with its tier and kind. */
+  type OwnerCard = { id: string; tier: string; type: string; question: string; raisedBy: string | null; raisedAt: Date };
+  const cardCols = { id: decisions.id, tier: decisions.tier, context: decisions.context, question: decisions.question, raisedAt: decisions.createdAt, raisedBy: agents.name };
+  const toCard = (r: { id: string; tier: string; context: unknown; question: string; raisedAt: Date; raisedBy: string | null }): OwnerCard => ({ id: r.id, tier: r.tier, type: (r.context as { type?: string } | null)?.type ?? "", question: r.question, raisedBy: r.raisedBy, raisedAt: r.raisedAt });
+
+  /**
+   * The open card that holds each ticket's merge: the owner's sign-off first, then a card the gate holds the merge
+   * for (holdsMergeSql, the same rule as openHoldingCard, BOS-1078), then the merge's own cards. A card that is only
+   * linked to the ticket (a plain question, an owner to-do) holds nothing, so it isn't shown as what the merge waits on.
+   */
   async function ownerCards(ticketIds: string[]) {
-    const out = new Map<string, { id: string; tier: string; type: string }>();
+    const out = new Map<string, OwnerCard>();
     if (!ticketIds.length) return out;
-    const deps_ = await db
-      .select({ ticketId: ticketDependencies.blockedTicketId, id: decisions.id, tier: decisions.tier, context: decisions.context })
+    const linked = await db
+      .select({ ...cardCols, ticketId: ticketDependencies.blockedTicketId })
       .from(ticketDependencies)
       .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(and(inArray(ticketDependencies.blockedTicketId, ticketIds), eq(decisions.status, "open")));
-    for (const r of deps_) if (r.ticketId && !out.has(r.ticketId)) out.set(r.ticketId, { id: r.id, tier: r.tier, type: (r.context as { type?: string } | null)?.type ?? "" });
+      .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
+      .where(and(inArray(ticketDependencies.blockedTicketId, ticketIds), eq(decisions.status, "open"), or(sql`${decisions.context}->>'type' = 'risk_review'`, holdsMergeSql)))
+      .orderBy(decisions.createdAt);
+    // The sign-off before any other card: it is the owner's own gate, and the screen says so.
+    const cards = linked.map((r) => ({ ticketId: r.ticketId, card: toCard(r) }));
+    for (const { ticketId, card } of [...cards.filter((c) => c.card.type === "risk_review"), ...cards.filter((c) => c.card.type !== "risk_review")]) if (ticketId && !out.has(ticketId)) out.set(ticketId, card);
     // The merge cards (a stuck check, a retry) hang off no dependency row; they carry the ticket in their context.
     const mergeCards = await db
-      .select({ id: decisions.id, tier: decisions.tier, context: decisions.context })
+      .select(cardCols)
       .from(decisions)
+      .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
       .where(and(eq(decisions.status, "open"), inArray(decisions.dedupeKey, ticketIds.map((id) => `merge-stuck:${id}`))));
     for (const r of mergeCards) {
       const ticketId = (r.context as { ticketId?: string } | null)?.ticketId;
-      if (ticketId && ticketIds.includes(ticketId) && !out.has(ticketId)) out.set(ticketId, { id: r.id, tier: r.tier, type: (r.context as { type?: string } | null)?.type ?? "" });
+      if (ticketId && ticketIds.includes(ticketId) && !out.has(ticketId)) out.set(ticketId, toCard(r));
     }
     return out;
+  }
+
+  /**
+   * A hint for the CEO that a card holding a merge may be stale (BOS-1078): it names another ticket of the company,
+   * by reference (BOS-12) or id, that is done now. Only a hint, never acted on: the CEO checks and withdraws it.
+   */
+  async function staleHint(companyId: string, prefix: string | null, heldId: string, text: string): Promise<string | null> {
+    const refs = prefix ? [...new Set([...text.matchAll(new RegExp(`\\b${prefix.replace(/[^A-Za-z0-9]/g, "")}-(\\d{1,7})\\b`, "g"))].map((m) => Number(m[1])))].slice(0, 10) : [];
+    const ids = [...new Set([...text.matchAll(/\b([0-9a-f]{8})(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\b/gi)].map((m) => m[1]!.toLowerCase()))].slice(0, 10);
+    if (!refs.length && !ids.length) return null;
+    const named = or(...(refs.length ? [inArray(tickets.number, refs)] : []), ...ids.map((id) => sql`${tickets.id}::text like ${`${id}%`}`));
+    const [done] = await db
+      .select({ number: tickets.number, title: tickets.title, id: tickets.id })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), sql`${tickets.id} <> ${heldId}`, named))
+      .limit(1);
+    if (!done) return null;
+    return `It names ${ticketRef(prefix, done.number) ?? `"${done.title}"`}, which is done now, so it may no longer be needed.`;
   }
 
   /** The latest check result for each ticket, from the indexed ticket+time lookup. */
@@ -375,16 +431,36 @@ export function mergeQueueService(
           waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
           continue;
         }
+        const view = (kind: HoldingCardView["kind"], staleHintText: string | null = null): HoldingCardView => ({ id: card!.id, kind, question: shortQuestion(card!.question), raisedBy: card!.raisedBy, raisedAt: card!.raisedAt.toISOString(), staleHint: staleHintText });
         if (card?.type === "risk_review") {
-          waiting.push({ ...base, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: overAnHour || failedCheck, next: "Boss Man merges it as soon as you answer the sign-off.", actor: "owner", decisionId: card.id });
+          waiting.push({ ...base, state: "waiting_for_sign_off", label: "waiting for your sign-off", stuck: overAnHour || failedCheck, next: "Boss Man merges it as soon as you answer the sign-off.", actor: "owner", decisionId: card.id, card: view("sign_off"), signedOffAt: null });
           continue;
         }
         if (card?.type === "check_stuck") {
-          waiting.push({ ...base, state: "needs_you", label: "stopped: needs you", stuck: true, next: "Open the card to run the check again, send it back, or skip it.", actor: card.tier === "ceo" ? "ceo" : "owner", decisionId: card.id });
+          waiting.push({ ...base, state: "needs_you", label: "stopped: needs you", stuck: true, next: "Open the card to run the check again, send it back, or skip it.", actor: card.tier === "ceo" ? "ceo" : "owner", decisionId: card.id, card: view("merge") });
           continue;
         }
         if (card) {
-          waiting.push({ ...base, state: "waiting_for_decision", label: "waiting for a decision", stuck: overAnHour || failedCheck, next: "Open the card in Decisions.", actor: card.tier === "ceo" ? "ceo" : "owner", decisionId: card.id });
+          // A card that holds the merge on purpose (BOS-1078): name it, and say when the owner's own sign-off is already done.
+          const merge = card.type !== "question" && card.type !== "review_loop";
+          const [full] = await db.select().from(tickets).where(eq(tickets.id, r.id));
+          // Loaded here, not at the top: signoff.ts reaches decisions.ts and review.ts, which import this module.
+          const { derivedSignoff } = await import("./signoff.js");
+          const so = full ? await derivedSignoff(db, full).catch(() => null) : null;
+          const signedOffAt = so?.state === "signed_off" ? so.at.toISOString() : null;
+          const hint = merge ? null : await staleHint(companyId, prefix, r.id, card.question).catch(() => null);
+          const who = card.raisedBy ?? "Boss Man";
+          waiting.push({
+            ...base,
+            state: "waiting_for_decision",
+            label: `held by ${who}'s card: "${shortQuestion(card.question, 80)}"`,
+            stuck: overAnHour || failedCheck,
+            next: `${signedOffAt ? "Your sign-off is done; " : ""}it merges once that card is answered.`,
+            actor: card.tier === "ceo" ? "ceo" : "owner",
+            decisionId: card.id,
+            card: view(merge ? "merge" : "hold", hint),
+            signedOffAt,
+          });
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {
