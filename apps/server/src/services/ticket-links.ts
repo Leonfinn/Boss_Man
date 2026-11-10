@@ -18,6 +18,14 @@ export class WorkError extends Error {
   }
 }
 
+/**
+ * Whether a ticket blocker has finished for the ticket waiting on it (BOS-989): done always counts; a link
+ * that waits "until merged" is also free once the blocker's merge commit is on main.
+ */
+export function ticketBlockerFinished(d: { ticketState: string | null; mergeCommit: string | null; until: string }): boolean {
+  return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
+}
+
 /** Who is asking for the link: an agent's run, or the system acting on its own (loop guards, risk sign-off). */
 export type LinkActor = { type: "agent"; agentId: string | null } | { type: "system" };
 
@@ -28,6 +36,8 @@ export type DependencyWrite = {
   blockerDecisionId?: string | null;
   blockerEngagementId?: string | null;
   actor: LinkActor;
+  /** For a ticket blocker: finished when it is merged or when it is done (BOS-989). Default done, as links always were. */
+  until?: "merged" | "done";
   /** Move the blocked ticket to blocked in the same call (a decision or a loop guard holding it). */
   hold?: boolean;
   now?: () => Date;
@@ -83,6 +93,7 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
       blockerTicketId: input.blockerTicketId ?? null,
       blockerDecisionId: input.blockerDecisionId ?? null,
       blockerEngagementId: input.blockerEngagementId ?? null,
+      until: input.blockerTicketId ? (input.until ?? "done") : "done",
     })
     .returning();
   if (input.hold) {
@@ -94,7 +105,7 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
       ticketId: input.blockedTicketId,
       from: input.actor.type === "agent" ? ["backlog", "ready", "in_progress", "blocked"] : undefined,
       to: "blocked",
-      reason: input.blockerTicketId ? "held by a ticket it depends on" : input.blockerDecisionId ? `held by the card ${input.blockerDecisionId}` : "held by an engagement",
+      reason: input.blockerTicketId ? "Boss Man: held by a ticket it depends on" : input.blockerDecisionId ? `Waiting on the owner's card ${input.blockerDecisionId}` : "Boss Man: held by an engagement",
       now: (input.now ?? (() => new Date()))(),
     });
   }

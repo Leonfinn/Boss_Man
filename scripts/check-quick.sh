@@ -126,6 +126,14 @@ done
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
+  # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
+  # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.
+  if has '^docker-compose[^/]*\.yml$|^deploy/.*\.ya?ml$|^\.github/workflows/|^scripts/check-compose\.sh$'; then
+    rc=0; out="$(scripts/check-compose.sh 2>&1)" || rc=$?
+    if [ "$rc" -eq 3 ]; then echo "SKIP  compose and workflow validation: ${out##*check-compose: } (a runner image from before BOS-1036; Build and update runners installs them)"
+    elif [ "$rc" -eq 0 ]; then echo "PASS  compose files and CI workflows"
+    else echo "FAIL  compose files and CI workflows (exit $rc)"; printf '%s\n' "$out" | tail -n 40 | sed 's/^/      /'; failed=1; fi
+  fi
 fi
 
 # Related test files of a package: source or test files changed in it (vitest follows imports); an apps/site change runs its whole small suite.

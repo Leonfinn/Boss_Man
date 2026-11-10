@@ -6,15 +6,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fail() { echo "netguard.test.sh: $1" >&2; exit 1; }
-printf '# tool servers\n192.168.68.20:11235\nnot a host:port\nbad:port\n' >"$tmp/allow"
-printf 'search lan\nnameserver 127.0.0.11\n# ExtServers: [192.168.68.1 1.1.1.1 fd00::53]\n' >"$tmp/resolv"
+printf '# tool servers\n192.168.1.20:11235\nnot a host:port\nbad:port\n' >"$tmp/allow"
+printf 'search lan\nnameserver 127.0.0.11\n# ExtServers: [192.168.1.1 1.1.1.1 fd00::53]\n' >"$tmp/resolv"
 
-rules="$(NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_EXTRA="172.20.0.9:8080 oops;" NETGUARD_ALLOW_FILE="$tmp/allow" NETGUARD_DNS="192.168.68.1 fd00::53" sh netguard.sh --print 2>"$tmp/err")"
+rules="$(NETGUARD_ALLOW=10.1.2.3:3100 NETGUARD_EXTRA="172.20.0.9:8080 oops;" NETGUARD_ALLOW_FILE="$tmp/allow" NETGUARD_DNS="192.168.1.1 fd00::53" sh netguard.sh --print 2>"$tmp/err")"
 has() { grep -qF -- "$1" <<<"$rules" || fail "missing: $1"; }
 has "ip daddr 10.1.2.3 tcp dport 3100 accept"
 has "ip daddr 172.20.0.9 tcp dport 8080 accept"
-has "ip daddr 192.168.68.20 tcp dport 11235 accept"
-has "ip daddr 192.168.68.1 udp dport 53 accept"
+has "ip daddr 192.168.1.20 tcp dport 11235 accept"
+has "ip daddr 192.168.1.1 udp dport 53 accept"
 has "ip6 daddr fd00::53 tcp dport 53 accept"
 grep -q "ignoring 'oops;'" "$tmp/err" || fail "a bad EXTRA entry should be ignored with a message"
 if grep -qE 'oops|not a host|bad:port' <<<"$rules"; then fail "a bad entry reached the ruleset"; fi

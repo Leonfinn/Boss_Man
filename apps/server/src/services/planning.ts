@@ -6,6 +6,7 @@ import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon,
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -167,11 +168,12 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
           blockerTicketId: ticketDependencies.blockerTicketId,
           blockerEngagementId: ticketDependencies.blockerEngagementId,
           blockerDecisionId: ticketDependencies.blockerDecisionId,
+          until: ticketDependencies.until,
         })
         .from(ticketDependencies)
         .where(or(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, ticketId)));
       const tIds = [...new Set(rows.flatMap((r) => [r.blockedTicketId, r.blockerTicketId]).filter((x): x is string => !!x && x !== ticketId))];
-      const ts = tIds.length ? await db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState }).from(tickets).where(inArray(tickets.id, tIds)) : [];
+      const ts = tIds.length ? await db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, mergeCommit: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, tIds)) : [];
       const eIds = rows.flatMap((r) => (r.blockerEngagementId ? [r.blockerEngagementId] : []));
       const es = eIds.length ? await db.select({ id: engagements.id, title: engagements.title, status: engagements.status }).from(engagements).where(inArray(engagements.id, eIds)) : [];
       const dIds = rows.flatMap((r) => (r.blockerDecisionId ? [r.blockerDecisionId] : []));
@@ -183,7 +185,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
           .map((r) => {
             if (r.blockerTicketId) {
               const b = t(r.blockerTicketId);
-              return { dependencyId: r.id, kind: "ticket" as const, id: r.blockerTicketId, title: b?.title ?? "", state: b?.state ?? "", open: b?.state !== "done", link: `#/tickets/${r.blockerTicketId}` };
+              return { dependencyId: r.id, kind: "ticket" as const, id: r.blockerTicketId, title: b?.title ?? "", state: b?.state ?? "", open: !ticketBlockerFinished({ ticketState: b?.state ?? null, mergeCommit: b?.mergeCommit ?? null, until: r.until }), until: r.until, link: `#/tickets/${r.blockerTicketId}` };
             }
             if (r.blockerEngagementId) {
               const e = es.find((x) => x.id === r.blockerEngagementId);
@@ -230,7 +232,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const peers = [...new Map(siblings.map((r) => [r.id, r])).values()].filter((r) => !childIds.has(r.id) && r.id !== me.parentId);
 
       const edges = await db
-        .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId })
+        .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, until: ticketDependencies.until })
         .from(ticketDependencies)
         .where(or(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, ticketId)));
       const waitIds = edges.filter((e) => e.blocked === ticketId && e.blocker).map((e) => e.blocker!);
@@ -252,7 +254,8 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
         parent: parent ? view(parent) : null,
         subtasks: others(children),
         peers: others(peers),
-        waitsOn: others(await byIds(waitIds)),
+        // "Until merged" or "until done" shows beside each ticket it waits on (BOS-989).
+        waitsOn: others(await byIds(waitIds)).map((r) => ({ ...r, until: edges.find((e) => e.blocked === ticketId && e.blocker === r.id)?.until ?? "done" })),
         blocks: others(await byIds(blockIds)),
         mentioned: others(mentioned.filter((r) => !shown.has(r.id))),
       };

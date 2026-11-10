@@ -48,7 +48,7 @@ describe("evaluatePermission defaults", () => {
       expect(isBossmanTool(title), title).toBe(false);
       expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("ceo");
     }
-    const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.68.1" } };
+    const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.1.1" } };
     expect(evaluatePermission(lookalike, [{ name: "Allow every bossman tool", match: { titlePattern: "^mcp__bossman" }, outcome: "allow" }]).outcome).toBe("deny");
     for (const title of ["mcp__bossman__wiki", "mcp.bossman.wiki", "bossman_wiki", "Tool: bossman/wiki"]) expect(isBossmanTool(title), title).toBe(true);
   });
@@ -211,11 +211,11 @@ describe("home-network guard", () => {
   const allowAll = [{ name: "Allow every crawl4ai tool", match: { titlePattern: "^mcp__crawl4ai__" }, outcome: "allow" as const }];
 
   it("denies tool-server and fetch calls aimed at private addresses, before any rule", () => {
-    for (const url of ["http://192.168.68.1/", "http://192.168.68.67:3101/api", "https://10.0.0.5", "http://127.0.0.1:8080", "http://localhost", "http://truenas/", "http://nas.local", "http://172.20.1.1", "http://169.254.169.254/latest", "http://[::1]/", "http://[fd00::1]/", "http://[::ffff:192.168.68.1]/", "http://3232252929/", "http://0xC0A84401/", "http://100.64.0.1"]) {
+    for (const url of ["http://192.168.1.1/", "http://192.168.1.50:3101/api", "https://10.0.0.5", "http://127.0.0.1:8080", "http://localhost", "http://truenas/", "http://nas.local", "http://172.20.1.1", "http://169.254.169.254/latest", "http://[::1]/", "http://[fd00::1]/", "http://[::ffff:192.168.1.1]/", "http://3232235777/", "http://0xC0A80101/", "http://100.64.0.1"]) {
       expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
     }
-    expect(evaluatePermission(tool("mcp__crawl4ai__crawl", { urls: ["https://example.com", "http://192.168.68.1"] }), allowAll).outcome).toBe("deny");
-    expect(evaluatePermission(tool("WebFetch", { url: "http://192.168.68.1" }, "fetch"), []).outcome).toBe("deny");
+    expect(evaluatePermission(tool("mcp__crawl4ai__crawl", { urls: ["https://example.com", "http://192.168.1.1"] }), allowAll).outcome).toBe("deny");
+    expect(evaluatePermission(tool("WebFetch", { url: "http://192.168.1.1" }, "fetch"), []).outcome).toBe("deny");
     expect(evaluatePermission(tool("mcp__scrapling__get", { url: "not a url http://" }), allowAll).outcome).not.toBe("deny");
   });
 
@@ -233,7 +233,7 @@ describe("home-network guard", () => {
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "https://docs.truenas.com/scale/" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "http://172.32.0.1" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__bossman__wiki_read", { url: "http://localhost" }), []).outcome).toBe("allow");
-    expect(evaluatePermission(exec("curl http://192.168.68.1"), []).outcome).toBe("allow");
+    expect(evaluatePermission(exec("curl http://192.168.1.1"), []).outcome).toBe("allow");
   });
 
   it("doesn't read an ordinary host name as a private IPv6 address (BOS-896)", () => {
