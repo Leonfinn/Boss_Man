@@ -180,7 +180,7 @@ describe("an approval whose merge fails", () => {
     expect((await c.row(t.id)).systemState).toBe("review");
     expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
-    expect(d).toMatchObject({ status: "open", tier: "owner", options: ["Run the check again", "Send it back to the agent"] });
+    expect(d).toMatchObject({ status: "open", tier: "ceo", options: ["Run the check again", "Send it back to the agent"] });
     // It holds up the approved ticket, so it ranks above a question that blocks nothing.
     const queued = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
     expect(queued.find((x) => x.id === d!.id)).toMatchObject({ blocks: [expect.objectContaining({ ticketId: t.id })], score: expect.any(Number) });

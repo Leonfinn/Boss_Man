@@ -1943,6 +1943,7 @@ export function schedulerService(
             options: ["Got it"],
             recommendedOption: "Got it",
             dedupeKey: `unblocked-unassigned:${cur.id}`,
+            tier: "ceo",
             context: { type: "question" },
           })
           .onConflictDoNothing()

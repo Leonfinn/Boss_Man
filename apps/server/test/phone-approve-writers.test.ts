@@ -138,7 +138,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 4, question: 1 }, why: "kind budget: budget_limit, project_cap, ticket_cap; unblocked-but-unassigned notice (no raising agent, one option)" },
   "src/services/self-deploy.ts": { counts: { insert: 1, todo: 2 }, why: "kind approval: self_deploy; the changed database/proxy settings card (BOS-487) and the deployer-script-behind card (BOS-990) are owner to-dos (type owner_todo, steps, ownerMustDo)" },
-  "src/services/sweeps.ts": { counts: { insert: 4, question: 3 }, why: "stale_blocker kind; gave-up notice (now Reassign/Got it, BOS-612), CEO-plan deadline-passed card (BOS-612) and released-unblocked catch-up notice have no raising agent (its alerts now use named alert kinds via the ladder: tier ceo, ladder key)" },
+  "src/services/sweeps.ts": { counts: { insert: 2, question: 1 }, why: "stale_blocker kind (tier ceo); released-unblocked catch-up notice (tier ceo, no raising agent). The gave-up and CEO-plan deadline-passed cards now go through the alert ladder (BOS-1015: tier ceo, ladder key)" },
 };
 const PATTERNS: Record<string, RegExp> = { insert: /insert\(decisions\w*\)/g, question: /kind: "question"/g, raise: /\.raise\(/g, todo: /raiseOwnerTodo\(/g };
 

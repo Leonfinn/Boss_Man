@@ -481,7 +481,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.${fix}`,
       options: [CHECK_AGAIN, CHECK_SEND_BACK],
       recommendedOption: CHECK_AGAIN,
-      tier: "owner",
+      // The CEO first, like a stuck check (BOS-1015): it can run the check again or send the work back; skipping the check stays the owner's.
+      tier: "ceo",
       dedupeKey: `merge-stuck:${t.id}`,
       // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
       context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },

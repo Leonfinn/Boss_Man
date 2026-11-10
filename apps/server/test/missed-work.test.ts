@@ -234,7 +234,7 @@ describe("unmerged approvals sweep", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, plain)))[0]!.systemState).toBe("done");
     const asked = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatchObject({ dedupeKey: `merge-stuck:${repo}`, options: ["Run the check again", "Send it back to the agent"] });
+    expect(asked[0]).toMatchObject({ tier: "ceo", dedupeKey: `merge-stuck:${repo}`, options: ["Run the check again", "Send it back to the agent"] });
     expect(asked[0]!.question).toContain('"Ship the API" was approved, but its merge didn\'t finish');
     // Asked once, not every pass, and not retried again.
     expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
