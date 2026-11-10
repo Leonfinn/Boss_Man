@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { FENCE_OFF_CONSEQUENCE, RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, tallestReading, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type DeviceProfile, type FundingSource, type Project } from "../api";
 import { collect } from "../devices";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
@@ -11,6 +11,7 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
 import { StarButton } from "./Agents";
 import { toBase64 } from "./Skills";
+import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../host-facts-display";
 import { clearDraft, readDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 
@@ -1829,7 +1830,7 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
 type FenceStatus = { registered: boolean; sandbox?: { level: "full" | "partial" | "unavailable"; missing: string[]; probe: boolean | null; guard?: { state: "on" | "absent"; reason: string } } | null; sandboxCheckedAt?: string | null };
 
 /** The agent fence (BOS-325): off, watch or enforce, with this host's fence level. A refusal by the fence is wording on the card, never a decision. */
-function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+export function FenceSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const act = useAction();
   const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
   const mode = company.fenceMode ?? "off";
@@ -1850,6 +1851,15 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         : sb.level === "partial"
           ? "Agent runs are isolated from each other, except that one run can send signals to another (this host's kernel is older than 6.12)."
           : "Agent runs are isolated from each other.";
+  // Off is never left looking like a safe default (BOS-940): say why it is Off and what it means.
+  const offLine =
+    mode !== "off"
+      ? null
+      : company.fenceModeChosenAt
+        ? `You chose Off. ${FENCE_OFF_CONSEQUENCE}`
+        : sb?.level === "unavailable"
+          ? `The fence is Off because this host can't fence agents. ${FENCE_OFF_CONSEQUENCE}`
+          : `Nobody chose Off: it was Boss Man's old default. ${FENCE_OFF_CONSEQUENCE}`;
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1866,21 +1876,25 @@ function FenceSetting({ company, onChanged }: { company: Company; onChanged: () 
         <p className="muted" style={{ fontSize: 14 }}>Network guard: not reported yet (this runner is older than the check).</p>
       ) : null}
       {isolationLine && <p style={{ fontSize: 14 }}>{isolationLine}</p>}
+      {offLine && <p style={{ fontSize: 14 }}>{offLine}</p>}
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <label htmlFor="fence-mode">Fence</label>
         <select
           id="fence-mode"
           value={mode}
           disabled={act.busy}
-          onChange={(e) =>
+          onChange={(e) => {
+            const fenceMode = e.target.value;
+            // Off is the owner's explicit choice, made after reading what it means (BOS-940).
+            if (fenceMode === "off" && !window.confirm(`Turn the agent fence off? ${FENCE_OFF_CONSEQUENCE} Agent runs can also read each other's memory and start-up keys.`)) return;
             void act.run(async () => {
-              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: e.target.value } });
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode } });
               onChanged();
               return "Saved. It applies to runs that start from now on.";
-            })
-          }
+            });
+          }}
         >
-          <option value="off">Off: agents run as before</option>
+          <option value="off">Off: agents run unfenced</option>
           <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
             {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
           </option>
@@ -2196,7 +2210,30 @@ type SelfDeployView = {
   /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
   deployer?: { reportedAt: string | null; late: boolean };
   lateAfterMinutes?: number;
+  /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
+  trial?: { endsAt: string; seconds: number } | null;
+  /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
+  deployWait?: { until: string } | null;
 };
+
+/** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
+function atTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+/** "in about 6 minutes", or "in less than a minute", from now to an instant (BOS-953). */
+function inAbout(iso: string, now: number): string {
+  const mins = Math.ceil((Date.parse(iso) - now) / 60_000);
+  return mins <= 0 ? "now" : mins === 1 ? "in about 1 minute" : `in about ${mins} minutes`;
+}
+/** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
+function useNow(everyMs = 15_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
 
 /** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
 function deployerLine(v: SelfDeployView): string {
@@ -2245,11 +2282,38 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
   );
 }
 
+/**
+ * The runner trial and any rate-limit wait (BOS-953), both counted from their own time so they never show the
+ * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
+ * Pure, so a layout test can render it on its own.
+ */
+export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number }) {
+  const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
+  const waitOver = wait ? Date.parse(wait.until) <= now : false;
+  return (
+    <>
+      {trial && !trialOver && (
+        <p className="error" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
+          The server update is still in its trial, so the runners can't be updated yet. Runners can be updated from {atTime(trial.endsAt)}, {inAbout(trial.endsAt, now)}.
+          Boss Man offers the runner update by itself then, so you don't need to press again.
+        </p>
+      )}
+      {wait && (
+        <p className={waitOver ? "muted" : "error"} role="status" data-testid="deploy-wait" style={{ fontSize: 14 }}>
+          {waitOver ? "You can deploy now." : `A server deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
+        </p>
+      )}
+    </>
+  );
+}
+
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
+  // A clock so the trial and rate-limit lines count down between polls (BOS-953).
+  const now = useNow();
   const v = view.data;
   if (!v?.enabled) return null;
   const s = v.status;
@@ -2265,6 +2329,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
+      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
@@ -2381,6 +2446,56 @@ export function RunLimits() {
           onClick={() =>
             void act.run(async () => {
               await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c, background: g } });
+              setEdit(null);
+              view.reload();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/**
+ * Tickets in progress per agent (BOS-1029): an agent finishes before it starts more. Only in-progress tickets
+ * count (review, blocked and done don't). Empty box = No limit.
+ */
+export function WipLimits() {
+  const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { agent: d.agent == null ? "" : String(d.agent), company: d.company == null ? "" : String(d.company) };
+  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
+  const [a, c] = [parse(v.agent), parse(v.company)];
+  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000));
+  return (
+    <Section id="wip-limits-h" title="Tickets in progress">
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="wip-agent">Tickets in progress per agent (leave empty for no limit)</label>
+        <input id="wip-agent" type="number" min={1} max={50} placeholder="No limit" value={v.agent} onChange={(e) => setEdit({ ...v, agent: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many tickets one agent may have in progress at once (default {d.defaultAgent}: one being worked, one waiting on its check). At the limit, a new ticket for that agent waits in Ready and starts by itself when one of their tickets goes to review, done or blocked. Only in-progress tickets count. Work already started is never held (changes requested, a failed merge check), and an urgent ticket may start one over. Agents already over the limit are not interrupted; they just start nothing new until they are back under.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="wip-company">Tickets in progress, whole company (leave empty for no limit)</label>
+        <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
+      </div>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/wip-limits", { method: "PUT", body: { agent: a, company: c } });
               setEdit(null);
               view.reload();
               return "Saved.";
@@ -2677,7 +2792,9 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
                         Waiting for an answer
                       </span>
                     ) : late ? (
-                      <span className="tag red">Not responding</span>
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
+                        Not responding
+                      </span>
                     ) : (
                       <span className="tag grey">Working</span>
                     )}
@@ -2692,8 +2809,11 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
             </ul>
           )}
           {s.runsList.length > 0 && (
-            <p className="muted" style={{ fontSize: 13 }}>
-              After {s.notRespondingAfter} minutes a run still going is marked "not responding". Boss Man never stops it for you; use Stop this run on that one only.
+            <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
+              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              {s.kind === "wrapup"
+                ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
+                : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}
             </p>
           )}
           <div>
@@ -2732,18 +2852,6 @@ type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; comm
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
 const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
 
-/** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
-type HostFactsView = {
-  hostName: string | null;
-  reportedAt: string | null;
-  ownerFacts: string[];
-  facts: Record<string, { value: string; source: "host" | "owner"; at: string; conflict?: { confirmed: string; reported: string } }>;
-};
-const OWNER_FACT_LABELS: Record<string, string> = {
-  "network.publicAddress": "Address you reach Boss Man at from outside",
-  "repo.deployKeyAdded": "Deploy key added to the code host (yes or no)",
-};
-
 /** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
 const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
 const readHostFactsOpen = () => {
@@ -2754,13 +2862,10 @@ const readHostFactsOpen = () => {
   }
 };
 
-/** A check fact that is a count of things wrong or of something that went wrong: a non-zero value is a problem.
- * These keep their plain meaning, so `check.restart_counts.max` of 1 is not read as a failure. */
-const CHECK_TROUBLE = /^(unhealthy|notRunning|stale|ageSeconds|lastExitCode)$/;
-/** The host's own answer to "can Boss Man reach the code host": any value but "ok" is a failing check. */
-const CHECK_OK = /(^|\.)(probe|health)$/;
 /** An add-on state saying it is not up (host-deployer.sh's states: running, stopped, needs_login, not installed). */
 const ADDON_RUNNING = "running";
+/** An add-on's name as the owner knows it (BOS-986), for the "isn't running" line. */
+const ADDON_NAME: Record<string, string> = { tailscale: "private-network", ntfy: "phone-notification", penpot: "design-tool" };
 
 /**
  * What is wrong with the reported facts, for the folded header, so folding never hides a problem (BOS-924):
@@ -2772,7 +2877,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
   const addonsDown: string[] = [];
   for (const [k, f] of Object.entries(d.facts)) {
     const v = f.value.trim();
-    if (!v) missing.push(k);
+    if (!v) { if (!missing.includes(k)) missing.push(k); }
     else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
     else if (k.startsWith("check.")) {
       const last = k.slice(k.lastIndexOf(".") + 1);
@@ -2784,7 +2889,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
       if (wrong) failing.push(k);
     }
   }
-  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim()) missing.push(OWNER_FACT_LABELS[k] ?? k);
+  for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim() && !missing.includes(k)) missing.push(k);
   return { missing, failing, addonsDown };
 }
 
@@ -2795,6 +2900,13 @@ function problemLine(p: { missing: string[]; failing: string[]; addonsDown: stri
   if (p.failing.length) bits.push(`${p.failing.length} check${p.failing.length === 1 ? "" : "s"} failing`);
   if (p.addonsDown.length) bits.push(`${p.addonsDown.length} add-on${p.addonsDown.length === 1 ? "" : "s"} not running`);
   return bits.length ? bits.join(" · ") : null;
+}
+
+/** The "Deployer script" line of Settings → This host (BOS-990). */
+export function deployerScriptLine(s: { state: string; since?: string }): string {
+  if (s.state === "current") return "current";
+  if (s.state === "behind") return `behind${s.since ? ` (since ${when(s.since)})` : ""}. A card in your queue has the copy steps.`;
+  return "unknown: this host's deployer is too old to report its version. A card in your queue has the copy steps.";
 }
 
 /** Settings → This host (BOS-419): what the host deployer reported, and the facts only the owner can confirm. */
@@ -2808,6 +2920,11 @@ export function ThisHost() {
   const keys = Object.keys(d.facts).sort();
   const problems = reportedProblems(d);
   const trouble = problemLine(problems);
+  // BOS-986: name what is wrong, not the raw key. The stopped containers come from the host as a list; its reason the
+  // code-host read failed comes with the probe result. Both are plain text the host wrote, shown as text only.
+  const stopped = stoppedContainerNames(d.facts[STOPPED_CONTAINERS_KEY]?.value ?? "");
+  const probeWhy = d.facts["repo.probeWhy"]?.value?.trim() ?? "";
+  const problemTexts = [...problems.missing, ...problems.failing].map((k) => ({ key: k, text: problemText(k, d, stopped, probeWhy) }));
   const toggle = () => {
     const next = !open;
     setOpen(next);
@@ -2829,6 +2946,11 @@ export function ThisHost() {
           ? `What the host${d.hostName ? ` ${d.hostName}` : ""} last told Boss Man about itself, ${when(d.reportedAt)}. Agents' cards use these facts, so a card can't be raised while one it needs is missing.`
           : "The host hasn't reported yet. Once its deployer runs, its facts show up here."}
       </p>
+      {d.deployerScript && d.deployerScript.state !== "none" && (
+        <p data-testid="deployer-script" style={{ fontSize: 14 }}>
+          <strong>Deployer script:</strong> {deployerScriptLine(d.deployerScript)}
+        </p>
+      )}
       {keys.length > 0 && (
         <div className="host-facts">
           <button type="button" className="host-facts-toggle" aria-expanded={open} aria-controls="host-facts-body" onClick={toggle}>
@@ -2844,9 +2966,19 @@ export function ThisHost() {
           </button>
           <div id="host-facts-body" hidden={!open} style={open ? undefined : { display: "none" }}>
             {trouble && (
-              <p className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
-                Worth a look: {[...problems.missing, ...problems.failing, ...problems.addonsDown.map((a) => `addon.${a}`)].join(", ")}.
-              </p>
+              <div className="muted" data-testid="host-facts-problem-detail" style={{ fontSize: 13 }}>
+                <p style={{ marginTop: 0, marginBottom: 4 }}>Worth a look. Raw keys are in the list below.</p>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {problemTexts.map((p) => (
+                    <li key={p.key}>{p.text}</li>
+                  ))}
+                  {problems.addonsDown.map((a) => (
+                    <li key={`addon.${a}`}>
+                      The {ADDON_NAME[a] ?? a} add-on isn't running, so whatever uses it can't be reached. Turn it back on for this host and it starts again; its own log says why it stopped.
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             <dl data-testid="host-facts" className="host-facts-list">
               {keys.map((k) => {
@@ -3408,6 +3540,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <ThisHost />
             <NetguardAllow />
             <RunLimits />
+            <WipLimits />
             <CheckQueueSetting />
           </>
         )}

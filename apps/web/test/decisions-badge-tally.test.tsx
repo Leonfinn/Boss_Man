@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
 import { Sidebar } from "../src/components/Sidebar";
@@ -80,21 +80,49 @@ describe("the Decisions badge shows the server's needs-you-now count (BOS-969)",
 });
 
 describe("the Decisions page heading uses the same count (BOS-969)", () => {
-  it("says how many are to do, and the waiting group separately", async () => {
+  it("says how many are to do, and the waiting group separately, and sends no numbers of its own (BOS-996)", async () => {
     const cards = [decision({ id: "a" }), decision({ id: "b" }), decision({ id: "c", waiting: "Nothing to do yet: the ticket is back with an agent." })];
-    // The page asks the server's one function for the figures it shows; the answer is the headless test's.
-    const fetch = async () => new Response(JSON.stringify({ open: 8, waiting: 4 }), { status: 200 });
+    // With no figure from the app, the page asks the server's tally for both; it sends no numbers of
+    // its own, so a stale tab can't lower or raise what the server says (BOS-996).
+    const asked: string[] = [];
+    const fetch = async (url: string | URL | Request) => {
+      asked.push(String(url));
+      return new Response(JSON.stringify({ open: 8, waiting: 4 }), { status: 200 });
+    };
     const original = globalThis.fetch;
     globalThis.fetch = fetch as unknown as typeof globalThis.fetch;
     try {
-      render(<Decisions decisions={cards} companies={[company]} loaded agentsWorking={0} onAnswered={noop} tally={{ open: 8, waiting: 4 }} />);
+      render(<Decisions decisions={cards} companies={[company]} loaded agentsWorking={0} onAnswered={noop} />);
       const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
       expect(await within(head).findByText("8 decisions to do · 4 waiting", { exact: false })).toBeTruthy();
+      const tallyCalls = asked.filter((u) => u.includes("/api/decisions/tally"));
+      expect(tallyCalls.length).toBeGreaterThan(0);
+      for (const u of tallyCalls) {
+        expect(u).not.toContain("open=");
+        expect(u).not.toContain("waiting=");
+      }
     } finally {
       globalThis.fetch = original;
     }
   });
 
+  it("drops a card the owner answers here straight out of the count until the next read", async () => {
+    // The tally says 2 to do and 0 waiting; answering one here takes the heading to 1 at once, before
+    // the page's next poll or the app's fresh tally arrives.
+    const cards = [decision({ id: "a" }), decision({ id: "b" })];
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).includes("/api/decisions/tally") ? new Response(JSON.stringify({ open: 2, waiting: 0 }), { status: 200 }) : new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const onAnswered = vi.fn();
+    render(<Decisions decisions={cards} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} tally={{ open: 2, waiting: 0 }} />);
+    const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
+    expect(await within(head).findByText(/^2 decisions to do/, { exact: false })).toBeTruthy();
+    // The recommended option is one click; the first card's button is the first "Yes".
+    fireEvent.click(within(head.parentElement!.parentElement!).getAllByRole("button", { name: "Yes" })[0]!);
+    await waitFor(() => expect(within(head).getByText(/^1 decision to do/, { exact: false })).toBeTruthy());
+    expect(onAnswered).toHaveBeenCalled();
+  });
   it("shows only the to-do number when nothing is waiting", () => {
     render(<Decisions decisions={[decision({ id: "a" })]} companies={[company]} loaded agentsWorking={0} onAnswered={noop} tally={{ open: 1, waiting: 0 }} />);
     const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;

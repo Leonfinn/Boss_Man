@@ -18,8 +18,8 @@ export class FeedbackError extends Error {
   }
 }
 
-export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; hasLogo: boolean };
-const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false };
+export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean };
+const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false };
 
 type FeaturePatch = {
   title?: string;
@@ -67,7 +67,7 @@ export function feedbackService(
   const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(eq(feedbackNotes.id, id)), companyId, "note");
 
   async function settings(companyId: string): Promise<FeedbackSettings> {
-    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
     return row ?? { ...DEFAULTS };
   }
 
@@ -207,7 +207,7 @@ export function feedbackService(
 
   return {
     settings,
-    async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro">>) {
+    async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro" | "portalBackUrl" | "portalBackText">>) {
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...patch }).onConflictDoUpdate({ target: feedbackSettings.companyId, set: patch });
       return settings(companyId);
     },
@@ -588,13 +588,15 @@ export function feedbackService(
     // ---- The portal: a page outsiders reach by a secret link ----
 
     /** Turns the portal on or off and sets its words. Turning it on the first time makes its link. */
-    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null }) {
+    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null }) {
       const current = await settings(companyId);
       const token = patch.enabled && !current.portalToken ? randomBytes(24).toString("base64url") : current.portalToken;
       const set = {
         ...(patch.enabled !== undefined ? { portalEnabled: patch.enabled } : {}),
         ...(patch.title !== undefined ? { portalTitle: patch.title } : {}),
         ...(patch.intro !== undefined ? { portalIntro: patch.intro } : {}),
+        ...(patch.backUrl !== undefined ? { portalBackUrl: patch.backUrl, portalBackText: patch.backUrl === null ? null : patch.backText ?? current.portalBackText } : {}),
+        ...(patch.backUrl === undefined && patch.backText !== undefined ? { portalBackText: patch.backText } : {}),
         portalToken: token,
       };
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...set }).onConflictDoUpdate({ target: feedbackSettings.companyId, set });
@@ -619,7 +621,7 @@ export function feedbackService(
     async portalFor(token: string) {
       if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
       const [row] = await db
-        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
+        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
         .from(feedbackSettings)
         .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
         .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));

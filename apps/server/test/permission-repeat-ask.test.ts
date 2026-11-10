@@ -193,7 +193,7 @@ describe("a public fetch is a built-in allow while a private one is always denie
     expect(pub.d).toBeUndefined();
     expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: pub.requestId, verdict: "allow" }));
     ctx.sent.length = 0;
-    const probe = await fetchAsk("http://192.168.68.67/admin");
+    const probe = await fetchAsk("http://192.168.1.50/admin");
     expect(probe.d).toBeUndefined();
     expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
     expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
@@ -204,7 +204,7 @@ describe("a public fetch is a built-in allow while a private one is always denie
     expect(pub.d).toBeUndefined();
     ctx.sent.length = 0;
     // The private fetch arrives right after: it must be its own deny, never allowed by the public allow.
-    const probe = await fetchAsk("http://192.168.68.67/admin");
+    const probe = await fetchAsk("http://192.168.1.50/admin");
     expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
     expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
   });

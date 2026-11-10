@@ -1,0 +1,129 @@
+name: Release
+
+# The owner's "beta" button (BOS-973, plan: BOS-935, DR-050): Actions > Release > Run workflow, branch main, type a
+# version such as 0.1.0-beta.1. It builds nothing. It takes the images the Publish workflow already built and signed
+# for the newest commit on main, gives them the version tag and the moving "beta" tag in every registry, and signs and
+# publishes release.json, the list of exact image digests per architecture that the updater (BOS-941) trusts.
+# Settings are the same as publish.yml (docs/25-published-images.md).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, like 0.1.0-beta.1 (no leading v)"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-images
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # The signature names this workflow on main, and the updater trusts only that.
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    # The Docker Hub secrets live in this environment, which only main may use (see docs/25-published-images.md).
+    environment: publish
+    permissions:
+      contents: write # the GitHub release that carries release.json
+      packages: write
+      id-token: write
+    env:
+      IMAGE_PREFIXES: ${{ vars.IMAGE_PREFIXES }}
+      PUBLISH_IMAGES: ${{ vars.PUBLISH_IMAGES }}
+      DOCKERHUB_PUBLISH: ${{ vars.DOCKERHUB_PUBLISH }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+      - name: Read and check the publishing settings (fails loudly when Docker Hub is on and a secret is missing)
+        id: s
+        run: |
+          set -euo pipefail
+          prefixes="$(scripts/publish-images.sh prefixes)"
+          scripts/publish-images.sh images > /dev/null
+          {
+            echo "ghcr=$(if echo "$prefixes" | grep -q '^ghcr.io/'; then echo true; else echo false; fi)"
+            echo "hub=$(if echo "$prefixes" | grep -q '^docker.io/'; then echo true; else echo false; fi)"
+            echo "tag=$(scripts/publish-images.sh tag "$GITHUB_SHA")"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        if: ${{ steps.s.outputs.ghcr == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        if: ${{ steps.s.outputs.hub == 'true' }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: The version is new, and the newest commit on main has its images
+        env:
+          TAG: ${{ steps.s.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Version '$VERSION' is not like 0.1.0 or 0.1.0-beta.1."; exit 1; }
+          if gh release view "v$VERSION" > /dev/null 2>&1; then echo "Version $VERSION is already released. Pick a new version."; exit 1; fi
+          for p in $(scripts/publish-images.sh prefixes); do
+            for name in $(scripts/publish-images.sh images); do
+              if docker buildx imagetools inspect "$p/$name:$VERSION" > /dev/null 2>&1; then echo "$p/$name:$VERSION already exists. Pick a new version."; exit 1; fi
+            done
+          done
+          for name in $(scripts/publish-images.sh images); do
+            first="$(scripts/publish-images.sh prefixes | head -n 1)"
+            docker buildx imagetools inspect "$first/$name:$TAG" > /dev/null 2>&1 \
+              || { echo "No $name image for the newest commit on main ($TAG). Wait for the 'Publish images' run for that commit to finish, then run this again."; exit 1; }
+          done
+      - name: Check every image in every registry (identical digest, signature, SBOM, provenance)
+        env:
+          TAG: ${{ steps.s.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          first="$(scripts/publish-images.sh prefixes | head -n 1)"
+          : > "$RUNNER_TEMP/verified-digests"
+          for name in $(scripts/publish-images.sh images); do
+            digest="$(docker buildx imagetools inspect "$first/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+            scripts/publish-images.sh copy "$name" "$TAG" "$digest"
+            scripts/publish-images.sh verify "$name" "$digest"
+            # Keep the digest that was verified; the tagging step reuses it, it never looks it up again.
+            echo "$name $digest" >> "$RUNNER_TEMP/verified-digests"
+          done
+      - name: Add the version and beta tags (the same digests, nothing is rebuilt)
+        env:
+          TAG: ${{ steps.s.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for p in $(scripts/publish-images.sh prefixes); do
+            while read -r name digest; do
+              docker buildx imagetools create -t "$p/$name:$VERSION" -t "$p/$name:beta" "$p/$name@$digest"
+            done < "$RUNNER_TEMP/verified-digests"
+          done
+      - name: Write release.json from what the registries now hold, and sign it
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Reading the version tag back proves it landed, with the same digest, in every registry.
+          scripts/publish-images.sh release-json "$VERSION" "$GITHUB_SHA" "$VERSION" > release.json
+          jq . release.json
+          cosign sign-blob --yes --bundle release.json.sigstore.json release.json
+          cosign verify-blob --bundle release.json.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+            release.json
+      - name: Publish release.json as a pre-release (beta)
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" release.json release.json.sigstore.json --prerelease --target "$GITHUB_SHA" \
+            --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."
