@@ -128,6 +128,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 1, question: 1 }, why: "no raising agent, one option" },
   "src/services/engagements.ts": { counts: { insert: 1 }, why: "kind engagement" },
+  "src/services/fence-default.ts": { counts: { insert: 1, question: 1 }, why: "type fence_default (BOS-940): no raising agent, owner-only answer" },
   "src/services/goal-check.ts": { counts: { insert: 1 }, why: "kind approval: goal_check" },
   "src/services/loop-guards.ts": { counts: { insert: 3, question: 2 }, why: "no raising agent, one option (repeated-failure and account-outage notices)" },
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },

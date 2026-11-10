@@ -59,6 +59,7 @@ import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
+import { closeFenceCard } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
@@ -1169,9 +1170,12 @@ export async function buildApp(opts: AppOptions) {
         if (b.fenceMode === "watch" && r?.sandbox?.level === "unavailable")
           return reply.code(400).send({ error: "fence_unavailable", message: "This company's runner can't fence agents (its kernel has no usable Landlock, or the container blocks it), so Watch would do nothing. Update the host's kernel to 5.19 or newer, or let the container use Landlock, then restart the runner." });
       }
-      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
+      // A fence mode sent from Settings is the owner's choice (BOS-940): Boss Man never changes it, and its card goes.
+      const chosenAt = b.fenceMode ? new Date() : null;
+      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
+      if (chosenAt) await closeFenceCard(db, id, chosenAt);
       // The disk cap is the owner's own setting (BOS-274): keep a record of who changed it and to what.
       if (diskCapGb !== undefined) {
         const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;

@@ -73,8 +73,17 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
-  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
-  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
+  /**
+   * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
+   * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
+   */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("watch"),
+  /**
+   * When the owner last chose the fence mode (Settings or the fence card, BOS-940); null while the mode is
+   * only the default. Only an unchosen mode is ever changed by Boss Man (fence-default.ts), and only an
+   * unchosen Off gets the card.
+   */
+  fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
