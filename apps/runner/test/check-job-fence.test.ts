@@ -48,7 +48,10 @@ describe.skipIf(level === "unavailable")("fenced check job", () => {
     writeFileSync(path.join(secretDir, "token"), "TOPSECRET");
     const { root, commit, ws } = setup({ level });
     const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `cat ${secretDir}/token; echo home=$HOME`, 60_000);
+    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `cat ${secretDir}/token; echo home=$HOME; test -d "$HOME" && echo homeexists=yes; touch "$HOME/probe" && echo homewritable=yes`, 60_000);
+    // BOS-1095: HOME must exist when the job starts (the gate bounced branches with "HOME folder missing").
+    expect(r.output).toContain("homeexists=yes");
+    expect(r.output).toContain("homewritable=yes");
     expect(r.output).not.toContain("TOPSECRET");
     expect(r.output).toContain(`home=${path.join(root, "check-jobs-home", jobId)}`);
     expect(existsSync(path.join(root, "check-jobs-home", jobId))).toBe(false);
@@ -64,9 +67,10 @@ describe("unfenced check job (BOS-655)", () => {
     const unfenced = new Workspaces(root, process.env, undefined, gate, { level: "unavailable", pnpmStore: store });
     const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const home = path.join(root, "check-jobs-home", jobId);
-    const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
+    const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; test -d "$HOME" && echo homeexists=yes; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
     expect(r.ok).toBe(true);
     expect(r.output).toContain(`home=${home}`);
+    expect(r.output).toContain("homeexists=yes");
     expect(r.output).toContain(`tmp=${path.join(root, "jt", shortTmpName(jobId))}`);
     expect(existsSync(path.join(root, "jt", shortTmpName(jobId)))).toBe(false);
     // BOS-1087: a socket under the job's TMPDIR must fit in sun_path (107 bytes). The test root is longer than a real

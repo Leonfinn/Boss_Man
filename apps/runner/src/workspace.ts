@@ -1255,6 +1255,8 @@ export class Workspaces {
   private jobFenceFor(repo: string, dir: string, home: string): { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } {
     const tmp = this.jobTmpDir(path.basename(home));
     mkdirSync(tmp, { recursive: true, mode: 0o700 });
+    // BOS-1095: the temp folder used to sit inside home, so making it made home too. Now it sits apart (BOS-1087), so make home itself.
+    mkdirSync(home, { recursive: true, mode: 0o700 });
     const env: Record<string, string> = { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
     const readWrite: string[] = [];
     if (this.jobFence?.pnpmStore) {
