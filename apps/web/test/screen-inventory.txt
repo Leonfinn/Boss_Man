@@ -120,10 +120,12 @@ reads:
 sections: 
   - How you're told
   - Notifications
+  - Recent phone pushes
   - Set up your phone
 reads: 
   - /api/notification-settings
   - /api/notifications
+  - /api/notifications/pushes
 
 ## #/plan
 sections: 
