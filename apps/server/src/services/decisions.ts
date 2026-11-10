@@ -1015,20 +1015,30 @@ async function recordOwnerHostChecks(db: Db, d: { question: string; answer: stri
   const answer = (d.answer ?? "").trim();
   if (!ticketIds.length || !answer) return [];
   const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
-  // A problem word wins over a "yes"/"works"; anything with no pass word at all (an answer to a "How did
-  // it look?" card) is a fail, so the assignee has to look rather than the ticket closing on a shrug. The
-  // owner's plain words are quoted on the note either way.
-  const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
-  const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
-  // (BOS-1056) A multiple-choice card names its passing answer: the recommended option. Choosing it is a pass
-  // whatever its wording ("on" on a "What does the Network guard row say?" card). When the card has no
-  // recommended option and the answer is one of its options with no pass or fail word, nothing says which
-  // way it counts, so nothing is recorded rather than a fail.
+  // Only a choice the owner made on purpose is a verdict (BOS-1091). An option is one: the recommended
+  // option is the card's passing answer whatever its wording (BOS-1056, "on"); another option counts by its
+  // pass or fail word, and on a card that names a recommended option, picking a different one is a fail.
+  // A one-word "pass"/"fail"/"yes"/"no" typed in is one too. Any other typed text is not judged: on
+  // BOS-1052 and BOS-993 the owner described a pass ("It answered in 1.7 s with a valid verdict", pasted
+  // panel text holding "not") and the old word test recorded both as fail and opened false follow-ups.
+  // Keyword-guessing free text either way could turn a real fail into a pass, so the note says the owner
+  // answered in their own words and leaves the criterion unreported: the done gate then makes the assignee
+  // (or the CEO) read the answer, which is on the ticket's conversation, and report it.
   const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
   const isOption = (d.options ?? []).some((o) => norm(o) === norm(answer));
   const chosenRecommended = !!d.recommended && norm(d.recommended) === norm(answer);
-  if (!chosenRecommended && !d.recommended && isOption && !fail && !pass) return [];
-  const verdict = chosenRecommended ? "pass" : fail || !pass ? "fail" : "pass";
+  let verdict: "pass" | "fail" | null;
+  if (chosenRecommended) verdict = "pass";
+  else if (isOption) {
+    const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
+    const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
+    // With no recommended option and no pass or fail word, nothing says which way it counts.
+    if (!d.recommended && !fail && !pass) return [];
+    verdict = fail || !pass ? "fail" : "pass";
+  } else {
+    const bare = /^(pass|passed|fail|failed|yes|no)[.!]?$/i.exec(answer)?.[1]?.toLowerCase();
+    verdict = !bare ? null : bare.startsWith("fail") || bare === "no" ? "fail" : "pass";
+  }
   const said = answer.replace(/\s+/g, " ").slice(0, 200);
   const wrote: string[] = [];
   for (const r of rows) {
@@ -1041,6 +1051,16 @@ async function recordOwnerHostChecks(db: Db, d: { question: string; answer: stri
     const named = explicit.length ? explicit : criteriaForCard(criteria, d.question, d.options ?? []);
     const settle = named.length ? named : unreportedAfterMerge(criteria, r.note).flatMap((text) => criteria.flatMap((c, i) => (criterionText(c) === text ? [i] : [])));
     if (!settle.length) continue;
+    if (verdict === null) {
+      // No pass or fail word, no question and no criterion words here: readVerdicts reads a verdict from any
+      // sentence holding a criterion's words, so this line must not read as one. The owner's own words are
+      // already on the ticket's conversation (postAnswerOnTickets).
+      const nums = settle.map((i) => i + 1).join(" and ");
+      const line = `The owner answered a card on criterion ${nums} in their own words rather than choosing an option, so Boss Man records no verdict: read their answer on the ticket's conversation and report criterion ${nums}`;
+      await db.update(tickets).set({ stateNote: `${(r.note ?? "").trim()}${r.note ? ". " : ""}${line}`.slice(0, 4000), stateNoteAt: now() }).where(eq(tickets.id, r.id));
+      wrote.push(r.id);
+      continue;
+    }
     // Numbered, so the verdict holds whatever the criterion's wording: "5 pass". The criteria's own words
     // are quoted after it so a reader sees what was checked.
     const numbered = settle.map((i) => `${i + 1} ${verdict}`).join("; ");
