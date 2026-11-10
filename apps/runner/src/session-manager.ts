@@ -13,6 +13,7 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { FENCE_DENIED_PATTERN, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
+import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
@@ -993,7 +994,8 @@ export class SessionManager {
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
-    const child = spawn(launch.bin, launch.args, { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const noCore = withoutCoreDumps(launch);
+    const child = spawn(noCore.bin, noCore.args, { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
@@ -1155,6 +1157,12 @@ export class SessionManager {
     });
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
+      // The no-core-dump shell wrapper (BOS-1059) turns a tool that can't be started into exit 127 / 126, not an "error".
+      const noStart = (code === 127 && /exec: .*not found/.test(stderr)) || (code === 126 && /exec: .*(Permission denied|not executable)/i.test(stderr));
+      if (noStart && this.runs.has(cmd.runId)) {
+        finish(null, `Couldn't start ${cmd.agentKind === "claude" ? "claude-code-acp" : cmd.agentKind}: ${code === 127 ? "not found" : "not allowed to run"}.`);
+        return;
+      }
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());
     });
 
