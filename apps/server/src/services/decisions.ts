@@ -850,6 +850,16 @@ const ALLOW = "Allow once";
 const DENY = "Deny";
 
 /**
+ * Whether an answer is a refusal button (BOS-1094): one of the card's own options that says "Send it back", "Deny"
+ * or "Reject" (so free text and a plain "No" never count: those are often just the answer to a yes/no question).
+ */
+export function isRefusalAnswer(answer: string, options: readonly string[] | null | undefined): boolean {
+  if (!options?.includes(answer)) return false;
+  const a = answer.trim().toLowerCase().replace(/[.!\s]+$/, "");
+  return /^(no, |not approved, )?(send it back|deny|reject)\b/.test(a) || a === "do not approve" || a === "don't approve";
+}
+
+/**
  * How long an Allow once covers a repeat of the same command in the same run (BOS-376). A harness can
  * report one ask twice (a retry, or the command and the folder it reaches into); both should be answered
  * by the one click. Long enough for a retry or a late replay, short enough that the agent's own next,
@@ -3230,6 +3240,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
+      }
+      // The owner refused (BOS-1094): a "Send it back" / "Deny" / "Reject" button on an agent's card about a ticket in
+      // review stops its merge. The card no longer holds it, so without this the merge went on (BOS-1071).
+      const refused = ctx.type === "question" && !extra.settledBy && extra.by !== "ceo" && isRefusalAnswer(answer, d.options as string[] | null);
+      if (refused) {
+        for (const t of kept) {
+          await loopHooks?.sendBack(t.id, `The owner answered "${d.question}" with "${answer}", so this ticket is not to merge as it is.${extra.note ? ` Their note: ${extra.note}` : ""} Change it as they ask, then move it back to review.`, "the owner");
+          await record(db, { companyId: d.companyId, ticketId: t.id, kind: "merge_stopped_by_answer", summary: `The owner answered "${asked}" with "${answer}", so the ticket was sent back to in progress and its merge stopped.`, at: now() });
+        }
+        kept = [];
       }
       for (const t of kept) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
