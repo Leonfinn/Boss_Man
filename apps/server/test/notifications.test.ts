@@ -266,6 +266,35 @@ describe("notification ladder (R44)", () => {
     await ceo.close();
   });
 
+  it("a CEO reissue with urgent:true marks the new card and it pushes; without the mark it stays off the phone; a short reason is refused (BOS-1110)", async () => {
+    const c = await setup({ listen: true });
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    const ceo = await c.mcp(c.ceo.id);
+    const asked = async (question: string) => (await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question, options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: c.worker.id, context: { type: "question", advice: { state: "asking", askedAt: new Date().toISOString() } } }).returning())[0]!;
+    const plain = await asked("Plain question from an agent");
+    const urgent = await asked("Urgent question from an agent");
+    const reissue = (id: string, extra: Record<string, unknown>) => ceo.callTool({ name: "decisions", arguments: { action: "advise", outcome: "reissue", id, question: "Clearer question?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Looked at the ticket and the agent's last run", ...extra } }) as Promise<{ isError?: boolean }>;
+    // A reason under 10 characters is refused and the card is left as it was.
+    expect(textOf(await reissue(urgent.id, { urgent: true, urgentWhy: "now" }))).toMatch(/urgentWhy/);
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, urgent.id)))[0]!.status).toBe("open");
+    // "handled" settles the card, so an urgent mark on it is refused.
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "advise", outcome: "handled", id: urgent.id, urgent: true, urgentWhy: "The runner is down and nothing can ship", summary: "Did the work and picked the answer." } }))).toMatch(/urgent/);
+
+    expect((await reissue(plain.id, {})).isError).toBeFalsy();
+    expect((await reissue(urgent.id, { urgent: true, urgentWhy: "The runner is down and nothing can ship" })).isError).toBeFalsy();
+    const open = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(open).toHaveLength(2);
+    expect(open.filter((d) => (d.context as { urgentPush?: { why: string } }).urgentPush?.why === "The runner is down and nothing can ship")).toHaveLength(1);
+
+    await c.notes.syncDecisions();
+    expect(c.pushed).toHaveLength(1);
+    expect(c.pushed[0]!.body.priority).toBe(5);
+    const marked = open.find((d) => (d.context as { urgentPush?: unknown }).urgentPush)!;
+    const [n] = await c.db.select().from(notifications).where(eq(notifications.decisionId, marked.id));
+    expect(n!.pushReason).toBe("The CEO marked it urgent: The runner is down and nothing can ship");
+    await ceo.close();
+  });
+
   it("clears a pushed card from the phone when it is answered, and a failed or unsupported clear never fails the answer (BOS-1097)", async () => {
     for (const clearStatus of [200, 404]) {
       const c = await setup({ clearStatus });
