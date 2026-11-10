@@ -727,6 +727,9 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
+    // The daemon's own temp folder goes on even when the base env is a trimmed one: in a fenced check job /tmp
+    // is refused, and Claude Code's own /tmp/claude-<uid> then ends the session with "Internal error" (BOS-1067).
+    for (const k of ["TMPDIR", "CLAUDE_CODE_TMPDIR"]) if (env[k] === undefined && process.env[k] !== undefined) env[k] = process.env[k];
     // The git credential stays with the daemon, which pushes and fetches itself (BOS-322): the session gets
     // every other granted secret, and a push from inside it fails fast instead of prompting.
     Object.assign(env, withoutGitCredentials(secrets), { GIT_TERMINAL_PROMPT: "0", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
@@ -793,7 +796,7 @@ export class SessionManager {
     rmSync(tmp, { recursive: true, force: true });
     if (!realDirsUnder(tmpRoot, cmd.runId)) throw new Error(`the run's temp folder ${tmp} isn't a folder`);
     chmodSync(tmp, 0o700);
-    Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
+    Object.assign(env, { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
 
