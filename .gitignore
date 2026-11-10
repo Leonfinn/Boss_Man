@@ -5,3 +5,7 @@ dist/
 coverage/
 data/
 secrets/
+
+# Core dump files (BOS-1059): never commit them. Narrow on purpose: a broad core.* would hide a real core.ts.
+core
+core.[0-9]*
