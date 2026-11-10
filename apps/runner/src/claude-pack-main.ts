@@ -9,7 +9,7 @@ import { copyFileSync } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { PACK_ROOT, PACK_SOURCE, PINNED_CLAUDE_CODE, claudeBin, cleanStalePacks, installPack, sourceLockHash, type Exec } from "./claude-pack.js";
+import { PACK_ROOT, PACK_SOURCE, PINNED_CLAUDE_CODE, adapterBin, claudeBin, cleanStalePacks, installPack, sourceLockHash, type Exec } from "./claude-pack.js";
 import { runCanary } from "./canary.js";
 
 const run = promisify(execFile);
@@ -34,7 +34,7 @@ const claudeVersion = (dir: string) => exec(claudeBin(dir), ["--version"]);
  * stand-in model. It needs no credentials and no network, so the pack is proven here even offline.
  */
 async function canary(dir: string) {
-  const r = await runCanary({ agentKind: "claude", baseEnv: { PATH: process.env.PATH, CLAUDE_CODE_EXECUTABLE: claudeBin(dir) } });
+  const r = await runCanary({ agentKind: "claude", adapterBin: adapterBin(dir), baseEnv: { PATH: process.env.PATH, CLAUDE_CODE_EXECUTABLE: claudeBin(dir) } });
   log(`canary: ${r.ok ? "passed" : `failed (${r.detail})`}`);
   return r.ok;
 }

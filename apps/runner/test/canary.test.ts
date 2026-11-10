@@ -27,6 +27,16 @@ describe("image canary (R52)", () => {
     expect(result.checks.answered).toBe(false);
   }, 60_000);
 
+  // BOS-972: the installer's canary must use the pack's adapter. Without the adapterBin option the
+  // session fell through to defaultBin("claude") and always said "isn't installed", so the pack never became ready.
+  it("uses the adapter it is given for Claude, instead of reporting Claude as not installed", async () => {
+    const given = await runCanary({ adapterBin: "/nonexistent/claude-agent-acp", baseEnv: { PATH: process.env.PATH, CLAUDE_CODE_EXECUTABLE: "/nonexistent/claude" }, timeoutMs: 30_000 });
+    expect(given.ok).toBe(false);
+    expect(given.detail).not.toContain("isn't installed");
+    const none = await runCanary({ baseEnv: { PATH: process.env.PATH, CLAUDE_CODE_EXECUTABLE: "/nonexistent/claude" }, timeoutMs: 30_000 });
+    expect(none.detail).toContain("isn't installed");
+  }, 90_000);
+
   it("runs a Codex session through its own approval, against a Responses-API stand-in", async () => {
     const result = await runCanary({ agentKind: "codex", baseEnv: { PATH: process.env.PATH } });
     expect(result.detail).toBe("all checks passed");
