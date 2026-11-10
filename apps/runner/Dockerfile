@@ -129,6 +129,8 @@ COPY --chown=node apps/runner/src apps/runner/src
 # live with "Build and update runners".
 COPY --chmod=0755 scripts/check-slot.sh /usr/local/lib/bossman/check-slot.sh
 ENV BOSSMAN_CHECK_SLOT=/usr/local/lib/bossman/check-slot.sh
+# The notice every published image carries (BOS-973).
+COPY NOTICE /NOTICE
 
 # Workspaces (one directory per ticket) and the event journal live on volumes, so a
 # restart replays unacknowledged events and keeps work in progress (R31).

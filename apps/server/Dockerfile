@@ -50,6 +50,8 @@ COPY apps/server/src apps/server/src
 COPY apps/server/drizzle apps/server/drizzle
 COPY --from=web /app/apps/web/dist /app/web
 COPY --from=bundle /app/apps/server/dist apps/server/dist
+# The notice every published image carries (BOS-973).
+COPY NOTICE /NOTICE
 
 # Where the launcher's key volume is mounted (R55). Owned by uid 1000 here too, so the volume
 # is created writable for the launcher whichever container starts first.
