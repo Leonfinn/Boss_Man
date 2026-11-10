@@ -3803,7 +3803,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <a className="set-back" href="#/settings" onClick={(e) => { e.preventDefault(); go("settings"); }}>
             ‹ Settings
           </a>
-          <h1>
+          <h1 ref={heading} tabIndex={-1}>
             {current.label}
             {current.allCompanies && <span className="tag set-scope">All companies</span>}
           </h1>
@@ -3815,9 +3815,6 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         {menu}
         <div className="set-page">
           {current.jump && <JumpLinks items={current.jump} />}
-          <h2 ref={heading} tabIndex={-1} className="set-page-title" style={{ display: "none" }}>
-            {current.label}
-          </h2>
           <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>{panels[current.id]}</div>
         </div>
       </div>
