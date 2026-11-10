@@ -934,6 +934,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // BOS-364 withdrew only cards for the commit it never reached; BOS-368 withdraws every open runner card, whichever way round the host names the commits.
     if (s.target === "server") {
       await putSetting(LAST_SERVER, { result: s.result, from: s.from_commit, to: s.to_commit, ended: s.ended } satisfies LastServer);
+      // The combined button's wish dies with a deploy that never landed (refused, nothing new), so it cannot attach to a later, unrelated deploy.
+      if (s.result === "rejected" || s.result === "nothing_new") await putSetting(RUNNERS_AFTER, null);
       // Switched back or failed: no runner update is due, whichever way round the host names the commits.
       if (s.result === "rolled_back" || s.result === "failed") {
         // BOS-1086: a queued press is cancelled, and the panel says why; the runners never update to a version that was rolled back.
@@ -1368,8 +1370,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
     /** "Cancel" on the queued runner update (BOS-1086): the owner's press is taken back and the hold goes back to what it was. */
     async cancelRunnerQueue() {
+      // The combined button's wish (deploy not landed yet) is a queued press too: cancelling takes it back.
+      const after = await getSetting<{ commit: string }>(RUNNERS_AFTER);
+      if (after) await putSetting(RUNNERS_AFTER, null);
       const due = await getSetting<RunnerDue>(RUNNER_DUE);
-      if (!due?.pressed) return { cancelled: false } as const;
+      if (!due?.pressed) return { cancelled: !!after } as const;
       const { pressed: _p, priorOffer, ...rest } = due;
       await putSetting(RUNNER_DUE, { ...rest, offer: priorOffer ?? false } satisfies RunnerDue);
       return { cancelled: true } as const;
