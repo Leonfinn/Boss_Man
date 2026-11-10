@@ -2,7 +2,7 @@
 # volumes, so it's visible, snapshotted and backed up like the rest of the pool.
 # Use it with the main file, from the repository root:
 #   docker compose -f docker-compose.yml -f deploy/truenas.yml --profile runners up -d
-# Set BOSSMAN_DATA in .env to the dataset, e.g. /mnt/NVME_Apps/Container_files/boss-man/data (see docs/06-install-truenas.md).
+# Set BOSSMAN_DATA in .env to the dataset, e.g. /mnt/tank/apps/boss-man/data (see docs/06-install-truenas.md).
 # Compose merges volumes by their path inside the container, so these replace the named ones.
 services:
   db:

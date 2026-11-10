@@ -436,7 +436,7 @@ describe("Allow always", () => {
     fireEvent.click(screen.getByLabelText("Every agent in this company"));
     expect(screen.getByText("Always allow any agent to use crawl4ai's md tool.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
-    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Rules\./)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Permissions\./)).toBeTruthy());
     const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });

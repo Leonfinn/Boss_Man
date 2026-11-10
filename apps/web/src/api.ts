@@ -75,7 +75,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; fenceModeChosenAt?: string | null; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -233,7 +233,7 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
-  blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
@@ -396,12 +396,21 @@ export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
-  pushLevels: NotifyLevel[];
+  /** Which cards go to the phone (BOS-1006): urgent ones by default. */
+  phonePush?: "urgent" | "all";
+  /** Only "flag" matters now: the Flags tick. */
+  pushLevels?: NotifyLevel[];
   publicUrl: string | null;
   /** Phone Approve buttons (BOS-243): on unless switched off. */
   approveButtons?: boolean;
   /** Whether Approve buttons are actually offered, and if not why. */
   approve?: { on: true } | { on: false; why: string };
+  /** The ntfy address the phone app must use (the add-on's NTFY_BASE_URL, as the host reports it); null when not known. */
+  phoneAddress?: string | null;
+  /** The ntfy container's name on the host (for `docker exec`); null when the host doesn't report it. */
+  phoneContainer?: string | null;
+  /** The last test push: when sent, and when the phone tapped Got it (null: not tapped). */
+  phoneTest?: { sentAt: string; confirmedAt: string | null } | null;
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
@@ -453,12 +462,12 @@ export type PlanNode = {
 };
 export type Plan = { nodes: PlanNode[]; edges: Array<{ id: string; from: string; to: string }>; columns: string[][] };
 export type TicketLinks = {
-  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; link: string }>;
+  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; until?: "merged" | "done"; link: string }>;
   blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
 };
 
 /** One ticket in the ticket page's Related section. */
-export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean };
+export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean; /** On a "Waits on" row: when the wait ends (BOS-989). */ until?: "merged" | "done" };
 export type TicketRelated = { feature: { id: string; title: string; status: string } | null; parent: RelatedTicket | null; subtasks: RelatedTicket[]; peers: RelatedTicket[]; waitsOn: RelatedTicket[]; blocks: RelatedTicket[]; mentioned: RelatedTicket[] };
 
 /** Today's date in the browser's time zone, YYYY-MM-DD. */

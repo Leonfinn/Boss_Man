@@ -278,7 +278,7 @@ On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss M
 
 **When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
-**Funding.** Under **Settings > Access and funding > Funding sources**, add one:
+**Funding.** Under **Settings > Funding**, add one:
 - "Subscription (setup-token)" for a Claude subscription;
 - "API credit" with your monthly grant for an API key.
 
@@ -331,7 +331,7 @@ Leave `launcher` out of the build if you don't use it (step 7b).
 scripts/update-runner.sh
 ```
 
-The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Runner update.
+The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Updates > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Updates > Runner update.
 
 **Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
 
@@ -848,7 +848,7 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Boss Man stores the token encrypted in its secrets as "ntfy access token", so you do not add it under **Settings > Secrets** yourself. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
-6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
+6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the ntfy address with its port, exactly the `NTFY_BASE_URL` value from step 2 (for example `https://<host-name>.<tailnet>.ts.net:8443`), and log in as `phone-read` with its password. Subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. Boss Man's **Notifications** page shows this address under **Set up your phone**, with a link to check from the phone's browser: open `<ntfy address>/v1/health`, which should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet. A test send that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.
 7. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
 
 Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):

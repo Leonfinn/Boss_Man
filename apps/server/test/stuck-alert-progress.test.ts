@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, reviewRequests, runs, tickets } from "../src/db/schema.js";
+import { decisions, reviewRequests, runs, ticketMessages, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { wakes } from "../src/db/schema.js";
 
@@ -120,6 +120,53 @@ describe("stuck-ticket card counts real progress (BOS-612)", () => {
     await ctx.stuck("Head unreadable", 4);
     await ctx.toCard();
     expect((await ctx.cards())[0]).toMatchObject({ recommendedOption: "Got it" });
+  });
+
+  it("goes up the alert ladder, not straight to the owner (BOS-1015)", async () => {
+    ctx = await setup();
+    await ctx.stuck("Empty runs", 4);
+    await ctx.toCard();
+    const [card] = await ctx.cards();
+    expect(card!.tier).not.toBe("owner");
+    const ladder = (card!.context as { ladder: { rung: string; kind: string; topRung: string } }).ladder;
+    expect(ladder).toMatchObject({ kind: "looks_stuck", topRung: "ceo" });
+    expect(ladder.rung).not.toBe("owner");
+  });
+
+  it("a state-note update or an agent reply counts as progress on a noCode ticket, on a noCode ticket (BOS-1015)", async () => {
+    ctx = await setup();
+    const sweep = await ctx.stuck("Sweep", 4, { noCode: true, branch: null });
+    await ctx.db.update(tickets).set({ stateNote: "Checked 12 tickets, all fine", stateNoteAt: new Date(Date.now() + 10_000) }).where(eq(tickets.id, sweep));
+    await ctx.toCard();
+    expect((await ctx.cards())[0]).toMatchObject({ recommendedOption: "Got it" });
+  });
+
+  it("a noCode ticket with no notes or replies still recommends Reassign (BOS-1015)", async () => {
+    ctx = await setup();
+    await ctx.stuck("Silent sweep", 4, { noCode: true, branch: null });
+    await ctx.toCard();
+    expect((await ctx.cards())[0]).toMatchObject({ recommendedOption: "Reassign" });
+  });
+
+  it("an agent reply counts as progress on a noCode ticket (BOS-1015)", async () => {
+    ctx = await setup();
+    const id = await ctx.stuck("Nudger", 4, { noCode: true, branch: null });
+    await ctx.db.insert(ticketMessages).values({ companyId: ctx.company.id, ticketId: id, author: "agent", agentId: ctx.worker.id, text: "Nudged the CEO", createdAt: new Date(Date.now() + 1500) });
+    await ctx.toCard();
+    expect((await ctx.cards())[0]).toMatchObject({ recommendedOption: "Got it" });
+  });
+
+  it("raises no second card while one is open (BOS-1015)", async () => {
+    ctx = await setup();
+    await ctx.stuck("Empty runs", 4);
+    await ctx.toCard();
+    expect(await ctx.cards()).toHaveLength(1);
+    for (let i = 0; i < 4; i++) {
+      ctx.advance(6 * HOUR);
+      await ctx.settle();
+      await ctx.sweeps.run();
+    }
+    expect(await ctx.cards()).toHaveLength(1);
   });
 });
 

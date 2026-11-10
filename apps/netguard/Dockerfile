@@ -7,5 +7,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends nftables libc-bin gawk \
  && rm -rf /var/lib/apt/lists/*
 COPY apps/netguard/netguard.sh /usr/local/bin/netguard.sh
+# The notice every published image carries (BOS-973).
+COPY NOTICE /NOTICE
 # Root inside the container, but with only NET_ADMIN, no new privileges and a read-only filesystem (set by the launcher).
 ENTRYPOINT ["/usr/local/bin/netguard.sh"]

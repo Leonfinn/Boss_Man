@@ -73,6 +73,8 @@ describe("wake classes: the table", () => {
     // The reasons written on a ticket's history row by a system move (BOS-898), not wakes.
     "what it waited on is resolved",
     "what it waited on finished",
+    // The reason in the detail of the history row for a company set to fence Off at start (BOS-940), not a wake.
+    "runner_cannot_fence",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {

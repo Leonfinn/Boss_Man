@@ -49,7 +49,7 @@ describe("deploy targets (R14)", () => {
 
   it("checks the endpoint shape for each kind", () => {
     expect(endpointProblem("ssh", "deploy@nas.lan")).toBeNull();
-    expect(endpointProblem("ssh", "ssh://deploy@192.168.68.10:22")).toBeNull();
+    expect(endpointProblem("ssh", "ssh://deploy@192.168.1.10:22")).toBeNull();
     expect(endpointProblem("git", "git@github.com:Leonfinn/homelab.git")).toBeNull();
     expect(endpointProblem("docker", "/var/run/docker.sock")).toMatch(/root on the host/);
     expect(endpointProblem("ssh", "nas.lan")).toMatch(/user@host/);

@@ -203,7 +203,7 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
         id="t-owner-setup"
         rows={3}
         maxLength={4_000}
-        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        placeholder={"Settings → Funding → Add funding source, then sign in to the second plan"}
         value={text}
         onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}

@@ -1053,7 +1053,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Rules.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1181,7 +1181,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   </li>
                                 ))}
                               </ul>
-                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Rules.</p>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions.</p>
                             </div>
                           ) : null}
                           <div className="actions" onClickCapture={(e) => {

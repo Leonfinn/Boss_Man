@@ -5,6 +5,7 @@ import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, INFINITE_M
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
+import { readWipLimits } from "./agent-wip.js";
 import { pictureType } from "./company-import.js";
 import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
@@ -597,6 +598,13 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         .from(tickets)
         .where(and(eq(tickets.companyId, companyId), inArray(tickets.systemState, [...OPEN])))
         .groupBy(tickets.assigneeAgentId);
+      // The WIP limit (BOS-1029): in-progress tickets against the limit, counted by the one rule in agent-wip.ts.
+      const wipLimit = (await readWipLimits(db)).agent;
+      const wip = await db
+        .select({ agentId: tickets.assigneeAgentId, n: sql<number>`count(*)::int` })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "in_progress")))
+        .groupBy(tickets.assigneeAgentId);
       const [pa] = await db
         .select({ total: sql<number>`count(*)::int`, posted: sql<number>`(count(*) filter (where ${paAnswers.outcome} = 'posted'))::int`, wrong: sql<number>`(count(*) filter (where ${paAnswers.verdict} = 'wrong'))::int` })
         .from(paAnswers)
@@ -612,6 +620,8 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
             current: working?.ticketId ? { ticketId: working.ticketId, title: working.ticket } : null,
             pa: a.duty === "assistant" ? { posted: pa!.posted, escalated: pa!.total - pa!.posted, wrong: pa!.wrong } : null,
             openTickets: assigned.find((r) => r.agentId === a.id)?.n ?? 0,
+            wipCount: wip.find((r) => r.agentId === a.id)?.n ?? 0,
+            wipLimit,
             month: {
               costMicros: Number(money.find((m) => m.agentId === a.id)?.micros ?? 0),
               runs: used.find((u) => u.agentId === a.id)?.runs ?? 0,
