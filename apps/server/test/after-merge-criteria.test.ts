@@ -408,7 +408,7 @@ describe("after-merge criteria", () => {
     const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Does it answer from your Tailscale name? Press Test and say what it shows.", options: ["Pass - it answers", "Fail - it doesn't"], recommendedOption: "Pass - it answers", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
     // A typed answer comes in as the owner's own words (custom), as the card's text box sends it.
-    await ctx.decisions.answer(d!.id, answer, { custom: !d!.options!.includes(answer) });
+    await ctx.decisions.answer(d!.id, answer, { custom: !(d!.options as string[]).includes(answer) });
     return { t, recorded: await ctx.row(t.id) };
   };
   const verdictOf = (row: { acceptanceCriteria: unknown; stateNote: string | null }) => readVerdicts(readCriteria(row.acceptanceCriteria), row.stateNote).find((r) => r.criterion === LIVE.text)?.verdict;
