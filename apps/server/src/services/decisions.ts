@@ -534,6 +534,7 @@ export async function markDecisionNotificationRead(db: Db, decisionId: string, a
   if (settledListener) void Promise.resolve(settledListener(decisionId)).catch(() => undefined);
 }
 
+// lost on restart, harmless because app.ts wires the listener again at every start
 let settledListener: ((decisionId: string) => unknown) | null = null;
 /** Wired in app.ts to the notifications service's clearPush (BOS-1097). */
 export function setDecisionSettledListener(fn: ((decisionId: string) => unknown) | null) {
