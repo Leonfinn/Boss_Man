@@ -3,7 +3,7 @@
 // BOS-655: the job's HOME is removed when it ends, and a runner that can't fence still gives the job its own
 // HOME/TMPDIR and the pnpm store on the workspaces volume, so an install doesn't fill the root disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -112,5 +112,22 @@ describe("a job's pnpm store (BOS-568 review)", () => {
     const r = await ws.runCommitCheck({ projectId, jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", commit }, `echo "store=$npm_config_store_dir"`, 60_000);
     expect(r.output).toContain(`store=${shared}`);
     expect(r.output).not.toContain(gate);
+  });
+});
+
+// BOS-1039: npm puts agent binaries behind links (bin/opencode -> ../lib/node_modules/opencode-ai/bin/opencode.exe). The
+// fence grants the PATH folders, but Landlock checks the real file, so a fenced job couldn't run the agent it was meant to.
+describe.skipIf(level === "unavailable")("fenced check job runs an agent binary behind a PATH link (BOS-1039)", () => {
+  it("runs opencode when PATH holds only a link to it", async () => {
+    const prefix = tmp("bm-fj-npm-");
+    mkdirSync(path.join(prefix, "bin"), { recursive: true });
+    mkdirSync(path.join(prefix, "lib", "pkg", "bin"), { recursive: true });
+    const real = path.join(prefix, "lib", "pkg", "bin", "opencode.exe");
+    writeFileSync(real, "#!/bin/sh\necho agent-ran\n", { mode: 0o755 });
+    symlinkSync(real, path.join(prefix, "bin", "opencode"));
+    const { root, commit } = setup({ level }, "bm-fj-link");
+    const ws = new Workspaces(root, { ...process.env, PATH: `${path.join(prefix, "bin")}:${process.env.PATH}` }, undefined, undefined, { level });
+    const r = await ws.runCommitCheck({ projectId, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit }, "opencode", 60_000);
+    expect(r.output).toContain("agent-ran");
   });
 });

@@ -55,7 +55,7 @@ export async function fenceDefaultSweep(db: Db, now: Date): Promise<{ turnedOff:
         question:
           `${c.name}'s agent fence is Off, but nobody chose that: Off was Boss Man's old default. ${FENCE_OFF_CONSEQUENCE}` +
           ` This company's runner can fence agents. Switch it to Watch (recommended): agents run inside the fence, every refusal is written to the permission log, and nothing new is asked of you. Or keep it Off.` +
-          ` Nothing changes until you answer. You can change it later in Settings → Agent fence.`,
+          ` Nothing changes until you answer. You can change it later in Settings → Permissions → Agent fence.`,
         options: [FENCE_TO_WATCH, FENCE_KEEP_OFF],
         recommendedOption: FENCE_TO_WATCH,
         dedupeKey: fenceCardKey(c.id),
@@ -73,7 +73,7 @@ export async function fenceDefaultSweep(db: Db, now: Date): Promise<{ turnedOff:
 export async function checkFenceAnswer(db: Db, companyId: string, answer: string): Promise<string | null> {
   if (answer !== FENCE_TO_WATCH) return null;
   const [r] = await db.select({ level: sql<string | null>`${runners.sandbox}->>'level'` }).from(runners).where(eq(runners.companyId, companyId));
-  return r?.level === "full" || r?.level === "partial" ? null : "This company's runner can't fence agents right now, so Watch would do nothing. Keep Off for now, or fix the host (Settings → Agent fence → Setting up a host) and answer again.";
+  return r?.level === "full" || r?.level === "partial" ? null : "This company's runner can't fence agents right now, so Watch would do nothing. Keep Off for now, or fix the host (Settings → Permissions → Agent fence → Setting up a host) and answer again.";
 }
 
 /** Applies the owner's answer. Either answer is a choice, so the card's company is never asked or changed again. */

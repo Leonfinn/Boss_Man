@@ -30,6 +30,8 @@ if [ "$1" = "-p" ]; then
   exit 0
 fi
 echo "node $*" >>"$LOG"
+# scripts/rebase-migrations.mjs: REBASE_OUT is what it prints, REBASE_RC its exit code (BOS-1048).
+if [[ "$1" == *rebase-migrations.mjs ]]; then printf '%s\n' "${REBASE_OUT:-none: nothing to renumber.}"; exit "${REBASE_RC:-0}"; fi
 if [ -n "${FAIL_ON:-}" ] && [[ "$*" == *"$FAIL_ON"* ]]; then echo "boom"; exit 1; fi
 S
 chmod +x "$t/bin/pnpm" "$t/bin/node"
@@ -358,5 +360,32 @@ g checkout -q -B depl origin/main; commit deploy/truenas.yml
 run 0 "deploy yml" env; logged "check-compose" "deploy/*.yml change runs the validator"
 g checkout -q -B nocompose origin/main; commit apps/web/src/q2.ts
 run 0 "no compose change" env; notlogged "check-compose" "unrelated change must not run the validator"
+
+# A migration-only clash (BOS-1048): two branches both add migration 0141, so the journal conflicts. The step accepts it as the
+# gate would and lints the rebuilt tree; a real conflict (a code file as well) still fails.
+mig() { # mig <branch> <start> <name> <readme text>: add migration 0141_<name> and a journal line, on a new branch off <start>
+  g checkout -q -B "$1" "$2"
+  mkdir -p "$repo/apps/server/drizzle/meta"
+  echo "-- $3" >"$repo/apps/server/drizzle/0141_$3.sql"
+  echo "{\"tag\":\"0141_$3\"}" >>"$repo/apps/server/drizzle/meta/_journal.json"
+  [ -z "$4" ] || echo "$4" >>"$repo/README"
+  g add -A; g commit -q -m "migration $3"
+}
+start="$(g rev-parse origin/main)"
+mig mainside "$start" other ""; g update-ref refs/remotes/origin/main HEAD
+mig mine "$start" mine ""
+tree="$(g rev-parse 'HEAD^{tree}')"
+run 0 "journal-only clash" env REBASE_OUT="$(printf '0141_mine -> 0142_mine\nrebuilt tree: %s' "$tree")"
+grep -q "^PASS  merge with origin/main is clean" "$t/out" || fail "clash: merge step not PASS: $(cat "$t/out")"
+grep -q "migration 0141 (mine) will be renumbered to 0142 by the merge gate" "$t/out" || fail "clash: no renumber line: $(cat "$t/out")"
+grep -q "^PASS  migration lint (on the tree the gate will build)" "$t/out" || fail "clash: lint not run on the rebuilt tree: $(cat "$t/out")"
+# the old plain merge-tree step failed on exactly this tree
+g merge-tree --write-tree origin/main HEAD >/dev/null 2>&1 && fail "clash fixture is not a real conflict"
+start="$(g rev-parse origin/main)"
+mig mainside2 "$start" other2 "main line"; g update-ref refs/remotes/origin/main HEAD
+mig mine2 "$start" mine2 "my line"
+run 1 "real clash" env REBASE_RC=1 REBASE_OUT="refused: real code conflicts too: README"
+grep -q "^FAIL  merge with origin/main is clean" "$t/out" || fail "real clash: merge step not FAIL: $(cat "$t/out")"
+grep -q "refused: real code conflicts too" "$t/out" || fail "real clash: refusal reason not shown: $(cat "$t/out")"
 
 echo "check-quick.test.sh: ok"
