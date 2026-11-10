@@ -213,7 +213,7 @@ export function SecondOpinionSetting({ company }: { company: Company }) {
           </button>
         </div>
         {msg && <p role="status">{msg}</p>}
-        {(cur.data?.enabled || (stats.data && stats.data.answered + stats.data.fellBack > 0)) && <SecondOpinionLast24h stats={stats.data} />}
+        {(cur.data?.enabled || (stats.data && stats.data.answered + stats.data.fellBack > 0)) && <SecondOpinionLast24h stats={stats.data ?? undefined} />}
       </form>
     </Section>
   );
