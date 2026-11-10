@@ -251,6 +251,7 @@ reads:
   - /api/run-limits
   - /api/runner-report
   - /api/self-deploy
+  - /api/self-deploy/wait
   - /api/settings/check-queue
   - /api/wip-limits
 
