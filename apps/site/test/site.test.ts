@@ -54,7 +54,8 @@ describe("build", () => {
 
   it("lists Troubleshooting, then the Glossary, then the FAQ, last in the guides list, and links every glossary term to a real guide section", () => {
     const html = read("guides/index.html");
-    const at = (p: string) => html.indexOf(`<a href="${p}">`);
+    const cards = html.indexOf('class="g-cards"'); // the header menu links /faq too, so only look at the guide cards
+    const at = (p: string) => html.indexOf(`<a href="${p}">`, cards);
     expect(at("/guides/troubleshooting")).toBeGreaterThan(at("/guides/updates-and-backups"));
     expect(at("/guides/glossary")).toBeGreaterThan(at("/guides/troubleshooting"));
     expect(at("/faq")).toBeGreaterThan(at("/guides/glossary"));
