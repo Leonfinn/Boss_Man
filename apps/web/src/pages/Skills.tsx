@@ -11,7 +11,7 @@ import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { clearDraft, readDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
-import { Section, useAction } from "./Settings";
+import { Section, useAction } from "./settings/shared";
 
 type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
 type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; hasInstructions?: boolean; instructionsPath?: string | null; instructionsUnreadable?: boolean; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
