@@ -55,6 +55,12 @@ type SelfDeployView = {
   trial?: { endsAt: string; seconds: number } | null;
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
   deployWait?: { until: string } | null;
+  /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
+  runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
+  /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
+  heldDeploy?: { id: string; commit: string; since: string } | null;
+  /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
+  queueCancelled?: { at: string; why: string } | null;
 };
 
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
@@ -128,15 +134,31 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
   const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
     <>
       {trial && !trialOver && (
-        <p className="error" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
-          The server update is still in its trial, so the runners can't be updated yet. Runners can be updated from {atTime(trial.endsAt)}, {inAbout(trial.endsAt, now)}.
-          Boss Man offers the runner update by itself then, so you don't need to press again.
+        <p className="muted" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
+          {queue
+            ? `Runners will update at ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}), when this server update's trial ends. You don't need to press again.`
+            : `The server update is in its trial until ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}). Press Build and update runners to queue the runner update; it then starts by itself when the trial ends.`}
+        </p>
+      )}
+      {queue && !(trial && !trialOver) && (
+        <p className="muted" role="status" data-testid="runner-queue" style={{ fontSize: 14 }}>
+          The runner update is queued. It is waiting for {queue.why.replace(/\.$/, "")}, and starts by itself as soon as that is over.
+        </p>
+      )}
+      {held && (
+        <p className="muted" role="status" data-testid="deploy-held" style={{ fontSize: 14 }}>
+          The server update you approved ({held.commit.slice(0, 8)}) waits for the runner update to finish, then goes by itself.
+        </p>
+      )}
+      {cancelled && (
+        <p className="error" role="status" data-testid="queue-cancelled" style={{ fontSize: 14 }}>
+          {cancelled.why}
         </p>
       )}
       {wait && (
@@ -170,7 +192,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
-      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} />
+      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
       <div>
         <button
@@ -200,13 +222,37 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
           onClick={() =>
             act.run(async () => {
-              await api("/api/self-deploy/update-runners", { method: "POST", body: {} });
+              const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+              // BOS-1086: a press that can't run yet is queued, not refused; the line above says when it starts.
+              if (r?.queued) {
+                view.reload();
+                return r.message ?? "The runner update is queued.";
+              }
               go("decisions");
             })
           }
         >
           Build and update runners
         </button>{" "}
+        {v.runnerQueue && (
+          <>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy}
+              title="Takes back the queued runner update. Nothing else changes."
+              onClick={() =>
+                act.run(async () => {
+                  await api("/api/self-deploy/cancel-runner-queue", { method: "POST", body: {} });
+                  view.reload();
+                  return "The queued runner update is cancelled.";
+                })
+              }
+            >
+              Cancel queued runner update
+            </button>{" "}
+          </>
+        )}
         <button
           type="button"
           className="btn"

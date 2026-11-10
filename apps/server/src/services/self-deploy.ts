@@ -11,7 +11,7 @@ import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
@@ -592,7 +592,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two). If more work merges before the host runs it, the newest version that has passed its checks goes out instead.${a?.runnerChanged ? `\n\nAfter this, ${RUNNER_STEP}: the merge gate keeps running the old code until you do. Boss Man raises that card after the trial.` : ""}`);
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
-    const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
+    const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : a?.runnerChanged ? [DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
     const [row] = await db
       .insert(decisions)
       .values({
@@ -727,6 +727,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
   /** BOS-1086: why a queued runner update was cancelled, shown in the panel until the next press or deploy. */
   const QUEUE_CANCELLED = "self_deploy_runner_queue_cancelled";
+  /** BOS-1086: set by "Deploy, then update runners after the trial"; becomes a queued press when the deploy lands. */
+  const RUNNERS_AFTER = "self_deploy_runners_after";
 
   /** Whether the live runner image was built from `commit` or a merge after it (BOS-764). False when the image's commit isn't recorded. */
   async function imageHas(commit: string | null | undefined) {
@@ -934,7 +936,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // Switched back or failed: no runner update is due, whichever way round the host names the commits.
       if (s.result === "rolled_back" || s.result === "failed") {
         // BOS-1086: a queued press is cancelled, and the panel says why; the runners never update to a version that was rolled back.
-        if ((await getSetting<RunnerDue>(RUNNER_DUE))?.pressed) await putSetting(QUEUE_CANCELLED, { at: new Date().toISOString(), why: `The server update ${s.result === "failed" ? "failed" : "was switched back"}, so the runner update you queued was cancelled. The runners were not touched. Press Build and update runners again when the server is settled.` });
+        const wasAfter = await getSetting<{ commit: string }>(RUNNERS_AFTER);
+        await putSetting(RUNNERS_AFTER, null);
+        if (wasAfter || (await getSetting<RunnerDue>(RUNNER_DUE))?.pressed) await putSetting(QUEUE_CANCELLED, { at: new Date().toISOString(), why: `The server update ${s.result === "failed" ? "failed" : "was switched back"}, so the runner update you queued was cancelled. The runners were not touched. Press Build and update runners again when the server is settled.` });
         await putSetting(RUNNER_DUE, null);
         // Free the dedupe key, as every other withdraw does, or a later offer for the same commit is silently dropped.
         for (const o of await openFor("runner")) await withdrawOpen(o.id);
@@ -957,8 +961,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // version carries it, so the card is replaced by one for the live version once the trial is over (never left stale).
       const staleCards = (await openFor("runner")).filter((o) => { const c = o.context as SelfDeployContext; return !!c.commit && c.commit !== s.to_commit; });
       const cardNeeds = (staleCards[0]?.context as SelfDeployContext | undefined)?.commit;
-      const needs = wants ? s.to_commit : old?.needs ?? ticketNeeds ?? cardNeeds;
-      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || onlyTickets.length > 0 || staleCards.length > 0, ...(needs ? { needs } : {}), ...(old?.pressed ? { pressed: old.pressed, priorOffer: old.priorOffer ?? false } : {}) } satisfies RunnerDue);
+      // The combined button: the owner already said they want the runners updated after this deploy's trial.
+      const runnersAfter = await getSetting<{ commit: string }>(RUNNERS_AFTER);
+      if (runnersAfter) await putSetting(RUNNERS_AFTER, null);
+      const pressed = old?.pressed ?? (runnersAfter ? new Date().toISOString() : undefined);
+      const needs = wants || (runnersAfter && !old?.pressed) ? s.to_commit : old?.needs ?? ticketNeeds ?? cardNeeds;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs(a, s)).toISOString(), offer: wants || !!held || !!pressed || onlyTickets.length > 0 || staleCards.length > 0, ...(needs ? { needs } : {}), ...(pressed ? { pressed, priorOffer: old?.pressed ? old.priorOffer ?? false : old?.offer ?? false } : {}) } satisfies RunnerDue);
     }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
@@ -1339,7 +1347,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     },
 
     /** Hands the approved request to the host. // leader-only */
-    async send(ctx: SelfDeployContext, decisionId: string) {
+    async send(ctx: SelfDeployContext, decisionId: string, thenRunners = false) {
+      // BOS-1086 combined button: remember that the runner update is wanted once this deploy's trial ends. finished()
+      // turns it into the queued press when the deploy lands, and cancels it if the deploy is switched back or fails.
+      if (thenRunners && ctx.target === "server") await putSetting(RUNNERS_AFTER, { commit: ctx.commit, at: new Date().toISOString() });
       // BOS-753: the checked merges go first, so the host can deploy the newest of them if main moves on before its tick.
       // A failure here never blocks the deploy: without the list the host deploys the approved commit (still on main).
       // BOS-1086: a server deploy approved while a runner update is queued or under way waits behind it (a new deploy

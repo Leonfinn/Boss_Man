@@ -1909,3 +1909,50 @@ describe("a queued runner update, its cancel and the deploys behind it (BOS-1086
     expect((await c.selfDeploy.overview()).heldDeploy).toBeNull();
   });
 });
+
+describe("the combined button: deploy, then update runners after the trial (BOS-1086)", () => {
+  afterEach(() => vi.useRealTimers());
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+  async function approved() {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-10T17:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-10T17:00:00Z");
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.options).toEqual(["Deploy", "Deploy, then update runners after the trial", "Not now"]);
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy, then update runners after the trial" })).statusCode).toBe(200);
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "server", commit: B });
+    await rm(inbox(c));
+    return { c, d: d! };
+  }
+
+  it("queues the runner update when the deploy lands, and starts it by itself when the trial ends", async () => {
+    const { c, d } = await approved();
+    await c.status({ id: d.id, target: "server", result: "deployed", from_commit: A, to_commit: B, ended: "2026-11-10T17:01:00Z", runner_changed: "true" });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect((await c.selfDeploy.overview()).runnerQueue).toMatchObject({ startsAt: expect.any(String) });
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    vi.setSystemTime(new Date("2026-11-10T17:16:30Z"));
+    await hostTicks(c, "2026-11-10T17:16:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  it("is cancelled, with the reason, when the deploy is switched back", async () => {
+    const { c, d } = await approved();
+    await c.status({ id: d.id, target: "server", result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-10T17:02:00Z" });
+    await c.available({ deployed: A, tip: B });
+    await c.selfDeploy.sync();
+    const o = await c.selfDeploy.overview();
+    expect(o.runnerQueue).toBeNull();
+    expect(o.queueCancelled?.why).toContain("switched back");
+    vi.setSystemTime(new Date("2026-11-10T17:40:00Z"));
+    await hostTicks(c, "2026-11-10T17:40:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+  });
+});
