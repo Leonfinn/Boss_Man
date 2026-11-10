@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm as rmFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
@@ -91,6 +91,8 @@ describe("release log: the Release Manager is woken when the live commit changes
     await c.releaseLog.note(companyId, A);
     await deployResult(c, { from: A, to: B });
     await c.selfDeploy.sync();
+    // The Release Manager finished the first ticket (BOS-1112): the rollback then opens a fresh one and wakes again.
+    await c.db.update(tickets).set({ systemState: "done" }).where(like(tickets.title, "Release log:%"));
     await deployResult(c, { result: "rolled_back", from: B, to: A, ended: new Date(Date.now() + 60_000).toISOString(), id: randomUUID() });
     expect(await c.selfDeploy.sync()).toBe(1);
     const all = await c.db.select().from(wakes).where(eq(wakes.agentId, rm!.id));
