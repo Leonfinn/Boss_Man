@@ -250,7 +250,13 @@ export function routeScreens(): Screen[] {
   screens.push({ id: "(default)", roots: tagsIn(tail) });
   // Settings is a menu plus panels (below); its own screen is just the menu, so the panels and the two embedded pages go.
   const settings = screens.find((s) => s.id === "settings")!;
-  settings.roots = settings.roots.filter((c) => c.name === "Settings");
+  settings.roots = settings.roots
+    .filter((c) => c.name === "Settings")
+    .map((c) => {
+      const from = c.body.indexOf("const panels");
+      const to = c.body.indexOf("\n  };", from);
+      return { ...c, body: c.body.slice(0, from) + c.body.slice(to) };
+    });
   return screens.map((s) => ({ ...s, id: `#/${s.id}` }));
 }
 
@@ -288,14 +294,8 @@ export function inventoryOf(screen: Screen): Inventory {
     for (const r of apiReadsOf(screen.own)) reads.add(r);
   }
   for (const c of chunks) {
-    let body = c.body;
-    if (c.file === settingsFile && c.name === "Settings") {
-      const from = body.indexOf("const panels");
-      const to = body.indexOf("\n  };", from);
-      body = body.slice(0, from) + body.slice(to);
-    }
-    for (const h of headingsOf(body)) sections.add(h);
-    for (const r of apiReadsOf(body)) reads.add(r);
+    for (const h of headingsOf(c.body)) sections.add(h);
+    for (const r of apiReadsOf(c.body)) reads.add(r);
   }
   return { id: screen.id, sections: [...sections].sort(), reads: [...reads].sort(), note: screen.note };
 }

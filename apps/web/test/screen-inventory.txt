@@ -169,75 +169,8 @@ reads:
 
 ## #/settings
 sections: 
-  - Add-ons
-  - Advice on permission cards
-  - Agent fence
-  - Agents at once
-  - Allowed automatically
-  - Asking the CEO for advice
-  - Budgets
-  - CEO chapters
-  - Checks
-  - Deploy targets
-  - Did it move the goal?
-  - Export …
-  - Extra lines from your.env
-  - Facts only you can give
-  - Funding sources
-  - Import a company
-  - Most expensive tasks
-  - Network guard
-  - Now
-  - Nudges
-  - Run time limit
-  - Runner
-  - Runner update
-  - Second opinion from a model (optional)
-  - Server
   - Settings
-  - Spending limits
-  - Standing rules
-  - Stop all work
-  - This host
-  - Ticket references
-  - Tickets in progress
-  - Tokens
-  - Tool servers (MCP)
-  - Updates
-  - Watchdog
-  - Workflow retros
-  - Workspace disk
-  - Your devices
-reads: 
-  - /api/bluegreen
-  - /api/budgets
-  - /api/companies/:id/chapters
-  - /api/companies/:id/deploy-targets
-  - /api/companies/:id/mcp-servers
-  - /api/companies/:id/projects
-  - /api/companies/:id/retro-settings
-  - /api/companies/:id/runner
-  - /api/companies/:id/runner/:id
-  - /api/companies/:id/second-opinion
-  - /api/companies/:id/second-opinion/stats
-  - /api/companies/:id/standing-rules
-  - /api/companies/:id/watchdog
-  - /api/companies/:id/watchdog/backtest
-  - /api/devices
-  - /api/funding-sources
-  - /api/funding-sources/:id/status
-  - /api/health
-  - /api/host-facts
-  - /api/kill-switch
-  - /api/maintenance
-  - /api/netguard-allow
-  - /api/projects/:id/spend
-  - /api/run-limits
-  - /api/runner-report
-  - /api/secrets
-  - /api/self-deploy
-  - /api/settings/check-queue
-  - /api/wip-limits
+reads: (none)
 
 ## #/settings/<company>/funding
 sections: 
