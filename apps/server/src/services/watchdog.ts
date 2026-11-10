@@ -77,7 +77,7 @@ export type WatchdogDeps = {
    * The idle-capacity rules (BOS-659) read both; absent, those rules do nothing.
    */
   capacity?: (companyId: string) => Promise<{ busy: number; limit: number }>;
-  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
+  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean }) => Promise<unknown>;
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
@@ -866,7 +866,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         await recordMove({ companyId, kind: "record_urgent_page", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Record only: would have paged the owner that one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")}). Nothing was sent.` });
         continue;
       }
-      await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions" });
+      await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions",
+        // BOS-1097: holding up tickets is not urgency. This page names no card, so the phone could never clear it once the card was answered: feed and browser only.
+        noPush: true });
       await log({ companyId, kind: "urgent_alert", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Boss Man paged the owner: one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")})` });
     }
   }

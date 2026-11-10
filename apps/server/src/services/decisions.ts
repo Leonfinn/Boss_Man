@@ -529,6 +529,16 @@ export async function raiseOwnerTodo(
  */
 export async function markDecisionNotificationRead(db: Db, decisionId: string, at: Date = new Date()) {
   await db.update(notifications).set({ readAt: at }).where(and(eq(notifications.decisionId, decisionId), isNull(notifications.readAt)));
+  // BOS-1097: the card is settled, so take its push off the phone. Fire and forget: the answer never waits
+  // on ntfy and never fails because of it (the clear writes its own failure on the notification).
+  if (settledListener) void Promise.resolve(settledListener(decisionId)).catch(() => undefined);
+}
+
+// lost on restart, harmless because app.ts wires the listener again at every start
+let settledListener: ((decisionId: string) => unknown) | null = null;
+/** Wired in app.ts to the notifications service's clearPush (BOS-1097). */
+export function setDecisionSettledListener(fn: ((decisionId: string) => unknown) | null) {
+  settledListener = fn;
 }
 
 /** The dedupe key for a ticket's owner setup card (DR-011): one per ticket, ever. */
@@ -2510,7 +2520,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[]; lint?: CardLint; /** The owner must act now (BOS-1110): stored as the card's urgent mark, so it also reaches their phone. */ urgentWhy?: string } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
@@ -2555,10 +2565,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, the owner can ask the CEO about it in chat.");
         const ctx = d.context as DecisionContext;
         const asking = sql`${decisions.context}->'advice'->>'state' = 'asking'`;
+        // The CEO's urgent mark (BOS-1097, BOS-1110): the same stored field escalate sets, so the card pushes once it is on the owner's tier.
+        const urgentWhy = input.urgentWhy?.trim();
+        if (input.urgentWhy !== undefined && (urgentWhy!.length < 10 || urgentWhy!.length > 200)) throw new AnswerError("urgentWhy must be 10 to 200 characters: one short sentence on what the owner must act on now.");
+        const [ceoRow] = urgentWhy ? await db.select({ name: agents.name }).from(agents).where(and(eq(agents.id, input.agentId ?? ""), eq(agents.companyId, d.companyId), eq(agents.role, "ceo"))) : [];
+        if (urgentWhy && !ceoRow) throw new AnswerError("Only the CEO marks a card urgent.");
+        const urgentMark = urgentWhy ? { urgentPush: { by: ceoRow!.name, at, why: urgentWhy } } : {};
         if (!(d.kind === "question" && ctx.type === "question")) {
           // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
           // them still works: the CEO only rewrites the question and adds what was tried and the steps.
-          const clarified = { triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps, lint: input.lint } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
+          const clarified = { triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps, lint: input.lint } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
           const done = await db.transaction(async (tx) => {
             const [row] = await tx
               .update(decisions)
@@ -2593,7 +2609,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
             // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
-            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            context: { type: "question", triedFirst: input.triedFirst.trim(), ...urgentMark, ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;

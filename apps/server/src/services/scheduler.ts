@@ -1134,8 +1134,9 @@ export function schedulerService(
       // them let the idle-slot sweep see a full house while slots sat empty (7 Nov, 5 of 10 slots).
       const t = now();
       const queue = await db
-        .select({ companyId: wakes.companyId, agentId: wakes.agentId })
+        .select({ companyId: wakes.companyId, agentId: wakes.agentId, model: agents.model })
         .from(wakes)
+        .innerJoin(agents, eq(agents.id, wakes.agentId))
         .where(
           and(
             or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
@@ -1144,10 +1145,13 @@ export function schedulerService(
             ne(wakes.reason, CEO_REPLY_REASON),
           ),
         );
+      // A wake for an Infinite-mode agent waits for a background slot (BOS-279), like its live runs above,
+      // so it neither fills a normal slot nor hides a free one (BOS-1113).
+      const queueNormal = queue.filter((w) => !isInfiniteModel(w.model));
       const room = new Map<string, number>();
       for (const r of live) if (r.agentId) room.set(r.agentId, (room.get(r.agentId) ?? limits.agent) - 1);
       const waiting: typeof queue = [];
-      for (const w of queue) {
+      for (const w of queueNormal) {
         const left = room.get(w.agentId) ?? limits.agent;
         if (left <= 0) continue;
         room.set(w.agentId, left - 1);

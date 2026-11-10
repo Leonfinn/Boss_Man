@@ -221,6 +221,24 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
     expect(await c.scheduler.freeSlots(c.company.id)).toBe(0);
   });
 
+  it("waiting wakes of Infinite-mode agents neither hide free slots nor count as normal ones (BOS-1113)", async () => {
+    const c = (ctx = await setup());
+    await c.db.insert(settings).values({ key: "run_limits", value: { instance: 10, company: 4 } });
+    // Company limit 4 keeps one slot for cards: 3 free.
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(3);
+    // Four infinite agents with a wake waiting each: they wait for background slots, so nothing changes.
+    for (const n of ["Inf 1", "Inf 2", "Inf 3", "Inf 4"]) {
+      const a = await c.hire(n);
+      await c.db.update(agents).set({ model: "synthetic/infinite:small:vision" }).where(eq(agents.id, a.id));
+      await c.db.insert(wakes).values({ companyId: c.company.id, agentId: a.id, reason: "assignment", note: "waiting" });
+    }
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(3);
+    // A normal agent's waiting wake still takes a slot.
+    const normal = await c.hire("Normal");
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: normal.id, reason: "assignment", note: "waiting" });
+    expect(await c.scheduler.freeSlots(c.company.id)).toBe(2);
+  });
+
   it("never takes a slot from a wake already held at the limit: that wake gets the next free slot", async () => {
     const c = (ctx = await setup());
     // A connected runner that accepts every command, so a wake that has room really starts.
