@@ -14,6 +14,8 @@ import { softHold } from "./deploy-wait-hold.js";
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
 export const DEFAULT_CHECK_SLOTS = 1;
+/** Why a queued job was cancelled when a newer request of the same ticket replaced it: not a failure, the newer job is the live one. */
+export const SUPERSEDED_TEXT = "A newer commit of this ticket was queued for checking, so this older request was dropped.";
 /**
  * Upper bound for check_slots. The runner enforces its own slot count (BOSSMAN_CHECK_SLOTS) on every job too (BOS-805), so a
  * check_slots above it only means jobs wait in the runner's line: the effective limit is the smaller of the two. The server
@@ -115,7 +117,7 @@ export function checkQueue(db: Db) {
     if (stale.length)
       await db
         .update(checkJobs)
-        .set({ state: "cancelled", reason: "A newer commit of this ticket was queued for checking, so this older request was dropped.", endedAt: new Date() })
+        .set({ state: "cancelled", reason: SUPERSEDED_TEXT, endedAt: new Date() })
         .where(inArray(checkJobs.id, stale.map((j) => j.id)));
     const [job] = await db
       .insert(checkJobs)

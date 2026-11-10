@@ -35,7 +35,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
    ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
-6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
+6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at any service that takes a JSON POST (ntfy needs a small relay, see `docs/06`).
 7. The server can write **one folder** and read **one folder**. It can never run anything on the host, and the host never executes anything from the request.
 8. At most **one deploy per target every 10 minutes**; the cron job runs every minute.
 
@@ -47,7 +47,7 @@ Base: `/mnt/tank/apps/boss-man/deployer` in the worked example of [docs/06](06-i
 |---|---|---|---|
 | `$D/` | root:root 755 | owner | Not writable by the server. |
 | `$D/host-deployer.sh` | root:root 750 | owner, by hand | A **copy** of `scripts/host-deployer.sh`. Never a link into the checkout, so a merged PR cannot change what root runs. |
-| `$D/host.conf` | root:root 600 | owner, by hand | Webhook URL and options (below). The script refuses to start if it is not private. |
+| `$D/host.conf` | root:root 600 | owner, by hand | Optional. Webhook URL and options (below); without the file nothing is posted and the defaults apply. If the file exists, the script refuses to start unless it is private. |
 | `$D/inbox/` | 1000:1000 750 | server (uid 1000) | The only place the server writes. Bind-mounted read-write into the server. |
 | `$D/inbox/request.json` | 1000:1000 640 | server | One pending request. The host takes it by renaming it out of the folder. |
 | `$D/inbox/checked` | 1000:1000 640 | server | The merge commits Boss Man's merge gate checked, newest merges first, one 40-character hash per line (BOS-753). Written beside every server request and refreshed while one waits. The host reads it only when main has moved past the approved commit (step 4). Untrusted like the request: a plain file under 256 KB, and only hash lines are kept. |
@@ -141,10 +141,10 @@ A server update rolls only the server copies. It never starts, stops or recreate
 
 ## Failure webhook
 
-`host.conf`, a root-owned file (shell `KEY=value` lines):
+`host.conf`, an optional root-owned file (shell `KEY=value` lines; skip it if you want no webhook):
 
 ```sh
-WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
 WEBHOOK_ON_SUCCESS=0   # 1 = also post when a deploy succeeds
 ```
 
@@ -154,7 +154,7 @@ On a failure the script POSTs `Content-Type: application/json`:
 { "result": "failed", "message": "…", "from_commit": "…", "to_commit": "…", "at": "2026-10-20T12:03:00Z" }
 ```
 
-Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test and a Home Assistant automation are in `docs/06`.
+Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that cannot be reached is logged and ignored. The exact curl test is in `docs/06`.
 
 ## Decisions in Boss Man
 
@@ -227,7 +227,7 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 1. **The hold is one `settings` row** (`maintenance`: `{reason, since, deadline, minutes, force?, swapped?, failed?}`), so no migration, and it survives a restart. It is separate from a company's Pause: Pause is `companies.paused`, which the drain never reads or writes, so companies the owner paused stay paused afterwards.
 2. **What the hold blocks.** The scheduler, in `tickOnce`, launches no new run in any company. Held wakes stay `queued` with the reason `update pending` (the same way a paused company's wakes wait), so nothing is lost and the first pass after the hold lifts starts them. Wakes that were `deferred` with a time (quiet hours, budgets) keep their own reason and time. **Nothing is exempt, chat and owner messages included.** Exempting chat would let a conversation start a run in a company mid-drain and keep that company's runner from swapping; the cost is that a chat message sent during a drain is answered after it. Runs already going are untouched.
 3. **Telling everyone.**
-   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
+   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Updates > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
    - A CEO's brief (and the owner's plain brief page) starts with an `UPDATE PENDING` line: finish what is in flight, do not delegate new work. A CEO run that was already going when the hold started has its old brief; the hold is what actually stops its delegations from launching anything.
    - The stall and missed-work sweeps: held wakes are `queued`, so a ticket with one counts as busy (not forgotten), and watchers' "tree stopped" check treats queued wakes as work. The missed-work sweep is skipped while the hold is on, so it cannot pile up wakes or raise "looks stuck" decisions for tickets that simply cannot start.
 4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. "Keep waiting" moves the deadline by the same number of minutes and the next deadline asks again; "Stop the remaining runs" sets `force`, so the next step recreates every runner whatever is running (crash recovery restarts those runs once the hold lifts); "Cancel" lifts the hold. Runners already swapped stay on the new image.
@@ -241,9 +241,9 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 `scripts/update-runner.sh` (default) builds, canaries and tags `:current`, then writes `$BOSSMAN_DEPLOYER/inbox/drain.json` (temp file and rename) and **returns**. The server's drain step (every 5 s, `BOSSMAN_DRAIN_MS`) takes the file, deletes it and starts the hold. The file's existence is the request. Its only field read is `reason`: `"setting change"` (from `--settings`) makes the drain recreate every runner once, whatever its image; anything else is an image update (BOS-594). The host deployer exports `BOSSMAN_DEPLOYER` for its "runner" action and runs it without `--now`, so the host holds its `flock` for the build and canary only, never while runs finish, and server deploys are not blocked. The host's `status.json` for a runner request therefore says "New runner image ready; Boss Man is waiting for runs to finish", and the server's notification for that says the same. **The swap's own result (done, or the problems) comes from the drain as a Boss Man notification**, not from the host script, so the failure webhook does not fire for a swap that goes wrong; the page notification (ntfy if configured) does.
 
 - `--now`: the old behaviour for emergencies on the host: `compose up -d` and `recreate-all`, runs cut off, no drain. It combines with `--rollback`.
-- `--settings`: no build. For a change to the runner settings in `.env` (`BOSSMAN_RUNNER_MEMORY`, `BOSSMAN_CHECK_SLOTS`, `BOSSMAN_RUNNER_CPUS`, ...): recreates the launcher so it reads them, then asks for a drain marked "setting change". Runs finish, each runner is recreated as its company goes idle, and the agents told to wrap up are woken afterwards. It refuses without a launcher or a deployer folder (use `--settings --now` there). Owner cards must use this, not `recreate-all`: the card lint refuses a bare recreate (R15, BOS-594).
+- `--settings`: no build. For a change to the runner settings in `.env` (`BOSSMAN_RUNNER_CPUS`, ...; not the check slots or runner memory, which follow "Checks at once" in Settings and need no host step): recreates the launcher so it reads them, then asks for a drain marked "setting change". Runs finish, each runner is recreated as its company goes idle, and the agents told to wrap up are woken afterwards. It refuses without a launcher or a deployer folder (use `--settings --now` there). Owner cards must use this, not `recreate-all`: the card lint refuses a bare recreate (R15, BOS-594).
 - `--rollback` retags `:previous` as `:current` and then drains onto it.
-- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Runner update > **Update runners**.
+- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Updates > Runner update > **Update runners**.
 - `deploy.sh --runner` calls `update-runner.sh`, so it drains too.
 - **Why each runner restarted (BOS-594).** Before Boss Man recreates or restarts a runner (an update drain, a setting-change drain, the owner's Restart or Reconnect) it records why. The runner's hello says whether its last process was stopped from outside (SIGTERM) or ended without being told (crash or out of memory), and when the host booted. The server turns that into one reason (update, setting change, owner restart, host, crash or out of memory, unknown), puts it in the owner's feed (a crash is a flag) and the activity log, and shows the latest in `server_status` under `runner.lastRestart`.
 
@@ -428,12 +428,13 @@ The owner's to-do for a hand-applied server update starts with **Quiet the machi
    - `python3` and `flock` on root's cron PATH;
    - `git ls-remote` from cron, over https or with the deploy key (whichever `origin` uses);
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
-3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
+3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any restore of the service it points at.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
 
 ## Why a runner update can be refused, and what the status shows (BOS-364)
 
 - Runners are rebuilt from the deployer's checkout, so a runner request is accepted only for the commit the checkout is on (the version the server runs). While a server swap runs, the deployer holds its lock and does not read the request; it is read on a later minute. If the server update was switched back in between (for example by the automatic switch-back during the standby window), the checkout is back on the old commit and the runner request is refused with a plain message. Nothing is broken; offer the runner update again once the server runs the version you want.
 - Boss Man shows that refusal as a quiet note ("Runner update not started"), not an alert, and withdraws a runner offer for a commit the server never reached.
+- **One runner card, only when it can be used (BOS-1010).** Every path that raises the runner card (the trial end, the BOS-947 replacement, the Settings button and a retry) goes through one function. It raises the card only when it can be acted on now: no server deploy approved or waiting for the host, running, in its trial, or in the host's "try again in N minutes" wait; until then it is held and raised by itself on the next pass once those clear. Raising a card withdraws every earlier open runner card in the same step, with the plain audit reason "Replaced by a newer runner update for <version>", and a pass clears any leftover duplicate already open when this shipped. When a server update is approved or starts while a runner card is open, that card is closed at once with a plain reason and a fresh one for the new live version follows after its trial. A press while it can't run (a race) gets the same plain reason and time as the panel, never a silent refusal. The runner card is routine: it is shown in the feed and the browser and is never pushed to the phone. (The owner's own Settings-button card is not folded away by another card.) All of this reads the host's own files, so it works on any Docker host, blue/green or single-colour, with no paths or names.
 - `server_status` `deploy.liveCommit` / `liveSince` come only from a finished **server** deploy (otherwise from the host's deployed commit, then the server's own commit). A refused or failed request never counts as live.
 - This is generic to any Docker host; nothing here depends on paths or names. Host-specific notes belong in the install guide for that host.

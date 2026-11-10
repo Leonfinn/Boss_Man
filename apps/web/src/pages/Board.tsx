@@ -14,7 +14,7 @@ import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { WatchdogHealth } from "../components/WatchdogHealth";
-import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
+import { ArchiveProject, ProjectBrief, ProjectRow } from "./settings/Projects";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 import { ago } from "./Dashboard";
@@ -940,6 +940,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                               <span key={b.ticketId}>
                                 {i > 0 && ", "}
                                 <a href={`#/tickets/${b.ticketId}`}>{b.ticketTitle ?? "a task"}</a>
+                                {b.until ? ` (until ${b.until})` : ""}
                               </span>
                             ))}
                         </span>

@@ -577,13 +577,26 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
   const waitingCards = shown.filter((d) => !!d.waiting);
-  const open = shown.filter((d) => !answered[d.id]);
-  // (BOS-969) The heading takes its numbers from the same server tally as the menu badge, over the cards
-  // this page is showing, so the two always agree. The menu badge shows only "open": what needs the owner now.
-  const tallyQuery = `?open=${open.length}&waiting=${waitingCards.length}`;
-  const tallyPoll = usePoll((signal) => api<DecisionTally>(`/api/decisions/tally${tallyQuery}`, { signal }).catch(() => null), 10_000, "decisions-tally");
-  // Until the first answer arrives, the cards themselves stand in, so the heading is never blank.
-  const counts = tallyPoll.data ?? tally ?? { open: open.length, waiting: waitingCards.length };
+  // (BOS-969, BOS-996) The heading takes both numbers from the server tally, the same figure the menu
+  // badge shows; it sends no numbers of its own. The app already polls that tally for the badge and
+  // refreshes it on every answer, so the heading reads it from there and only asks itself if it is
+  // missing (the app's read failed). A card the owner answers here leaves the count straight away, so
+  // the heading never shows it as still to do while the page waits for its next read.
+  const viewQuery = filter ? `?companyId=${filter}` : "";
+  const tallyPoll = usePoll(
+    (signal) => (tally ? Promise.resolve(tally) : api<DecisionTally>(`/api/decisions/tally${viewQuery}`, { signal }).catch(() => null)),
+    10_000,
+    `decisions-tally-page-${filter ?? ""}`,
+  );
+  const answeredHere = shown.filter((d) => !!answered[d.id]);
+  const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
+  const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
+  // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
+  const counted = tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  const counts = {
+    open: Math.max(counted.open - answeredQueue, 0),
+    waiting: Math.max(counted.waiting - answeredWaiting, 0),
+  };
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
     if (inFlight.current.has(d.id)) return;
@@ -721,8 +734,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           {queueCards.length > 0 && (
           <>
           <details className="formula">
-            <summary>How the ranking works</summary>
-            <p>The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
+            <summary>What the score means</summary>
+            <p>The number shows how much each decision holds up. It doesn't change the order: cards stay newest first. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -1050,7 +1063,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Rules.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1178,7 +1191,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   </li>
                                 ))}
                               </ul>
-                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Rules.</p>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions.</p>
                             </div>
                           ) : null}
                           <div className="actions" onClickCapture={(e) => {

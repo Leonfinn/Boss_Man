@@ -549,7 +549,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
       {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (
         <p className="banner" role="status">
           <span>
-            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start in <a href={`#/settings/${company.id}`}>Settings</a>.
+            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start on the <a href="#/agents">Agents</a> page.
           </span>
         </p>
       )}

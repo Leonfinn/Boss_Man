@@ -104,7 +104,9 @@ describe("decision queue", () => {
     expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     // The legend folds away behind one line (BOS-245), so it opens before it can be read.
-    fireEvent.click(screen.getByText("How the ranking works"));
+    fireEvent.click(screen.getByText("What the score means"));
+    // (BOS-1005) The fold-out says what the score is and that the order is newest first, not that it ranks.
+    expect(screen.getByText(/The number shows how much each decision holds up\. It doesn't change the order: cards stay newest first\./)).toBeTruthy();
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
     // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
     expect(screen.getByText(`1 decision to do in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
@@ -434,7 +436,7 @@ describe("Allow always", () => {
     fireEvent.click(screen.getByLabelText("Every agent in this company"));
     expect(screen.getByText("Always allow any agent to use crawl4ai's md tool.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
-    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Rules\./)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Permissions\./)).toBeTruthy());
     const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });

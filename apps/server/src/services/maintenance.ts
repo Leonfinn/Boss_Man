@@ -80,6 +80,13 @@ export async function getHold(db: Db): Promise<Hold | null> {
   return (row?.value as Hold | null | undefined) ?? null;
 }
 
+/**
+ * A runner update already waiting for runs (DR-046 part 2), or null (BOS-1010). A wrap-up hold (BOS-929) swaps
+ * no image, so it is not a pending runner update. This is what the owner-card lint's R16 reads, so a card that
+ * asks the owner to press Build and update runners again is refused while one is under way.
+ */
+export const runnerCardHold = (hold: Hold | null): Hold | null => (hold && hold.kind !== "wrapup" ? hold : null);
+
 export type FleetRunner = { slug: string; companyId: string | null; current: boolean | undefined };
 
 export type MaintenanceDeps = {

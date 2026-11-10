@@ -117,7 +117,7 @@ const BREAK = /[,;:(]|\s(?:and|then)\s/;
 
 /**
  * The paths in one sentence, each as its parts and where its last part starts. A sentence can hold several
- * ("Open Settings → Server and runner → Updates: it shows…, Settings → Reviews and CEO should…"): a part with a
+ * ("Open Settings → Server and runner → Updates: it shows…, Settings → Reviews should…"): a part with a
  * comma, colon or "and" in it that isn't itself a name ends one path, and the name at its end starts the next.
  */
 function chainsIn(text: string): Array<{ parts: string[]; end: number }> {

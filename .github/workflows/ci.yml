@@ -77,7 +77,12 @@ jobs:
           # The tests try /usr/bin/chromium, chromium-browser and google-chrome first (ubuntu-latest
           # ships Chrome); Playwright's own Chromium is the fallback when none is there.
           if [ -x /usr/bin/google-chrome ]; then /usr/bin/google-chrome --version; else playwright install --with-deps chromium; fi
+      # Tests that load the built page (e.g. wrap-up-layout.test.ts, BOS-988) skip without apps/web/dist.
+      - run: pnpm --filter @boss-man/web build
       - name: Web tests in a real browser, none skipped
+        env:
+          # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
+          BOSSMAN_SCRATCH: ${{ runner.temp }}
         run: |
           pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
           node -e '
@@ -106,6 +111,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
+        with:
+          # Under /opt, which the merge-check fence lets a check run programs from (apps/runner/src/fence.ts SYSTEM_RO);
+          # the default ~/setup-pnpm is outside it, so clone-fence.test.ts got "pnpm: Permission denied" (BOS-323).
+          dest: ${{ runner.tool_cache }}/pnpm
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -139,9 +148,19 @@ jobs:
   images:
     needs: changes
     if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.images == 'true' }}
-    # Builds both images so Dockerfile changes are proven before merge. Nothing is pushed:
-    # the runner image contains Claude Code, which must not be redistributed.
-    runs-on: ubuntu-latest
+    # Builds and tests every image natively on x86 and on ARM (BOS-971, plan: BOS-935), no emulation.
+    # Nothing is pushed: the runner image contains Claude Code, which must not be redistributed.
+    # Steps that don't depend on the processor (compose files, Caddy, shell tests) run on x86 only.
+    name: images (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
       - name: Build the server image
@@ -158,7 +177,13 @@ jobs:
           docker run --rm --entrypoint git boss-man-runner:ci --version
           docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
       - name: Canary - a Claude session works inside the image, with no network (R52)
-        run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true boss-man-runner:ci node_modules/.bin/tsx src/canary-main.ts
+        run: scripts/image-tests.sh canary
+      - name: Landlock fence works in the runner image on this architecture
+        run: scripts/image-tests.sh fence
+      - name: Network guard blocks a private address it wasn't told to allow (real nftables)
+        run: scripts/image-tests.sh netguard
+      - name: Runner image holds no Anthropic code (expected to fail until the Claude pack lands, BOS-935)
+        run: scripts/image-tests.sh no-anthropic
       - name: Server image ships the separate migrate step
         run: docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f dist/migrate.js && DATABASE_URL= node dist/migrate.js 2>&1 | grep -q "DATABASE_URL is required"'
       - name: Server image serves the web UI
@@ -169,11 +194,13 @@ jobs:
           if docker run --rm boss-man-runner:ci 2> err.txt; then echo "expected failure"; exit 1; fi
           grep -q "BOSSMAN_RUNNER_TOKEN" err.txt
       - name: Compose file is valid
+        if: matrix.arch == 'amd64'
         run: |
           mkdir -p secrets && touch secrets/master.key secrets/runner-app-co.token
           POSTGRES_PASSWORD=ci docker compose --profile runners config -q
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm docker compose --profile launcher config -q
       - name: Penpot overlay validates as its own project, registration and prepl stay off
+        if: matrix.arch == 'amd64'
         run: |
           export PENPOT_BIND=127.0.0.1 PENPOT_PUBLIC_URI=http://127.0.0.1:9001 PENPOT_SECRET_KEY=x PENPOT_DB_PASSWORD=x
           docker compose -p boss-man-penpot -f deploy/penpot.yml --profile penpot config -q
@@ -187,17 +214,20 @@ jobs:
           docker tag boss-man-runner:ci boss-man-runner:current
           scripts/ci-launcher.sh
       - name: TrueNAS override merges cleanly (docs/06-install-truenas.md)
+        if: matrix.arch == 'amd64'
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/mnt/tank/apps/boss-man/data docker compose -f docker-compose.yml -f deploy/truenas.yml --profile runners config > merged.yml
           grep -q "/mnt/tank/apps/boss-man/data/postgres:/var/lib/postgresql/data\|source: /mnt/tank/apps/boss-man/data/postgres" merged.yml
           grep -q "source: /mnt/tank/apps/boss-man/data/app-co/workspaces" merged.yml
           test "$(grep -c 'target: /home/node/workspaces' merged.yml)" = 1
       - name: Tailscale override merges into a valid compose file (docs/20-https-tailscale.md)
+        if: matrix.arch == 'amd64'
         run: |
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config -q
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "BOSSMAN_TRUSTED_PROXIES: 172.30.0.2"
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "ipv4_address: 172.30.0.3"
       - name: Blue/green Tailscale overlay puts Caddy on edge as "server" (docs/20-https-tailscale.md)
+        if: matrix.arch == 'amd64'
         run: |
           export POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer
           F="-f docker-compose.yml -f deploy/truenas-bluegreen.yml -f deploy/tailscale.yml -f deploy/tailscale-bluegreen.yml"
@@ -215,12 +245,14 @@ jobs:
           ! grep -q 3101 deploy/tailscale/serve.json
           ! grep -q AllowFunnel deploy/tailscale/serve.json
       - name: Self-deploy override mounts the two folders and no Docker socket
+        if: matrix.arch == 'amd64'
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-deployer.yml --profile runners config > merged-deployer.yml
           grep -q "source: /mnt/tank/boss-man/deployer/inbox" merged-deployer.yml
           grep -q "source: /mnt/tank/boss-man/deployer/outbox" merged-deployer.yml
           grep -q "BOSSMAN_DEPLOYER_DIR: /run/deployer" merged-deployer.yml
       - name: Blue/green override renders, the proxy owns the name "server", and nothing but the launcher has the Docker socket
+        if: matrix.arch == 'amd64'
         run: |
           export POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer
           docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-bluegreen.yml --profile runners --profile migrate --profile launcher config > merged-bg.yml
@@ -249,6 +281,7 @@ jobs:
           # Without the file the single server is unchanged.
           docker compose -f docker-compose.yml -f deploy/truenas.yml config | grep -q "^  server:"
       - name: The Caddyfile and a generated include validate with the pinned Caddy
+        if: matrix.arch == 'amd64'
         run: |
           mkdir -p active
           # Both include forms scripts/host-deployer.sh writes: the front-network one and the older one.
@@ -258,13 +291,60 @@ jobs:
           printf '(active) {\n\treverse_proxy server-blue:{args[0]} {\n\t\thealth_uri {args[1]}\n\t}\n}\n' > active/active.caddy
           docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Spoofed forwarded headers through the real Caddyfile (scripts/caddy-edge.test.sh)
+        if: matrix.arch == 'amd64'
         run: |
           id=$(docker create caddy:2.11.7)
           docker cp "$id:/usr/bin/caddy" "$RUNNER_TEMP/caddy"
           docker rm "$id"
           CADDY="$RUNNER_TEMP/caddy" scripts/caddy-edge.test.sh
       - name: Shell script tests (deploy.sh, the host deployer, backup and Penpot)
+        if: matrix.arch == 'amd64'
         run: |
           sudo apt-get install -y shellcheck >/dev/null
           scripts/check-shell.sh
           scripts/test-shell.sh
+      - name: Save the images for the join job (a one-day build file inside this repo's CI, never published; the runner image is left out because it holds Claude Code, DR-050)
+        run: |
+          mkdir -p "$RUNNER_TEMP/img"
+          docker save boss-man-server:ci boss-man-launcher:current boss-man-netguard:current | gzip -1 > "$RUNNER_TEMP/img/images-${{ matrix.arch }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ matrix.arch }}
+          path: ${{ runner.temp }}/img/images-${{ matrix.arch }}.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  # Joins the two architectures into one multi-arch image per name with `docker buildx imagetools create`,
+  # in a throwaway registry on this CI machine. Nothing leaves it: publishing is a later ticket (BOS-935).
+  images-join:
+    needs: images
+    name: images (join amd64 + arm64)
+    runs-on: ubuntu-24.04
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/in
+      - name: Join each image's two architectures and check both are in it
+        run: |
+          set -euo pipefail
+          reg=localhost:5000
+          # One architecture at a time, because both archives hold the same image names.
+          for arch in amd64 arm64; do
+            docker load < "$RUNNER_TEMP/in/images-$arch/images-$arch.tar.gz" >/dev/null
+            for img in boss-man-server:ci boss-man-launcher:current boss-man-netguard:current; do
+              name="${img%%:*}"
+              docker tag "$img" "$reg/$name:$arch"
+              docker push -q "$reg/$name:$arch"
+            done
+          done
+          # The runner image joins once the Claude pack lands (it holds Claude Code today and must not leave the build machine).
+          for name in boss-man-server boss-man-launcher boss-man-netguard; do
+            docker buildx imagetools create -t "$reg/$name:joined" "$reg/$name:amd64" "$reg/$name:arm64"
+            docker buildx imagetools inspect "$reg/$name:joined" | tee "$RUNNER_TEMP/$name.txt"
+            grep -q "linux/amd64" "$RUNNER_TEMP/$name.txt" && grep -q "linux/arm64" "$RUNNER_TEMP/$name.txt" || { echo "$name: joined image lacks an architecture"; exit 1; }
+          done

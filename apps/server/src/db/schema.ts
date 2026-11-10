@@ -73,8 +73,17 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
-  /** The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323). Existing companies stay off. */
-  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("off"),
+  /**
+   * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
+   * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
+   */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("watch"),
+  /**
+   * When the owner last chose the fence mode (Settings or the fence card, BOS-940); null while the mode is
+   * only the default. Only an unchosen mode is ever changed by Boss Man (fence-default.ts), and only an
+   * unchosen Off gets the card.
+   */
+  fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -333,6 +342,12 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
+    mergedAt: timestamp("merged_at", { withTimezone: true }),
+    touchesRunner: boolean("touches_runner"),
+    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    goLiveWait: text("go_live_wait"),
+    goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -514,6 +529,8 @@ export const ticketDependencies = pgTable(
     blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     blockerEngagementId: uuid("blocker_engagement_id").references(() => engagements.id, { onDelete: "cascade" }),
     blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+    /** When a ticket blocker counts as finished: its merge commit on main ("merged") or its done state ("done", BOS-989). */
+    until: text("until", { enum: ["merged", "done"] }).notNull().default("done"),
   },
   (t) => [
     check(
@@ -1392,6 +1409,10 @@ export const feedbackSettings = pgTable("feedback_settings", {
   portalToken: text("portal_token").unique(),
   portalTitle: text("portal_title"),
   portalIntro: text("portal_intro"),
+  /** Where the portal's "← Back to …" links go: an https address on the owner's own site (BOS-967). */
+  portalBackUrl: text("portal_back_url"),
+  /** The words after "← Back to "; empty means the portal's heading. */
+  portalBackText: text("portal_back_text"),
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),

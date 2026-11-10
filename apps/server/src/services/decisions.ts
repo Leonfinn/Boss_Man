@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
+import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -234,6 +235,8 @@ export type DecisionContext =
   | { type: "project_cap"; projectId: string }
   /** A run stopped for passing the company's per-run time limit (BOS-846); "Raise the limit" lifts it by half. */
   | { type: "run_time_limit"; companyId: string; runId: string; minutes: number }
+  /** A company still at the old unchosen fence Off, on a runner that can fence (BOS-940): switch to Watch or keep Off. */
+  | { type: "fence_default" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -370,6 +373,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "engagement",
   "project_cap",
   "run_time_limit",
+  "fence_default",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
@@ -486,7 +490,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.${fix}`,
       options: [CHECK_AGAIN, CHECK_SEND_BACK],
       recommendedOption: CHECK_AGAIN,
-      tier: "owner",
+      // The CEO first, like a stuck check (BOS-1015): it can run the check again or send the work back; skipping the check stays the owner's.
+      tier: "ceo",
       dedupeKey: `merge-stuck:${t.id}`,
       // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
       context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
@@ -1073,6 +1078,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let deployWait: DeployWaitHook | null = null;
   let maintenance: MaintenanceHook | null = null;
 
+  // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
+  // dashboard share one walk of the ranked queue instead of one each. Cleared on every answer.
+  // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next
+  // read simply walks the queue again.
+  const TALLY_CACHE_MS = 5_000;
+  const tallyCache = new Map<string, { tally: { open: number; waiting: number }; until: number }>();
+  const clearTallyCache = () => tallyCache.clear();
+
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
   async function stallEvidence(runId: string) {
     const [row] = await db
@@ -1118,7 +1131,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on is resolved", now: now() });
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
@@ -1181,6 +1194,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
       const problem = await retroHook?.problemReverting(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "fence_default") {
+      const problem = await checkFenceAnswer(db, d.companyId, answer);
       if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Write the corrected lesson in the note box.");
@@ -1841,6 +1858,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
+      // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
+      clearTallyCache();
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
       return { ...raised, droppedLinks };
     },
@@ -2099,22 +2118,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * must never drift, so both take it from here, over the same rows and the same rule as the list:
      * a card is actionable when it is not in the "Waiting, nothing to do yet" group. It walks the
      * owner's own queue (CEO-tier and lesson cards are left out there, so they wait for the ladder).
-     * `companyId` narrows it to one company, and `visible` (open, waiting) is what the page is showing
-     * by company, so a page's own heading agrees with the menu.
+     * `companyId` narrows it to one company. (BOS-996) The page no longer sends its own figures: the
+     * tally is the server's alone, and the heading reads the same number the menu does. The tally is
+     * kept for a few seconds per view, so the menu badge, the page heading and the dashboard's
+     * "need your answer" figure, polling together, share one walk of the ranked queue rather than
+     * three. `now()` is the service's clock, so a test can step past the window.
      */
-    async queueTally(opts: { includeAll?: boolean; companyId?: string; visible?: { open: number; waiting: number } } = {}): Promise<{ open: number; waiting: number }> {
+    async queueTally(opts: { includeAll?: boolean; companyId?: string } = {}): Promise<{ open: number; waiting: number }> {
+      const key = opts.includeAll ? "*" : (opts.companyId ?? "");
+      const hit = tallyCache.get(key);
+      if (hit && hit.until > now().getTime()) return hit.tally;
       const query: { includeAll?: boolean; companyId?: string } = {};
       if (opts.includeAll) query.includeAll = true;
       if (opts.companyId) query.companyId = opts.companyId;
       const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null }>;
-      const waitingTotal = rows.filter((r) => !!r.waiting).length;
-      const openTotal = rows.length - waitingTotal;
-      // The page works its counts out over the cards it is showing; they can only be stale against this
-      // read, never bigger, so nothing is let past the list itself.
-      const v = opts.visible;
-      const waiting = v ? Math.min(Math.max(v.waiting, 0), waitingTotal) : waitingTotal;
-      const open = v ? Math.min(Math.max(v.open, 0), openTotal) : openTotal;
-      return { open, waiting };
+      const waiting = rows.filter((r) => !!r.waiting).length;
+      const tally = { open: rows.length - waiting, waiting };
+      tallyCache.set(key, { tally, until: now().getTime() + TALLY_CACHE_MS });
+      return tally;
     },
 
     async queue(opts: { includeAll?: boolean; companyId?: string } = {}) {
@@ -2784,6 +2805,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) The queue changed: the badge, the heading and the dashboard read it afresh next poll.
+      clearTallyCache();
       if (!d) {
         // A sign-off the owner pressed twice (or the CEO settled) is already answered, and the ticket page's
         // Approve and merge still merges it rather than refusing on a card that is no longer open (BOS-471).
@@ -3116,6 +3139,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "run_time_limit") {
         // Only lifts a limit that is still the one the card was about, so a limit the owner changed meanwhile isn't overwritten.
         if (answer === "Raise the limit") await db.update(companies).set({ maxRunMinutes: Math.min(10080, Math.ceil(ctx.minutes * 1.5)) }).where(and(eq(companies.id, d.companyId), eq(companies.maxRunMinutes, ctx.minutes)));
+      } else if (ctx.type === "fence_default") {
+        await applyFenceAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
@@ -3224,6 +3249,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
     async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) A withdrawal changes the queue; clear the kept tally before anything reads it again.
+      clearTallyCache();
       if (!d) return null;
       if (!actor.agentId || d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only withdraw a decision you raised.");
       // Only a question asked through raise_decision may be taken back. System cards that also

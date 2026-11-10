@@ -11,7 +11,7 @@ afterEach(() => {
 
 const company: Company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, agents: [] };
 const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
-const row = { id: "m1", name: "scrapling", url: "http://192.168.68.67:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN", secretGranted: true };
+const row = { id: "m1", name: "scrapling", url: "http://192.168.1.50:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN", secretGranted: true };
 
 function stub(list: unknown[] = [row]) {
   const calls: Array<{ method: string; url: string; body?: unknown }> = [];
@@ -45,13 +45,13 @@ describe("tool servers", () => {
     const calls = stub([]);
     render(<ToolServers company={company} />);
     fireEvent.change(screen.getByLabelText("Server name"), { target: { value: "scrapling" } });
-    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "http://192.168.68.67:30301/mcp" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "http://192.168.1.50:30301/mcp" } });
     fireEvent.change(screen.getByLabelText("Token secret"), { target: { value: "SCRAPLING_MCP_TOKEN" } });
     fireEvent.click(screen.getByRole("button", { name: "Add tool server" }));
     await vi.waitFor(() => expect(calls.find((c) => c.method === "POST")).toBeTruthy());
     expect(calls.find((c) => c.method === "POST")).toMatchObject({
       url: "/api/companies/c1/mcp-servers",
-      body: { name: "scrapling", url: "http://192.168.68.67:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN", headerName: "Authorization", headerValue: "Bearer {secret}" },
+      body: { name: "scrapling", url: "http://192.168.1.50:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN", headerName: "Authorization", headerValue: "Bearer {secret}" },
     });
   });
 

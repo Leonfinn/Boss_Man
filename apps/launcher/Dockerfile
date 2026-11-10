@@ -21,6 +21,8 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 COPY --from=build /app/apps/launcher/dist ./dist
 COPY apps/launcher/package.json ./
+# The notice every published image carries (BOS-973).
+COPY NOTICE /NOTICE
 # The key folder is a volume shared with the server; owned by uid 1000 so a new volume is too.
 RUN mkdir -p /run/launcher && chown 1000:1000 /run/launcher
 USER 1000:1000
