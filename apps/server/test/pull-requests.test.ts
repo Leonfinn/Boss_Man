@@ -14,7 +14,7 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-const GITEA = "http://192.168.68.67:3003";
+const GITEA = "http://192.168.1.50:3003";
 const HEAD = "d".repeat(40);
 
 /** A fake Gitea 28 that records each call; merge answers are queued per test. */
