@@ -399,7 +399,11 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
   const maintenance = maintenanceService(db, {
     fleet: async () => (launch.enabled ? launch.fleet() : []),
-    recreate: (slug) => launch.recreate(slug),
+    // BOS-993: the launcher is told "Checks at once" first, so a recreate always uses the current setting (it also covers a launcher that lost it).
+    recreate: async (slug) => {
+      await launch.setChecks(await checkQueueSvc.slots()).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
+      return launch.recreate(slug);
+    },
     connected: async (companyId) => {
       const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
       return !!r && runners.isConnected(r.id);
@@ -1385,9 +1389,26 @@ export async function buildApp(opts: AppOptions) {
     const checkQueueView = async () => {
       const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
       const live = rows.filter((r) => runners.isConnected(r.id));
+      const slots = await checkQueueSvc.slots();
+      // BOS-993: the limit a runner really gets (the launcher works it out from the setting, .env bounds and host memory) and whether runners already have it.
+      const lc = await launch.checks();
+      const hold = await getHold(db);
+      const runner = lc
+        ? {
+            slots: lc.slots,
+            memoryBytes: lc.memoryBytes,
+            // Only meaningful once the launcher has been sent the setting; before that it is the .env value.
+            reason: lc.requested === slots ? lc.reason : null,
+            // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
+            runnerCount: lc.runners.length,
+            pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,
+            applying: hold?.kind === "settings",
+          }
+        : null;
       return {
         mode: await checkQueueSvc.mode(),
-        slots: await checkQueueSvc.slots(),
+        slots,
+        runner,
         maxSlots: MAX_CHECK_SLOTS,
         defaultSlots: DEFAULT_CHECK_SLOTS,
         // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
@@ -1398,8 +1419,24 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/settings/check-queue", async (req) => {
       const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
       const was = await checkQueueSvc.mode();
+      const slotsWere = await checkQueueSvc.slots();
       await checkQueueSvc.setSlots(b.slots);
       await checkQueueSvc.setMode(b.mode);
+      // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
+      // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
+      let applying = false;
+      if (launch.enabled && b.slots !== slotsWere) {
+        try {
+          await launch.setChecks(b.slots);
+          const lc = await launch.checks();
+          if (lc?.runners.some((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes)) {
+            await maintenance.start({ kind: "settings" }); // leader-only
+            applying = true;
+          }
+        } catch (e) {
+          app.log.error(`check slots: could not apply to the runners: ${(e as Error).message}`);
+        }
+      }
       // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
       // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
       let cancelled = 0;
@@ -1407,7 +1444,7 @@ export async function buildApp(opts: AppOptions) {
         for (const id of await checkQueueSvc.queuedIds())
           if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
       if (b.mode === "server") await checks.pump();
-      return { ...(await checkQueueView()), cancelled };
+      return { ...(await checkQueueView()), cancelled, applying };
     });
     // BOS-313: check the merged result before pushing it (off by default while it rolls out).
     owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));

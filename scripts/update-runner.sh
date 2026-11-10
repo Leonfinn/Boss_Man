@@ -6,8 +6,8 @@
 #   scripts/update-runner.sh             build with the latest Claude Code, check, promote, ask for the drain
 #   scripts/update-runner.sh 2.1.50      pin a Claude Code version instead of "latest"
 #   scripts/update-runner.sh --rollback  tag the image that was running before as current, then drain onto it
-#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_MEMORY,
-#                                        BOSSMAN_CHECK_SLOTS, BOSSMAN_RUNNER_CPUS...). Recreates the launcher so it reads
+#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_CPUS...; the check
+#                                        slots and runner memory follow Settings, not .env). Recreates the launcher so it reads
 #                                        them, then asks Boss Man to drain and recreate every runner as its company
 #                                        goes idle, and to wake the agents afterwards (BOS-594). Use this, never a bare
 #                                        "recreate-all", for a setting change.
