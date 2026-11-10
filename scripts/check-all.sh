@@ -9,7 +9,7 @@ cd "$(dirname "$self")/.."
 # A check job's HOME folder must exist: a runner older than the jobFenceFor fix (BOS-1095) starts the job without
 # creating it, and tests that make temp files under HOME then fail with ENOENT. Creating it is safe to repeat.
 if [ -n "${HOME:-}" ] && [ ! -d "$HOME" ]; then
-  mkdir -p -m 700 "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
+  mkdir -p "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
   export HOME
 fi
 

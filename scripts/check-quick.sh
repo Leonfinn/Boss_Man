@@ -12,7 +12,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
 # A check job's HOME folder must exist; a runner older than the jobFenceFor fix (BOS-1095) doesn't create it. Safe to repeat.
 if [ -n "${HOME:-}" ] && [ ! -d "$HOME" ]; then
-  mkdir -p -m 700 "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
+  mkdir -p "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
   export HOME
 fi
 # One CPU budget for every step, the web build outside the slot included (BOS-674; see scripts/check-threads.mjs and check-all.sh).
