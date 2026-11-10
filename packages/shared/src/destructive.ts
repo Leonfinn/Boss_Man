@@ -878,6 +878,8 @@ export function commandRisks(command: string | string[]): Risk[] {
           const valued = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
           // git -c can set a command git then runs: an alias starting with !, a pager, an editor, a hook path…
           const aliases = new Map<string, string>();
+          // -c gc.pruneExpire / gc.reflogExpire* / gc.worktreePruneExpire set to anything but "never" makes a plain gc discard (BOS-954).
+          let gcConfigPrunes = false;
           for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
             if (args[i]!.text !== "-c") {
               if (valued.includes(args[i]!.text)) i++;
@@ -885,6 +887,7 @@ export function commandRisks(command: string | string[]): Risk[] {
             }
             const setWord = args[++i];
             const set = setWord?.text ?? "";
+            if (/^gc\.(pruneexpire|reflogexpire\w*|worktreepruneexpire)(=(?!never$)|$)/i.test(set)) gcConfigPrunes = true;
             const alias = /^alias\.([^=]*)=(.*)$/is.exec(set);
             const m = /^[^=]*\.(fsmonitor|sshcommand|pager|editor|hookspath|cmd|command|program|helper|textconv|clean|smudge|process)=(.*)$/i.exec(set);
             if ((alias || m) && setWord!.dynamic) return destroys("sets a git command only known when it runs");
@@ -963,8 +966,9 @@ export function commandRisks(command: string | string[]): Risk[] {
             // whatever the date (=now, =all, =1.second.ago); only --prune=never leaves them. A bare --prune prunes the
             // default two weeks. An option only known when it runs could be that one. A plain gc, --auto and --quiet
             // leave them alone (BOS-571).
-            const prunesNow = before.some((o) => /^--prun(e)?$/.test(o) || (/^--prun(e)?=/.test(o) && !/^--prun(e)?=never$/.test(o)));
-            if (unknownOpt || prunesNow) destroys("discards unreachable commits for good (git gc --prune=now)");
+            // git takes any unambiguous start of --prune (--pru=now), and `-c gc.pruneExpire=now` does the same (BOS-954).
+            const prunesNow = before.some((o) => longOf(o, ["prune"]) && !/^--[^=]*=never$/.test(o));
+            if (unknownOpt || prunesNow || gcConfigPrunes) destroys("discards unreachable commits for good (git gc --prune=now)");
           } else if (sub === "prune") {
             // The standalone `git prune` discards unreachable objects just as gc --prune does (BOS-571 review).
             if (!before.some((o) => longOf(o, ["dry-run"]))) destroys("discards unreachable commits for good (git prune)");
