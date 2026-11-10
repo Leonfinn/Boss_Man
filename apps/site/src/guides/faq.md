@@ -3,7 +3,7 @@ path: /faq
 title: FAQ
 description: Short answers about what Boss Man is, what it costs, what you need to run it, and how safe it is.
 group: Questions
-order: 12
+order: 13
 lead: Short answers to the questions people ask first.
 ---
 
