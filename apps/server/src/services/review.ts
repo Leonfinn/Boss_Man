@@ -369,12 +369,8 @@ export function reviewService(
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
     if (await openHold(db, ticketId)) return false;
-    const [signoff] = await db
-      .select({ id: decisions.id })
-      .from(ticketDependencies)
-      .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-    return !signoff;
+    // Only a card that really holds the merge counts (BOS-1078): the sign-off, or a card marked as holding it.
+    return !(await openSignoffCard(db, ticketId)) && !(await openHoldingCard(db, ticketId));
   }
 
   /**
@@ -785,12 +781,9 @@ export function reviewService(
           return { verdict: "approved" as const, outcome: "held" as const, delivered: `the pass stands; the merge is held: ${input.hold.reason.trim()}` };
         }
         if (await openHold(db, ticketId)) return { verdict: "approved" as const, outcome: "held" as const, delivered: "the merge is held by a reviewer; it goes on once the hold is released" };
-        const [signoff] = await db
-          .select({ id: decisions.id })
-          .from(ticketDependencies)
-          .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-          .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
-        if (signoff || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
+        // The same holding rule as the gate (BOS-1078): a plain question on the ticket doesn't stop this merge.
+        const holding = (await openSignoffCard(db, ticketId)) ?? (await openHoldingCard(db, ticketId));
+        if (holding || (await derivedSignoff(db, t)).state === "waiting") throw new ReviewError(409, `Every review is in; the ticket is waiting on the owner's decision${holding ? ` (card ${holding})` : ""} before it merges.`);
         if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "Every review is in and the merge is running now.");
         await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
         return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });

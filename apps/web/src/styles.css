@@ -170,6 +170,8 @@ p { margin: 0; }
 .score-legend .swatch { display: inline-block; width: 12px; height: 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: grid; grid-template-columns: 88px minmax(0, 1fr); }
+/* The card a link opened (#/decisions/<id>, BOS-1078). */
+.decision.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
 .decision .score { padding: 18px 0 18px 20px; display: flex; flex-direction: column; gap: 8px; }
 .decision .score b { font-family: var(--mono); font-size: 26px; font-weight: 500; line-height: 1; }
 .decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
