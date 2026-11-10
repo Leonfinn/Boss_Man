@@ -1157,6 +1157,12 @@ export class SessionManager {
     });
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
+      // The no-core-dump shell wrapper (BOS-1059) turns a tool that can't be started into exit 127 / 126, not an "error".
+      const noStart = (code === 127 && /exec: .*not found/.test(stderr)) || (code === 126 && /exec: .*(Permission denied|not executable)/i.test(stderr));
+      if (noStart && this.runs.has(cmd.runId)) {
+        finish(null, `Couldn't start ${cmd.agentKind === "claude" ? "claude-code-acp" : cmd.agentKind}: ${code === 127 ? "not found" : "not allowed to run"}.`);
+        return;
+      }
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());
     });
 

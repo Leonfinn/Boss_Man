@@ -5,7 +5,7 @@ dist/
 coverage/
 data/
 secrets/
-
-# Core dump files (BOS-1059): never commit them. Narrow on purpose: a broad core.* would hide a real core.ts.
+# Process core dumps (core.<pid>) can hold live secrets; never commit or checkpoint them.
+# Narrow on purpose (BOS-1059): a broad core.* would hide a real file such as core.ts.
 core
 core.[0-9]*
