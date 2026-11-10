@@ -132,7 +132,7 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect((await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"))).toHaveLength(0);
   });
 
-  it("opens one ticket per change, and reuses an open one for the same commit", async () => {
+  it("two deploys in a row with one ticket open give one ticket listing both commits (BOS-1112)", async () => {
     const c = (ctx = await setupApp());
     const { companyId } = await withReleaseManager(c);
     await c.releaseLog.note(companyId, A);
@@ -141,7 +141,48 @@ describe("release log: the Release Manager is woken when the live commit changes
     await c.releaseLog.note(companyId, C);
     await c.releaseLog.releaseManagerWakes("restarted");
     const logTickets = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
-    expect(logTickets.map((t) => t.title)).toEqual([`Release log: record ${B.slice(0, 8)}`, `Release log: record ${C.slice(0, 8)}`]);
+    expect(logTickets).toHaveLength(1);
+    expect(logTickets[0]!.body).toContain(`New commit: ${B}`);
+    expect(logTickets[0]!.body).toContain(`New commit: ${C}`);
+    // A repeat pass doesn't list the commit twice.
+    await c.releaseLog.releaseManagerWakes("restarted");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, logTickets[0]!.id)))[0]!.body!.split(`New commit: ${C}`)).toHaveLength(2);
+  });
+
+  it("once the ticket is closed, the next deploy opens a new one (BOS-1112)", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId } = await withReleaseManager(c);
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("restarted");
+    const [first] = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, first!.id));
+    await c.releaseLog.note(companyId, C);
+    await c.releaseLog.releaseManagerWakes("restarted");
+    const logTickets = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
+    expect(logTickets.map((t) => t.title).sort()).toEqual([`Release log: record ${B.slice(0, 8)}`, `Release log: record ${C.slice(0, 8)}`].sort());
+    expect(logTickets.find((t) => t.id !== first!.id)!.body).not.toContain(`New commit: ${B}`);
+  });
+
+  it("folds release-log tickets already open into the oldest one (BOS-1112)", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId, rm } = await withReleaseManager(c);
+    const D = "4".repeat(40);
+    const mk = (sha: string) => c.work.createTicket(projectId, { title: `Release log: record ${sha.slice(0, 8)}`, body: `Old commit: ${A}\nNew commit: ${sha}`, assigneeAgentId: rm!.id, state: "ready", noCode: true, risk: "trivial" });
+    const t1 = await mk(B);
+    const t2 = await mk(C);
+    await c.releaseLog.note(companyId, A);
+    await c.releaseLog.note(companyId, D);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    const rows = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
+    const open = rows.filter((x) => x.systemState !== "done");
+    expect(open.map((x) => x.id)).toEqual([t1.id]);
+    expect(open[0]!.body).toContain(`New commit: ${C}`);
+    expect(open[0]!.body).toContain(`New commit: ${D}`);
+    expect(rows.find((x) => x.id === t2.id)!.systemState).toBe("done");
+    // Only the one ticket has a waiting wake.
+    const waiting = await c.db.select().from(wakes).where(eq(wakes.reason, RELEASE_REASON));
+    expect(waiting.map((w) => w.ticketId)).toEqual([t1.id]);
   });
 
   it("does not stack a second wake on a ticket whose first wake is still waiting", async () => {

@@ -3,9 +3,9 @@
 // woke it and its Releases page fell behind. The server watches the live commit it already knows (the
 // host deployer's status.json, and the commit this process was built from) and queues a wake on a
 // small no-code ticket, so the work is visible and isn't dropped by the ticketless-wake cap (BOS-272).
-import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
+import { agents, decisions, projects, settings, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
@@ -13,6 +13,7 @@ import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runne
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
 const SEEN_PREFIX = "live_release:";
+const LOG_TITLE_PREFIX = "Release log: record ";
 const RELEASES_PROJECT = "Releases";
 
 /** How a new live commit went live, in plain words, for the wake note. */
@@ -63,6 +64,8 @@ export const releaseLogService = (
     createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string; title: string }>;
     /** Queues the wake on that ticket (scheduler.notify). */
     notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
+    /** Marks a folded-in release-log ticket done through the normal ticket path (BOS-1112); without it the row is set done directly. */
+    closeTicket?: (ticketId: string) => Promise<unknown>;
     /** Tells the owner when a setup card Boss Man closes itself leaves its notice (BOS-740). */
     notifyOwner?: (n: NotifyInput) => Promise<unknown>;
     /** Runs on every pass for each company, after the live commit is noted: lets after-merge checks that waited for go-live start (BOS-1021). */
@@ -128,15 +131,33 @@ export const releaseLogService = (
   async function wakeOne(companyId: string, from: string, to: string, how: ReleaseHow, ticketId?: string | null) {
     const rm = await releaseManagerOf(companyId);
     if (!rm) return false;
-    const title = `Release log: record ${short(to)}`;
+    const title = `${LOG_TITLE_PREFIX}${short(to)}`;
     let ticket = ticketId ? await db.select({ id: tickets.id, title: tickets.title }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId))).then((r) => r[0] ?? null) : null;
-    if (!ticket) {
-      const open = await db
-        .select({ id: tickets.id, title: tickets.title })
-        .from(tickets)
-        .where(and(eq(tickets.companyId, companyId), ne(tickets.systemState, "done")))
-        .orderBy(desc(tickets.createdAt));
-      ticket = open.find((t) => t.title === title) ?? null;
+    // BOS-1112: one open release-log ticket per company. A new live commit is added to it rather than
+    // opening another, and any others already open are folded into it. Once it is done, the next commit opens a fresh one.
+    const openLogs = await db
+      .select({ id: tickets.id, title: tickets.title, body: tickets.body })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, companyId), ne(tickets.systemState, "done"), like(tickets.title, `${LOG_TITLE_PREFIX}%`)))
+      .orderBy(asc(tickets.createdAt));
+    const primary = openLogs[0] ?? null;
+    if (!ticket || (primary && ticket.id !== primary.id)) ticket = primary ? { id: primary.id, title: primary.title } : ticket;
+    if (primary) {
+      const lines: string[] = [];
+      for (const other of openLogs.slice(1)) {
+        const commits = (other.body ?? "").match(/^New commit: ([0-9a-f]{40})$/gim) ?? [];
+        for (const c of commits) lines.push(c);
+        await db.delete(wakes).where(and(eq(wakes.ticketId, other.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])));
+        if (deps.closeTicket) await deps.closeTicket(other.id);
+        else await db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, other.id));
+        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `Folded "${other.title}" into this ticket.` });
+      }
+      const have = new Set((primary.body ?? "").split("\n"));
+      const add = [...lines, `New commit: ${to}`].filter((l, i, all) => !have.has(l) && all.indexOf(l) === i);
+      if (add.length) {
+        await db.update(tickets).set({ body: `${primary.body ?? ""}\n${add.join("\n")}`.trim(), version: sql`${tickets.version} + 1` }).where(eq(tickets.id, primary.id));
+        await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record ${short(to)} too.` });
+      }
     }
     // A wake already waiting for this ticket is the one that will run: don't stack a second.
     // Creating the ticket queues its own "assigned" wake, which is reused rather than doubled.
