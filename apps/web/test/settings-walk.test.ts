@@ -33,7 +33,7 @@ function answer(p: string): unknown {
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return { on: false, last: null };
   if (p === "/api/runner-report") return { live: [], update: null };
-  if (p === "/api/self-deploy") return { enabled: false };
+  if (p === "/api/self-deploy") return { enabled: true, status: null, available: null };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
   if (p === "/api/netguard-allow") return { report: null };
@@ -149,6 +149,39 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       await browser.close();
     }
   }, 90_000);
+
+  // BOS-1063: a plain "#id" link replaced the route and sent the owner to the dashboard.
+  it("every 'On this page' link keeps the route and brings its own section into view", async () => {
+    const browser = await launch();
+    if (!browser) return;
+    try {
+      for (const vp of SIZES) {
+        const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
+        for (const id of ["team", "permissions", "system"]) {
+          await page.goto(`${base}/#/settings/c1/${id}`);
+          await page.waitForSelector(".set-jump a", { timeout: 8000 });
+          await new Promise((r) => setTimeout(r, 500));
+          const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
+          expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
+          for (const target of hrefs) {
+            await page.locator(`.set-jump a[href="#${target}"]`).click();
+            await new Promise((r) => setTimeout(r, 900));
+            expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
+            const inView = await page.evaluate((t: string) => {
+              const el = document.getElementById(t);
+              if (!el) return "missing";
+              const r = el.getBoundingClientRect();
+              return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
+            }, target);
+            expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
+          }
+        }
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 180_000);
 
   async function landsOn(pairs: ReadonlyArray<readonly [string, string]>) {
     const browser = await launch();
