@@ -12,13 +12,24 @@ export const HEARTBEAT_MS = 15_000;
 
 const Uuid = z.string().uuid();
 
+export const GuardReport = z.object({
+  /** on: a connect to the runner's own default gateway was refused at once with EHOSTUNREACH (the guard). absent: it connected, timed out, was refused or there was no gateway. */
+  state: z.enum(["on", "absent"]),
+  reason: z.string().max(200),
+  errno: z.string().max(100).nullable(),
+  ms: z.number().nonnegative(),
+});
+export type GuardReport = z.infer<typeof GuardReport>;
+
 /**
  * What a runner can fence agents with (DR-004, BOS-321), from its start-up self-test. full: Landlock
  * ABI 6+; partial: ABI 2-5, files fenced but `missing` lists what isn't; unavailable: no usable
  * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
  * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
  */
-export const SandboxReport = z.object({
+export const SandboxReport =z.object({
+  /** The runner's own network-guard probe (DR-049 point 2); absent on a runner that predates it. */
+  guard: GuardReport.optional(),
   landlockAbi: z.number().int().nonnegative(),
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
@@ -420,11 +431,13 @@ export type MigrationsResult =
   | { needed: null; reason: string };
 
 /**
- * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
- * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ * The company's agent fence setting (BOS-325): off, watch (default for new companies since BOS-940: agents run
+ * fenced and refusals are logged) or enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
  */
 export const FENCE_MODES = ["off", "watch", "enforce"] as const;
 export type FenceMode = (typeof FENCE_MODES)[number];
+/** What Off means, in BOS-373's words, said wherever the owner chooses Off (BOS-940): Settings and the fence card. */
+export const FENCE_OFF_CONSEQUENCE = "With the fence Off, agents can read the runner's key and this company's git login.";
 /** Flip once BOS-323 is merged and its test shows the git gap closed. */
 export const FENCE_ENFORCE_AVAILABLE = false;
 /** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */

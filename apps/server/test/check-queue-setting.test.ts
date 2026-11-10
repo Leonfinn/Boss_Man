@@ -37,7 +37,7 @@ async function setup(features: string[]) {
 describe("the check queue switch (BOS-798)", () => {
   it("is legacy with one slot until the owner changes it, and names a connected runner too old to run queued checks", async () => {
     const c = (ctx = await setup([]));
-    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"] });
+    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"] });
   });
 
   it("is owner only: no session, no read and no change", async () => {

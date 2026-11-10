@@ -1,5 +1,5 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type DecisionTally, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
@@ -15,11 +15,11 @@ import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
 import { MergeQueue } from "./pages/MergeQueue";
-import { ProjectsPage, Settings } from "./pages/Settings";
+import { Settings, settingsRedirect } from "./pages/Settings";
+import { ProjectsPage } from "./pages/settings/Projects";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
-import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { ScrumMaster } from "./pages/ScrumMaster";
 import { Workflow } from "./pages/Workflow";
@@ -212,9 +212,13 @@ export function ServerBanner() {
 }
 
 function Signed({ onLogout }: { onLogout: () => void }) {
-  const [route, go] = useRoute();
-  const page = route[0] ?? "dashboard";
+  const [rawRoute, go] = useRoute();
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
+  // The old Settings addresses keep working (BOS-1019): the redirect runs before anything renders, so an old
+  // link lands on the new page and a bookmarked #/rules/a1 opens Permissions for that company.
+  const route = rawRoute;
+  const page = route[0] ?? "dashboard";
+  const routeCompany = route[1] && route[1] !== "all" ? companies.data?.find((c) => c.id === route[1]) : undefined;
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
@@ -265,6 +269,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const [collapsed, setCollapsed] = useState<boolean>(collapsedByDefault);
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  // An old bare address such as #/funding carries no company, so the redirect uses the company already
+  // selected (BOS-1044), not only the one in the address. It waits for the company list, or it would send
+  // a bare #/funding to the menu before it knows which company to use.
+  const redirect = page && companies.data ? settingsRedirect(route, routeCompany?.id ?? current?.id) : null;
+  useEffect(() => {
+    if (redirect) go(redirect);
+  }, [redirect, go]);
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
   // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
   // turns the badge to the warning colour when a jam is there to see.
@@ -276,6 +287,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
   }, [inRoute, chosen]);
+  // The Decisions menu badge (BOS-969): what needs the owner now, from the server's one count (the
+  // Decisions page heading asks the same function), so the two can't drift. It follows the chosen
+  // company and refreshes on the same poll as the queue, and on every answer.
+  const decisionsTally = usePoll(
+    (signal) =>
+      current ? api<DecisionTally>(`/api/decisions/tally?companyId=${current.id}`, { signal }).catch(() => null) : Promise.resolve(null),
+    10_000,
+    `decisions-tally-${current?.id}`,
+  );
+  useEffect(() => decisionsTally.reload(), [current?.id]);
   const pick = (id: string) => {
     remember(id, setChosen);
     if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
@@ -313,6 +334,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onPickCompany={pick}
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
+        decisionsTally={decisionsTally.data}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
@@ -327,7 +349,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         <ServerBanner />
         <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
-        {page === "board" ? (
+        {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
@@ -357,20 +379,18 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Workflow company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
-        ) : page === "funding" || page === "rules" || page === "secrets" ? (
-          <Settings companies={list} companyId={companyId} tab={page} go={go} onChanged={companies.reload}>
-            {page === "funding" ? <Funding companies={list} /> : page === "rules" ? <Rules companies={list} companyId={companyId} go={go} /> : <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />}
-          </Settings>
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
-          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload} />
+          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload}>
+            {route[2] === "secrets" ? <Secrets companies={list} companyId={companyId} onChanged={companies.reload} /> : route[2] === "permissions" ? <Rules companies={list} companyId={companyId} go={go} /> : null}
+          </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}

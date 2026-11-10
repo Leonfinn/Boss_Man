@@ -2,13 +2,13 @@
 // review. Each test here fails on the old code and passes with the after-merge mark.
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { DEFAULT_REVIEW_POLICY, afterMergeLint, carryFailedOver, failedAfterMerge, isAfterMerge, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, afterMergeLint, carryFailedOver, criteriaForCard, failedAfterMerge, isAfterMerge, mentionsCriterion, missingVerdicts, readCriteria, readVerdicts, unreportedAfterMerge } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, decisions, reviewRequests, ticketDependencies, ticketMessages, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { landingText } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
@@ -120,6 +120,22 @@ describe("after-merge criteria: the rules", () => {
     expect(unreportedAfterMerge(carry.criteria, done)).toEqual([]);
     expect(failedAfterMerge(carry.criteria, done)).toEqual([]);
     expect(failedAfterMerge(carry.criteria, `${carry.note}\n3 fail: 71 minutes, over the limit`)).toEqual([SLOTS[2]]);
+  });
+
+  it("works out which after-merge criteria a card is about from its question and options (BOS-963)", () => {
+    const SHOT = { text: "Screenshot of the conflict message at the owner's 1667px width on the ticket page", after: "merge" as const };
+    const other = { text: "Answers from the owner's Tailscale name on a real host", after: "merge" as const };
+    const list = [BEFORE, SHOT, other];
+    // A card whose question and options are worded differently but name the check still matches it.
+    expect(criteriaForCard(list, "The screenshot at 1667px is ready: does the ticket page look right?", [])).toEqual([1]);
+    // The options count too.
+    expect(criteriaForCard(list, "Did it work?", ["Yes, the real host answers from the Tailscale name", "No"])).toEqual([2]);
+    // A card that names nothing settles nothing by itself.
+    expect(criteriaForCard(list, "How did the whole thing feel to use?", ["Fine", "Not fine"])).toEqual([]);
+    // A before-merge criterion is never picked up, whatever the card says.
+    expect(criteriaForCard([BEFORE, { text: "Health check returns 200", after: "merge" as const }], "Does the health check return 200?", [])).toEqual([1]);
+    expect(mentionsCriterion(SHOT.text, "the 1667px screenshot on the ticket page")).toBe(true);
+    expect(mentionsCriterion(SHOT.text, "did it work")).toBe(false);
   });
 
   it("a merge with only before-merge criteria closes the ticket as it always did", async () => {
@@ -243,6 +259,115 @@ describe("after-merge criteria", () => {
     expect((await ctx.row(t.id)).systemState).toBe("done");
   });
 
+  // BOS-963: on BOS-905 the owner answered "Pass" on a card three times and the after-merge criterion never
+  // recorded. Two faults: the note's wording came from the card, not the criterion, so the plain-text match
+  // missed it; and a card answered after an earlier answer had already written the criterion out of the
+  // "unreported" set wrote nothing at all, so a fresh card could never settle it.
+  const SHOT = { text: "Screenshot of the conflict message on the ticket page at the owner's Brave 1667px width", after: "merge" as const };
+  const SHOT_Q = "The screenshot is ready: does it show the conflict message at 1667px?";
+  const raiseFor = async (ticketId: string, question: string, options: string[], criterion?: number | string) => {
+    const c = await ctx.agent(ctx.dev.id);
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question, options, recommended: options[0]!, triedFirst: "Took the screenshot myself; only the owner's own screen shows their true width.", blocksTicketId: ticketId, ...(criterion !== undefined ? { criterion } : {}) } }));
+    expect(asked).toMatch(/decision/i);
+    return (await ctx.db.select().from(decisions).where(and(eq(decisions.question, question), eq(decisions.companyId, ctx.co.company.id))))[0]!;
+  };
+
+  it("the owner's answer records the criterion in the card's own words, not the criterion's", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, SHOT], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const card = await raiseFor(t.id, SHOT_Q, ["Pass - the screenshot meets the criterion", "Fail - it doesn't"]);
+    expect((await ctx.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Pass - the screenshot meets the criterion" })).statusCode).toBe(200);
+    const recorded = await ctx.row(t.id);
+    expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([]);
+    expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === SHOT.text)?.verdict).toBe("pass");
+    // And the ticket closes on that answer alone.
+    const c = await ctx.agent(ctx.dev.id);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed on the owner's answer." } }))).toContain("is now done");
+  });
+
+  it("a later card's answer still records when an earlier answer already wrote the criterion", async () => {
+    // The BOS-905 shape: two answers land, and the second must not be silently dropped.
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, SHOT], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const first = await raiseFor(t.id, SHOT_Q, ["Pass - the screenshot meets the criterion", "Fail - it doesn't"]);
+    expect((await ctx.req("POST", `/api/decisions/${first.id}/answer`, { answer: "Pass - the screenshot meets the criterion" })).statusCode).toBe(200);
+    const noted = (await ctx.row(t.id)).stateNote;
+    const second = await raiseFor(t.id, "One more look at the 1667px screenshot: does it meet the criterion now?", ["Pass - the screenshot meets the criterion", "Fail - it doesn't"], 2);
+    expect((await ctx.req("POST", `/api/decisions/${second.id}/answer`, { answer: "Pass - the screenshot meets the criterion" })).statusCode).toBe(200);
+    const recorded = await ctx.row(t.id);
+    // The second answer added its own line, so the ticket shows both times it was answered.
+    expect((recorded.stateNote ?? "").length).toBeGreaterThan((noted ?? "").length);
+    expect(recorded.stateNote).toContain("One more look at the 1667px screenshot");
+    expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([]);
+  });
+
+  it("raise_decision says when a card on a merged ticket can't be tied to an after-merge criterion", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, SHOT], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const c = await ctx.agent(ctx.dev.id);
+    const r = await c.callTool({ name: "raise_decision", arguments: { question: "How did the whole ticket go for you?", options: ["Fine", "Not fine"], recommended: "Fine", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt to use.", blocksTicketId: t.id } });
+    const said = textOf(r);
+    // The card is still raised (it may be a real question), but the raiser is told the answer won't record a criterion.
+    expect(said).toMatch(/decision/i);
+    expect(said).toMatch(/won't record|cannot record|can't record|not record/i);
+    expect(said).toContain("Screenshot of the conflict message");
+    // And a card that does name the criterion gets no such warning.
+    const ok = textOf(await c.callTool({ name: "raise_decision", arguments: { question: SHOT.text + ": does it pass?", options: ["Pass - the screenshot meets the criterion", "Fail - it doesn't"], recommended: "Pass - the screenshot meets the criterion", triedFirst: "Took the screenshot myself; only the owner's own screen shows their true width.", blocksTicketId: t.id } }));
+    expect(ok).not.toMatch(/won't record|cannot record|can't record|not record/i);
+    // Naming the criterion by its number also avoids the warning, and refuses one that isn't an after-merge check.
+    const byNumber = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "All good now?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Ran the checks and the app myself; only the owner can say how it looked on their screen.", blocksTicketId: t.id, criterion: 2 } }));
+    expect(byNumber).not.toMatch(/won't record|cannot record|can't record|not record/i);
+    const beforeMerge = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the health check still pass?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Ran the checks myself; the host only answers to the owner.", blocksTicketId: t.id, criterion: 1 } }));
+    expect(beforeMerge).toMatch(/checked before merge/i);
+    const notThere = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", blocksTicketId: t.id, criterion: 9 } }));
+    expect(notThere).toMatch(/No criterion/i);
+  });
+
+  it("a card's explicit criterion records that check even when its wording names nothing", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, SHOT], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    // The question and options say nothing about the screenshot; the criterion number links it.
+    const card = await raiseFor(t.id, "All good now?", ["Yes, all good", "No, something is off"], 2);
+    expect((await ctx.req("POST", `/api/decisions/${card.id}/answer`, { answer: "Yes, all good" })).statusCode).toBe(200);
+    const recorded = await ctx.row(t.id);
+    expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === SHOT.text)?.verdict).toBe("pass");
+    expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([]);
+  });
+
+  // BOS-1012: Claude Code sends a number as the string "6" (its JSON schema is anyOf [integer, string]),
+  // so the handler's typeof-number branch never ran and a card naming a criterion by number was refused.
+  it("a criterion number sent as a string, as Claude Code sends it, links the card", async () => {
+    const SIX = [...SLOTS.slice(0, 4), LIVE, { text: "Claude Max 2 shows the 2 line on the Funding page", after: "merge" as const }];
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: SIX, systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "1 pass; 2 pass; 3 pass; 4 pass" });
+    const c = await ctx.agent(ctx.dev.id);
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the Funding page show the 2 line?", options: ["Pass - it shows the 2 line", "Fail - it doesn't"], recommended: "Pass - it shows the 2 line", triedFirst: "Ran the checks; only the owner's live plan shows their own allowance.", blocksTicketId: t.id, criterion: "6" } }));
+    expect(asked).toMatch(/decision/i);
+    expect(asked).not.toMatch(/No criterion/);
+    const card = (await ctx.db.select().from(decisions).where(and(eq(decisions.question, "Does the Funding page show the 2 line?"), eq(decisions.companyId, ctx.co.company.id))))[0]!;
+    expect((card.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([5]);
+    // The refusals still stand for a string number: out of range, and pointing at a before-merge check.
+    const past = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", blocksTicketId: t.id, criterion: "9" } }));
+    expect(past).toMatch(/No criterion 9 on this ticket/i);
+    const before = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the health check still pass?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Ran the checks myself; the host only answers to the owner.", blocksTicketId: t.id, criterion: "1" } }));
+    expect(before).toMatch(/checked before merge/i);
+    // And without a ticket to attach to, the reason is given rather than a card raised.
+    const noTicket = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Anything else?", options: ["Yes", "No"], recommended: "No", triedFirst: "Ran the checks and the app myself; only the owner can say how it felt.", criterion: "6" } }));
+    expect(noTicket).toMatch(/goes with blocksTicketId set to that ticket/i);
+  });
+
+  it("a criterion copied with the after-merge note Boss Man shows still matches its text", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const c = await ctx.agent(ctx.dev.id);
+    // Exactly what `tickets read` shows on the criterion line, suffix and all.
+    const shown = `${LIVE.text} (checked after merge; don't fail the review on it)`;
+    const asked = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Is BOS-373 answered on the real host?", options: ["Pass - the host answers", "Fail - it doesn't"], recommended: "Pass - the host answers", triedFirst: "Asked the host myself and it refused; only the owner's tailnet reaches it here.", blocksTicketId: t.id, criterion: shown } }));
+    expect(asked).toMatch(/decision/i);
+    expect(asked).not.toMatch(/No criterion/);
+    const [card] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "Is BOS-373 answered on the real host?"), eq(decisions.companyId, ctx.co.company.id)));
+    expect((card!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
+    // Case and runs of spacing don't stop it matching either.
+    const loose = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "And now, on the host?", options: ["Pass", "Fail"], recommended: "Pass", triedFirst: "Asked the host myself and it refused; only the owner's tailnet reaches it here.", blocksTicketId: t.id, criterion: `  ${LIVE.text.toUpperCase().replace(/ /g, "   ")}  ` } }));
+    expect(loose).not.toMatch(/No criterion/);
+    const [second] = await ctx.db.select().from(decisions).where(and(eq(decisions.question, "And now, on the host?"), eq(decisions.companyId, ctx.co.company.id)));
+    expect((second!.context as { criterionIndexes?: number[] }).criterionIndexes).toEqual([1]);
+  });
+
   it("the owner's answer records a fail, which keeps the ticket open", async () => {
     const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
     const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Does the host answer?", options: ["Yes, it works", "No, it does not"], recommendedOption: "Yes, it works", context: { type: "question" }, raisedByAgentId: ctx.dev.id }).returning();
@@ -254,6 +379,77 @@ describe("after-merge criteria", () => {
     // ticket's own assignee has to fix it before it can close.
     expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === LIVE.text)?.verdict).toBe("fail");
     expect(recorded.systemState).toBe("in_progress");
+  });
+
+  // BOS-1056: card 6a7c5944 ("What does the Network guard row say?") was answered "on", its recommended
+  // option, and recorded as a fail because "on" holds no pass word.
+  it("answering the recommended option records a pass whatever its wording", async () => {
+    const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "What does the Network guard row say?", options: ["on", "off", "not shown"], recommendedOption: "on", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await ctx.decisions.answer(d!.id, "on");
+    const recorded = await ctx.row(t.id);
+    expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === LIVE.text)?.verdict).toBe("pass");
+  });
+
+  it("a card with no recommended option records nothing for a neutral option, not a fail", async () => {
+    const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "What does the Network guard row say?", options: ["on", "off"], recommendedOption: "", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await ctx.decisions.answer(d!.id, "on");
+    const recorded = await ctx.row(t.id);
+    expect(recorded.stateNote).toBe("Health check returns 200 pass");
+  });
+
+  // BOS-1091: on BOS-1052 and BOS-993 the owner typed what they saw instead of pressing an option; both
+  // answers showed a pass, were recorded as "fail" and opened follow-ups (BOS-1088, BOS-1090) the CEO cancelled.
+  const answerLiveCard = async (answer: string) => {
+    const t = await ctx.ticket({ title: "Live check", assigneeAgentId: ctx.dev.id, risk: "low", acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "c".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "Does it answer from your Tailscale name? Press Test and say what it shows.", options: ["Pass - it answers", "Fail - it doesn't"], recommendedOption: "Pass - it answers", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    // A typed answer comes in as the owner's own words (custom), as the card's text box sends it.
+    await ctx.decisions.answer(d!.id, answer, { custom: !(d!.options as string[]).includes(answer) });
+    return { t, recorded: await ctx.row(t.id) };
+  };
+  const verdictOf = (row: { acceptanceCriteria: unknown; stateNote: string | null }) => readVerdicts(readCriteria(row.acceptanceCriteria), row.stateNote).find((r) => r.criterion === LIVE.text)?.verdict;
+  const followUps = async (parentId: string) => (await ctx.db.select().from(tickets).where(eq(tickets.projectId, ctx.project.id))).filter((x) => x.id !== parentId && x.title.includes("Follow-up to"));
+
+  for (const [name, typed] of [
+    ["a descriptive success sentence (BOS-1052)", "It answered in 1.7 s with a valid verdict, and the reason line was not empty."],
+    ["pasted Settings panel text (BOS-993)", "Checks\nLimit in force: 1 check at a time\nQueue: not running a check\nLast check failed: none"],
+  ] as const) {
+    it(`a free-text answer, ${name}, is recorded as answered with no verdict, and only the assignee's explicit report closes it`, async () => {
+      const { t, recorded } = await answerLiveCard(typed);
+      // Not a fail, not a pass: the criterion is still unreported, and the note says the owner answered.
+      expect(verdictOf(recorded)).toBeNull();
+      expect(unreportedAfterMerge(readCriteria(recorded.acceptanceCriteria), recorded.stateNote)).toEqual([LIVE.text]);
+      expect(recorded.stateNote).toMatch(/in their own words/);
+      expect(recorded.stateNote).toContain("criterion 2");
+      // The owner's words reach the ticket's conversation, where the assignee reads them.
+      const said = await ctx.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
+      expect(said.some((m) => m.text.includes(typed))).toBe(true);
+      // The done gate asks the assignee to report it; once they report a pass the ticket closes with no follow-up.
+      const c = await ctx.agent(ctx.dev.id);
+      expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed on the owner's answer." } }))).toMatch(/aren't reported yet/);
+      const done = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "2 pass: the owner's answer shows it working" } }));
+      expect(done).toContain("is now done");
+      expect(done).not.toMatch(/follow-up/);
+      expect(await followUps(t.id)).toEqual([]);
+    });
+  }
+
+  it("an explicit fail option still records a fail and opens the follow-up when the ticket closes", async () => {
+    const { t, recorded } = await answerLiveCard("Fail - it doesn't");
+    expect(verdictOf(recorded)).toBe("fail");
+    const c = await ctx.agent(ctx.dev.id);
+    const done = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed on the owner's answer." } }));
+    expect(done).toMatch(/opened the follow-up/);
+    expect(await followUps(t.id)).toHaveLength(1);
+  });
+
+  it("a bare typed fail or pass is still the owner's verdict", async () => {
+    expect(verdictOf((await answerLiveCard("fail")).recorded)).toBe("fail");
+    expect(verdictOf((await answerLiveCard("Pass.")).recorded)).toBe("pass");
   });
 
   it("reopening a merged ticket for code clears its no-code mark, so review and done ask for a diff again", async () => {

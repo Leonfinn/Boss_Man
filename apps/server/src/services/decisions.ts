@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
+import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -12,6 +13,9 @@ import {
   ruleProblems,
   isBossmanCall,
   readCriteria,
+  criterionText,
+  criteriaForCard,
+  isAfterMerge,
   unreportedAfterMerge,
   ruleFor,
   rankDecision,
@@ -61,7 +65,7 @@ import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from 
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
@@ -195,7 +199,7 @@ export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>)
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -229,6 +233,8 @@ export type DecisionContext =
   | { type: "project_cap"; projectId: string }
   /** A run stopped for passing the company's per-run time limit (BOS-846); "Raise the limit" lifts it by half. */
   | { type: "run_time_limit"; companyId: string; runId: string; minutes: number }
+  /** A company still at the old unchosen fence Off, on a runner that can fence (BOS-940): switch to Watch or keep Off. */
+  | { type: "fence_default" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -362,6 +368,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "engagement",
   "project_cap",
   "run_time_limit",
+  "fence_default",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
@@ -478,7 +485,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
       question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.${fix}`,
       options: [CHECK_AGAIN, CHECK_SEND_BACK],
       recommendedOption: CHECK_AGAIN,
-      tier: "owner",
+      // The CEO first, like a stuck check (BOS-1015): it can run the check again or send the work back; skipping the check stays the owner's.
+      tier: "ceo",
       dedupeKey: `merge-stuck:${t.id}`,
       // The one closer, on any tier: a retry card goes once its ticket finishes (DR-016, BOS-470).
       context: { type: "check_stuck", ticketId: t.id, command: "", output: why, clearWhen: [{ kind: "ticketDone", ticketId: t.id }] },
@@ -917,9 +925,16 @@ export type RetroHook = {
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" | "standing_rules" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
+/** How long a card's question can be in an "unblocked" wake; the answer itself is never cut (BOS-951). */
+const UNBLOCKED_QUESTION_MAX = 200;
+/** Past this, the wake carries a short line instead: the whole answer is on the ticket's conversation (BOS-951). */
+const UNBLOCKED_TOTAL_MAX = 800;
+const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conversation.";
+
 /**
  * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
  * decision's dependency row is already gone by then, so its question and answer come in as `answered`.
+ * The question is cut, never the answer: the answer is what the agent has to act on (BOS-951).
  */
 export async function unblockedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
   const blockers = await db
@@ -936,40 +951,121 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
         .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
         .where(inArray(ticketArtifacts.ticketId, ids))
     : [];
+  const asked = (question: string) => `${question.replace(/\s+/g, " ").trim().slice(0, UNBLOCKED_QUESTION_MAX)}${question.length > UNBLOCKED_QUESTION_MAX ? "…" : ""}`;
   const lines = blockers.flatMap((b) => {
     if (b.id) {
       const outs = made.filter((m) => m.ticketId === b.id).map((m) => m.slug ?? m.title);
       return [`- "${b.title}" is done.${b.note ? ` Its note: ${b.note}` : ""}${outs.length ? ` It produced: ${outs.join(", ")}.` : ""}`];
     }
-    return b.question && b.answer ? [`- You asked "${b.question}"; the answer was: ${b.answer}`] : [];
+    return b.question && b.answer ? [`- You asked "${asked(b.question)}"; the answer was: ${b.answer}`] : [];
   });
-  if (answered) lines.push(`- You asked "${answered.question}"; the answer was: ${answered.answer}`);
-  return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
+  if (answered) lines.push(`- You asked "${asked(answered.question)}"; the answer was: ${answered.answer}`);
+  if (!lines.length) return undefined;
+  const text = `What you were waiting on:\n${lines.join("\n")}`;
+  // A short note is sent whole. A long one keeps its first 800 characters, which now leaves room for the answer
+  // because the question above is cut; the whole thing is on the ticket's conversation either way (BOS-951).
+  return text.length <= UNBLOCKED_TOTAL_MAX ? text : `${text.slice(0, UNBLOCKED_TOTAL_MAX)}\n\n${UNBLOCKED_POINTER}`;
+}
+
+/**
+ * The owner's answer to a card that was holding a ticket up, written on that ticket's conversation (BOS-951).
+ * The wake that follows is short, so this is where the assignee reads the whole answer and note. Attributed to
+ * the owner on the ticket, as it is their words. Returns the tickets it wrote to; it never throws into the
+ * answer path, as the answer is already saved by then.
+ */
+async function postAnswerOnTickets(
+  db: Db,
+  d: { companyId: string; question: string; answer: string | null },
+  ticketIds: string[],
+  who: string,
+  note: string | undefined,
+  log: (message: string) => void,
+  now: () => Date,
+) {
+  if (!ticketIds.length) return [];
+  const answer = (d.answer ?? "").trim();
+  if (!answer) return [];
+  const lines = [`${who} answered your card on this ticket: ${answer}`];
+  if (note?.trim()) lines.push("", "Their note:", note.trim());
+  lines.push("", `The card asked: ${d.question.replace(/\s+/g, " ").trim().slice(0, 300)}${d.question.length > 300 ? "…" : ""}`);
+  const text = lines.join("\n");
+  const wrote: string[] = [];
+  for (const ticketId of [...new Set(ticketIds)]) {
+    try {
+      await db.insert(ticketMessages).values({ companyId: d.companyId, ticketId, author: "owner", agentId: null, runId: null, delivery: null, text });
+      await record(db, { companyId: d.companyId, ticketId, kind: "message", summary: `The owner's answer was posted here: ${answer}` });
+      wrote.push(ticketId);
+    } catch (err) {
+      log(`answering decision was saved, but the owner's answer couldn't be posted on ticket ${ticketId}: ${(err as Error).message}`);
+    }
+  }
+  return wrote;
 }
 
 /**
  * The owner's answer on a card that blocks a ticket settles that ticket's after-merge criteria (DR-024 #5):
- * the card was how the owner was to check the live work, so the answer is its pass or fail. The criterion's
- * own words are written into the state note with the verdict, so the done gate reads it like any other report.
- * Returns the tickets it wrote to; a ticket whose criteria were already reported is left as it is.
+ * the card was how the owner was to check the live work, so the answer is its pass or fail. Which criteria it
+ * settles is worked out from the card (its question and options) rather than from what is still unreported
+ * (BOS-963): on BOS-905 a card worded in its own way never recorded, and a second card after an earlier answer
+ * had written the criterion wrote nothing at all. The verdict goes on the note as a numbered line ("5 pass"),
+ * which the done gate reads however the criterion is worded; the owner's words are quoted too.
+ * Returns the tickets it wrote to.
  */
-async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
+async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null; options?: string[] | null; recommended?: string | null; criterionIndexes?: number[] | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
   const answer = (d.answer ?? "").trim();
   if (!ticketIds.length || !answer) return [];
   const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
-  // A problem word wins over a "yes"/"works"; anything with no pass word at all (an answer to a "How did
-  // it look?" card) is a fail, so the assignee has to look rather than the ticket closing on a shrug. The
-  // owner's plain words are quoted on the note either way.
-  const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
-  const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
-  const verdict = fail || !pass ? "fail" : "pass";
+  // Only a choice the owner made on purpose is a verdict (BOS-1091). An option is one: the recommended
+  // option is the card's passing answer whatever its wording (BOS-1056, "on"); another option counts by its
+  // pass or fail word, and on a card that names a recommended option, picking a different one is a fail.
+  // A one-word "pass"/"fail"/"yes"/"no" typed in is one too. Any other typed text is not judged: on
+  // BOS-1052 and BOS-993 the owner described a pass ("It answered in 1.7 s with a valid verdict", pasted
+  // panel text holding "not") and the old word test recorded both as fail and opened false follow-ups.
+  // Keyword-guessing free text either way could turn a real fail into a pass, so the note says the owner
+  // answered in their own words and leaves the criterion unreported: the done gate then makes the assignee
+  // (or the CEO) read the answer, which is on the ticket's conversation, and report it.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const isOption = (d.options ?? []).some((o) => norm(o) === norm(answer));
+  const chosenRecommended = !!d.recommended && norm(d.recommended) === norm(answer);
+  let verdict: "pass" | "fail" | null;
+  if (chosenRecommended) verdict = "pass";
+  else if (isOption) {
+    const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
+    const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
+    // With no recommended option and no pass or fail word, nothing says which way it counts.
+    if (!d.recommended && !fail && !pass) return [];
+    verdict = fail || !pass ? "fail" : "pass";
+  } else {
+    const bare = /^(pass|passed|fail|failed|yes|no)[.!]?$/i.exec(answer)?.[1]?.toLowerCase();
+    verdict = !bare ? null : bare.startsWith("fail") || bare === "no" ? "fail" : "pass";
+  }
   const said = answer.replace(/\s+/g, " ").slice(0, 200);
   const wrote: string[] = [];
   for (const r of rows) {
     const criteria = readCriteria(r.criteria);
     // Only a merged ticket has after-merge checks to settle; before that its own assignee reports them.
-    if (!r.merged || !unreportedAfterMerge(criteria, r.note).length) continue;
-    const line = `Owner answered "${d.question.split("\n")[0]!.slice(0, 120)}" (${by}): ${unreportedAfterMerge(criteria, r.note).map((c) => `"${c}" ${verdict}`).join("; ")} — "${said}"`;
+    if (!r.merged) continue;
+    // The criteria the raiser named on the card win (BOS-963): an exact link, whatever the wording. Failing
+    // that, the criteria the card's own words name, then the ones still unreported, as before.
+    const explicit = (d.criterionIndexes ?? []).filter((i) => i >= 0 && i < criteria.length && isAfterMerge(criteria[i]!));
+    const named = explicit.length ? explicit : criteriaForCard(criteria, d.question, d.options ?? []);
+    const settle = named.length ? named : unreportedAfterMerge(criteria, r.note).flatMap((text) => criteria.flatMap((c, i) => (criterionText(c) === text ? [i] : [])));
+    if (!settle.length) continue;
+    if (verdict === null) {
+      // No pass or fail word, no question and no criterion words here: readVerdicts reads a verdict from any
+      // sentence holding a criterion's words, so this line must not read as one. The owner's own words are
+      // already on the ticket's conversation (postAnswerOnTickets).
+      const nums = settle.map((i) => i + 1).join(" and ");
+      const line = `The owner answered a card on criterion ${nums} in their own words rather than choosing an option, so Boss Man records no verdict: read their answer on the ticket's conversation and report criterion ${nums}`;
+      await db.update(tickets).set({ stateNote: `${(r.note ?? "").trim()}${r.note ? ". " : ""}${line}`.slice(0, 4000), stateNoteAt: now() }).where(eq(tickets.id, r.id));
+      wrote.push(r.id);
+      continue;
+    }
+    // Numbered, so the verdict holds whatever the criterion's wording: "5 pass". The criteria's own words
+    // are quoted after it so a reader sees what was checked.
+    const numbered = settle.map((i) => `${i + 1} ${verdict}`).join("; ");
+    const cue = settle.map((i) => `"${criterionText(criteria[i]!)}"`).join("; ");
+    const line = `Owner answered "${d.question.split("\n")[0]!.slice(0, 120)}" (${by}): ${numbered} — ${cue} — "${said}"`;
     await db.update(tickets).set({ stateNote: `${(r.note ?? "").trim()}${r.note ? ". " : ""}${line}`.slice(0, 4000), stateNoteAt: now() }).where(eq(tickets.id, r.id));
     wrote.push(r.id);
   }
@@ -995,6 +1091,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
+
+  // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
+  // dashboard share one walk of the ranked queue instead of one each. Cleared on every answer.
+  // shortcut: a 5-second copy, cleared on every answer; lost on restart, harmless because the next
+  // read simply walks the queue again.
+  const TALLY_CACHE_MS = 5_000;
+  const tallyCache = new Map<string, { tally: { open: number; waiting: number }; until: number }>();
+  const clearTallyCache = () => tallyCache.clear();
 
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
   async function stallEvidence(runId: string) {
@@ -1041,7 +1145,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on is resolved", now: now() });
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
@@ -1095,6 +1199,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
       const problem = await retroHook?.problemReverting(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "fence_default") {
+      const problem = await checkFenceAnswer(db, d.companyId, answer);
       if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Write the corrected lesson in the note box.");
@@ -1712,7 +1820,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
       // Ordering links may only point at open cards in the raiser's own company (BOS-625).
       const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
       const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
@@ -1729,7 +1837,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
@@ -1755,6 +1863,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
+      // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
+      clearTallyCache();
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
       return { ...raised, droppedLinks };
     },
@@ -1961,11 +2071,74 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /**
+     * One card by id, settled or not (BOS-951): after an answer it drops off the open list, and the owner
+     * and the CEO still need to read the question, the full answer and note. Null when the company doesn't hold it.
+     */
+    async cardById(id: string, companyId: string) {
+      const [row] = await db
+        .select({ d: decisions, raisedBy: agents.name })
+        .from(decisions)
+        .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
+        .where(and(eq(decisions.id, id), eq(decisions.companyId, companyId)));
+      if (!row) return null;
+      const d = row.d;
+      const about = await decisionTicketIds(db, d);
+      const ticketsAbout = about.length
+        ? await db
+            .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+            .from(tickets)
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .where(and(eq(tickets.companyId, companyId), inArray(tickets.id, about)))
+        : [];
+      return {
+        id: d.id,
+        kind: d.kind,
+        status: d.status,
+        question: d.question,
+        options: d.options as string[],
+        recommended: d.recommendedOption,
+        answer: d.answer,
+        answerNote: (d.context as { settled?: { note?: string | null } }).settled?.note ?? (d.context as { answerNote?: string | null }).answerNote ?? null,
+        answeredAt: d.answeredAt,
+        settledBy: (d.context as { settled?: { name?: string } }).settled?.name ?? null,
+        raisedBy: row.raisedBy ?? "Boss Man",
+        tickets: ticketsAbout.map((t) => ({ id: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) })),
+        context: d.context,
+        createdAt: d.createdAt,
+      };
+    },
+
+    /**
      * The owner's queue (R20): every open decision with what it holds up, down the chain,
      * ranked by an explainable score. `includeAll` is the CEO's view (BOS-149): every open card
      * in the company, any tier, including lesson cards and cards still with the CEO or the
      * Scrum Master. `companyId` narrows that view to one company.
      */
+    /**
+     * What the owner has to do now (BOS-969). The number on the Decisions menu and the page's heading
+     * must never drift, so both take it from here, over the same rows and the same rule as the list:
+     * a card is actionable when it is not in the "Waiting, nothing to do yet" group. It walks the
+     * owner's own queue (CEO-tier and lesson cards are left out there, so they wait for the ladder).
+     * `companyId` narrows it to one company. (BOS-996) The page no longer sends its own figures: the
+     * tally is the server's alone, and the heading reads the same number the menu does. The tally is
+     * kept for a few seconds per view, so the menu badge, the page heading and the dashboard's
+     * "need your answer" figure, polling together, share one walk of the ranked queue rather than
+     * three. `now()` is the service's clock, so a test can step past the window.
+     */
+    async queueTally(opts: { includeAll?: boolean; companyId?: string } = {}): Promise<{ open: number; waiting: number }> {
+      const key = opts.includeAll ? "*" : (opts.companyId ?? "");
+      const hit = tallyCache.get(key);
+      if (hit && hit.until > now().getTime()) return hit.tally;
+      const query: { includeAll?: boolean; companyId?: string } = {};
+      if (opts.includeAll) query.includeAll = true;
+      if (opts.companyId) query.companyId = opts.companyId;
+      const rows = (await this.queue(query)) as unknown as Array<{ waiting?: string | null }>;
+      const waiting = rows.filter((r) => !!r.waiting).length;
+      const tally = { open: rows.length - waiting, waiting };
+      tallyCache.set(key, { tally, until: now().getTime() + TALLY_CACHE_MS });
+      return tally;
+    },
+
     async queue(opts: { includeAll?: boolean; companyId?: string } = {}) {
       const t = now();
       const open = await db
@@ -2419,7 +2592,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             recommendedOption: input.recommended,
             raisedByAgentId: d.raisedByAgentId,
             // The card says the CEO wrote it and points back at the original (advice.replaces).
-            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+            // A card that held its ticket's merge still does once reworded (BOS-1078): the hold moves with the link below.
+            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.lint ? { lint: input.lint } : {}), ...((d.context as { holdsMerge?: boolean } | null)?.holdsMerge ? { holdsMerge: true as const, ...((d.context as { ticketId?: string }).ticketId ? { ticketId: (d.context as { ticketId?: string }).ticketId } : {}) } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
           return true;
@@ -2633,6 +2807,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) The queue changed: the badge, the heading and the dashboard read it afresh next poll.
+      clearTallyCache();
       if (!d) {
         // A sign-off the owner pressed twice (or the CEO settled) is already answered, and the ticket page's
         // Approve and merge still merges it rather than refusing on a card that is no longer open (BOS-471).
@@ -2708,6 +2884,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
         settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
       }
+      // The owner's own note is kept on the card too (BOS-951), so a card read by id after it drops off the queue
+      // shows it beside the answer. `settled` covers the CEO's note; this is the owner's, kept whole in the card.
+      const ownerNote = !extra.settledBy && extra.note?.trim() ? extra.note.trim().slice(0, 4000) : null;
       // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
       // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
       // closes the race where the ladder hands the open card to the owner between the CEO reading it
@@ -2724,7 +2903,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer,
           answeredAt: now(),
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || ctx.type === "review_stall" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
-          ...(extra.handled ? { context: mergeContext({ advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } }) } : settled ? { context: mergeContext({ settled }) } : {}),
+          ...(extra.handled
+            ? { context: mergeContext({ advice: { ...adviceOf(d.context), state: "handled", ...extra.handled }, ...(ownerNote ? { answerNote: ownerNote } : {}) }) }
+            : settled
+              ? { context: mergeContext({ settled }) }
+              : ownerNote
+                ? { context: mergeContext({ answerNote: ownerNote }) }
+                : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
@@ -2746,6 +2931,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!closed) return null;
       // The card is settled, so its notification is read now rather than on the next feed poll (BOS-413).
       await markDecisionNotificationRead(db, id, now());
+
+      // The owner's answer goes on the conversation of every ticket the card was about (BOS-951): the wake
+      // that follows is short, so this is where the assignee reads the whole answer and note, whether the
+      // card was a plain question or a system one (a host check, a sign-off, a review loop).
+      if (!extra.settledBy) {
+        try {
+          await postAnswerOnTickets(db, { companyId: d.companyId, question: d.question, answer }, await decisionTicketIds(db, d), extra.by === "ceo" ? "The CEO" : "The owner", extra.note, log, now);
+        } catch (err) {
+          log(`answering decision ${id} was saved, but posting it on its tickets failed: ${(err as Error).message}`);
+        }
+      }
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
@@ -2934,6 +3130,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "run_time_limit") {
         // Only lifts a limit that is still the one the card was about, so a limit the owner changed meanwhile isn't overwritten.
         if (answer === "Raise the limit") await db.update(companies).set({ maxRunMinutes: Math.min(10080, Math.ceil(ctx.minutes * 1.5)) }).where(and(eq(companies.id, d.companyId), eq(companies.maxRunMinutes, ctx.minutes)));
+      } else if (ctx.type === "fence_default") {
+        await applyFenceAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
@@ -2998,15 +3196,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // question isn't the owner looking at the host, and the assignee still reports that one.
       if (!extra.settledBy && ctx.type === "question") {
         try {
-          await recordOwnerHostChecks(db, { question: d.question, answer }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
+          await recordOwnerHostChecks(db, { question: d.question, answer, options: d.options as string[] | null, recommended: d.recommendedOption, criterionIndexes: (ctx as { criterionIndexes?: number[] }).criterionIndexes ?? null }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
         } catch (err) {
           // The answer is saved; a failed write here must not stop it reaching the asker.
           log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
         }
       }
-      // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
-      const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      // The activity line is cut at 300 characters, and the brief shows 100, so a long question is shortened here to
+      // keep the answer in it (BOS-951 criterion 3: the whats_new line shows the option chosen, not only the question).
+      const asked = d.question.length > 80 ? `${d.question.slice(0, 79)}…` : d.question;
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${asked}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       // Linked tickets the card never moved (BOS-919: one in review keeps its state): not released, but still
       // the ticket the answer is about, so the asker is woken on it and its assignee hears the answer too.
@@ -3041,6 +3240,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
     async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      // (BOS-996) A withdrawal changes the queue; clear the kept tally before anything reads it again.
+      clearTallyCache();
       if (!d) return null;
       if (!actor.agentId || d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only withdraw a decision you raised.");
       // Only a question asked through raise_decision may be taken back. System cards that also

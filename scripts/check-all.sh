@@ -41,7 +41,13 @@ scratch_log() {
   if [ -z "$out" ]; then
     [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
     tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$tmp" 2>/dev/null || return 0
+    if ! { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+      # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
+      # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
+      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
+      echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
+    fi
   fi
   if [ -z "$tmp" ]; then
     [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
@@ -120,10 +126,16 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
     rc=0; : >"$began_file"; attempt_start=$SECONDS; rm -rf "${times_dir:?}"/* 2>/dev/null || true
     # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" BOSSMAN_CHECK_TIMES_DIR="$times_dir" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    # tee runs on its own descriptor so we can wait for it: a bare `wait` doesn't wait for a process substitution that
+    # isn't $!, so the EAGAIN grep below could read the log before tee wrote it and skip a retry (CI: "ran 2 times, want 3").
+    # The child closes that descriptor, so a process it leaves behind can't hold tee open; the wait is bounded anyway.
+    exec {log_fd}> >(tee "$log")
+    tee_pid=$!
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" BOSSMAN_CHECK_TIMES_DIR="$times_dir" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" >&"$log_fd" 2>&1 {log_fd}>&- &
     child=$!
     wait "$child" || rc=$?
-    wait 2>/dev/null || true  # let tee finish writing the log
+    exec {log_fd}>&-
+    for _ in $(seq 100); do kill -0 "$tee_pid" 2>/dev/null || break; sleep 0.1; done  # let tee finish writing the log (at most 10 s)
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; scratch_log "$log" 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.

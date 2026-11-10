@@ -17,7 +17,7 @@ function resolves(dist, target) {
 
 export function checkSite(dist, { siteUrl = "" } = {}) {
   const problems = [];
-  const pages = readdirSync(dist).filter((f) => f.endsWith(".html"));
+  const pages = readdirSync(dist, { recursive: true }).map(String).filter((f) => f.endsWith(".html")).sort();
   if (pages.length === 0) problems.push("no pages found in " + dist);
 
   const internal = (page, kind, url) => {
@@ -46,12 +46,26 @@ export function checkSite(dist, { siteUrl = "" } = {}) {
     const h1s = (html.match(/<h1[\s>]/gi) ?? []).length;
     if (h1s !== 1) problems.push(`${page}: has ${h1s} h1 headings, expected 1`);
     if (!/id="main"/.test(html)) problems.push(`${page}: no #main target for the skip link`);
+    // The Content-Security-Policy allows only the site's own files, so an inline style or script would silently not apply.
+    if (/<style[\s>]/i.test(html) || /\sstyle=["']/i.test(html)) problems.push(`${page}: inline style (the Content-Security-Policy blocks it)`);
+    if (/<script(?![^>]*\ssrc=)[^>]*>/i.test(html)) problems.push(`${page}: inline script (the Content-Security-Policy blocks it)`);
+    // Heading order: the first heading is the h1 and no level is skipped on the way down.
+    let level = 0;
+    for (const m of html.matchAll(/<h([1-6])[\s>]/gi)) {
+      const n = Number(m[1]);
+      if (level === 0 && n !== 1) problems.push(`${page}: the first heading is an h${n}, expected h1`);
+      else if (n > level + 1 && level !== 0) problems.push(`${page}: heading jumps from h${level} to h${n}`);
+      level = n;
+    }
 
     for (const img of tags("img")) {
       const src = attr(img, "src");
       if (attr(img, "alt") === undefined) problems.push(`${page}: image ${src} has no alt attribute`);
       if (!attr(img, "width") || !attr(img, "height")) problems.push(`${page}: image ${src} has no width and height`);
       internal(page, "image", src);
+    }
+    for (const source of tags("source")) {
+      for (const candidate of (attr(source, "srcset") ?? "").split(",")) internal(page, "image", candidate.trim().split(/\s+/)[0]);
     }
     for (const a of tags("a")) {
       const href = attr(a, "href");

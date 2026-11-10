@@ -1,7 +1,7 @@
 // Ticket dependencies (BOS-86 round 12): one guarded writer for every row in `ticket_dependencies`
 // and every move it makes. Rounds 8-12 closed one route at a time; this is the data layer, so a new
 // tool or service can't reopen the hole by forgetting its own check.
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, tickets, ticketDependencies } from "../db/schema.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
@@ -18,6 +18,14 @@ export class WorkError extends Error {
   }
 }
 
+/**
+ * Whether a ticket blocker has finished for the ticket waiting on it (BOS-989): done always counts; a link
+ * that waits "until merged" is also free once the blocker's merge commit is on main.
+ */
+export function ticketBlockerFinished(d: { ticketState: string | null; mergeCommit: string | null; until: string }): boolean {
+  return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
+}
+
 /** Who is asking for the link: an agent's run, or the system acting on its own (loop guards, risk sign-off). */
 export type LinkActor = { type: "agent"; agentId: string | null } | { type: "system" };
 
@@ -28,6 +36,8 @@ export type DependencyWrite = {
   blockerDecisionId?: string | null;
   blockerEngagementId?: string | null;
   actor: LinkActor;
+  /** For a ticket blocker: finished when it is merged or when it is done (BOS-989). Default done, as links always were. */
+  until?: "merged" | "done";
   /** Move the blocked ticket to blocked in the same call (a decision or a loop guard holding it). */
   hold?: boolean;
   now?: () => Date;
@@ -83,6 +93,7 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
       blockerTicketId: input.blockerTicketId ?? null,
       blockerDecisionId: input.blockerDecisionId ?? null,
       blockerEngagementId: input.blockerEngagementId ?? null,
+      until: input.blockerTicketId ? (input.until ?? "done") : "done",
     })
     .returning();
   if (input.hold) {
@@ -94,7 +105,7 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
       ticketId: input.blockedTicketId,
       from: input.actor.type === "agent" ? ["backlog", "ready", "in_progress", "blocked"] : undefined,
       to: "blocked",
-      reason: input.blockerTicketId ? "held by a ticket it depends on" : input.blockerDecisionId ? `held by the card ${input.blockerDecisionId}` : "held by an engagement",
+      reason: input.blockerTicketId ? "Boss Man: held by a ticket it depends on" : input.blockerDecisionId ? `Waiting on the owner's card ${input.blockerDecisionId}` : "Boss Man: held by an engagement",
       now: (input.now ?? (() => new Date()))(),
     });
   }
@@ -102,17 +113,26 @@ export async function addTicketDependency(db: Db, input: DependencyWrite) {
 }
 
 /**
- * An open card that holds this ticket's merge (BOS-919): a question raised against it (raise_decision with
- * blocksTicketId) or a stuck-review card. The carried-work card is left out on purpose: Boss Man starts that
- * merge again by itself once the carried ticket lands (BOS-733), whether or not the owner pressed "Got it".
- * The owner's sign-off card has its own check.
+ * Which linked cards hold an approved ticket's merge (BOS-1078). The one rule, used by the merge gate
+ * (openHoldingCard) and the Merge queue screen alike, so the screen can never name a card the gate ignores:
+ * - the stuck-review guard (`review_loop`), the system's own stop;
+ * - an agent's card raised with `holdsMerge` (raise_decision with blocksTicketId and holdsMerge: true): the
+ *   raiser said on purpose that it must be answered before the code goes in.
+ * Any other card linked to the ticket (a plain question, an owner to-do, an after-merge check, a plan card)
+ * stays linked, so it is still in the owner's queue and the Your review lane, but it does not hold the merge:
+ * the reviews and the owner's sign-off are the merge's gate (BOS-919 had kept every question as a hold).
+ * The owner's sign-off card, a reviewer's hold and the merge's own cards have their own checks. The carried-work
+ * card is left out on purpose: Boss Man starts that merge again by itself once the carried ticket lands (BOS-733).
  */
+export const holdsMergeSql = sql`(${decisions.context}->>'type' = 'review_loop' or (${decisions.context}->>'type' = 'question' and ${decisions.context}->>'holdsMerge' = 'true'))`;
+
+/** An open card that holds this ticket's merge (see holdsMergeSql), or null. */
 export async function openHoldingCard(db: Db, ticketId: string): Promise<string | null> {
   const [d] = await db
     .select({ id: decisions.id })
     .from(ticketDependencies)
     .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), inArray(sql`${decisions.context}->>'type'`, ["question", "review_loop"])))
+    .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open"), holdsMergeSql))
     .limit(1);
   return d?.id ?? null;
 }

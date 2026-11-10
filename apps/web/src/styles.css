@@ -170,6 +170,8 @@ p { margin: 0; }
 .score-legend .swatch { display: inline-block; width: 12px; height: 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: grid; grid-template-columns: 88px minmax(0, 1fr); }
+/* The card a link opened (#/decisions/<id>, BOS-1078). */
+.decision.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
 .decision .score { padding: 18px 0 18px 20px; display: flex; flex-direction: column; gap: 8px; }
 .decision .score b { font-family: var(--mono); font-size: 26px; font-weight: 500; line-height: 1; }
 .decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
@@ -338,6 +340,13 @@ textarea { font: inherit; padding: 8px 12px; border: 1px solid var(--line-strong
 @media (max-width: 640px) { .steps { grid-template-columns: 1fr 1fr; } }
 
 .codebox { margin: 0; padding: 10px 12px; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; font-size: 13px; overflow-x: auto; overflow-y: hidden; white-space: pre-wrap; word-break: break-all; }
+/* Read-only text the owner reads but can't type in (standing rules, agent instructions in an import
+   preview). It used to be a <pre> with an inline `background: var(--panel, #f6f6f6)`, but --panel was
+   never defined, so the box fell back to near-white under the dark theme's pale text (BOS-1050). The
+   colours live here now: a quiet inset panel in the card's family, in body text colour. */
+.readonly-text { margin: 0; padding: 12px; background: var(--field); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
+/* The text is in a span, so an empty box collapses to nothing instead of showing a blank strip. */
+.readonly-text.readonly-text-empty { display: none; }
 .linkish { background: none; border: 0; padding: 0; color: var(--link); text-decoration: underline; cursor: pointer; font: inherit; }
 code { font-family: var(--mono); font-size: 0.92em; }
 
@@ -460,6 +469,73 @@ details > summary { cursor: pointer; font-size: 14px; }
 .tabs .tab-count { font-family: var(--mono); font-size: 12px; min-width: 22px; padding: 1px 6px; border-radius: 999px; background: var(--grey-soft); color: var(--muted); text-align: center; }
 .tabs button[aria-selected="true"] .tab-count { background: var(--accent-soft); color: var(--accent-ink); }
 
+/* ---------- Settings menu (BOS-1019, from BOS-1018 §3) ---------- */
+/* A menu of pages, each with its own URL: a list of links, not a tablist. Below 900 px the address
+   #/settings opens on the menu itself, and a page starts with "‹ Settings" at the top. */
+.set-layout { display: flex; flex-direction: column; gap: 18px; margin-top: 18px; }
+.set-nav { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.set-group { display: flex; flex-direction: column; gap: 6px; }
+.set-group-label { font-family: var(--sans); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; padding: 0 4px; }
+.set-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-nav li > a { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 12px; border-radius: 8px; border-left: 4px solid transparent; color: var(--ink); text-decoration: none; font-size: 15px; font-weight: 500; }
+.set-nav li > a:hover { background: var(--grey-soft); }
+.set-nav li > a[aria-current="page"] { background: var(--accent-soft); border-left-color: var(--accent); font-weight: 700; color: var(--accent-ink); }
+.set-nav li > a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.set-item-label { flex: 1 1 auto; min-width: 0; }
+/* The one-line hint shows on the phone menu and as the page's help line; a menu row on a wide screen is just the name. */
+.set-item-hint { display: none; color: var(--muted); font-size: 13px; font-weight: 400; }
+.set-item-chevron { color: var(--muted); font-size: 20px; line-height: 1; }
+.set-wizard .btn { width: 100%; }
+.set-head-wizard .btn { white-space: nowrap; }
+.set-back { display: none; align-items: center; min-height: 44px; color: var(--muted); text-decoration: none; font-size: 15px; }
+.set-back:hover { color: var(--ink); }
+.set-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* A select must be allowed to shrink below its longest option's text, or a long option widens the page (BOS-1044). */
+.set-page select { max-width: 100%; min-width: 0; }
+/* The Watchdog's limit rows: on a phone the long label takes its own line, so the page never scrolls sideways (BOS-1044). */
+.wd-limits { display: grid; grid-template-columns: max-content 90px max-content; gap: 8px 10px; align-items: center; }
+@media (max-width: 640px) {
+  .wd-limits { grid-template-columns: 90px minmax(0, 1fr); }
+  .wd-limits label { grid-column: 1 / -1; }
+}
+/* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
+.page-head h1:focus { outline: none; }
+.set-scope { margin-left: 10px; vertical-align: middle; }
+.set-jump { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
+.set-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.set-jump a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
+
+@media (min-width: 900px) {
+  .set-layout { display: grid; grid-template-columns: 228px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .set-nav { position: sticky; top: 16px; align-self: start; }
+  .set-nav li > a { min-height: 40px; padding: 8px 12px; }
+  .set-nav .set-wizard { display: none; }
+  .set-head-wizard { display: none; }
+  .set-jump a { min-height: 24px; }
+}
+/* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */
+@media (pointer: coarse) {
+  .set-nav li > a, .set-jump a { min-height: 44px; }
+}
+@media (max-width: 899px) {
+  /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
+  .set-back { display: inline-flex; }
+  /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
+  .set-nav li > a { min-height: 56px; flex-wrap: wrap; }
+  .set-item-label { flex: 0 0 100%; }
+  .set-item-hint { display: block; flex: 1 1 auto; }
+  .set-nav li > a { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; row-gap: 2px; }
+  .set-item-label { grid-column: 1; grid-row: 1; }
+  .set-item-hint { grid-column: 1; grid-row: 2; }
+  .set-item-chevron { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  .set-head-wizard { display: none; }
+  .set-nav .set-wizard { margin-top: 8px; }
+  .set-jump a { min-height: 44px; }
+  .set-page .field .btn, .set-page .btn.primary { min-height: 44px; }
+}
+/* The menu itself is the only page footer; the wizard sits under it (wide screens put it top right). */
+@media (min-width: 900px) { .set-layout .set-wizard { display: none; } }
+
 /* ---------- Roadmap cards (Now / Next / Later) ---------- */
 .rm-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .rm-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 8px; background: var(--card); }
@@ -512,6 +588,16 @@ label.chip:focus-within { outline: 2px solid var(--accent); outline-offset: 2px;
 .insight-list li:last-child { border-bottom: 0; padding-bottom: 0; }
 table.features td, table.features th { padding: 8px 10px; vertical-align: middle; }
 table.features tr.group th { padding-top: 16px; font-family: var(--sans); font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink); background: var(--ground); }
+/* A feature's tasks fold behind its arrow, and the WORK summary opens them too (BOS-956). */
+.feature-fold { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.feature-fold:hover { text-decoration: underline; }
+.feature-work { white-space: nowrap; }
+/* What visitors read as a feature's portal title, under its name (BOS-997). The title line is cut at two lines and the
+   "from the summary" note always shows under it, so a long summary can't stretch the table and the note is never lost. */
+.feature-visitors { font-size: 12px; white-space: normal; }
+.feature-visitors small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; }
+.feature-visitors small.muted { font-size: 11px; }
+.feature-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input.search { flex: 1; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); }
 
 .inbox { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }
@@ -544,6 +630,17 @@ blockquote.selected { background: var(--amber-soft); border-left-color: var(--am
 .portal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .portal-card { display: flex; flex-direction: column; gap: 10px; }
 .portal-card h3 { font-size: 17px; font-weight: 600; }
+/* The way back to the owner's website (BOS-967): a bar above the portal, and the same link under it. */
+.portal-back-bar { background: var(--side-raised); border-bottom: 1px solid var(--line); }
+.portal-back-wrap { max-width: 880px; margin: 0 auto; padding: 0 16px; }
+.portal-back { display: inline-flex; align-items: center; gap: 6px; min-height: 48px; color: var(--head); font-weight: 600; text-decoration: none; }
+.portal-back:hover { color: #fff; text-decoration: underline; }
+.portal-back-foot { border-top: 1px solid var(--line); padding-top: 16px; }
+.portal-back-foot .portal-back { min-height: 32px; }
+@media (max-width: 480px) {
+  .portal-back { display: flex; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .portal-back > span { flex: none; }
+}
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 

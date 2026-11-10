@@ -7,7 +7,10 @@ import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
-import { Credentials, Funding, ProjectRow, Runner } from "./Settings";
+import { Credentials } from "./settings/Credentials";
+import { Funding } from "./settings/Funding";
+import { ProjectRow } from "./settings/Projects";
+import { Runner } from "./settings/Runner";
 
 type Progress = { dismissed: boolean; step: number; companyId: string | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };

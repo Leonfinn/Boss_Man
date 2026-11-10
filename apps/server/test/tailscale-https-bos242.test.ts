@@ -34,19 +34,19 @@ describe("BOS-242 https through the trusted hop", () => {
 
   it("still logs in over plain LAN http, without Secure", async () => {
     const { login } = await setup();
-    const r = await login("192.168.68.20");
+    const r = await login("192.168.1.20");
     expect(r.statusCode).toBe(200);
     expect(session(r)?.secure).toBeFalsy();
   });
 
   it("ignores spoofed forwarded headers from an untrusted address", async () => {
     const { login } = await setup();
-    const r = await login("192.168.68.20", { "x-forwarded-proto": "https", "x-forwarded-for": "100.64.0.9" });
+    const r = await login("192.168.1.20", { "x-forwarded-proto": "https", "x-forwarded-for": "100.64.0.9" });
     expect(r.statusCode).toBe(200);
     expect(session(r)?.secure).toBeFalsy();
     // Rotating a spoofed client address must not dodge the per-address limit (a different username each time, so only the address counts).
-    for (let i = 0; i < 3; i++) await login("192.168.68.21", { "x-forwarded-for": `10.9.9.${i}` }, "wrong password here", `guess${i}`);
-    expect((await login("192.168.68.21", { "x-forwarded-for": "10.9.9.99" }, "wrong password here", "guess9")).statusCode).toBe(429);
+    for (let i = 0; i < 3; i++) await login("192.168.1.21", { "x-forwarded-for": `10.9.9.${i}` }, "wrong password here", `guess${i}`);
+    expect((await login("192.168.1.21", { "x-forwarded-for": "10.9.9.99" }, "wrong password here", "guess9")).statusCode).toBe(429);
   });
 
   it("limits logins per client behind the hop, not for everyone", async () => {

@@ -1,0 +1,1 @@
+ALTER TABLE "ticket_dependencies" ADD COLUMN "until" text DEFAULT 'done' NOT NULL;

@@ -43,6 +43,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "checking an old card": "scheduled",
   "live release": "scheduled",
   "review hold ready": "scheduled",
+  // The merge queue tells the CEO a card holding a merge looks stale (BOS-1078).
+  "merge held by a stale card": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

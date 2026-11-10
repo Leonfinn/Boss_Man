@@ -27,6 +27,7 @@ import { promisify } from "node:util";
 import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
+import { withoutCoreDumps } from "./no-core.js";
 import { checkMigrations, journalAt, journalProblems, rebaseMigrations } from "./migrations.js";
 import { checkSignoffCovers, type SignoffCover } from "./signoff-covers.js";
 
@@ -1246,7 +1247,7 @@ export class Workspaces {
   private jobFenceFor(repo: string, dir: string, home: string): { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } {
     const tmp = path.join(home, "tmp");
     mkdirSync(tmp, { recursive: true });
-    const env: Record<string, string> = { HOME: home, TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
+    const env: Record<string, string> = { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
     const readWrite: string[] = [];
     if (this.jobFence?.pnpmStore) {
       mkdirSync(this.jobFence.pnpmStore, { recursive: true });
@@ -1254,7 +1255,24 @@ export class Workspaces {
       readWrite.push(this.jobFence.pnpmStore);
     }
     if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
-    const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const pathDirs = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const readOnly = [...pathDirs];
+    // BOS-1039: a PATH entry is often a folder of links (npm's bin/ holds opencode -> ../lib/node_modules/opencode-ai/bin/...).
+    // Landlock checks the real file, so a grant on the link's folder alone leaves the binary unreadable and a check that runs
+    // a fenced agent fails with "permission denied". Grant the real folder of each agent binary found on PATH, read-only.
+    for (const name of ["opencode", "claude", "codex"]) {
+      for (const d of pathDirs) {
+        try {
+          const real = realpathSync(path.join(d, name));
+          if (statSync(real).isFile()) {
+            readOnly.push(path.dirname(real));
+            break;
+          }
+        } catch {
+          // not in this folder
+        }
+      }
+    }
     // BOS-805: the job waits in the shared check line, so it may write the queue folder and read the gate folder (slot count).
     if (this.coordDir) {
       const grant = checkQueueGrant(this.coordDir);
@@ -1311,7 +1329,8 @@ export class Workspaces {
       // the shared one: the fenced check may write its store, and the unfenced gate must never install from one it could write.
       if (fence && !job && this.checkFence) ({ env, launch, tmp } = this.fenceCheck(fenceProject, dir, env, launch));
       const fenced = fence ? { fenced: tmp !== null } : {};
-      const child = spawn(launch.bin, launch.args, {
+      const noCore = withoutCoreDumps(launch);
+      const child = spawn(noCore.bin, noCore.args, {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -1397,7 +1416,7 @@ export class Workspaces {
     // (.gitconfig, .npmrc) that a later ticket's check would run with write access to its copy (Jane's finding).
     const checkHome = path.join(tmp, "home");
     mkdirSync(checkHome);
-    const out: NodeJS.ProcessEnv = { ...env, HOME: checkHome, TMPDIR: tmp };
+    const out: NodeJS.ProcessEnv = { ...env, HOME: checkHome, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp };
     const readWrite: string[] = [];
     const readOnly = [this.baseEnv.NPM_CONFIG_PREFIX, this.baseEnv.PLAYWRIGHT_BROWSERS_PATH].filter((p): p is string => !!p);
     if (pnpmStore) {

@@ -62,6 +62,8 @@ export function mergeJamService(
     view: (companyId: string) => Promise<MergeQueueView>;
     /** Returns the owner's notification as delivered (its `level` after quiet hours), or null when none was written. */
     notify: (input: { companyId: string; level: "note" | "flag" | "page"; title: string; body: string; link: string }) => Promise<{ id: string; level: string } | null>;
+    /** Wakes the company's CEO on a ticket with a note (BOS-1078: a card holding a merge looks stale); without it nothing is sent. */
+    tellCeo?: (input: { companyId: string; ticketId: string; note: string }) => Promise<unknown>;
     now?: () => Date;
   },
 ) {
@@ -104,6 +106,32 @@ export function mergeJamService(
     };
   }
 
+  /**
+   * A card holding an approved merge that looks stale (BOS-1078: it names a ticket that is done now) is put to the
+   * CEO once per card, to check and withdraw or answer. Only a hint: nothing is closed by itself.
+   */
+  async function flagStaleHolds(companyId: string, view: MergeQueueView) {
+    if (!deps.tellCeo) return;
+    for (const w of view.waiting) {
+      const card = w.card;
+      if (!card?.staleHint || card.kind !== "hold") continue;
+      const key = `merge_hold_stale:${card.id}`;
+      const [seen] = await db.select({ key: settings.key }).from(settings).where(eq(settings.key, key));
+      if (seen) continue;
+      // Claimed before telling, so two passes can't both send it.
+      const claimed = await db.insert(settings).values({ key, value: { at: now().toISOString(), ticketId: w.ticketId } }).onConflictDoNothing().returning({ key: settings.key });
+      if (!claimed.length) continue;
+      const ref = w.ref ?? `"${w.title}"`;
+      await deps
+        .tellCeo({
+          companyId,
+          ticketId: w.ticketId,
+          note: `${ref} is approved${w.signedOffAt ? " and signed off" : ""}, but its merge is held by ${card.raisedBy ?? "Boss Man"}'s card ${card.id}: "${card.question}". ${card.staleHint} Check it: if it's no longer needed, ask ${card.raisedBy ?? "its raiser"} to withdraw it (or withdraw it yourself if its ticket is finished) so the merge goes on; if it is still needed, leave it.`,
+        })
+        .catch(() => undefined);
+    }
+  }
+
   return {
     /** One pass for every company with a jam going, or unpaused: the first alert, the reminder, or the all-clear. Safe to call often. */
     async run(): Promise<{ alerted: number; reminded: number; cleared: number }> {
@@ -118,6 +146,7 @@ export function mergeJamService(
         // A failing read leaves the episode as it is: the next pass tries again.
         const view = await deps.view(companyId).catch(() => null);
         if (!view) continue;
+        await flagStaleHolds(companyId, view);
         const jam = jammedRows(view);
         const jammed = jam.running.length + jam.waiting.length;
         // Merges moving again, and the owner was told about the jam: one quiet note, and the jam alerts

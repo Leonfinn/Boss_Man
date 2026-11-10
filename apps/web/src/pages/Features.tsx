@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { featureHorizon, HORIZONS, type Horizon } from "@boss-man/shared";
+import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
   FEATURE_STATUS_LABEL,
@@ -282,13 +282,83 @@ function AddFeature({ companyId, areas, onAdded }: { companyId: string; areas: A
 type Sort = "priority" | "demand" | "newest";
 const ACTIVE: FeatureStatus[] = ["idea", "considering", "planned", "in_progress"];
 
-function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+// (BOS-956) Each feature's tasks are folded behind the arrow and the choice stays in this browser,
+// like the "This host" fold (BOS-924). Every read and write is wrapped: private browsing can refuse
+// localStorage, and the list must still work when it does.
+const FEATURE_OPEN_KEY = "bossman.features.open";
+function readFeatureOpen(): { ids: string[] } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(FEATURE_OPEN_KEY) ?? "") as { ids?: unknown };
+    return { ids: Array.isArray(saved.ids) ? saved.ids.filter((x): x is string => typeof x === "string") : [] };
+  } catch {
+    return { ids: [] };
+  }
+}
+function saveFeatureOpen(state: { ids: string[] }) {
+  try {
+    localStorage.setItem(FEATURE_OPEN_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+/** The WORK column in plain words: done of all tasks (cancelled ones count for neither), and any blocked. */
+export function taskSummary(f: Feature): string {
+  const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
+  if (!live.length) return "–";
+  const done = live.filter((t) => t.state === "done").length;
+  const blocked = live.filter((t) => t.state === "blocked").length;
+  return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
+}
+
+/** What a visitor reads as the feature's title on the portal, shown under the feature's name on the list row (BOS-997):
+ * the public title, or the public summary's first line when no public title is set, said in plain words. Nothing for a
+ * feature off the portal. */
+function VisitorsWillSee({ f }: { f: Feature }) {
+  if (!f.portal?.onPortal) return null;
+  const seen = portalTitle(f.publicTitle, f.publicSummary);
+  if (!seen) return null;
+  const fromSummary = !f.publicTitle?.trim();
+  return (
+    <span className="feature-visitors">
+      <small>Visitors will see: {seen}</small>
+      {fromSummary && <small className="muted">from the summary, no public title set</small>}
+    </span>
+  );
+}
+
+/** The "On portal" tick on a list row (BOS-957): saves at once, and says why a feature is held off when it is. */
+function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+  const reason = f.portal?.reason ?? null;
+  const hint = !f.portalVisible && (reason === "security" || reason === "sensitive") ? `kept off: ${reason}` : reason === "needs public summary" ? "needs public summary" : null;
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
+        <input type="checkbox" aria-label={`On portal: ${f.title}`} checked={f.portalVisible} onChange={(e) => onPatch(f.id, { portalVisible: e.target.checked })} />
+        <span className="muted" style={{ fontSize: 12 }}>On portal</span>
+      </label>
+      {hint && <small className="muted" style={{ fontSize: 11 }}>{hint}</small>}
+    </span>
+  );
+}
+
+function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+  const summary = taskSummary(f);
+  const foldable = f.tickets.items.length > 0;
   return (
     <>
     <tr>
-      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220 }}>
-        <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
-        {f.portalVisible && <span className="tag" style={{ marginLeft: 6 }}>portal</span>}
+      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220, maxWidth: 340 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          {foldable && (
+            <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
+              <span className="pl-arrow" aria-hidden="true">{open ? "▾" : "▸"}</span>
+            </button>
+          )}
+          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+        </span>
+        <VisitorsWillSee f={f} />
+      </td>
+      <td style={{ whiteSpace: "nowrap" }}>
+        <PortalTick f={f} onPatch={onPatch} />
       </td>
       <td>
         <select className="mini" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
@@ -322,20 +392,33 @@ function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drive
       <td className="mono">
         <b>{f.priority.toFixed(1)}</b>
       </td>
-      <td className="mono muted" style={{ whiteSpace: "nowrap" }}>{f.tickets.total ? `${f.tickets.done}/${f.tickets.total} tasks` : "–"}</td>
+      <td className="mono muted" style={{ whiteSpace: "nowrap" }}>
+        {foldable ? (
+          <button type="button" className="feature-fold feature-work" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} onClick={onToggle}>
+            {summary}
+          </button>
+        ) : (
+          summary
+        )}
+      </td>
     </tr>
-    {f.tickets.items.length > 0 && (
-      <tr>
-        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 20 }}>
+    {foldable && (
+      <tr id={`feature-tasks-${f.id}`} hidden={!open}>
+        <td colSpan={8 + drivers.length} style={{ paddingLeft: sub ? 56 : 32 }}>
           <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
             {f.tickets.items.map((t) => (
               <li key={t.id}>
                 <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <span className={`tag ${t.state === "done" ? "green" : t.state === "blocked" ? "amber" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
                 <span className="muted">{t.assignee ?? "unassigned"}</span>
               </li>
             ))}
           </ul>
+          {hasSubfeatures && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              {f.title} has its own tasks too: open it to see them.
+            </p>
+          )}
         </td>
       </tr>
     )}
@@ -355,8 +438,15 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [fold, setFold] = useState(readFeatureOpen);
   const [error, setError] = useState<string | null>(null);
   const patch = (id: string, body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(data.reload, (err: Error) => setError(err.message));
+  const isOpen = (id: string) => fold.ids.includes(id);
+  const setFeatureOpen = (id: string, open: boolean) => {
+    const next = { ids: open ? [...fold.ids.filter((x) => x !== id), id] : fold.ids.filter((x) => x !== id) };
+    setFold(next);
+    saveFeatureOpen(next);
+  };
   const d = data.data;
   const areas = settings.data?.areas ?? [];
   const order = (a: Feature, b: Feature) => (sort === "priority" ? b.priority - a.priority || b.demand - a.demand : sort === "demand" ? b.demand - a.demand || b.priority - a.priority : b.createdAt.localeCompare(a.createdAt));
@@ -365,13 +455,23 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const groups = [...areas.map((a) => ({ id: a.id, name: a.name })), { id: "", name: areas.length ? "No area" : "" }]
     .map((g) => ({ ...g, features: top.filter((f) => (f.areaId ?? "") === g.id) }))
     .filter((g) => g.features.length);
-  const cols = 7 + (d?.drivers.length ?? 0);
+  const foldableIds = shown.filter((f) => f.tickets.items.length > 0).map((f) => f.id);
+  const allOpen = foldableIds.length > 0 && foldableIds.every((id) => fold.ids.includes(id));
+  const setAllOpen = (open: boolean) => {
+    const next = { ids: open ? foldableIds : [] };
+    setFold(next);
+    saveFeatureOpen(next);
+  };
+  const cols = 8 + (d?.drivers.length ?? 0);
   return (
     <>
       <header className="page-head">
         <div>
           <h1>Features</h1>
           <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
+          <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+          </p>
         </div>
       </header>
       {!company ? (
@@ -393,6 +493,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
               </label>
+              {foldableIds.length > 0 && (
+                <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!allOpen)}>
+                  {allOpen ? "Collapse all" : "Expand all"}
+                </button>
+              )}
               <a href={`#/feedback/${company.id}`} style={{ marginLeft: "auto" }}>
                 Feedback inbox
               </a>
@@ -411,6 +516,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <thead>
                   <tr>
                     <th>Feature</th>
+                    <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
@@ -434,11 +540,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                       </tr>
                     )}
                     {g.features.flatMap((f) => [
-                      <FeatureRow key={f.id} f={f} drivers={d.drivers} maxDemand={d.maxDemand} onPatch={patch} />,
+                      <FeatureRow key={f.id} f={f} drivers={d.drivers} maxDemand={d.maxDemand} hasSubfeatures={shown.some((s) => s.parentId === f.id)} open={isOpen(f.id)} onToggle={() => setFeatureOpen(f.id, !isOpen(f.id))} onPatch={patch} />,
                       ...shown
                         .filter((s) => s.parentId === f.id)
                         .sort(order)
-                        .map((s) => <FeatureRow key={s.id} f={s} sub drivers={d.drivers} maxDemand={d.maxDemand} onPatch={patch} />),
+                        .map((s) => <FeatureRow key={s.id} f={s} sub drivers={d.drivers} maxDemand={d.maxDemand} hasSubfeatures={false} open={isOpen(s.id)} onToggle={() => setFeatureOpen(s.id, !isOpen(s.id))} onPatch={patch} />),
                     ])}
                   </tbody>
                 ))}
@@ -554,11 +660,15 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // the box is being edited, and it goes once the server has taken the summary.
   const summaryDraftKey = `feature-summary/${id}`;
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
+  // The public title is saved with the summary, so the owner is not left with a summary that still shows the internal
+  // title to visitors (BOS-991).
+  const publicTitleDraftKey = `feature-public-title/${id}`;
+  const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
   const saveSummary = (summary: string) =>
-    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
-      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), data.reload()),
+    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
+      () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
   if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
@@ -757,6 +867,11 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
         </label>
+        {f.portal?.reason === "needs public summary" && <p className="muted" style={{ fontSize: 13 }}>Held off the portal until you write a public summary below: visitors see the public summary and its first line, not the internal title or description.</p>}
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
+          Keep off the portal (sensitive)
+        </label>
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.
@@ -769,8 +884,18 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           Public roadmap
         </h2>
         <p className="muted" style={{ fontSize: 13 }}>
-          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap.
+          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap. Visitors to the feedback portal see the public summary as the description and its first line as the title, or the public title below when you write one; they never see this feature's internal title.
         </p>
+        <div className="field">
+          <label htmlFor="f-public-title">Public title (optional)</label>
+          <input
+            id="f-public-title"
+            maxLength={200}
+            placeholder="Shown to visitors; leave empty to use the public summary's first line"
+            value={publicTitleDraft ?? f.publicTitle ?? ""}
+            onChange={(e) => setPublicTitleDraft(e.target.value)}
+          />
+        </div>
         <div className="field">
           <label htmlFor="f-public-summary">Public summary</label>
           <DraftTextarea
@@ -783,7 +908,12 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>
+          <button
+            type="button"
+            className="btn small"
+            disabled={(summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")) && (publicTitleDraft === null || publicTitleDraft.trim() === (f.publicTitle ?? ""))}
+            onClick={() => saveSummary(summaryDraft ?? f.publicSummary ?? "")}
+          >
             Save summary
           </button>
           <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>

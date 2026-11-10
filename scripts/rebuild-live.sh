@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuilds the live blue/green colour in place (docs/06, "Rebuild the live colour in place"), for a change
 # the host deployer refuses (a Dockerfile, compose or script change) or a colour built from an older image.
-# For ordinary app changes use Settings → Updates → Deploy latest instead: that swaps colours with no downtime.
+# For ordinary app changes use Settings → Server and runner → Updates → Deploy latest instead: that swaps colours with no downtime.
 #
 # One step, so the server is never left on standby: back up the database, build the live colour at the
 # checkout's commit, migrate, recreate it, tell it to take charge (SIGUSR2), and wait until /api/ready says

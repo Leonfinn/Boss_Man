@@ -11,7 +11,9 @@ type RunningNow = { ticketId: string; ref: string | null; title: string; phase: 
 type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
-type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[] };
+/** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */
+type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
+type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
 
@@ -29,6 +31,51 @@ function waited(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** "12:55" today, "9 Nov, 12:55" on another day. */
+export function clockText(iso: string, now = new Date()): string {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === now.toDateString() ? time : `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${time}`;
+}
+
+/** Who is acting, in plain grammar: "you're acting", "the CEO is acting". */
+export function actingText(actor: NonNullable<WaitingRow["actor"]>): string {
+  return actor === "owner" ? "you're acting" : `${ACTOR[actor]} is acting`;
+}
+
+/**
+ * The card that holds this merge (BOS-1078): its question, who raised it and a link straight to it. When the owner
+ * has already signed off, it says so, so a different card holding the merge never reads as a second sign-off.
+ */
+function HeldBy({ row }: { row: WaitingRow }) {
+  const card = row.card;
+  if (!card || card.kind === "merge") return null;
+  const link = (
+    <a href={`#/decisions/${card.id}`} data-card-link={card.id}>
+      {card.kind === "sign_off" ? "Open the sign-off card" : "Open that card"}
+    </a>
+  );
+  if (card.kind === "sign_off")
+    return (
+      <p className="mq-line" data-held-by="sign_off">
+        Needs you: your sign-off on this work. {link}
+      </p>
+    );
+  const who = card.raisedBy ?? "Boss Man";
+  return (
+    <p className="mq-line" data-held-by="card">
+      {row.signedOffAt ? <>You signed this off at {clockText(row.signedOffAt)}. It's held by a different card: </> : <>Held by a card: </>}
+      <q>{card.question}</q>, raised by {who}. {link}
+      {card.staleHint ? (
+        <>
+          {" "}
+          <span className="tag amber" data-stale="true">probably stale</span> {card.staleHint} The CEO has been asked to check it.
+        </>
+      ) : null}
+    </p>
+  );
 }
 
 function TicketLink({ id, ref, title }: { id: string; ref: string | null; title: string }) {
@@ -68,7 +115,7 @@ function Running({ rows, slots }: { rows: RunningNow[]; slots: number }) {
   );
 }
 
-function Waiting({ rows }: { rows: WaitingRow[] }) {
+export function Waiting({ rows }: { rows: WaitingRow[] }) {
   return (
     <section>
       <h2>Waiting to merge</h2>
@@ -109,14 +156,16 @@ function Waiting({ rows }: { rows: WaitingRow[] }) {
                   to merge first.
                 </p>
               ) : null}
+              <HeldBy row={r} />
               {r.next && (
                 <p className="mq-next">
                   Next: {r.next}
-                  {r.actor && r.actor !== "system" ? ` (${ACTOR[r.actor]} is acting)` : ""}
-                  {r.actor === "owner" && r.decisionId ? (
+                  {r.actor && r.actor !== "system" ? ` (${actingText(r.actor)})` : ""}
+                  {/* A card named above has its own link; the merge's own cards (a stuck check) link here, straight to the card. */}
+                  {r.actor === "owner" && r.decisionId && (!r.card || r.card.kind === "merge") ? (
                     <>
                       {" "}
-                      <a href="#/decisions">Needs you: open the card</a>
+                      <a href={`#/decisions/${r.decisionId}`}>Needs you: open the card</a>
                     </>
                   ) : null}
                 </p>

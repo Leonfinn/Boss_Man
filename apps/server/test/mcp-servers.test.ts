@@ -26,7 +26,7 @@ async function setup() {
   return { ...built, close, req, company, worker, project, sent };
 }
 
-const good = { name: "scrapling", url: "http://192.168.68.67:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN" };
+const good = { name: "scrapling", url: "http://192.168.1.50:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN" };
 
 describe("tool servers (MCP)", () => {
   it("refuses bad input", async () => {
@@ -61,7 +61,7 @@ describe("tool servers (MCP)", () => {
     expect(made.statusCode).toBe(201);
     expect(made.json()).toMatchObject({ ...good, headerName: "Authorization", headerValue: "Bearer {secret}" });
     expect((await c.req("POST", url, good)).statusCode).toBe(409);
-    expect((await c.req("POST", url, { name: "crawl4ai", url: "http://192.168.68.67:11235/mcp/sse", transport: "sse" })).json().secretEnv).toBeNull();
+    expect((await c.req("POST", url, { name: "crawl4ai", url: "http://192.168.1.50:11235/mcp/sse", transport: "sse" })).json().secretEnv).toBeNull();
     expect((await c.req("GET", url)).json().map((m: { name: string }) => m.name)).toEqual(["crawl4ai", "scrapling"]);
     expect((await c.req("DELETE", `/api/mcp-servers/${made.json().id}`)).statusCode).toBe(204);
     expect((await c.req("DELETE", `/api/mcp-servers/${made.json().id}`)).statusCode).toBe(404);
@@ -82,7 +82,7 @@ describe("tool servers (MCP)", () => {
   it("names in the prompt only the servers this agent gets, and says how to find and when to prefer them", async () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/mcp-servers`, good);
-    await c.req("POST", `/api/companies/${c.company.id}/mcp-servers`, { name: "crawl4ai", url: "http://192.168.68.67:11235/mcp/sse", transport: "sse", secretEnv: "CRAWL4AI_API_TOKEN" });
+    await c.req("POST", `/api/companies/${c.company.id}/mcp-servers`, { name: "crawl4ai", url: "http://192.168.1.50:11235/mcp/sse", transport: "sse", secretEnv: "CRAWL4AI_API_TOKEN" });
     const secret = async (name: string) => (await c.req("POST", "/api/secrets", { name, kind: "generic", value: `${name}-value` })).json().secret.id as string;
     await c.req("POST", `/api/secrets/${await secret("scrapling")}/grants`, { companyId: c.company.id, envName: "SCRAPLING_MCP_TOKEN" });
     const crawl = (await c.req("POST", `/api/secrets/${await secret("crawl4ai")}/grants`, { companyId: c.company.id, envName: "CRAWL4AI_API_TOKEN" })).json() as { id: string };

@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 type Pushed = { url: string; body: Record<string, any> };
-const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, pushLevels: ["page", "ask"], publicUrl: "https://bossman.example.ts.net" };
+const SETTINGS = { quietHours: null, agentHourlyCap: 6, ntfy: { url: "https://ntfy.example.ts.net", topic: "bossman", token: "tk_secret_value_123" }, phonePush: "all", publicUrl: "https://bossman.example.ts.net" };
 
 async function setup(opts: { listen?: boolean } = {}) {
   const { db, close } = await openPglite();
@@ -82,6 +82,14 @@ async function setup(opts: { listen?: boolean } = {}) {
 }
 
 const httpActions = (p: Pushed | undefined) => ((p?.body.actions ?? []) as Array<{ action: string }>).filter((a) => a.action === "http");
+
+describe("rule 0: ntfy address check", () => {
+  const gate = (url: string) => approveGate({ ...DEFAULT_NOTIFY_SETTINGS, ntfy: { url, topic: "t", tokenSecretId: "x" }, publicUrl: "https://b.example.ts.net" } as never, "tok");
+  it("accepts https and the bundled http://ntfy only", () => {
+    for (const url of ["https://ntfy.example.ts.net:8443", "http://ntfy:80", "http://ntfy", "http://NTFY:80/"]) expect(gate(url)).toEqual({ on: true });
+    for (const url of ["http://ntfy.example.ts.net", "http://ntfy:8080", "http://ntfy.evil.com", "http://user@ntfy", "http://ntfy@evil.com", "http://10.0.0.5", "ftp://ntfy", "not a url"]) expect(gate(url).on).toBe(false);
+  });
+});
 
 describe("rule 0: Approve only through the owner's private channel", () => {
   it("needs a publish token, an https ntfy URL and an https public URL; Open stays either way", async () => {
@@ -593,5 +601,48 @@ describe("rule 8: rate limit, ntfy URL and retention", () => {
     expect(r.phoneApprove).toBe(2);
     expect(await c.db.select().from(approveTokens)).toEqual([]);
     expect(await c.db.select().from(phoneActionHits)).toEqual([]);
+  });
+});
+
+describe("QA (BOS-248): token lifetime edges and isolation between cards", () => {
+  it("a link works one millisecond before its 15 minutes are up and is refused at exactly 15 minutes", async () => {
+    const c = await setup();
+    const d1 = await c.ask();
+    const { token: t1 } = await c.sync();
+    const start = c.clock().getTime();
+    c.setClock(new Date(start + 15 * 60_000 - 1));
+    expect((await c.tap({ token: t1 })).json().outcome).toBe("approved");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d1.id)))[0]!.answer).toBe("Yes");
+
+    const d2 = await c.ask({ question: "Use Cloudflare instead?" });
+    const { token: t2 } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 15 * 60_000));
+    expect((await c.tap({ token: t2 })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d2.id)))[0]!.status).toBe("open");
+  });
+
+  it("an expired, unanswered link is also refused on a re-tap and never answers the card", async () => {
+    const c = await setup();
+    const d = await c.ask();
+    const { token } = await c.sync();
+    c.setClock(new Date(c.clock().getTime() + 20 * 60_000));
+    for (let i = 0; i < 2; i++) expect((await c.tap({ token })).json().outcome).toBe("no_longer_works");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
+  });
+
+  it("one card's link answers only that card", async () => {
+    const c = await setup();
+    const a = await c.ask({ question: "Question A?" });
+    const { token: ta } = await c.sync();
+    const b = await c.ask({ question: "Question B?" });
+    const { token: tb } = await c.sync();
+    expect(ta).not.toBe(tb);
+    expect((await c.tap({ token: ta })).json().outcome).toBe("approved");
+    const rows = await c.db.select().from(decisions);
+    expect(rows.find((r) => r.id === a.id)!.status).not.toBe("open");
+    expect(rows.find((r) => r.id === b.id)!.status).toBe("open");
+    // B's own link still works, once.
+    expect((await c.tap({ token: tb })).json().outcome).toBe("approved");
+    expect((await c.tap({ token: tb })).json().outcome).toBe("already_answered");
   });
 });

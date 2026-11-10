@@ -58,8 +58,10 @@ describe("merge queue screen (BOS-587)", () => {
     // A stuck one says what happens next and who acts.
     expect(first.getByText(/Next: Boss Man checks and merges it by itself/)).toBeTruthy();
 
-    // A card that needs the owner links to Decisions.
-    expect(screen.getByRole("link", { name: "Needs you: open the card" }).getAttribute("href")).toBe("#/decisions");
+    // A card that needs the owner links straight to that card (BOS-1078), in plain grammar.
+    expect(screen.getByRole("link", { name: "Needs you: open the card" }).getAttribute("href")).toBe("#/decisions/d1");
+    expect(screen.getByText(/\(you're acting\)/)).toBeTruthy();
+    expect(screen.queryByText(/you is acting/)).toBeNull();
 
     expect(screen.getByText("Recently finished")).toBeTruthy();
     expect(screen.getByText(/merged as abcdef1/)).toBeTruthy();
@@ -74,6 +76,24 @@ describe("merge queue screen (BOS-587)", () => {
     expect(row.getAttribute("data-stuck")).toBe("true");
     expect(within(row).getByText(/waiting for APP-19 to merge first/)).toBeTruthy();
     expect(within(row).getByText(/Next: APP-19 has to be reviewed and merged first/)).toBeTruthy();
+  });
+
+  it("names the card holding a signed-off merge, who raised it, and links straight to it (BOS-1078)", async () => {
+    const signedOffAt = new Date();
+    signedOffAt.setHours(12, 55, 0, 0);
+    const card = { id: "11111111-2222-4333-8444-555555555555", kind: "hold", question: "Rotate the deploy key before this goes in?", raisedBy: "Jane", raisedAt: new Date().toISOString(), staleHint: "It names APP-66, which is done now, so it may no longer be needed." };
+    const held = { ticketId: "t5", ref: "APP-5", title: "Key rotation", minutes: 30, state: "waiting_for_decision", label: `held by Jane's card: "Rotate the deploy key before this goes in?"`, stuck: false, next: "Your sign-off is done; it merges once that card is answered.", actor: "owner", decisionId: card.id, risk: "high", urgent: false, failedCheck: false, card, signedOffAt: signedOffAt.toISOString() };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waiting: [held], waitingCount: 1 })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Key rotation")).toBeTruthy();
+    const line = document.querySelector('[data-held-by="card"]') as HTMLElement;
+    expect(line.textContent).toMatch(/^You signed this off at 12.?55(\s?[AP]M)?\. It's held by a different card: /);
+    expect(line.textContent).toContain("Rotate the deploy key before this goes in?");
+    expect(line.textContent).toContain("raised by Jane");
+    expect(within(line).getByRole("link", { name: "Open that card" }).getAttribute("href")).toBe(`#/decisions/${card.id}`);
+    expect(line.querySelector('[data-stale="true"]')?.textContent).toBe("probably stale");
+    // One link to the card, not a second generic "open the card" beside it.
+    expect(screen.queryByRole("link", { name: "Needs you: open the card" })).toBeNull();
   });
 
   it("says plainly when nothing is waiting or running", async () => {

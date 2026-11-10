@@ -11,7 +11,7 @@ import { TicketLinks } from "../components/TicketLinks";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
-import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
+import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
 import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -81,7 +81,7 @@ function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (fie
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
           {rows.map((r, i) => (
             <li key={r.criterion} data-testid="criterion" data-verdict={r.verdict ?? "none"} data-after={isAfterMerge(criteria[i]!) ? "merge" : undefined}>
-              <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
+              <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{!r.verdict && t.goLiveWait && isAfterMerge(criteria[i]!) ? goLiveWaitWords(t.goLiveWait) : VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
               {isAfterMerge(criteria[i]!) && <small className="muted"> · on a real host, checked after merge</small>}
             </li>
           ))}
@@ -203,7 +203,7 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
         id="t-owner-setup"
         rows={3}
         maxLength={4_000}
-        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        placeholder={"Settings → Funding → Add funding source, then sign in to the second plan"}
         value={text}
         onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}

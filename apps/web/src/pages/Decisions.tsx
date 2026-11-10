@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
-import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
 import { State } from "../components/State";
@@ -246,7 +246,8 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
         </div>
       )}
       <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
+        {/* Sideways only (BOS-962 sweep, same as BOS-554): the command wraps, so it never needs to scroll vertically, and without overflow-y: hidden a one-pixel overflow would swallow the wheel. */}
+        <pre ref={pre} style={{ flex: 1, minWidth: 0, margin: 0, padding: "8px 10px", overflowX: "auto", overflowY: "hidden", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
           <code>{command}</code>
         </pre>
         <button type="button" onClick={copy} aria-label="Copy this command" aria-live="polite" style={{ flex: "none", maxWidth: "42%", whiteSpace: "normal", lineHeight: 1.2, alignSelf: "stretch", padding: "0 10px" }}>{label}</button>
@@ -458,8 +459,32 @@ function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Deci
   );
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[] }) {
+/** The card id in a #/decisions/<id> link (BOS-1078), or null. Safe where there is no window (a static render). */
+export function linkedCardOf(hash: string): string | null {
+  const [page, id] = hash.replace(/^#\/?/, "").split("/");
+  return page === "decisions" && id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}
+
+function useLinkedCard(): string | null {
+  const read = () => (typeof window === "undefined" ? null : linkedCardOf(window.location.hash));
+  const [id, setId] = useState(read);
+  useEffect(() => {
+    const on = () => setId(read());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return id;
+}
+
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
+  // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
+  // that card is scrolled to and marked once it is on the page.
+  const linkedId = useLinkedCard();
+  useEffect(() => {
+    if (!linkedId) return;
+    document.getElementById(`decision-${linkedId}`)?.scrollIntoView?.({ block: "start" });
+  }, [linkedId, loaded, decisions.length]);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [alwaysScopes, setAlwaysScopes] = useState<Record<string, "agent" | "company">>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -576,7 +601,26 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   // yet" group instead of the numbered list. Anything not marked keeps its place in the main list.
   const queueCards = shown.filter((d) => !d.waiting);
   const waitingCards = shown.filter((d) => !!d.waiting);
-  const open = shown.filter((d) => !answered[d.id]);
+  // (BOS-969, BOS-996) The heading takes both numbers from the server tally, the same figure the menu
+  // badge shows; it sends no numbers of its own. The app already polls that tally for the badge and
+  // refreshes it on every answer, so the heading reads it from there and only asks itself if it is
+  // missing (the app's read failed). A card the owner answers here leaves the count straight away, so
+  // the heading never shows it as still to do while the page waits for its next read.
+  const viewQuery = filter ? `?companyId=${filter}` : "";
+  const tallyPoll = usePoll(
+    (signal) => (tally ? Promise.resolve(tally) : api<DecisionTally>(`/api/decisions/tally${viewQuery}`, { signal }).catch(() => null)),
+    10_000,
+    `decisions-tally-page-${filter ?? ""}`,
+  );
+  const answeredHere = shown.filter((d) => !!answered[d.id]);
+  const answeredQueue = answeredHere.filter((d) => !d.waiting).length;
+  const answeredWaiting = answeredHere.filter((d) => !!d.waiting).length;
+  // Until the first tally arrives, the cards themselves stand in, so the heading is never blank.
+  const counted = tally ?? tallyPoll.data ?? { open: queueCards.length, waiting: waitingCards.length };
+  const counts = {
+    open: Math.max(counted.open - answeredQueue, 0),
+    waiting: Math.max(counted.waiting - answeredWaiting, 0),
+  };
   // Too long for an answer: the text goes in a .txt file, and the agent is told where to read it whole.
   const answerAsFile = async (d: Decision, long: string) => {
     if (inFlight.current.has(d.id)) return;
@@ -653,7 +697,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {open.length === 1 ? "1 decision waiting" : `${open.length} decisions waiting`}
+            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
+            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
@@ -713,8 +758,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           {queueCards.length > 0 && (
           <>
           <details className="formula">
-            <summary>How the ranking works</summary>
-            <p>The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
+            <summary>What the score means</summary>
+            <p>The number shows how much each decision holds up. It doesn't change the order: cards stay newest first. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -744,7 +789,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const checking = land?.state === "running" && !land.stale;
               const staleCheck = land?.state === "running" && !!land.stale;
               return (
-                <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
+                <li className={`decision${d.id === linkedId ? " linked" : ""}`} id={`decision-${d.id}`} key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined} aria-current={d.id === linkedId ? "true" : undefined}>
                   <div className="score" title={why(d) ?? undefined}>
                     {Math.round(d.score) > 0 && (
                       <>
@@ -1032,7 +1077,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Rules.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? ` Saved as a rule for ${d.context?.alwaysAgent && alwaysScopes[d.id] !== "company" ? d.context.alwaysAgent.name : "every agent"}. To undo it, remove it under Settings → Permissions.` : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : checking ? null : (
                       <>
                         {d.context?.hires && (
@@ -1160,7 +1205,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   </li>
                                 ))}
                               </ul>
-                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Rules.</p>
+                              <p className="muted" style={{ fontSize: 13 }}>It never covers pushes or destructive commands. You can remove the rule later in Settings → Permissions.</p>
                             </div>
                           ) : null}
                           <div className="actions" onClickCapture={(e) => {
