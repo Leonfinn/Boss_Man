@@ -25,6 +25,9 @@ export class LauncherError extends Error {
   }
 }
 
+/** What the launcher says about the check slots and memory a runner gets (BOS-993). */
+export type LauncherChecks = { requested: number | null; slots: number; memoryBytes: number; reason: string | null; runners: { slug: string; slots: number; memoryBytes: number }[] };
+
 const SLUG_KEY = "runner-slug:";
 
 /** A company name as a launcher slug: lower case, dashes, at most 40 characters. */
@@ -312,6 +315,23 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       if (!opts) return null;
       try {
         return await call<unknown>("GET", "/cpu");
+      } catch {
+        return null;
+      }
+    },
+
+    /** BOS-993: tells the launcher the owner's "Checks at once", so runners it makes from now on get that many slots and the memory to match. */
+    async setChecks(slots: number): Promise<void> {
+      await call("PUT", "/checks", { slots });
+    },
+
+    /** BOS-993: the limit the launcher would give a runner now (and why it is below the setting), and what each running runner has. Null when the launcher is off, can't be reached, or is older. */
+    async checks(): Promise<LauncherChecks | null> {
+      if (!opts) return null;
+      try {
+        const r = await call<Partial<LauncherChecks>>("GET", "/checks");
+        if (typeof r?.slots !== "number" || typeof r.memoryBytes !== "number" || !Array.isArray(r.runners)) return null;
+        return { requested: typeof r.requested === "number" ? r.requested : null, slots: r.slots, memoryBytes: r.memoryBytes, reason: typeof r.reason === "string" ? r.reason : null, runners: r.runners };
       } catch {
         return null;
       }

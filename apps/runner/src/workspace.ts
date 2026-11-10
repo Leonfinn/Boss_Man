@@ -1310,7 +1310,24 @@ export class Workspaces {
       readWrite.push(this.jobFence.pnpmStore);
     }
     if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
-    const readOnly = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const pathDirs = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
+    const readOnly = [...pathDirs];
+    // BOS-1039: a PATH entry is often a folder of links (npm's bin/ holds opencode -> ../lib/node_modules/opencode-ai/bin/...).
+    // Landlock checks the real file, so a grant on the link's folder alone leaves the binary unreadable and a check that runs
+    // a fenced agent fails with "permission denied". Grant the real folder of each agent binary found on PATH, read-only.
+    for (const name of ["opencode", "claude", "codex"]) {
+      for (const d of pathDirs) {
+        try {
+          const real = realpathSync(path.join(d, name));
+          if (statSync(real).isFile()) {
+            readOnly.push(path.dirname(real));
+            break;
+          }
+        } catch {
+          // not in this folder
+        }
+      }
+    }
     // BOS-805: the job waits in the shared check line, so it may write the queue folder and read the gate folder (slot count).
     if (this.coordDir) {
       const grant = checkQueueGrant(this.coordDir);

@@ -583,6 +583,8 @@ describe("scheduler", () => {
       await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
       const notices = () => ctx.db.select().from(decisions).then((rows) => rows.filter((d) => d.dedupeKey === `unblocked-unassigned:${waiting.id}`));
       expect(await notices()).toHaveLength(1);
+      // The CEO can assign it, so it is the CEO's first (BOS-1015).
+      expect((await notices())[0]!.tier).toBe("ceo");
       expect(await unblockedWakes(waiting.id)).toHaveLength(0);
       await ctx.req("POST", "/api/sweep");
       expect(await notices()).toHaveLength(1);
@@ -605,6 +607,7 @@ describe("scheduler", () => {
       const summaries = (await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`);
       expect(summaries).toHaveLength(1);
       expect(summaries[0]!.question).toContain("Stuck");
+      expect(summaries[0]!.tier).toBe("ceo"); // BOS-1015: the summary is for the CEO, not the owner
     });
 
     it("does not release again a ticket moved back to backlog on purpose", async () => {

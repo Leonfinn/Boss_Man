@@ -17,6 +17,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
+import { agentWipHold, isWipHeldNote, oldestInProgress } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -248,22 +249,55 @@ export function schedulerService(
     // handed over, which a launch always is.
     const waiting = waits.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (waiting.length) return false;
-    const [col] = await db
-      .select({ id: workflowColumns.id })
-      .from(workflowColumns)
-      .where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "in_progress")))
-      .orderBy(asc(workflowColumns.position))
-      .limit(1);
-    await db
-      .update(tickets)
-      .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
-      .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+    // The agent's WIP limit may hold the start: the ticket then waits in Ready and nothing starts (BOS-1029).
+    const moved = await systemMoveTicket(db, { ticketId, from: ["backlog", "ready"], to: "in_progress", reason: "Boss Man: started on the wake", now: now() });
+    if (moved?.systemState !== "in_progress") return false;
     if (t.featureId) await deps.onFeature?.(t.featureId);
     return true;
   }
 
+  /**
+   * The WIP limit's answer for a wake whose ticket was held in Ready: the reason, and the agent's oldest
+   * in-progress ticket to carry on with instead (BOS-1029). Null when the ticket isn't held.
+   */
+  async function wipHeldRefusal(ticketId: string): Promise<string | null> {
+    const [t] = await db.select({ state: tickets.systemState, note: tickets.stateNote, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+    if (t?.state !== "ready" || !isWipHeldNote(t.note) || !t.agentId) return null;
+    const oldest = await oldestInProgress(db, t.agentId);
+    if (!oldest) return `${t.note} (Not started.)`;
+    const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
+    return `you are at your limit of in-progress tickets, so it stays in Ready and starts when one finishes. Carry on with your oldest unfinished ticket, "${o?.title ?? oldest}", instead.`;
+  }
+
+  /**
+   * A freed slot starts a held ticket by itself (BOS-1029): an agent under its limit with a held Ready ticket is woken on it,
+   * and the launch then starts it. One per pass per agent, oldest first.
+   */
+  async function wakeHeldStarts(self: { notify: (agentId: string, input: { ticketId: string; reason: string; note: string }) => Promise<unknown> }) {
+    const held = await db
+      .select({ id: tickets.id, note: tickets.stateNote, agentId: tickets.assigneeAgentId })
+      .from(tickets)
+      .where(and(eq(tickets.systemState, "ready"), isNotNull(tickets.assigneeAgentId), like(tickets.stateNote, "Waiting: %")))
+      .orderBy(asc(tickets.createdAt));
+    const seen = new Set<string>();
+    for (const h of held) {
+      if (!h.agentId || seen.has(h.agentId) || !isWipHeldNote(h.note)) continue;
+      seen.add(h.agentId);
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(and(eq(agents.id, h.agentId), isNull(agents.retiredAt)));
+      if (!a) continue;
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, h.id));
+      if (!t || (await agentWipHold(db, t)).hold) continue;
+      // Already woken (queued or running on it): don't pile another note on every pass.
+      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, h.agentId), eq(wakes.ticketId, h.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+      if (waiting) continue;
+      await self.notify(h.agentId, { ticketId: h.id, reason: "assigned", note: "Your WIP limit has room again, so this held ticket can start now." });
+    }
+  }
+
   /** Why a launch did not start a ticket it was woken for, in words the agent can act on (BOS-254). */
   async function startRefusalFor(ticketId: string): Promise<string | null> {
+    const held = await wipHeldRefusal(ticketId);
+    if (held) return held;
     const deps = await db
       .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
       .from(ticketDependencies)
@@ -1552,6 +1586,7 @@ export function schedulerService(
       const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
+      await wakeHeldStarts(this).catch((e) => deps.log?.(`held starts: ${e instanceof Error ? e.message : String(e)}`));
       const queue = await db
         .select()
         .from(wakes)
@@ -1940,7 +1975,7 @@ export function schedulerService(
         if (!deps.length) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.
         if (cur.systemState === "blocked") {
-          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "what it waited on finished", now: now() });
+          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
           return true;
         }
         const rows = await db
@@ -1952,13 +1987,14 @@ export function schedulerService(
             options: ["Got it"],
             recommendedOption: "Got it",
             dedupeKey: `unblocked-unassigned:${cur.id}`,
+            tier: "ceo",
             context: { type: "question" },
           })
           .onConflictDoNothing()
           .returning({ id: decisions.id });
         return rows.length > 0;
       }
-      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "what it waited on finished", now: now() });
+      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
       if (!t?.assigneeAgentId) return false;
       await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       return true;

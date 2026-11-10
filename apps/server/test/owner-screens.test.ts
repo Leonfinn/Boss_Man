@@ -41,14 +41,14 @@ describe("R8: the screen a step sends the owner to", () => {
     expect(all(["Open Notifications and tick Send to my phone through my own ntfy server."])).toEqual([]);
   });
 
-  it("refuses the first second-Claude-Max card's funding page: sources are added on Access and funding", () => {
-    const [f] = r8(["Open Settings → Funding and add a funding source: under **New funding source** set **Kind** to **Anthropic subscription**, then press Save."]);
-    expect(f?.problem).toContain("Settings → Access and funding");
-    expect(all(["Open Settings → Access and funding. Under **New funding source** set **Kind** to **Anthropic subscription**, then press Save."])).toEqual([]);
+  it("sends the owner to Funding for a funding source (it moved there in BOS-1019)", () => {
+    // Since BOS-1019 a funding source is added on Settings → Funding itself, not on a separate Access and funding tab.
+    expect(all(["Open Settings → Funding and add a funding source: under **New funding source** set **Kind** to **Anthropic subscription**, then press Save."])).toEqual([]);
+    expect(all(["Open Settings → Funding. Under **New funding source** set **Kind** to **Anthropic subscription**, then press Save."])).toEqual([]);
   });
 
-  it("refuses a tab under the wrong tab, and a button on another screen", () => {
-    expect(r8(["Open Settings → Access and funding → Funding and press Save."])[0]?.problem).toMatch(/Funding isn't under Settings → Access and funding: it is Settings → Funding/);
+  it("refuses a page under the wrong page, a retired tab, and a button on another page", () => {
+    expect(r8(["Open Settings → Funding → Watchdog and press Save."])[0]?.problem).toMatch(/Watchdog isn't under Settings → Funding: it is Settings → Watchdog/);
     expect(r8(["Open Settings → Projects."])[0]?.problem).toMatch(/it is Projects/);
     expect(r8(["Open Settings → Secrets and press Build and update runners."])[0]?.problem).toContain("Settings → Server and runner");
     expect(r8(["Open Settings → Secrets → Build and update runners."])[0]?.problem).toContain("Settings → Server and runner");
@@ -61,12 +61,12 @@ describe("R8: the screen a step sends the owner to", () => {
       "Open Settings → Secrets, then press Save.",
       "Open Settings → Funding and press Save.",
       "Open Projects, open Acme, click Config, then click Re-detect.",
-      "Open Settings → Reviews and CEO and press Run a retro now.",
+      "Open Settings → Team and CEO and press Run a retro now.",
       "Open BOS-368 and press Approve and merge.",
       "Open Dashboard → Something new and press Save.",
-      // A tab named by its first word; "Reviews" is also a button on a ticket's page.
+      // A page named by its first word; "Reviews" is also a button on a ticket's page.
       "Move the review to another agent in Settings → Reviews",
-      "Open Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should look as expected.",
+      "Open Settings → Server and runner → Server: Role reads leader, and Settings → Reviews should look as expected.",
     ])
       expect(r8([s]), s).toEqual([]);
   });
@@ -109,7 +109,7 @@ describe("R13: a field the owner fills in has its value", () => {
       'Open Settings → Secrets and type "GITHUB_TOKEN" in Variable name.',
       "Open Settings → Secrets and fill in Name (any name works, it is only a label).",
       "Open Settings → Secrets, paste the token you copied into Value and press Save.",
-      "Open Settings → Access and funding and set Kind to Anthropic subscription.",
+      "Open Settings → Funding and set Kind to Anthropic subscription.",
       "Open Settings → Secrets and leave Name empty.",
       // Named, not filled in.
       "Open Settings → Secrets: the Variable name field shows CLAUDE_CODE_OAUTH_TOKEN.",

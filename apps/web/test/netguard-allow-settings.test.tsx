@@ -47,8 +47,8 @@ describe("Network guard addresses in Settings", () => {
     expect(screen.getByText("(ignored)")).toBeTruthy();
     expect(screen.getByText("(used)")).toBeTruthy();
     expect(screen.getAllByRole("alert").some((a) => a.textContent?.includes("only the last one counts"))).toBe(true);
-    // The section is renamed.
-    expect(screen.getByText("Network guard: addresses runners may reach")).toBeTruthy();
+    // The section keeps the name the Settings menu uses (BOS-1044).
+    expect(screen.getByText("Network guard")).toBeTruthy();
     expect(screen.getByText("Allowed automatically")).toBeTruthy();
     expect(screen.getByText("Extra lines from your .env")).toBeTruthy();
   });

@@ -14,6 +14,7 @@ import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
+import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -328,7 +329,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const out = ticketId ? await outsideTree(ticketId) : null;
       if (out) return fail(out);
       const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
-      return r.ok ? text(`Nudged: ${r.delivered}.`) : fail(r.error);
+      return r.ok ? text(`Nudged: ${r.delivered}.${await wipQueuedNote(db, ticketId)}`) : fail(r.error);
     },
   );
 
@@ -1277,7 +1278,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {
     if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
     const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
-    return r.ok ? text(`Nudged: ${r.delivered}.`) : fail(r.error);
+    return r.ok ? text(`Nudged: ${r.delivered}.${await wipQueuedNote(db, ticketId)}`) : fail(r.error);
   });
 
   server.registerTool(
@@ -1316,7 +1317,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
         // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
         const thin = input.noCode ? "" : thinTicketWarning(input.body, input.assignee);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${criteriaWarning(input.acceptanceCriteria)}${thin}`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${thin}`);
       } catch (err) {
         return workFail(err);
       }

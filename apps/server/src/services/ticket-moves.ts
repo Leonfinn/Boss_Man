@@ -2,11 +2,12 @@
 // set_ticket_state, the owner's move and updateTicket all come through here, so the rules (the column,
 // the WIP limit, the field rules, the history line, the merge line's "left" event and the steps that follow
 // a real change) can't drift apart again. Wakes stay with the callers: they differ by cause.
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, tickets, workflowColumns } from "../db/schema.js";
 import { record } from "./activity.js";
+import { agentWipHold, countWip, isWipHeldNote } from "./agent-wip.js";
 import { lineEvent } from "./merge-line.js";
 import { WorkError } from "./ticket-links.js";
 
@@ -69,7 +70,8 @@ export type MoveOpts = {
   now?: Date;
 };
 
-export type MoveResult = { ticket: TicketRow; before: TicketRow; changed: boolean };
+/** `held`: the agent's WIP limit kept a new start in Ready (the "Waiting:" note, also written on the ticket); `urgentOver`: an urgent ticket started over the limit. */
+export type MoveResult = { ticket: TicketRow; before: TicketRow; changed: boolean; held: string | null; urgentOver: boolean };
 
 /**
  * Moves a ticket to `to` (null keeps its state, for a note or field edit) and writes everything that goes
@@ -100,17 +102,35 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
     if (!col) throw new WorkError(422, "That column isn't on this project's board.");
     columnId = col.id;
   }
-  if (columnId && columnId !== t.columnId && !opts.overLimit && !opts.projectId) {
+  // The agent's own limit (BOS-1029): a new start (backlog or ready -> in progress) of an agent at its limit waits in Ready,
+  // assigned, with a note saying why. Boss Man's own moves are held too; only the owner's override (overLimit, not internal) skips it.
+  let held: string | null = null;
+  let urgentOver = false;
+  if (target === "in_progress" && (t.systemState === "backlog" || t.systemState === "ready") && !(opts.overLimit && !opts.internal) && !opts.projectId) {
+    const r = await agentWipHold(db, t);
+    urgentOver = r.urgentOver;
+    if (r.hold) {
+      const ready = t.systemState === "ready" ? { id: t.columnId } : (await db.select().from(workflowColumns).where(and(eq(workflowColumns.projectId, boardId), eq(workflowColumns.systemState, "ready"))).orderBy(asc(workflowColumns.position)))[0];
+      if (!ready) throw new WorkError(422, "That column isn't on this project's board.");
+      held = r.hold.reason;
+      target = "ready";
+      columnId = ready.id ?? null;
+    }
+  }
+  if (columnId && columnId !== t.columnId && !opts.overLimit && !opts.projectId && !held) {
     const col = cols.find((c) => c.id === columnId);
     if (col?.wipLimit != null) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), ne(tickets.id, t.id)));
-      if (inCol.length >= col.wipLimit) throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
+      // The same counting rule as the agent's limit: tickets in this column and state, not counting this one.
+      const inCol = await countWip(db, and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)), t.id);
+      if (inCol >= col.wipLimit) throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
     }
   }
 
   // The field rules.
   const changed = target !== t.systemState;
   const fields: Partial<typeof tickets.$inferInsert> = { ...opts.fields };
+  if (held) Object.assign(fields, { stateNote: held, stateNoteAt: at, stateNoteStaleAt: null });
+  else if (target === "in_progress" && fields.stateNote === undefined && isWipHeldNote(t.stateNote)) fields.stateNote = null;
   if (t.noCode && t.mergeCommit && !opts.internal && fields.noCode === undefined && changed && REOPEN_STATES.has(target)) fields.noCode = false;
   const set: Partial<typeof tickets.$inferInsert> = {
     ...fields,
@@ -134,7 +154,7 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
 
   if (changed) {
     const until = target === "blocked" && updated.blockedUntil && opts.blockedUntil ? ` (until ${updated.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${updated.blockedUntilReason ? `: ${updated.blockedUntilReason}` : ""})` : "";
-    await record(db, { companyId: t.companyId, agentId: opts.by ?? undefined, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${target}${opts.note?.trim() ? `: ${opts.note.trim()}` : ""}${until}`, at });
+    await record(db, { companyId: t.companyId, agentId: opts.by ?? undefined, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${target}${opts.note?.trim() ? `: ${opts.note.trim()}` : ""}${until}${urgentOver ? " (urgent: started over the WIP limit)" : ""}`, at });
     // Out of review without a merge (sent back, cancelled, closed by hand) ends its pass through the merge line (BOS-769).
     // A merge records "merged" first, and an unapproved ticket was never in the line, so lineEvent writes nothing for either.
     if (t.systemState === "review") await lineEvent(db, t, { event: "left", to: target }, at);
@@ -143,5 +163,5 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   }
   // A task of the feature started, finished, reopened, moved or was added: the feature's status may need to follow.
   if (opts.hooks?.onFeature) for (const fid of new Set([t.featureId, updated.featureId])) if (fid) await opts.hooks.onFeature(fid);
-  return { ticket: updated, before: t, changed };
+  return { ticket: updated, before: t, changed, held, urgentOver };
 }

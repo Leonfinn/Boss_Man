@@ -24,6 +24,40 @@ RUN apt-get update \
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
 
+# Validation tools for compose files and CI workflows (BOS-1036), used by scripts/check-compose.sh from check-quick:
+# the Docker CLI and the compose plugin, which only read files (`docker compose config -q`), and actionlint.
+# NO daemon (dockerd, containerd and runc are not unpacked: only the `docker` client binary) and NO socket: nothing in
+# this image can start a container, and no Docker socket is mounted into the runner. Exact versions, each download checked
+# against a pinned SHA-256 (taken from the vendor's release on 9 Nov 2026) so a rebuild never changes them silently.
+# To update: change the version and both hashes of the new release, rebuild with Build and update runners.
+ARG DOCKER_CLI_VERSION=29.9.3
+ARG COMPOSE_VERSION=5.7.0
+ARG ACTIONLINT_VERSION=1.7.12
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) da=x86_64; aa=amd64; \
+             docker_sha=3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2e6922c973; \
+             compose_sha=7758048ad38e580f22559603312874fec8bb638d021a9e64182385fc17cc12a2; \
+             actionlint_sha=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8;; \
+      arm64) da=aarch64; aa=arm64; \
+             docker_sha=1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2; \
+             compose_sha=15861535d14e26555736b49376c95e14bfd94285366c8446bfac7156a972e76f; \
+             actionlint_sha=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6;; \
+      *) echo "unsupported architecture" >&2; exit 1;; \
+    esac; \
+    t="$(mktemp -d)"; \
+    curl -fsSL --retry 3 -o "$t/docker.tgz" "https://download.docker.com/linux/static/stable/$da/docker-${DOCKER_CLI_VERSION}.tgz"; \
+    curl -fsSL --retry 3 -o "$t/compose" "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-$da"; \
+    curl -fsSL --retry 3 -o "$t/actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_$aa.tar.gz"; \
+    printf '%s  %s\n' "$docker_sha" "$t/docker.tgz" "$compose_sha" "$t/compose" "$actionlint_sha" "$t/actionlint.tgz" | sha256sum -c -; \
+    tar -xzf "$t/docker.tgz" -C /usr/local/bin --strip-components=1 docker/docker; \
+    tar -xzf "$t/actionlint.tgz" -C /usr/local/bin actionlint; \
+    mkdir -p /usr/local/lib/docker/cli-plugins; \
+    install -m 0755 "$t/compose" /usr/local/lib/docker/cli-plugins/docker-compose; \
+    rm -rf "$t"; \
+    docker --version; docker compose version; actionlint -version; \
+    ! test -e /var/run/docker.sock
+
 # Optional add-ons (docs/12), off unless asked for: --build-arg RUNNER_ADDONS=agent-browser,webkit.
 # Boss Man works the same without them; a skill that needs one is only given to runs once the
 # runner reports it healthy. The image lists what it holds in /etc/bossman-addons.
@@ -101,6 +135,9 @@ ENV BOSSMAN_CHECK_SLOT=/usr/local/lib/bossman/check-slot.sh
 COPY --chmod=0755 scripts/scan-added-lines.mjs /usr/local/lib/bossman/scan-added-lines.mjs
 COPY --chmod=0644 scripts/scan-allow.txt /usr/local/lib/bossman/scan-allow.txt
 ENV BOSSMAN_SCAN_SCRIPT=/usr/local/lib/bossman/scan-added-lines.mjs
+
+# The notice every published image carries (BOS-973).
+COPY NOTICE /NOTICE
 
 # Workspaces (one directory per ticket) and the event journal live on volumes, so a
 # restart replays unacknowledged events and keeps work in progress (R31).

@@ -20,6 +20,8 @@ function files(dir: string): string[] {
 const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/sweeps.ts", kind: "stalled_run", why: "a stalled run" },
   { file: "services/sweeps.ts", kind: "ticketless_run", why: "a run with no ticket" },
+  { file: "app.ts", kind: "watchdog_trip", why: "the Scrum Master watchdog pausing itself (BOS-1015)" },
+  { file: "services/sweeps.ts", kind: "looks_stuck", why: "a ticket woken again and again with nothing running (BOS-1015)" },
   { file: "services/sweeps.ts", kind: "review_stall", why: "a review nobody is doing" },
   { file: "services/sweeps.ts", kind: "runner_boot", why: "runs that never started after a runner restart" },
   { file: "services/progress.ts", kind: "silent_run", why: "a silent run" },
@@ -41,6 +43,46 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
   { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
 ];
+
+/**
+ * Ratchet (BOS-1015): `decisions.tier` defaults to "owner", so a card inserted straight into the table without a
+ * tier lands with the owner. Boss Man's own alerts must go through `alerts.raise` or name a tier. These are the
+ * inserts that still leave the tier out (cards that are meant for the owner: plans, questions the owner asked
+ * for, approvals); the count per file may only go down. A new insert without `tier:` fails here: name the tier,
+ * or raise the alert through the ladder.
+ */
+const UNTIERED_INSERTS: Record<string, number> = {
+  // The agent's own question, a permission ask, an undelivered-answer notice: the owner is who they ask.
+  "services/decisions.ts": 3,
+  // Disk, runner update, self-deploy, budget and cost-cap cards are the owner's own to answer.
+  "services/disk.ts": 1,
+  "services/maintenance.ts": 1,
+  "services/runners.ts": 1,
+  "services/scheduler.ts": 3,
+  "services/self-deploy.ts": 1,
+};
+
+describe("raw decision inserts name their tier (BOS-1015)", () => {
+  it("no file has more inserts into decisions without a tier than the list allows", () => {
+    const found: Record<string, number> = {};
+    for (const file of files(SRC)) {
+      const text = readFileSync(file, "utf8");
+      const call = /insert\(decisions\)/g;
+      let m: RegExpExecArray | null;
+      while ((m = call.exec(text))) {
+        // The insert's values run to its conflict clause or its returning clause.
+        const rest = text.slice(m.index, m.index + 4000);
+        const end = rest.search(/\.onConflict|\.returning\(|\n\s*\);?\n/);
+        const body = end > 0 ? rest.slice(0, end) : rest.slice(0, 1500);
+        if (!/\btier\b/.test(body) && !/\.\.\.[a-zA-Z]/.test(body)) {
+          const rel = file.slice(SRC.length + 1);
+          found[rel] = (found[rel] ?? 0) + 1;
+        }
+      }
+    }
+    expect(found).toEqual(UNTIERED_INSERTS);
+  });
+});
 
 describe("the alert kinds table (DR-017 A, BOS-469)", () => {
   it("every kind a raise site names has a row, and the site really names it", () => {
@@ -80,7 +122,7 @@ describe("the alert kinds table (DR-017 A, BOS-469)", () => {
       expect(["scrum_master", "ceo", "owner"]).toContain(row.topRung);
     }
     // The alert kinds that must stop at the CEO (DR-017 A).
-    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
+    for (const kind of ["stalled_run", "self_wake", "chain_loop", "ticketless_limit", "nudge_loop", "could_not_start", "repeated_failure", "review_loop", "review_no_verdict", "review_stall", "silent_run", "unproven_cause", "ticketless_run", "looks_stuck", "watchdog_trip", "runner_boot", "quota_held", "opencode_vacuum_cut"] as const) {
       expect(kindCeiling(kind, undefined), kind).toBe("ceo");
       expect(kindRow(kind, undefined).topRung, kind).toBe("ceo");
     }

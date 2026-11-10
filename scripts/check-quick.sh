@@ -121,16 +121,58 @@ for d in apps/launcher apps/runner apps/server apps/web packages/shared; do
 done
 
   if [ "${CHECK_QUICK_PHASE:-}" != heavy ]; then
-  step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
+  # The merge gate renumbers a branch's new migration when migration bookkeeping is the only clash (BOS-690, DR-037), so
+  # this step accepts that case the same way, using the same function (scripts/rebase-migrations.mjs). Real clashes still fail.
+  # It notes the rebuilt tree in $rebuilt_tree_file, and the migration lint then runs on that tree.
+  rebuilt_tree_file="$(mktemp)"; lint_dir=""
+  # shellcheck disable=SC2317  # called through step below
+  merge_clean() {
+    local mout mrc=0 rout rrc=0
+    mout="$(git merge-tree --write-tree "$base" HEAD 2>&1)" || mrc=$?
+    if [ "$mrc" -ne 0 ] && [ "$mrc" -ne 1 ]; then printf '%s\n' "$mout"; return "$mrc"; fi
+    if [ "$mrc" -eq 0 ] && ! has '^apps/server/drizzle/'; then return 0; fi
+    rout="$(node scripts/rebase-migrations.mjs HEAD "$base" 2>&1)" || rrc=$?
+    if [ "$rrc" -eq 0 ] && [[ "$rout" == *"rebuilt tree: "* ]]; then
+      printf '%s\n' "$rout" | sed -n 's/^rebuilt tree: //p' >"$rebuilt_tree_file"
+      printf '%s\n' "$rout" | sed -n 's/^\([0-9][0-9]*\)_\([^ ]*\) -> \([0-9][0-9]*\)_.*$/migration \1 (\2) will be renumbered to \3 by the merge gate; do not renumber it by hand/p' >"$rebuilt_tree_file.notes"
+      return 0
+    fi
+    # Nothing to renumber: a clean merge stays clean; a conflict stays a conflict, with the refusal reason when there is one.
+    [ "$mrc" -eq 0 ] && return 0
+    printf '%s\n' "$mout"
+    [ "$rrc" -ne 0 ] && printf 'the merge gate cannot renumber it either: %s\n' "$rout"
+    return 1
+  }
+  step "merge with $base is clean" merge_clean
+  # step hides the output of a pass, so the renumbering notes were kept aside: show them.
+  [ -s "$rebuilt_tree_file.notes" ] && sed 's/^/      /' "$rebuilt_tree_file.notes"
+  rm -f "$rebuilt_tree_file.notes"
+  if [ -s "$rebuilt_tree_file" ]; then
+    tree_id="$(tr -d '[:space:]' <"$rebuilt_tree_file")"
+    lint_dir="$(mktemp -d)"
+    git archive "$tree_id" apps/server/drizzle | tar -x -C "$lint_dir" && lint_dir="$lint_dir/apps/server/drizzle"
+  fi
+  rm -f "$rebuilt_tree_file"
+  if has '^apps/server/drizzle/|^scripts/lint-migrations'; then
+    if [ -n "$lint_dir" ] && [ -d "$lint_dir" ]; then step "migration lint (on the tree the gate will build)" node scripts/lint-migrations.mjs "$lint_dir"; rm -rf "$lint_dir"
+    else step "migration lint" node scripts/lint-migrations.mjs; fi
+  fi
   # BOS-979: a hand run's early warning for the secret rules (it has no owner's list). Convenience only: the merge line's
   # scan is the runner's own installed copy, run before this script starts, and it does not depend on this step.
   if [ -f scripts/scan-added-lines.mjs ]; then
     step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
-  if has '^apps/server/drizzle/|^scripts/lint-migrations'; then step "migration lint" node scripts/lint-migrations.mjs; fi
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
+  # Compose files and CI workflows (BOS-1036): validated by the Docker CLI's compose plugin (no daemon, no socket) and actionlint.
+  # A runner image built before they were added has neither tool: that is a SKIP naming the fix, not a failure.
+  if has '^docker-compose[^/]*\.yml$|^deploy/.*\.ya?ml$|^\.github/workflows/|^scripts/check-compose\.sh$'; then
+    rc=0; out="$(scripts/check-compose.sh 2>&1)" || rc=$?
+    if [ "$rc" -eq 3 ]; then echo "SKIP  compose and workflow validation: ${out##*check-compose: } (a runner image from before BOS-1036; Build and update runners installs them)"
+    elif [ "$rc" -eq 0 ]; then echo "PASS  compose files and CI workflows"
+    else echo "FAIL  compose files and CI workflows (exit $rc)"; printf '%s\n' "$out" | tail -n 40 | sed 's/^/      /'; failed=1; fi
+  fi
 fi
 
 # Related test files of a package: source or test files changed in it (vitest follows imports); an apps/site change runs its whole small suite.

@@ -9,7 +9,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max
 import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
@@ -24,6 +24,7 @@ import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type Signoff
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
+import { fenceDefaultSweep } from "./fence-default.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -221,7 +222,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (have.has(depId)) continue;
       const rows = await db
         .insert(decisions)
-        .values({ companyId: s.companyId, kind: "stale_blocker", question: s.question, options: s.options, recommendedOption: s.recommended, dedupeKey: `stale:${depId}`, context: s.ctx })
+        .values({ companyId: s.companyId, kind: "stale_blocker", question: s.question, options: s.options, recommendedOption: s.recommended, dedupeKey: `stale:${depId}`, tier: "ceo", context: s.ctx })
         .onConflictDoNothing()
         .returning({ id: decisions.id });
       raised += rows.length;
@@ -762,7 +763,13 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     }
     if (!known) return null;
     const [verdict] = await db.select({ at: max(reviewRequests.decidedAt) }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticket.id));
-    const since = [ticket.stateChangedAt, verdict?.at, progressAt].reduce<Date>((m, d) => (d && d > m ? d : m), new Date(0));
+    // A ticket with no code to commit (noCode, or no branch) does its work in notes and replies, so those count too (BOS-1015).
+    let notesAt: Date | null = null;
+    if (ticket.noCode || !ticket.branch) {
+      const [reply] = await db.select({ at: max(ticketMessages.createdAt) }).from(ticketMessages).where(and(eq(ticketMessages.ticketId, ticket.id), eq(ticketMessages.author, "agent")));
+      notesAt = [ticket.stateNoteAt, reply?.at].reduce<Date | null>((m, d) => (d && (!m || d > m) ? d : m), null);
+    }
+    const since = [ticket.stateChangedAt, verdict?.at, progressAt, notesAt].reduce<Date>((m, d) => (d && d > m ? d : m), new Date(0));
     const started = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, ticket.id), ticket.assigneeAgentId ? eq(runs.agentId, ticket.assigneeAgentId) : undefined, gt(runs.startedAt, since)));
     return started.length;
   }
@@ -808,6 +815,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           options: ["Got it"],
           recommendedOption: "Got it",
           dedupeKey: `unblocked-catchup:${companyId}`,
+          tier: "ceo",
           context: { type: "question" },
         })
         .onConflictDoNothing();
@@ -880,21 +888,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const planAt = ticket.ceoPlanDeadline;
       if (planAt && t.getTime() < planAt.getTime() + limits.planGraceMs && recent.length >= MISSED_NUDGES_PER_DAY) continue;
       if (planAt && t.getTime() >= planAt.getTime() + limits.planGraceMs && !ticket.ceoPlanAlertedAt && recent.length >= MISSED_NUDGES_PER_DAY) {
-        const rows = await db
-          .insert(decisions)
-          .values({
+        const row = await opts.alert({
             companyId: ticket.companyId,
-            kind: "question",
+            kind: "looks_stuck",
+            from: "scrum_master",
+            duty: true,
+            ticketId: ticket.id,
+            about: [agentId],
             question: `The plan for "${ticket.title}" had a deadline of ${planAt.toISOString().slice(0, 16).replace("T", " ")} UTC and it has passed with nothing moving. ${agent} was woken about it ${recent.length} times in the last day and nothing is running on it. The plan was: ${(ticket.ceoPlan ?? "").slice(0, 300)}`,
             options: [REASSIGN, "Got it"],
-            recommendedOption: REASSIGN,
+            recommended: REASSIGN,
             dedupeKey: `missed:${ticket.id}:plan:${planAt.getTime()}`,
-            context: { type: "question" },
-          })
-          .onConflictDoNothing()
-          .returning({ id: decisions.id });
+            clearWhen: [{ kind: "ticketDone", ticketId: ticket.id }],
+          });
         await db.update(tickets).set({ ceoPlanAlertedAt: t }).where(eq(tickets.id, ticket.id));
-        result.gaveUp += rows.length;
+        if (row) result.gaveUp++;
         continue;
       }
       if (recent.length >= MISSED_NUDGES_PER_DAY) {
@@ -906,20 +914,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         // Runs that moved nothing: no new commit, state change or review verdict since the last progress (BOS-612).
         const empty = await emptyRuns(ticket, t);
         const reassign = empty !== null && empty >= limits.emptyRunsBeforeReassign;
-        const rows = await db
-          .insert(decisions)
-          .values({
+        // Scrum Master first, then the CEO; the owner only if the CEO escalates it (BOS-1015).
+        const row = await opts.alert({
             companyId: ticket.companyId,
-            kind: "question",
+            kind: "looks_stuck",
+            from: "scrum_master",
+            duty: true,
+            ticketId: ticket.id,
+            about: [agentId],
             question: `"${ticket.title}" looks stuck. ${agent} was woken about it ${recent.length} times in the last day and nothing is running on it; it was last active ${ago(t.getTime() - lastActive.getTime())} ago.${reassign ? ` ${agent} has run on it ${empty} times with no new commit, state change or review, so reassign it (assign_ticket).` : " Look into it, or reassign it."}`,
             options: reassign ? [REASSIGN, "Got it"] : ["Got it"],
-            recommendedOption: reassign ? REASSIGN : "Got it",
+            recommended: reassign ? REASSIGN : "Got it",
             dedupeKey: key,
-            context: { type: "question" },
-          })
-          .onConflictDoNothing()
-          .returning({ id: decisions.id });
-        result.gaveUp += rows.length;
+            clearWhen: [{ kind: "ticketDone", ticketId: ticket.id }],
+          });
+        if (row) result.gaveUp++;
         continue;
       }
       await opts.wake({
@@ -1343,6 +1352,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.endUnconfirmedCancels(t);
       // Runs past the company's time limit (BOS-846). Off by default; a failing read must not take the pass down.
       if (opts.cancelRun) await runTimeLimitSweep(db, { now, cancel: opts.cancelRun, alert: opts.alert }).run().catch(() => ({ stopped: 0 }));
+      // A fence mode nobody chose (BOS-940): Off where the runner can't fence, or one card asking about an old Off.
+      await fenceDefaultSweep(db, t).catch(() => ({ turnedOff: 0, raised: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);
