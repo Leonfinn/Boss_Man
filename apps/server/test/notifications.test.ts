@@ -240,6 +240,32 @@ describe("notification ladder (R44)", () => {
     expect(row!.pushedAt).toBeNull();
   });
 
+  it("a CEO escalation with urgent:true stores the mark and the card pushes; without it the same card stays off the phone (BOS-1097)", async () => {
+    const c = await setup({ listen: true });
+    await c.req("PUT", "/api/notification-settings", { ...SETTINGS, phonePush: undefined });
+    const ceo = await c.mcp(c.ceo.id);
+    const alert = (question: string) => c.alerts.raise({ companyId: c.company.id, kind: "owner", question, from: "scrum_master", options: ["Got it", "Keep waiting"] });
+    const plain = await alert("Plain alert the CEO could not settle");
+    const urgent = await alert("Urgent alert the CEO could not settle");
+    const triedFirst = "Looked at both agents' last runs and the host";
+    // urgent:true without a reason is refused and nothing moves.
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: urgent!.id, triedFirst, urgent: true } }))).toMatch(/urgentWhy/);
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, urgent!.id)))[0]!.tier).toBe("ceo");
+
+    expect((await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: plain!.id, triedFirst } }) as { isError?: boolean }).isError).toBeFalsy();
+    expect((await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: urgent!.id, triedFirst, urgent: true, urgentWhy: "The runner is down and nothing can ship" } }) as { isError?: boolean }).isError).toBeFalsy();
+    const [row] = await c.db.select().from(decisions).where(eq(decisions.id, urgent!.id));
+    expect(row!.tier).toBe("owner");
+    expect((row!.context as { urgentPush?: { why: string } }).urgentPush).toMatchObject({ why: "The runner is down and nothing can ship" });
+
+    await c.notes.syncDecisions();
+    expect(c.pushed.map((p) => p.body.message)).toEqual(["Urgent alert the CEO could not settle"]);
+    expect(c.pushed[0]!.body.priority).toBe(5);
+    const [n] = await c.db.select().from(notifications).where(eq(notifications.decisionId, urgent!.id));
+    expect(n!.pushReason).toBe("The CEO marked it urgent: The runner is down and nothing can ship");
+    await ceo.close();
+  });
+
   it("clears a pushed card from the phone when it is answered, and a failed or unsupported clear never fails the answer (BOS-1097)", async () => {
     for (const clearStatus of [200, 404]) {
       const c = await setup({ clearStatus });
