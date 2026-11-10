@@ -97,7 +97,7 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "How many agents run at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
   transfer: ["Import a company"],
 };
 const SIZES = [
@@ -130,10 +130,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
           if (over > 1) wide.push(`${vp.name}/${id} +${over}px`);
         }
-        // KNOWN (BOS-1020 finding): at 380 px the Watchdog (+226 px) and Permissions (+146 px) pages scroll sideways.
-        // Drop these two from KNOWN_WIDE when they are fixed, so the walk guards them too.
-        const KNOWN_WIDE = ["phone/watchdog", "phone/permissions"];
-        expect(wide.filter((w) => !KNOWN_WIDE.some((k) => w.startsWith(`${k} `))), "pages that scroll sideways").toEqual([]);
+        expect(wide, "pages that scroll sideways").toEqual([]);
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         await page.close();
       }
@@ -167,11 +164,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
     ]);
   }, 60_000);
 
-  // KNOWN BUG (BOS-1020 finding): the old bare #/funding and #/secrets carry no company id, and App.tsx resolves the
-  // company for the redirect from the address only (never the company already selected), so they land on the bare
-  // #/settings menu instead of Funding / Secrets. When fixed, this test starts passing and `it.fails` flags it:
-  // change it to a plain `it`.
-  it.fails("lands the old bare #/funding and #/secrets on Funding and Secrets", async () => {
+  it("lands the old bare #/funding and #/secrets on Funding and Secrets", async () => {
     await landsOn([
       ["funding", "settings/c1/funding"],
       ["secrets", "settings/c1/secrets"],

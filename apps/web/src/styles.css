@@ -481,6 +481,14 @@ details > summary { cursor: pointer; font-size: 14px; }
 .set-back { display: none; align-items: center; min-height: 44px; color: var(--muted); text-decoration: none; font-size: 15px; }
 .set-back:hover { color: var(--ink); }
 .set-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* A select must be allowed to shrink below its longest option's text, or a long option widens the page (BOS-1044). */
+.set-page select { max-width: 100%; min-width: 0; }
+/* The Watchdog's limit rows: on a phone the long label takes its own line, so the page never scrolls sideways (BOS-1044). */
+.wd-limits { display: grid; grid-template-columns: max-content 90px max-content; gap: 8px 10px; align-items: center; }
+@media (max-width: 640px) {
+  .wd-limits { grid-template-columns: 90px minmax(0, 1fr); }
+  .wd-limits label { grid-column: 1 / -1; }
+}
 /* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
 .page-head h1:focus { outline: none; }
 .set-scope { margin-left: 10px; vertical-align: middle; }
