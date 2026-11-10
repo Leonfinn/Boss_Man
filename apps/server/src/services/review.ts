@@ -1087,9 +1087,12 @@ export function reviewService(
     },
 
     /**
-     * The files this ticket's branch would clash with on the default branch, or null when that can't be
-     * told (no repo, no connected runner, an older runner, or a failed check). Null means "carry on as
-     * if it merges": a check that can't answer never holds a reviewer back (BOS-426).
+     * The files this ticket's branch would clash with on the default branch. Null when it merges cleanly
+     * or when that can't be told (no repo, no connected runner, an older runner, or a failed check): null
+     * means "carry on as if it merges", so a check that can't answer never holds a reviewer back (BOS-426).
+     * A real clash whose file list is unknown is an empty array, which callers must read as a clash.
+     * A clean merge must never come back as [] (BOS-1074: [] is truthy, so every idle review woke its
+     * author with "no longer merges").
      */
     async branchClash(ticketId: string): Promise<string[] | null> {
       try {
@@ -1099,7 +1102,7 @@ export function reviewService(
         if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
         const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
         if (typeof r?.clashes !== "boolean") return null;
-        return r.clashes ? (r.files ?? []) : [];
+        return r.clashes ? (r.files ?? []) : null;
       } catch {
         return null;
       }
