@@ -16,6 +16,7 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
+import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "./services/agent-wip.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
@@ -1366,6 +1367,13 @@ export async function buildApp(opts: AppOptions) {
       const merged = { instance: value.instance, company: value.company, background: value.background ?? before?.background ?? DEFAULT_LIMITS.background };
       await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
       return runLimits();
+    });
+    // Tickets in progress per agent, and (optionally) in the whole company (BOS-1029). null is "No limit".
+    owner.get("/api/wip-limits", async () => ({ ...(await readWipLimits(db)), defaultAgent: DEFAULT_AGENT_WIP_LIMIT }));
+    owner.put("/api/wip-limits", async (req) => {
+      const value = z.object({ agent: z.number().int().min(1).max(50).nullable(), company: z.number().int().min(1).max(1000).nullable() }).parse(req.body);
+      await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
     });
     /** Whether phone Approve buttons are on, and if not why, for Settings → Notifications (BOS-243). */
     const approveStatus = async (s: NotifySettings) => {

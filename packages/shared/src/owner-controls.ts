@@ -231,6 +231,9 @@ export const OWNER_FIELDS = {
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
     "Background (infinite mode) runs at once (0 to 16)",
+    // Settings → Tickets in progress (BOS-1029).
+    "Tickets in progress per agent (leave empty for no limit)",
+    "Tickets in progress, whole company (leave empty for no limit)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
   ],

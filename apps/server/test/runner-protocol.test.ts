@@ -12,7 +12,7 @@ import { buildApp } from "../src/app.js";
 import { runnerIngestWaiting } from "../src/routes/runner-socket.js";
 import { PROTOCOL_VERSION } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
-import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { agents, costEvents, runnerEvents, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 
 const HEARTBEAT = 100;
 
@@ -258,6 +258,8 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
   const monitorAtOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   async function parked(n = 1) {
     const ceo = (await ctx.db.select().from(agents).where(eq(agents.companyId, ctx.companyId)))[0]!;
+    // These tests are about parked checks, not the per-agent WIP limit (BOS-1029): "No limit" lets one agent hold all of them in progress.
+    await ctx.db.insert(settings).values({ key: "wip_limits", value: { agent: null, company: null } }).onConflictDoUpdate({ target: settings.key, set: { value: { agent: null, company: null } } });
     const p = await ctx.built.work.createProject(ctx.companyId, "App");
     const out: string[] = [];
     for (let i = 0; i < n; i++) {

@@ -139,6 +139,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>ThisHost": "Server and runner",
   "pages/Settings.tsx>NetguardAllow": "Server and runner",
   "pages/Settings.tsx>RunLimits": "Server and runner",
+  "pages/Settings.tsx>WipLimits": "Server and runner",
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
