@@ -14,6 +14,7 @@ import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { NOTHING_CHANGED } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { moveTicket } from "./services/ticket-moves.js";
+import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FIXES_LIVE_HELP, managerIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
@@ -178,8 +179,10 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim() } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim() } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
+      // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
+      if (blocker && blocker.state !== "done") await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn, until: waitsOnUntil ?? "merged" }, scope.agentId);
       await feedback.syncFeature(featureId);
