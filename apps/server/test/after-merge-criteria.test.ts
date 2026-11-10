@@ -381,6 +381,26 @@ describe("after-merge criteria", () => {
     expect(recorded.systemState).toBe("in_progress");
   });
 
+  // BOS-1056: card 6a7c5944 ("What does the Network guard row say?") was answered "on", its recommended
+  // option, and recorded as a fail because "on" holds no pass word.
+  it("answering the recommended option records a pass whatever its wording", async () => {
+    const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "What does the Network guard row say?", options: ["on", "off", "not shown"], recommendedOption: "on", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await ctx.decisions.answer(d!.id, "on");
+    const recorded = await ctx.row(t.id);
+    expect(readVerdicts(readCriteria(recorded.acceptanceCriteria), recorded.stateNote).find((r) => r.criterion === LIVE.text)?.verdict).toBe("pass");
+  });
+
+  it("a card with no recommended option records nothing for a neutral option, not a fail", async () => {
+    const t = await ctx.ticket({ acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", mergeCommit: "f".repeat(40), stateNote: "Health check returns 200 pass" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "What does the Network guard row say?", options: ["on", "off"], recommendedOption: "", context: { type: "question", criterionIndexes: [1] }, raisedByAgentId: ctx.dev.id }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await ctx.decisions.answer(d!.id, "on");
+    const recorded = await ctx.row(t.id);
+    expect(recorded.stateNote).toBe("Health check returns 200 pass");
+  });
+
   it("reopening a merged ticket for code clears its no-code mark, so review and done ask for a diff again", async () => {
     const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: [BEFORE, LIVE], systemState: "in_progress", branch: null, mergeCommit: "a".repeat(40), noCode: true, stateNote: `${LIVE.text} pass` });
     // The owner reopens it to do real work: from then on it is a code ticket again.

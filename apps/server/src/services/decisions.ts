@@ -1011,7 +1011,7 @@ async function postAnswerOnTickets(
  * which the done gate reads however the criterion is worded; the owner's words are quoted too.
  * Returns the tickets it wrote to.
  */
-async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null; options?: string[] | null; criterionIndexes?: number[] | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
+async function recordOwnerHostChecks(db: Db, d: { question: string; answer: string | null; options?: string[] | null; recommended?: string | null; criterionIndexes?: number[] | null }, ticketIds: string[], by: string, now: () => Date): Promise<string[]> {
   const answer = (d.answer ?? "").trim();
   if (!ticketIds.length || !answer) return [];
   const rows = await db.select({ id: tickets.id, criteria: tickets.acceptanceCriteria, note: tickets.stateNote, merged: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, ticketIds));
@@ -1020,7 +1020,15 @@ async function recordOwnerHostChecks(db: Db, d: { question: string; answer: stri
   // owner's plain words are quoted on the note either way.
   const fail = /\b(fail|failed|fails|failing|broken|not|didn't|doesn't|can't|cannot|red|no|✗|✘)\b/i.test(answer);
   const pass = /\b(pass|passed|passes|passing|ok|done|yes|green|works|working|✓|✔)\b/i.test(answer);
-  const verdict = fail || !pass ? "fail" : "pass";
+  // (BOS-1056) A multiple-choice card names its passing answer: the recommended option. Choosing it is a pass
+  // whatever its wording ("on" on a "What does the Network guard row say?" card). When the card has no
+  // recommended option and the answer is one of its options with no pass or fail word, nothing says which
+  // way it counts, so nothing is recorded rather than a fail.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const isOption = (d.options ?? []).some((o) => norm(o) === norm(answer));
+  const chosenRecommended = !!d.recommended && norm(d.recommended) === norm(answer);
+  if (!chosenRecommended && !d.recommended && isOption && !fail && !pass) return [];
+  const verdict = chosenRecommended ? "pass" : fail || !pass ? "fail" : "pass";
   const said = answer.replace(/\s+/g, " ").slice(0, 200);
   const wrote: string[] = [];
   for (const r of rows) {
@@ -3167,7 +3175,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // question isn't the owner looking at the host, and the assignee still reports that one.
       if (!extra.settledBy && ctx.type === "question") {
         try {
-          await recordOwnerHostChecks(db, { question: d.question, answer, options: d.options as string[] | null, criterionIndexes: (ctx as { criterionIndexes?: number[] }).criterionIndexes ?? null }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
+          await recordOwnerHostChecks(db, { question: d.question, answer, options: d.options as string[] | null, recommended: d.recommendedOption, criterionIndexes: (ctx as { criterionIndexes?: number[] }).criterionIndexes ?? null }, [...new Set(freed.map((f) => f.ticketId))], "the owner", now);
         } catch (err) {
           // The answer is saved; a failed write here must not stop it reaching the asker.
           log(`answering decision ${id} was saved, but recording the owner's host check on its ticket failed: ${(err as Error).message}`);
