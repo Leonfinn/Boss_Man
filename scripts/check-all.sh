@@ -231,12 +231,27 @@ for d in "${pkg_dirs[@]}"; do
   step "typecheck:${d##*/}" pnpm --dir "$d" run typecheck
 done
 unset NODE_OPTIONS  # the heap cap is for tsc only
+# The build runs before the tests (BOS-1071): the web tests that load the built page (wrap-up-layout, settings-walk, ...)
+# skip when apps/web/dist is missing, so with the build after them a change that broke them passed this gate and only GitHub CI saw it.
+step build pnpm build
+# The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
+# fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
+web_tests() {
+  local d=$1 report shots rc=0
+  report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
+  [ -n "$report" ] || report="$(mktemp)"
+  shots="$(mktemp -d)"
+  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" || rc=$?
+  rm -rf "$shots"
+  [ "$rc" -eq 0 ] || return "$rc"
+  node "$(dirname "$self")/check-no-skips.mjs" "$report"
+}
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
+  if [ "${d##*/}" = web ]; then step "test:web" web_tests "$d"; continue; fi
   # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
   step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
 done
-step build pnpm build
 step shellcheck scripts/check-shell.sh
 step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
 echo "check-all: everything passed"
