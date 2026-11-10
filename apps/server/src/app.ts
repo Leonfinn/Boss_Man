@@ -345,7 +345,7 @@ export async function buildApp(opts: AppOptions) {
   });
   notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
-  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", now: opts.now });
   decisionsSvc.setSecondOpinion(secondOpinion);
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
@@ -1909,6 +1909,8 @@ export async function buildApp(opts: AppOptions) {
       if (b.enabled && (!b.model || !b.baseUrl)) return reply.code(400).send({ error: "invalid_request", message: "Set the provider address and the model first." });
       return secondOpinion.setSettings(id, b);
     });
+    // BOS-1052: how often the model answered vs fell back to the rules judge in the last 24 h.
+    owner.get("/api/companies/:id/second-opinion/stats", async (req) => secondOpinion.stats(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/second-opinion/test", async (req) => {
       IdParam.parse(req.params);
       return secondOpinion.test(SecondOpinionSettings.parse(req.body));
