@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, featureHorizon, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
+import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, riskSummary, usdToMicros, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -14,7 +14,7 @@ import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
@@ -61,7 +61,7 @@ import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
-import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
+import { planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
@@ -96,6 +96,9 @@ import { serverAdminRoutes } from "./routes/server-admin.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { projectRoutes } from "./routes/projects.js";
+import { featureRoutes } from "./routes/features.js";
+import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { logoType } from "./services/image-type.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -2033,104 +2036,11 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(201).send(await work.addDependency(id, body));
     });
 
-    owner.post("/api/companies/:id/objectives", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const body = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5).optional(), projectId: Uuid.optional() }).parse(req.body);
-      const o = await work.createObjective(id, body);
-      await teamCheck(id, `added an objective, "${o.title}"${body.projectId ? ` for project ${body.projectId}` : ""}`);
-      return reply.code(201).send(o);
-    });
+    // Objectives: routes/roadmap.ts, on this owner scope.
+    objectiveRoutes(owner, db, { work, teamCheck });
 
-    owner.post("/api/objectives/:id/key-results", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const body = z.object({ title: z.string().trim().min(1).max(200), target: z.number().optional(), current: z.number().optional(), unit: z.string().max(20).optional(), method: z.enum(["manual", "agent", "check"]).optional() }).parse(req.body);
-      return reply.code(201).send(await work.addKeyResult(id, body));
-    });
-
-    owner.post("/api/objectives/:id/milestones", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional(), horizon: z.enum(HORIZONS).optional() }).parse(req.body);
-      const m = await work.addMilestone(id, body);
-      const [o] = await db.select({ companyId: objectives.companyId, title: objectives.title }).from(objectives).where(eq(objectives.id, id));
-      if (o) await teamCheck(o.companyId, `added a milestone, "${body.title}", under the objective "${o.title}"`);
-      return reply.code(201).send(m);
-    });
-
-    owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
-
-    // Feature requests: feedback notes, features and prioritisation.
-    const Text = (max: number) => z.string().trim().min(1).max(max);
-    const CustomerIn = z.object({ name: Text(200), email: z.string().trim().email().max(320).nullable().optional(), segment: z.string().trim().max(100).nullable().optional() });
-    const FeatureFields = z.object({
-      title: Text(200),
-      description: z.string().max(OWNER_MESSAGE_MAX).nullable(),
-      status: z.enum(FEATURE_STATUSES),
-      areaId: Uuid.nullable(),
-      parentId: Uuid.nullable(),
-      effort: z.number().int().min(1).max(5).nullable(),
-      rank: z.number().int().min(1).max(5).nullable(),
-      horizon: z.enum(HORIZONS).nullable(),
-      driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
-      milestoneId: Uuid.nullable(),
-      objectiveId: Uuid.nullable(),
-      portalVisible: z.boolean(),
-      keepOffPortal: z.boolean(),
-      publicSummary: z.string().trim().max(2000).nullable(),
-      publicTitle: z.string().trim().max(200).nullable(),
-      showPublicly: z.boolean(),
-    });
-    owner.get("/api/companies/:id/feedback-settings", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const s = await feedback.settings(id);
-      return { ...s, portalUrl: opts.portalUrl?.replace(/\/+$/, "") || null, drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
-    });
-    owner.patch("/api/companies/:id/feedback-settings", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ demandWeight: z.number().int().min(0).max(10), ceoTriage: z.boolean() }).partial().parse(req.body);
-      return feedback.setSettings(id, b);
-    });
-    owner.post("/api/companies/:id/feature-drivers", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      return reply.code(201).send(await feedback.addDriver(id, z.object({ name: Text(80), weight: z.number().int().min(0).max(10).default(1) }).parse(req.body)));
-    });
-    owner.patch("/api/feature-drivers/:id", async (req) => feedback.updateDriver(IdParam.parse(req.params).id, z.object({ name: Text(80), weight: z.number().int().min(0).max(10), position: z.number().int().min(0) }).partial().parse(req.body)));
-    owner.delete("/api/feature-drivers/:id", async (req, reply) => (await feedback.removeDriver(IdParam.parse(req.params).id), reply.code(204).send()));
-    owner.post("/api/companies/:id/feature-areas", async (req, reply) => reply.code(201).send(await feedback.addArea(IdParam.parse(req.params).id, z.object({ name: Text(80) }).parse(req.body).name)));
-    owner.patch("/api/feature-areas/:id", async (req) => feedback.updateArea(IdParam.parse(req.params).id, z.object({ name: Text(80), position: z.number().int().min(0) }).partial().parse(req.body)));
-    owner.delete("/api/feature-areas/:id", async (req, reply) => (await feedback.removeArea(IdParam.parse(req.params).id), reply.code(204).send()));
-
-    owner.patch("/api/companies/:id/portal", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable() }).partial().parse(req.body);
-      // BOS-967: the back link must be a full https address, or empty for none.
-      if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
-      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
-    });
-    // Only these three types, found by their first bytes: the portal is public, so no SVG.
-    const logoType = (b: Buffer) =>
-      b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ? "image/png"
-      : b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff ? "image/jpeg"
-      : b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP" ? "image/webp"
-      : null;
-    owner.put("/api/companies/:id/feedback/portal-logo", { bodyLimit: 400 * 1024 }, async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { data } = z.object({ data: z.string() }).parse(req.body);
-      const bytes = Buffer.from(data, "base64");
-      if (!bytes.length || bytes.length > 256 * 1024) return reply.code(413).send({ error: "too_large", message: "The logo must be 256 KB or smaller." });
-      const type = logoType(bytes);
-      if (!type) return reply.code(415).send({ error: "bad_type", message: "The logo must be a PNG, JPEG or WebP image." });
-      await feedback.setPortalLogo(id, { bytes, type });
-      return feedback.settings(id);
-    });
-    owner.delete("/api/companies/:id/feedback/portal-logo", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      await feedback.setPortalLogo(id, null);
-      return feedback.settings(id);
-    });
-    owner.get("/api/companies/:id/feedback/portal-logo", async (req, reply) => {
-      const logo = await feedback.portalLogo(IdParam.parse(req.params).id);
-      return logo ? sendLogo(reply, logo) : reply.code(404).send({ error: "not_found", message: "No logo." });
-    });
+    // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
+    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
     // An agent's own picture, in place of its template's portrait.
     owner.put("/api/agents/:id/avatar", { bodyLimit: 400 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -2156,50 +2066,6 @@ export async function buildApp(opts: AppOptions) {
       const [pic] = await db.select({ bytes: agentAvatars.bytes, type: agentAvatars.type }).from(agentAvatars).where(eq(agentAvatars.agentId, IdParam.parse(req.params).id));
       return pic ? sendLogo(reply, pic) : reply.code(404).send({ error: "not_found", message: "No picture." });
     });
-    owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
-    owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
-    owner.post("/api/companies/:id/features", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      return reply.code(201).send(await feedback.createFeature(id, FeatureFields.partial().required({ title: true }).parse(req.body)));
-    });
-    owner.get("/api/features/:id", async (req) => feedback.featureDetail(IdParam.parse(req.params).id));
-    owner.patch("/api/features/:id", async (req) => feedback.updateFeature(IdParam.parse(req.params).id, FeatureFields.partial().parse(req.body)));
-    owner.delete("/api/features/:id", async (req, reply) => (await feedback.removeFeature(IdParam.parse(req.params).id), reply.code(204).send()));
-    /** A ticket that delivers the feature, described from what people asked for. */
-    owner.post("/api/features/:id/tickets", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ projectId: Uuid, title: Text(200).optional(), risk: z.enum(RISK_TIERS).optional(), assigneeAgentId: Uuid.optional(), state: z.enum(SYSTEM_STATES).optional(), noCode: z.boolean().optional() }).parse(req.body);
-      const { feature: f, body } = await feedback.brief(id);
-      const [p] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, b.projectId));
-      if (!p || p.companyId !== f.companyId) return reply.code(422).send({ error: "rejected", message: "Pick a project of the feature's company." });
-      const t = await work.createTicket(b.projectId, { title: b.title ?? f.title, body, featureId: id, risk: b.risk, assigneeAgentId: b.assigneeAgentId, state: b.state, noCode: b.noCode });
-      if (f.status === "idea" || f.status === "considering") await feedback.updateFeature(id, { status: "planned" });
-      return reply.code(201).send(t);
-    });
-
-    owner.get("/api/companies/:id/feedback-customers", async (req) => feedback.customers(IdParam.parse(req.params).id, z.object({ q: z.string().max(100).optional() }).parse(req.query).q));
-    owner.get("/api/feedback/unprocessed", async () => feedback.unprocessedCount());
-    owner.get("/api/companies/:id/feedback", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-      return feedback.notes(id, q);
-    });
-    owner.post("/api/companies/:id/feedback", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ title: z.string().trim().max(200).nullable().optional(), text: Text(20_000), source: z.enum(NOTE_SOURCES).exclude(["portal", "agent", "chat"]).optional(), customerId: Uuid.nullable().optional(), customer: CustomerIn.nullable().optional() }).parse(req.body);
-      return reply.code(201).send(await feedback.createNote(id, b));
-    });
-    owner.get("/api/feedback/:id", async (req) => feedback.noteDetail(IdParam.parse(req.params).id));
-    owner.patch("/api/feedback/:id", async (req) => {
-      const b = z.object({ title: z.string().trim().max(200).nullable(), state: z.enum(["unprocessed", "processed", "archived"]), customerId: Uuid.nullable(), customer: CustomerIn.nullable() }).partial().parse(req.body);
-      return feedback.updateNote(IdParam.parse(req.params).id, b);
-    });
-    owner.delete("/api/feedback/:id", async (req, reply) => (await feedback.removeNote(IdParam.parse(req.params).id), reply.code(204).send()));
-    owner.post("/api/feedback/:id/insights", async (req, reply) => {
-      const b = z.object({ featureId: Uuid, importance: z.enum(IMPORTANCE).default("important"), highlight: z.string().max(2000).nullable().optional() }).parse(req.body);
-      return reply.code(201).send(await feedback.link(IdParam.parse(req.params).id, { ...b, createdBy: "the owner" }));
-    });
-    owner.delete("/api/insights/:id", async (req, reply) => (await feedback.unlink(IdParam.parse(req.params).id), reply.code(204).send()));
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2232,40 +2098,8 @@ export async function buildApp(opts: AppOptions) {
       return c ? { number: c.number, rollRequestedAt: c.rollRequestedAt } : reply.code(409).send({ error: "no_chapter", message: "The CEO hasn't started a chapter yet. One starts at its next run." });
     });
 
-    // Roadmap and plan views (v1.1).
-    const planning = planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) });
-    owner.get("/api/roadmap", async (req) => {
-      const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
-      return planning.roadmap(q.today ?? dateIn(opts.now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
-    });
-    /** Features for the roadmap's Now / Next / Later columns, grouped by objective on the client. */
-    owner.get("/api/roadmap/features", async () => {
-      const cos = await db.select({ id: companies.id, name: companies.name }).from(companies).orderBy(asc(companies.name));
-      return Promise.all(cos.map(async (c) => ({ ...c, features: await feedback.roadmapFeatures(c.id) })));
-    });
-    owner.patch("/api/objectives/:id", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5), status: z.enum(OBJECTIVE_STATUSES) }).partial().parse(req.body);
-      return planning.updateObjective(id, b);
-    });
-    owner.get("/api/milestones/:id/tickets", async (req) => planning.milestoneTickets(IdParam.parse(req.params).id));
-    owner.patch("/api/milestones/:id", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable() }).partial().parse(req.body);
-      return planning.updateMilestone(id, b);
-    });
-    owner.delete("/api/milestones/:id", async (req, reply) => {
-      await planning.deleteMilestone(IdParam.parse(req.params).id);
-      return reply.code(204).send();
-    });
-    owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
-    owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
-    owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
-    owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
-    owner.delete("/api/dependencies/:id", async (req, reply) => {
-      await planning.removeDependency(IdParam.parse(req.params).id);
-      return reply.code(204).send();
-    });
+    // The roadmap and plan views: routes/roadmap.ts, on this owner scope.
+    roadmapRoutes(owner, db, { feedback, now: opts.now, planning: planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) }) });
 
     // Agents (R62): hire from a template, change them, retire them, and undo any change.
     const agentErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
