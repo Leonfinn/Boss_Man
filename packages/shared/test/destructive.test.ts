@@ -666,3 +666,195 @@ describe("do-nothing sed -i (BOS-680)", () => {
     expect(destroys(c)).toBe(true);
   });
 });
+
+describe("forms left out of BOS-393 (BOS-571)", () => {
+  // Each of these got "allow" from the BOS-393 reader: the rows below fail on that code, which the ticket requires.
+  const owner: string[] = [
+    // 1. In-place edits by another interpreter: ruby -i.
+    "ruby -pi -e s/a/b/ /etc/x",
+    "ruby -i.bak -pe s/a/b/ /etc/x",
+    "ruby -pi -e s/a/b/ ../x",
+    "ruby -i -e s/a/b/ .git/config",
+    "ruby -i '$_.upcase!' /etc/hosts",
+    "cd /etc && ruby -pi -e s/a/b/ hosts",
+    "ls | xargs ruby -pi -e s/a/b/",
+    "sudo ruby -pi -e s/a/b/ x",
+    "ssh h ruby -pi -e s/a/b/ x",
+    "docker exec c ruby -pi -e s/a/b/ x",
+    // Ruby switches that take a value must not hide the -i (security review round 1).
+    "ruby -rdate -i -pe s/a/b/ /etc/hosts",
+    "ruby -Fe -i -pe s/a/b/ /etc/hosts",
+    "ruby -Ilib -i -pe s/a/b/ /etc/hosts",
+    "ruby -r date -i -pe s/a/b/ /etc/hosts",
+    "ruby -r json -i -pe s/a/b/ /etc/hosts",
+    "ruby -E utf-8 -i -pe s/a/b/ /etc/hosts",
+    // Ruby switches whose value is joined only must not swallow the -i after them (security review round 2).
+    "ruby -W -i -pe s/a/b/ /etc/hosts",
+    "ruby -K -i -pe s/a/b/ /etc/hosts",
+    "ruby -F -i -pe s/a/b/ /etc/hosts",
+    "ruby -T -i -pe s/a/b/ /etc/hosts",
+    "ruby -x -i -pe s/a/b/ /etc/hosts",
+    "ruby -W -i.bak -pe s/a/b/ /etc/hosts",
+    // 2. Git deletes.
+    "git worktree remove -f ../wt",
+    "git worktree remove ../wt",
+    "git worktree remove --force ../wt",
+    "git update-ref -d refs/heads/x",
+    "git update-ref --delete refs/heads/x",
+    "git update-ref --stdin",
+    "git update-ref refs/heads/x 0000000000000000000000000000000000000000",
+    "git reflog expire --expire=now --all",
+    "git reflog expire --all",
+    "git gc --prune=now",
+    "git gc --prune=all --aggressive",
+    "git gc --prune=1.second.ago",
+    "git prune",
+    "git branch -C a b",
+    "git branch --force-create a b",
+    "git switch -C a",
+    // 3. Archive deletes and tar options that run a command.
+    "tar --delete -f a.tar x",
+    "tar --delet -f a.tar x",
+    "tar --checkpoint-action=exec=rm a.tar",
+    "tar -cf a.tar --checkpoint=1 --checkpoint-action exec=./x d",
+    "tar cf a.tar --checkpoint=1 --checkpoint-act=exec=ls x",
+    "tar cf a.tar --checkpoint=1 --checkpoint-a=exec=ls x",
+    "tar cf a.tar --checkpoint=1 --checkpoint-action=exec=ls x",
+    "tar cIf rm a.tar x",
+    "tar --to-command=rm -xf a.tar",
+    "tar --use-compress-program=rm -xf a.tar",
+    "tar -I rm -xf a.tar",
+    "tar -cf a.tar -I 'sh -c \"rm -rf /srv/x\"' d",
+    "tar -xf a.tar -I rm",
+    "tar cf a.tar -Irm x",
+    "tar -cf a.tar -F 'rm -rf /srv/x' d",
+    "tar -cf a.tar --rsh-command=rm d",
+    "tar --info-script=rm -cf a.tar x",
+    // 4. Other cloud CLIs.
+    "gcloud compute instances delete i-1",
+    "gcloud --project p compute disks delete d1",
+    "gcloud compute instances -q delete i-1",
+    "az vm delete -g g -n v",
+    "az --subscription s group delete -n g",
+    // --only-show-errors takes no value in az, so it must not hide the `delete` after it (BOS-571 review).
+    "az vm --only-show-errors delete -g g -n v",
+    "gcloud compute instances --quiet delete i-1",
+    "terraform destroy",
+    "terraform apply -destroy",
+    "pulumi destroy",
+    "pulumi down",
+    "pulumi dn",
+    "kubectl apply --prune -f .",
+    "kubectl replace --force -f x.yaml",
+    "helm uninstall rel",
+    "helm del rel",
+    "helm delete rel",
+    "helm un rel",
+    // ruby -C changes directory before relative paths resolve (BOS-571 review).
+    "ruby -C / -i -pe s/a/b/ etc/hosts",
+    "ruby -C/ -i -pe s/a/b/ etc/hosts",
+    "ruby -C /srv -i -pe s/a/b/ x.rb",
+    "ruby -C /srv -i.bak -pe s/a/b/ f",
+    "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
+    // ruby long options whose value is the next word must not hide the -i (security review round 3).
+    "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --external-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --internal-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
+    "ruby --unknown-long-opt -i -pe s/a/b/ x.rb",
+    "ruby --inplace -pe s/a/b/ /etc/hosts",
+    // 5. Wrappers.
+    "sg docker -c 'rm -rf /x'",
+    "sg docker rm -rf /x",
+    "firejail rm -rf /x",
+    "firejail --net=none rm -rf /x",
+    "firejail --private rm -rf /srv/x",
+    "firejail --seccomp rm -rf /srv/x",
+    "firejail --private-tmp rm -rf /srv/x",
+    "firejail --x11 rm -rf /srv/x",
+    "firejail --debug rm -rf /srv/x",
+    "bwrap --ro-bind / / rm -rf /x",
+    "bwrap --bind /srv /srv --dev /dev rm -rf /srv/x",
+  ];
+
+  it.each(owner)("sends %j to the owner, recommended Deny", (c) => {
+    expect(destroys(c)).toBe(true);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("owner");
+    expect(recommendedVerdict(exec(c))).toBe("deny");
+  });
+
+  it.each([
+    // ruby -i that stays in the checkout and /tmp, and ruby without -i.
+    "ruby -pi -e s/a/b/ x.rb",
+    "ruby -i.bak -pe s/a/b/ /tmp/f",
+    "ruby -i -pe s/a/b/ src/*.rb",
+    "ruby script.rb arg",
+    "ruby -e 'print 1'",
+    "ruby -r date script.rb",
+    "ruby -rdate script.rb",
+    // -C without -i only reads a script from another folder.
+    "ruby -C /srv script.rb",
+    // Long options that read a value, without -i.
+    "ruby --encoding utf-8 script.rb",
+    "ruby --encoding utf-8 -pe s/a/b/ x.rb",
+    "ruby --encoding=utf-8 -i -pe s/a/b/ x.rb",
+    // git commands that keep work recoverable.
+    "git gc",
+    "git gc --auto",
+    "git gc --quiet",
+    "git gc --prune=never",
+    "git prune --dry-run",
+    "git reflog",
+    "git reflog show main",
+    "git branch -d x",
+    "git branch -c a b",
+    "git branch -M main",
+    "git switch -c feat",
+    "git switch main",
+    "git worktree list",
+    "git update-ref refs/heads/x main",
+    // tar archives and reads without deleting or running a command.
+    "tar czf a.tgz x",
+    "tar -xzf a.tgz -C \"$DIR\"",
+    "tar --list -f a.tar",
+    // Archive names that start with a capital letter (or a letter followed by I) are not tar options (BOS-571 review).
+    "tar xf Installer.tgz",
+    "tar czf BUILD.tgz x",
+    "tar czf DIST.tgz x",
+    "tar xf Images.tar",
+    "tar czf Image.tar.gz dir",
+    "tar czf a.tgz srcIndex",
+    "tar -cf out.tar Installer.tgz",
+    "tar czf out.tgz srcIndex Image.tar",
+    // cloud CLIs that read or apply without deleting.
+    "terraform plan",
+    "terraform apply",
+    "terraform init",
+    "pulumi up",
+    "pulumi preview",
+    "kubectl apply -f x.yaml",
+    "kubectl replace -f x.yaml",
+    "kubectl get pods",
+    "helm upgrade rel chart",
+    "helm list",
+    "helm status rel",
+    "helm install rel chart",
+    "gcloud auth list",
+    "gcloud compute instances list",
+    "gcloud compute instances list -q",
+    "gcloud config set project p",
+    "az account show",
+    "az vm list -g g",
+    "az vm list --only-show-errors -g g",
+    // wrappers that run a harmless program.
+    "sg docker -c ls",
+    "sg docker id",
+    "firejail ls",
+    "firejail --net=none ls",
+    "firejail --private ls",
+    "firejail --seccomp ls",
+    "bwrap --ro-bind / / ls",
+  ])("leaves %j alone", (c) => {
+    expect(commandRisks(c)).toEqual([]);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
+  });
+});
