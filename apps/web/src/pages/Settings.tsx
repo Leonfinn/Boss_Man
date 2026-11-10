@@ -1478,7 +1478,7 @@ export function Watchdog({ company }: { company: Company }) {
           ))}
         </select>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "max-content 90px max-content", gap: "8px 10px", alignItems: "center" }}>
+      <div className="wd-limits">
         {WATCHDOG_LIMITS.map((l) => (
           <div key={l.key} style={{ display: "contents" }}>
             <label htmlFor={`wd-${l.key}`}>{l.label}</label>
@@ -2438,7 +2438,7 @@ export function RunLimits() {
   const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
   const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
-    <Section id="run-limits-h" title="How many agents run at once">
+    <Section id="run-limits-h" title="Agents at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
@@ -3081,7 +3081,7 @@ export function NetguardAllow() {
   const automatic = r.automatic ?? [];
   const notAllowed = automatic.filter((e) => e.notAllowed !== null);
   return (
-    <Section id="netguard-allow-h" title="Network guard: addresses runners may reach">
+    <Section id="netguard-allow-h" title="Network guard">
       <p className="muted" style={{ fontSize: 14 }}>
         Two lists: the addresses Boss Man opens for your runners by itself, and any extra addresses you added in your .env. This page only reports; it never changes .env.
       </p>
