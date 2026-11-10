@@ -17,7 +17,7 @@ afterEach(async () => {
 
 const diffOf = (path: string) => ({ baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path, added: 1, removed: 0 }], diff: "", truncated: false });
 
-async function setup(path = "apps/server/src/x.ts") {
+async function setup(path = "apps/server/src/x.ts", diffFails = false) {
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   ctx = { close: async () => (await built.app.close(), await close()) };
@@ -36,7 +36,8 @@ async function setup(path = "apps/server/src/x.ts") {
     (c) => {
       sent.push(c);
       const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-      if (c.type === "workspace.diff") ok(diffOf(path));
+      if (c.type === "workspace.diff" && diffFails) queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: false, error: "timed out" }));
+      else if (c.type === "workspace.diff") ok(diffOf(path));
       if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
       if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
       if (c.type === "workspace.carried") ok({ carried: [] });
@@ -114,6 +115,13 @@ describe("a diff that touches scripts/check-all.sh (BOS-1094)", () => {
     const deadline = Date.now() + 20_000;
     while (c.merges() === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
     expect(c.merges()).toBe(1);
+  });
+
+  it("does not merge when the changed files can't be read (fails closed)", async () => {
+    const c = await setup("scripts/check-all.sh", true);
+    const t = await c.approved();
+    await c.review.landOnce(t.id, "Boss Man").catch(() => undefined);
+    expect(c.merges()).toBe(0);
   });
 
   it("an ordinary diff is not held", async () => {

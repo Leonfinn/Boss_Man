@@ -1528,6 +1528,13 @@ export function reviewService(
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
       // A diff that touches a file the owner approves (scripts/check-all.sh, CLAUDE.md) is held at high risk, so the
       // owner's sign-off is needed even if nobody raised a card (BOS-1094). The sign-off machinery does the holding.
+      // A diff that could not be read has an unknown file list, so it must not merge: it might change one of those
+      // files. Fail closed with the same "Run the check again" card the other runner failures use.
+      if (!changed && t.branch) {
+        await wait(t, "Not merged: the runner didn't answer when asked which files the ticket changes. Nothing was merged.", "card");
+        await raiseCheckStuck(db, t, "changed-files check", "the runner didn't answer when asked which files the ticket changes", "workspace.diff failed");
+        return { outcome: "check_stuck", delivered: null, detail: { unchecked: "workspace.diff failed" } };
+      }
       const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
       let because: string | undefined;
       if (ownerFiles.length) {
