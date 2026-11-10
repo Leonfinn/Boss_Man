@@ -78,16 +78,21 @@ afterAll(async () => {
 async function launch(): Promise<any | null> {
   let chromium: any;
   try {
-    chromium = createRequire(import.meta.url)("playwright").chromium;
+    const req = createRequire(import.meta.url);
+    try {
+      chromium = req("playwright").chromium;
+    } catch {
+      chromium = req("playwright-core").chromium;
+    }
   } catch {
     console.warn("settings-walk: playwright is not installed; the browser walk was skipped");
     return null;
   }
   for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
     try {
-      return await chromium.launch(executablePath ? { executablePath } : {});
-    } catch {
-      /* next */
+      return await chromium.launch({ ...(executablePath ? { executablePath } : {}), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    } catch (e) {
+      console.warn(`settings-walk: launch ${executablePath ?? "bundled"} failed: ${String(e).slice(0, 300)}`);
     }
   }
   console.warn("settings-walk: no Chromium could be launched; the browser walk was skipped");
@@ -174,6 +179,10 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
               return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
             }, target);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
+            // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
+            if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
+              await page.screenshot({ path: path.join(process.env.BOSSMAN_SHOT_DIR, `after-checks-${vp.name}.png`) });
+            }
           }
         }
         await page.close();
