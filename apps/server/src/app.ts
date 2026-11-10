@@ -100,6 +100,7 @@ import { skillRoutes } from "./routes/skills.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { logoType } from "./services/image-type.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -108,7 +109,7 @@ import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
+import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
@@ -1051,46 +1052,9 @@ export async function buildApp(opts: AppOptions) {
     return { username: owner.username };
   });
 
-  // Phone Approve (BOS-243 rules 3, 4, 8): an ntfy http action posts {"token": "..."} here, with no
-  // session. JSON in and out, never a page; request logging is off and the body is never logged or
-  // echoed, so the token can't reach a log, the error buffer or a response. Its own parsers, in their
-  // own scope, so a bad body gets a plain JSON answer rather than the error handler's message.
-  await app.register(async (phone) => {
-    phone.removeAllContentTypeParsers();
-    phone.addContentTypeParser("application/json", { parseAs: "string", bodyLimit: 1024 }, (_req, body, done) => done(null, { json: body }));
-    phone.addContentTypeParser("*", { parseAs: "string", bodyLimit: 1024 }, (_req, _body, done) => done(null, { json: null }));
-    phone.setErrorHandler((err, _req, reply) => {
-      const status = (err as { statusCode?: number }).statusCode;
-      if (status && status >= 400 && status < 500) return reply.code(status).send({ ok: false, error: "bad_request" });
-      // A fixed line only: the error itself could quote the request.
-      app.log.warn("phone approve: a tap failed inside the server");
-      return reply.code(500).send({ ok: false, error: "internal_error" });
-    });
-    // The "Got it" button on the test push: a tap proves the phone received it. Same body rules as Approve.
-    phone.post("/api/phone/got-it", { logLevel: "silent" }, async (req, reply) => {
-      const raw = (req.body as { json?: string | null } | undefined)?.json;
-      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
-      let token: unknown;
-      try {
-        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
-      } catch {
-        return reply.code(400).send({ ok: false, error: "bad_request" });
-      }
-      return (await notes.confirmTest(token)) ? { ok: true } : reply.code(404).send({ ok: false, error: "not_found" });
-    });
-    phone.post("/api/phone/approve", { logLevel: "silent" }, async (req, reply) => {
-      const raw = (req.body as { json?: string | null } | undefined)?.json;
-      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
-      let token: unknown;
-      try {
-        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
-      } catch {
-        return reply.code(400).send({ ok: false, error: "bad_request" });
-      }
-      const r = await phoneApprove.redeem(token, req.ip);
-      return reply.code(r.status).send(r.body);
-    });
-  });
+  // Phone Approve (BOS-243 rules 3, 4, 8): its own scope, parsers and error handler, kept in
+  // routes/devices-notifications.ts.
+  await phoneApproveRoutes(app, { notes, phoneApprove });
 
   app.post("/api/logout", async (req, reply) => {
     const token = req.cookies[SESSION_COOKIE];
@@ -1111,31 +1075,8 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
-    // Device profiles (BOS-641): the owner's browsers report their measured screens so a layout
-    // ticket can be checked at the real device. Only screen facts; one row per signed-in browser.
-    owner.get("/api/devices", async (req) => {
-      const ownerId = await currentOwnerId(req);
-      return ownerId ? deviceProfiles.list(ownerId) : [];
-    });
-    owner.post("/api/devices", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      return deviceProfiles.report(ownerId, req.body);
-    });
-    owner.patch("/api/devices/:id", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      const { id } = IdParam.parse(req.params);
-      const { label } = z.object({ label: z.string().trim().min(1).max(80) }).parse(req.body);
-      const p = await deviceProfiles.rename(ownerId, id, label);
-      return p ?? reply.code(404).send({ error: "not_found" });
-    });
-    owner.delete("/api/devices/:id", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      const { id } = IdParam.parse(req.params);
-      return (await deviceProfiles.remove(ownerId, id)) ? { ok: true } : reply.code(404).send({ error: "not_found" });
-    });
+    // Device profiles (BOS-641): the owner's browsers report their measured screens.
+    deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({
@@ -1332,24 +1273,8 @@ export async function buildApp(opts: AppOptions) {
       return secretsSvc.accessLog(id, limit);
     });
 
-    // Notifications (R44): the feed, settings and a test push.
-    owner.get("/api/notifications", async (req) => {
-      const q = z
-        .object({
-          before: z.coerce.date().optional(),
-          limit: z.coerce.number().int().min(1).max(200).optional(),
-          status: z.enum(["unread", "read"]).optional(),
-          level: z.enum(["note", "flag", "page", "ask"]).optional(),
-          company: z.union([z.literal("none"), Uuid]).optional(),
-        })
-        .parse(req.query);
-      return { items: await notes.list(q), unread: await notes.unread() };
-    });
-    owner.post("/api/notifications/read", async (req) => {
-      const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
-      await notes.markRead(b.all ? "all" : (b.ids ?? []));
-      return { unread: await notes.unread() };
-    });
+    // Notifications (R44): the feed.
+    notificationRoutes(owner, { notes });
     // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
     // Infinite-mode agents have their own "background" slots instead (BOS-279), so slow free runs never take a normal one.
     const runLimits = async () => {
@@ -1382,11 +1307,6 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
       return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
     });
-    /** Whether phone Approve buttons are on, and if not why, for Notifications (BOS-243). */
-    const approveStatus = async (s: NotifySettings) => {
-      const { gate: g } = await phoneApprove.gate(s);
-      return g.on ? { on: true } : { on: false, why: g.why };
-    };
     // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
     // Owner only: no agent tool or route writes these settings.
     const checkQueueView = async () => {
@@ -1464,39 +1384,8 @@ export async function buildApp(opts: AppOptions) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
       }
     });
-    // The address the phone app must use for ntfy: the add-on's own NTFY_BASE_URL as the host reports it (null: not reported).
-    const phoneNtfyAddress = async () => (await hostFacts.value("ntfy.baseUrl").catch(() => null)) ?? null;
-    const phoneNtfyContainer = async () => (await hostFacts.value("ntfy.container").catch(() => null)) ?? null;
-    owner.get("/api/notification-settings", async () => {
-      const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
-    });
-    owner.put("/api/notification-settings", async (req) => {
-      const b = NotifySettings.omit({ ntfy: true })
-        .extend({
-          ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
-        })
-        .parse(req.body);
-      const current = await notes.getSettings();
-      let tokenSecretId = current.ntfy?.tokenSecretId ?? null;
-      if (b.ntfy?.token === null) tokenSecretId = null;
-      else if (b.ntfy?.token) {
-        // The token goes into the encrypted secrets store, like every other credential.
-        tokenSecretId = tokenSecretId
-          ? ((await secretsSvc.rotate(tokenSecretId, b.ntfy.token, { acceptUnusualFormat: true })) ? tokenSecretId : null)
-          : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
-      }
-      const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
-    });
-    owner.post("/api/notification-settings/test", async (_req, reply) => {
-      try {
-        await notes.test();
-        return { ok: true };
-      } catch (err) {
-        return reply.code(502).send({ error: "push_failed", message: `The test push didn't go through: ${(err as Error).message}` });
-      }
-    });
+    // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
 
     // Decision rules (R19): what happens when an agent asks to use a tool.
     const Match = z.object({
