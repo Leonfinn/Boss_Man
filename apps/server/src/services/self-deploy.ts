@@ -352,7 +352,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /** Withdraws every open runner card but `keepId`, with the plain "replaced by a newer one" reason (BOS-1010 rule 7). */
-  async function withdrawOtherRunnerCards(keepId: string, commit: string) {
+  async function withdrawOtherRunnerCards(keepId: string, commit: string, keepOwnerAsks = false) {
     const companyId = await homeCompany();
     if (!companyId) return;
     const why = replacedWhy(commit);
@@ -360,9 +360,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     for (const d of await openFor("runner")) {
       if (d.id === keepId) continue;
       // The owner's own button press is left alone: it is their explicit ask, not a stale automatic card (BOS-764 pattern).
-      // BOS-1086: a server deploy no longer closes the runner card, so an owner's card for an OLDER version can now be
-      // left open when the live version moves on. It is replaced like any other; only one for this same version stays.
-      if (((d.context as SelfDeployContext).requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(d.dedupeKey ?? "")) && (d.context as SelfDeployContext).commit === commit) continue;
+      // BOS-1086: a server deploy no longer closes the runner card, so an owner's card for an OLDER version can be left
+      // open when the live version moves on. A newly raised card replaces it; only the duplicate sweep spares it.
+      const ownerAsk = (d.context as SelfDeployContext).requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(d.dedupeKey ?? "");
+      if (ownerAsk && (keepOwnerAsks || (d.context as SelfDeployContext).commit === commit)) continue;
       await withdrawOpen(d.id, replacedNotice({ commit, text: why, now }));
       await record(db, { companyId, kind: "decision_withdrawn", summary: why, at: now });
     }
@@ -383,7 +384,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const pool = mine.length ? mine : open;
     const keep = (pool.find((d) => (d.context as SelfDeployContext).requested) ?? pool.sort((x, y) => +new Date(y.createdAt) - +new Date(x.createdAt))[0])!;
     // Withdraws the rest; the requested-card guard inside leaves any other owner press alone (BOS-1010 rule 7).
-    await withdrawOtherRunnerCards(keep.id, (keep.context as SelfDeployContext).commit ?? live ?? "");
+    await withdrawOtherRunnerCards(keep.id, (keep.context as SelfDeployContext).commit ?? live ?? "", true);
   }
 
   /**
