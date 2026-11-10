@@ -1,7 +1,7 @@
 // The company's agent fence setting (BOS-325): off by default, watch asks capable runners to fence,
 // enforce is locked, and a fenced run's kernel refusals reach the permission log.
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -212,9 +212,12 @@ describe("the fence stops being off by unspoken default (DR-049 point 3, BOS-940
     expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ raised: 0 });
   });
 
-  it("migration 0138 marks only the companies already at watch or enforce as chosen, and changes no mode", async () => {
+  it("the fence_watch_by_default migration marks only the companies already at watch or enforce as chosen, and changes no mode", async () => {
     const c = (ctx = await setup(["fence"]));
-    const file = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0139_fence_watch_by_default.sql"), "utf8");
+    // Found by name, not number: main keeps taking the next migration number while this waits to merge.
+    const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle");
+    const [name] = readdirSync(dir).filter((f) => f.endsWith("_fence_watch_by_default.sql"));
+    const file = readFileSync(path.join(dir, name!), "utf8");
     const update = file.slice(file.indexOf('UPDATE "companies"')).trim();
     expect(update).toMatch(/^UPDATE "companies" SET "fence_mode_chosen_at" = now\(\) WHERE "fence_mode" <> 'off';$/);
     const [other] = await c.db.insert(companies).values({ name: "Fenced Co", fenceMode: "watch" }).returning();

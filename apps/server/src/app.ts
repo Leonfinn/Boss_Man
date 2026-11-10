@@ -317,7 +317,7 @@ export async function buildApp(opts: AppOptions) {
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
   const hostFacts = hostFactsService({ dir: opts.deployerDir, db, now: opts.now, log: (m) => app.log.warn(m) });
   const deviceProfiles = deviceProfilesService(db);
-  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
+  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, hosts: () => hostFacts.hosts(), deployerScript: () => hostFacts.deployerScript(), facts: async () => Object.fromEntries(Object.entries((await hostFacts.sync()).facts).map(([k, f]) => [k, f.value])), log: (m) => app.log.warn(m),
     // Both colours, the same probe Settings shows: the runner trial ends as soon as the standby is stopped (BOS-953). `build` is defined further down; this only runs per request.
     colours: () => probeColours(colour(), build),
     // Quiet = no agent run in flight (an owner chat doesn't count) and no merge landing: a few seconds' outage of the database or proxy would cut them short (BOS-487).
@@ -1058,6 +1058,18 @@ export async function buildApp(opts: AppOptions) {
       app.log.warn("phone approve: a tap failed inside the server");
       return reply.code(500).send({ ok: false, error: "internal_error" });
     });
+    // The "Got it" button on the test push: a tap proves the phone received it. Same body rules as Approve.
+    phone.post("/api/phone/got-it", { logLevel: "silent" }, async (req, reply) => {
+      const raw = (req.body as { json?: string | null } | undefined)?.json;
+      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
+      let token: unknown;
+      try {
+        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
+      } catch {
+        return reply.code(400).send({ ok: false, error: "bad_request" });
+      }
+      return (await notes.confirmTest(token)) ? { ok: true } : reply.code(404).send({ ok: false, error: "not_found" });
+    });
     phone.post("/api/phone/approve", { logLevel: "silent" }, async (req, reply) => {
       const raw = (req.body as { json?: string | null } | undefined)?.json;
       if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
@@ -1393,7 +1405,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
     owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
-    owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS] }));
+    owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
     // BOS-770: Settings → Server and runner. The .env network-guard allow entries and which ones Boss Man already covers. Read only.
     owner.get("/api/netguard-allow", async () => ({ report: await netguardAllow().catch(() => null) }));
     owner.put("/api/host-facts", async (req, reply) => {
@@ -1404,9 +1416,12 @@ export async function buildApp(opts: AppOptions) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
       }
     });
+    // The address the phone app must use for ntfy: the add-on's own NTFY_BASE_URL as the host reports it (null: not reported).
+    const phoneNtfyAddress = async () => (await hostFacts.value("ntfy.baseUrl").catch(() => null)) ?? null;
+    const phoneNtfyContainer = async () => (await hostFacts.value("ntfy.container").catch(() => null)) ?? null;
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s) };
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
     });
     owner.put("/api/notification-settings", async (req) => {
       const b = NotifySettings.omit({ ntfy: true })
@@ -1424,7 +1439,7 @@ export async function buildApp(opts: AppOptions) {
           : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
       }
       const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved) };
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
     });
     owner.post("/api/notification-settings/test", async (_req, reply) => {
       try {

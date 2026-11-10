@@ -87,6 +87,9 @@ has "$D/outbox/host.json" "\"path\": \"$(cd "$D" && pwd)\""
 has "$D/outbox/host.json" '"mode": "'
 hasnt "$D/outbox/host.json" '"login"' # the deployer runs as root and doesn't guess the owner's account
 [[ $(stat -c %a "$D/outbox/host.json") == 644 ]] || fail "host.json is not mode 644"
+# BOS-990: the host reports the sha256 of the script file it runs from, and of the checkout's copy (empty when the checkout has none).
+has "$D/outbox/host.json" "\"deployer\": {\"scriptSha\": \"$(sha256sum "$here/host-deployer.sh" | cut -d' ' -f1)\", \"repoSha\": \""
+[[ $(node -e 'const h=require(process.argv[1]);process.stdout.write(/^([0-9a-f]{64})?$/.test(h.deployer.repoSha)?"ok":"bad")' "$D/outbox/host.json") == ok ]] || fail "deployer.repoSha is malformed: $(cat "$D/outbox/host.json")"
 node -e 'const h=require(process.argv[1]);if(!Array.isArray(h.ownership)||!h.ownership.length)process.exit(1);for(const o of h.ownership)if(!/^\/[^"]*$/.test(o.path)||!/^[0-7]{3,4}$/.test(o.mode)||!o.owner||!o.group)process.exit(2)' "$D/outbox/host.json" || fail "host.json ownership is malformed: $(cat "$D/outbox/host.json")"
 # 1a2. Roles (BOS-541): each known folder says what it is for. The deployer folder is "deployer"; the install
 # folder is "install", and the backups folder is "backups" (here a separate folder; the default layout, below,
@@ -119,6 +122,15 @@ has "$D/outbox/host.json" '"BOSSMAN_HOST_PORT": "3199"'
 hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'SECRET_TOKEN'
 hasnt "$D/outbox/host.json" 'PENPOT_BIND'
+# The ntfy add-on's own https address is reported (so the phone page can show it); anything else is not.
+printf 'NTFY_BASE_URL=https://box.example.ts.net:8443\n' >"$T/src/.env"
+host
+has "$D/outbox/host.json" '"ntfy": {"baseUrl": "https://box.example.ts.net:8443"}'
+hasnt "$D/outbox/host.json" '"container"' # no docker here, so no container name is guessed
+printf 'NTFY_BASE_URL=https://user:pw@box.example.ts.net:8443/?x=1\n' >"$T/src/.env"
+host
+hasnt "$D/outbox/host.json" 'baseUrl'
+hasnt "$D/outbox/host.json" 'user:pw'
 rm -f "$T/src/.env"
 # BOS-770: every BOSSMAN_NETGUARD_ALLOW line in .env is reported in order, host:port entries only, so a duplicate
 # (Compose uses only the last) shows; a comment, a commented-out line and anything that isn't host:port are left out.

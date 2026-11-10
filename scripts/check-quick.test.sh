@@ -332,4 +332,31 @@ run 1 "scratch: a failing run" env BOSSMAN_SCRATCH="$scratch" FAIL_ON=typecheck
 grep -q "(exit 1)" "$scratch/check-quick.log" || fail "scratch: a failure's log is not marked with its exit: $(cat "$scratch/check-quick.log")"
 grep -q "PASS  typecheck @boss-man/web" "$scratch/check-quick.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$scratch")"
 
+# Compose files and workflows (BOS-1036): scripts/check-compose.sh runs when one changed. Exit 3 = tools missing = SKIP, other = FAIL.
+cat >"$repo/scripts/check-compose.sh" <<'S'
+#!/usr/bin/env bash
+echo "check-compose" >>"$LOG"
+case "${COMPOSE_STUB:-}" in
+  missing) echo "check-compose: docker CLI or compose plugin not installed"; exit 3;;
+  bad) echo "FAIL  compose set [docker-compose.yml]"; echo "yaml: line 12: did not find expected key"; exit 1;;
+esac
+S
+chmod +x "$repo/scripts/check-compose.sh"
+# The stub belongs to the base, as the real script does: commit it on main and move origin/main with it.
+g checkout -q main; g add -A; g commit -q -m "stub check-compose"; g update-ref refs/remotes/origin/main HEAD
+g checkout -q -B compose origin/main; commit docker-compose.yml
+run 0 "compose: valid files" env
+logged "check-compose" "compose: validator runs for docker-compose.yml"
+grep -q "^PASS  compose files and CI workflows" "$t/out" || fail "compose: no PASS line: $(cat "$t/out")"
+run 1 "compose: invalid file" env COMPOSE_STUB=bad
+{ grep -q "^FAIL  compose files and CI workflows" "$t/out" && grep -q "yaml: line 12" "$t/out"; } || fail "compose: failure not shown with its line: $(cat "$t/out")"
+run 0 "compose: tools missing" env COMPOSE_STUB=missing
+grep -q "^SKIP  compose and workflow validation" "$t/out" || fail "compose: no SKIP line: $(cat "$t/out")"
+g checkout -q -B wf origin/main; commit .github/workflows/ci.yml
+run 0 "workflow" env; logged "check-compose" "workflow change runs the validator"
+g checkout -q -B depl origin/main; commit deploy/truenas.yml
+run 0 "deploy yml" env; logged "check-compose" "deploy/*.yml change runs the validator"
+g checkout -q -B nocompose origin/main; commit apps/web/src/q2.ts
+run 0 "no compose change" env; notlogged "check-compose" "unrelated change must not run the validator"
+
 echo "check-quick.test.sh: ok"

@@ -229,7 +229,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     const col = target.columnId ? cols.find((c) => c.id === target.columnId) : cols.find((c) => c.systemState === (target.state ?? "backlog"));
     if (!col) throw new WorkError(422, "That column isn't on this project's board.");
     if (col.wipLimit != null && !opts.overLimit) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.columnId, col.id));
+      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)));
       if (inCol.filter((t) => t.id !== opts.ticketId).length >= col.wipLimit) {
         throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
       }

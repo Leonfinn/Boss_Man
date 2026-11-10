@@ -1,5 +1,5 @@
 {
-  "id": "514e5b95-1598-456c-9b66-4e6b829dd5fb",
+  "id": "9b1c6f52-3d7a-4e18-a0c5-6e2f4b8d1a73",
   "prevId": "2406c0fb-e4e7-4b5d-9871-eae66534f437",
   "version": "7",
   "dialect": "postgresql",
@@ -1750,13 +1750,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'watch'"
-        },
-        "fence_mode_chosen_at": {
-          "name": "fence_mode_chosen_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
+          "default": "'off'"
         },
         "watchdog": {
           "name": "watchdog",
