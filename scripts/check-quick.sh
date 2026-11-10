@@ -125,6 +125,7 @@ done
   # this step accepts that case the same way, using the same function (scripts/rebase-migrations.mjs). Real clashes still fail.
   # It notes the rebuilt tree in $rebuilt_tree_file, and the migration lint then runs on that tree.
   rebuilt_tree_file="$(mktemp)"; lint_dir=""
+  # shellcheck disable=SC2317  # called through step below
   merge_clean() {
     local mout mrc=0 rout rrc=0
     mout="$(git merge-tree --write-tree "$base" HEAD 2>&1)" || mrc=$?
