@@ -186,7 +186,7 @@ These come from cline/kanban (Apache-2.0) and its issue tracker; see [04-researc
   - **Quiet hours** demote a notification to a lower level rather than drop it.
   - **Evidence:** every notification links to its evidence.
   - **Phone push** uses Web Push (Boss Man only sends outbound requests) or a self-hosted ntfy reached over Tailscale. Boss Man is never exposed at the router.
-  - **What reaches the phone (BOS-1006):** by default only urgent cards, at ntfy priority 5: a decision that blocks work only the owner can answer, a deploy carrying the fix for a live problem, a page, and the test push. Routine cards stay in the app. Settings → Notifications → "Send to my phone" can switch to "All decisions", which sends routine ones at priority 3. The "Flags" tick is separate. Quiet hours still lower an urgent ask to a flag first.
+  - **What reaches the phone (BOS-1006):** by default only urgent cards, at ntfy priority 5: a decision that blocks work only the owner can answer, a deploy carrying the fix for a live problem, a page, and the test push. Routine cards stay in the app. Notifications → "Send to my phone" can switch to "All decisions", which sends routine ones at priority 3. The "Flags" tick is separate. Quiet hours still lower an urgent ask to a flag first.
 - **R45. Web hardening.** WebSocket upgrades check `Origin` and `Host`. Login has a rate limit and a lockout after repeated failures.
 
 ### From the Nimbalyst and Aperant reviews (2026-10-16)
