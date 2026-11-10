@@ -229,6 +229,7 @@ sections:
   - Facts only you can give
   - Network guard
   - Now
+  - Private details to block
   - Runner
   - Runner update
   - Server
@@ -248,6 +249,7 @@ reads:
   - /api/kill-switch
   - /api/maintenance
   - /api/netguard-allow
+  - /api/private-details
   - /api/run-limits
   - /api/runner-report
   - /api/self-deploy
