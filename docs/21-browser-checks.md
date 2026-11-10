@@ -16,6 +16,22 @@ scripts/browser-check.sh --print-url                             # only the URL,
 - Seeing a screenshot is not a check. Open the printed URL with your browser tool (agent-browser, which uses the same Chromium), at both sizes, and click, type and copy.
 - The app must listen on all interfaces (not only 127.0.0.1) for the address to work.
 
+## Screenshots of the web build: `scripts/screenshot.mjs`
+
+For a picture of one screen at one width (a layout ticket, a QA proof), use the script, not hand-run Chromium (BOS-1060):
+
+```sh
+pnpm --filter @boss-man/web build        # once; the script serves apps/web/dist
+node scripts/screenshot.mjs --route "#board/p1" --width 1667 --wait ".board-scroll" --out "$BOSSMAN_SCRATCH/board.png"
+node scripts/screenshot.mjs --route "#settings" --width 380 --touch --api my-api.json --wait "h1" --out shot.png
+```
+
+- It serves the build on 127.0.0.1 and answers `/api/*` from a built-in fixture (signed-in owner, one company, one project, an empty board). `--api FILE` is a JSON map of `"/api/path": body` that adds or replaces paths; an unknown path gets `{}`. Find which paths a screen asks for in the page's `api(...)` calls.
+- `--wait SELECTOR` is required: it waits for that element to be visible, never a fixed time, and exits non-zero with one line if it does not appear. Other options: `--height`, `--ratio`, `--touch`, `--full-page`, `--timeout`, `--dist`, `--url` (a running app instead of the local server).
+- It needs no permission cards beyond running it. Its temp files live in one folder it creates and removes (also on Ctrl-C); the browser runs with `ulimit -c 0`, so a crash leaves no core dump.
+
+Why hand-run Chromium failed on the runner (BOS-1053): (1) the run's temp path is long and Chromium's socket path limit is 107 characters ("Socket path too long", the crash on its temp folder); the script points `TMPDIR` at a short link. (2) `/dev/shm` on the runner is 64 MB and can be nearly full, so pointing Chromium at it, or letting it use it for renderer memory, gives a blank page; the script passes `--disable-dev-shm-usage` and never writes there except the link.
+
 ## When a ticket names a device
 
 The generic phone size above is not the owner's phone. Each of the owner's browsers is recorded as a device profile (Settings → Server and runner → Your devices) and saved as `apps/web/test/device-profiles/*.json`. So the acceptance line for a UI ticket that names a device is:
