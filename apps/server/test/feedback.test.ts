@@ -21,7 +21,7 @@ describe("feedback notes and insights", () => {
     const c = await setup();
     const dark = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme for the dashboard" })).json();
     const csv = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "CSV export" })).json();
-    expect(dark).toMatchObject({ status: "idea", portalVisible: false });
+    expect(dark).toMatchObject({ status: "idea", portalVisible: true });
 
     const n = (await c.req("POST", `/api/companies/${c.company.id}/feedback`, { text: "The dashboard is far too bright at night. A dark theme would help. Exporting to CSV would be nice too.", customer: { name: "Acme Ltd", email: "ops@acme.example", segment: "Enterprise" } })).json();
     expect(n).toMatchObject({ state: "unprocessed", source: "owner", untrusted: false });

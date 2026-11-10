@@ -56,7 +56,7 @@ export function diskService(db: Db, deps: { send: (runnerId: string, command: Ru
             question:
               `${company.name}'s workspaces use ${gb(report.usedBytes)}, over its ${gb(cap)} disk cap.` +
               (named.length ? ` The biggest ticket workspaces are ${named.join(", ")}.` : "") +
-              ` This is a warning: nothing is stopped by it. To raise it, open Settings → Reviews and CEO → Workspace disk and set "Disk cap (GB)" higher than its current ${gb(cap)}; it takes effect at the next hourly clean-up.` +
+              ` This is a warning: nothing is stopped by it. To raise it, open Settings → Server and runner → Runner → Workspace disk and set "Disk cap (GB)" higher than its current ${gb(cap)}; it takes effect at the next hourly clean-up.` +
               ` Otherwise, finish or cancel tickets; worktrees of tickets done more than ${limits.retentionDays} days ago are removed automatically.`,
             options: ["Got it"],
             recommendedOption: "Got it",

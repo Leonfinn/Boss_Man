@@ -153,7 +153,9 @@ describe("docker events (BOS-335)", () => {
     // Twelve reconnects on the one signal: if the listener stayed, Node would warn past ten.
     for (let i = 0; i < 12; i++) {
       const open = docker.events({ type: "container" }, 0, () => undefined, () => undefined, abort.signal);
-      await new Promise((r) => setTimeout(r, 5));
+      // Wait for the request to reach the fake socket, not a fixed 5 ms: on a busy machine it can arrive later, and
+      // f.end() before then ends nothing, so the stream stayed open until the test timed out.
+      while (f.seen.length <= i) await new Promise((r) => setTimeout(r, 2));
       f.end();
       await open;
     }

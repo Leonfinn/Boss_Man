@@ -82,7 +82,7 @@ describe("an owner card on handed-in work (BOS-919)", () => {
       const t = await ctx.ticket({ systemState: from });
       const card = await ctx.raise(t.id);
       expect(await stateOf(t.id)).toBe("blocked");
-      expect(await stateRows(t.id)).toEqual([`${from} -> blocked: held by the card ${card.id}`]);
+      expect(await stateRows(t.id)).toEqual([`${from} -> blocked: Waiting on the owner's card ${card.id}`]);
       await ctx.decisions.answer(card.id, "Stripe");
       expect(await stateOf(t.id)).toBe("ready");
     });

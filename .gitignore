@@ -5,3 +5,5 @@ dist/
 coverage/
 data/
 secrets/
+# Process core dumps (core.<pid>) can hold live secrets; never commit or checkpoint them.
+core.[0-9]*

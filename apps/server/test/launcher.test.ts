@@ -152,10 +152,10 @@ describe("runners through the launcher (R55)", () => {
     const c = (ctx = await setup());
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
-    const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
+    const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.1.20:11235/mcp", transport: "http" });
     expect(added.statusCode).toBe(201);
     // A private literal the owner typed in is trusted for private, so the guard keeps it (BOS-708).
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.20:11235"], private: ["192.168.68.20:11235"] }));
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.1.20:11235"], private: ["192.168.1.20:11235"] }));
     await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
     await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [], private: [] }));
     expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
@@ -169,7 +169,7 @@ describe("runners through the launcher (R55)", () => {
     const res = await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "ftp://files.example.org/o/r.git" });
     expect(res.statusCode).toBe(400);
     expect(JSON.stringify(res.json())).toContain("http://192.0.2.10:3003/you/repo.git");
-    expect(JSON.stringify(res.json())).not.toContain("192.168.68.67");
+    expect(JSON.stringify(res.json())).not.toContain("192.168.1.50");
   });
 
   it("lists the addresses Boss Man opens by itself, per company, with what each one is (BOS-791)", async () => {
@@ -263,8 +263,8 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
     const last = () => c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body;
-    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
-    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.1.50:3003/team/site.git" });
+    await vi.waitFor(() => expect(last()).toEqual({ allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] }));
     await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "https://github.com/o/r.git" });
     // A public git name is allowed but never trusted for private: its DNS could be pointed at the stack later (BOS-777).
     await vi.waitFor(() => expect(last()).toEqual({ allow: ["github.com:443"], private: [] }));
@@ -277,7 +277,7 @@ describe("runners through the launcher (R55)", () => {
     await c.db.update(projects).set({ repoUrl: "https://git.example.org/o/r.git", allowPrivate: true }).where(eq(projects.id, p.id));
     await c.launcher.syncAllow(company.id);
     expect(last()).toEqual({ allow: ["git.example.org:443"], private: [] });
-    expect(gitHostAddress("http://192.168.68.67:3003/o/r.git")).toBe("192.168.68.67:3003");
+    expect(gitHostAddress("http://192.168.1.50:3003/o/r.git")).toBe("192.168.1.50:3003");
     expect(gitHostAddress("git@git.lan:o/r.git")).toBe("git.lan:22");
     expect(gitHostAddress("ssh://git@h.lan:2222/o/r")).toBe("h.lan:2222");
     expect(gitHostAddress("http://gitea.lan/o/r")).toBe("gitea.lan:80");
@@ -295,14 +295,14 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const p = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
     const q = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Odd" })).json() as { id: string };
-    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.68.67:3003/team/site.git" });
+    await c.req("PATCH", `/api/projects/${p.id}`, { repoUrl: "http://192.168.1.50:3003/team/site.git" });
     await c.req("PATCH", `/api/projects/${q.id}`, { repoUrl: "https://my_git.lan/o/r" });
     // Wait for both patches' own syncs to land, so clearing the log doesn't race one of them into the syncAll assertions.
-    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] }));
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] }));
     await new Promise((r) => setTimeout(r, 20));
     c.fake.calls.length = 0;
     await c.launcher.syncAll(1);
-    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.68.67:3003"], private: ["192.168.68.67:3003"] } })]);
+    expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow")).toEqual([expect.objectContaining({ method: "PUT", body: { allow: ["192.168.1.50:3003"], private: ["192.168.1.50:3003"] } })]);
   });
 
   it("start-up sync tries again while the launcher is coming up, and never throws", async () => {
@@ -400,7 +400,7 @@ describe("the launcher's private addresses (BOS-886): the shared table, pinned t
 
 describe("isLanHost (BOS-777): whether a git host is trusted for private addresses, with no DNS", () => {
   it("trusts private IP literals and LAN-style names only", () => {
-    for (const u of ["http://192.168.68.67:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
+    for (const u of ["http://192.168.1.50:3003/o/r.git", "https://10.0.0.5/o/r", "git@git.lan:o/r.git", "ssh://git@h.local:2222/o/r", "http://gitea/o/r", "https://git.corp.internal/o/r", "http://nas.home/o/r"]) expect(isLanHost(u), u).toBe(true);
     for (const u of ["https://git.example.org/o/r.git", "https://github.com/o/r.git", "git@github.com:o/r.git", "http://8.8.8.8/o/r", "https://lan.example.org/o/r", "/srv/repos/r", "not a url"]) expect(isLanHost(u), u).toBe(false);
   });
 });
