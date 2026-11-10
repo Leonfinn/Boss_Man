@@ -33,6 +33,9 @@ type AgentRow = {
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
   openTickets: number;
+  /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 / 2" (BOS-1029). */
+  wipCount?: number;
+  wipLimit?: number | null;
   pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
@@ -733,6 +736,14 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                 `${a.openTickets} open task${a.openTickets === 1 ? "" : "s"}`
               ) : (
                 "No open tasks"
+              )}
+              {a.wipLimit != null && a.wipCount !== undefined && (
+                <>
+                  {" · "}
+                  <span title="Tickets in progress, against the limit per agent set in Settings" style={a.wipCount > a.wipLimit ? { color: "var(--danger, #b3261e)" } : undefined}>
+                    {a.wipCount} / {a.wipLimit} in progress
+                  </span>
+                </>
               )}
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}

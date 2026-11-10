@@ -2447,6 +2447,56 @@ export function RunLimits() {
   );
 }
 
+/**
+ * Tickets in progress per agent (BOS-1029): an agent finishes before it starts more. Only in-progress tickets
+ * count (review, blocked and done don't). Empty box = No limit.
+ */
+export function WipLimits() {
+  const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { agent: d.agent == null ? "" : String(d.agent), company: d.company == null ? "" : String(d.company) };
+  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
+  const [a, c] = [parse(v.agent), parse(v.company)];
+  const valid = (a === null || (Number.isInteger(a) && a >= 1 && a <= 50)) && (c === null || (Number.isInteger(c) && c >= 1 && c <= 1000));
+  return (
+    <Section id="wip-limits-h" title="Tickets in progress">
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="wip-agent">Tickets in progress per agent (leave empty for no limit)</label>
+        <input id="wip-agent" type="number" min={1} max={50} placeholder="No limit" value={v.agent} onChange={(e) => setEdit({ ...v, agent: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          How many tickets one agent may have in progress at once (default {d.defaultAgent}: one being worked, one waiting on its check). At the limit, a new ticket for that agent waits in Ready and starts by itself when one of their tickets goes to review, done or blocked. Only in-progress tickets count. Work already started is never held (changes requested, a failed merge check), and an urgent ticket may start one over. Agents already over the limit are not interrupted; they just start nothing new until they are back under.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="wip-company">Tickets in progress, whole company (leave empty for no limit)</label>
+        <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
+      </div>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/wip-limits", { method: "PUT", body: { agent: a, company: c } });
+              setEdit(null);
+              view.reload();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number };
 
 /**
@@ -3464,6 +3514,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <ThisHost />
             <NetguardAllow />
             <RunLimits />
+            <WipLimits />
             <CheckQueueSetting />
           </>
         )}

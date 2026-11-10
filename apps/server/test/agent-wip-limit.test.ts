@@ -224,6 +224,25 @@ describe("the tools say it is queued in Ready", () => {
   });
 });
 
+describe("the setting API and the Agents count", () => {
+  it("PUT /api/wip-limits saves a number or null, and refuses nonsense", async () => {
+    const c = (ctx = await setup());
+    expect((await c.req("GET", "/api/wip-limits")).json()).toEqual({ agent: 2, company: null, defaultAgent: 2 });
+    expect((await c.req("PUT", "/api/wip-limits", { agent: 3, company: 20 })).json()).toMatchObject({ agent: 3, company: 20 });
+    expect((await c.req("PUT", "/api/wip-limits", { agent: null, company: null })).json()).toMatchObject({ agent: null, company: null });
+    expect((await c.req("GET", "/api/wip-limits")).json()).toMatchObject({ agent: null });
+    expect((await c.req("PUT", "/api/wip-limits", { agent: 0, company: null })).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await c.req("PUT", "/api/wip-limits", { agent: 1.5, company: null })).statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it("the agents list carries each agent's count and the limit (\"3 / 2\")", async () => {
+    const c = (ctx = await setup());
+    await holding(c, 3);
+    const list = (await c.req("GET", `/api/companies/${c.company.id}/agents`)).json() as { id: string; wipCount: number; wipLimit: number | null }[];
+    expect(list.find((a) => a.id === c.worker.id)).toMatchObject({ wipCount: 3, wipLimit: 2 });
+  });
+});
+
 describe("the setting", () => {
   it("is read from wip_limits; absent means 2 per agent and no company limit", async () => {
     const c = (ctx = await setup());
