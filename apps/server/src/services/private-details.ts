@@ -19,6 +19,8 @@ type Stored = { ciphertext: string; wrappedKey: string; masterKeyVersion: number
 /** One entry per line, "kind: value" or just a value (kind guessed). Blank lines and # comments are dropped. */
 export function parsePrivateDetails(text: string): { kind: PrivateDetailKind; value: string }[] {
   const out: { kind: PrivateDetailKind; value: string }[] = [];
+  // A per-call local (not state): this note is for the in-memory-state lint, which also matches 2-space indented locals.
+  // lost on restart, harmless because it lives for one call
   const seen = new Set<string>();
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
