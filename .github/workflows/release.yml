@@ -24,6 +24,8 @@ jobs:
     # The signature names this workflow on main, and the updater trusts only that.
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
+    # The Docker Hub secrets live in this environment, which only main may use (see docs/25-published-images.md).
+    environment: publish
     permissions:
       contents: write # the GitHub release that carries release.json
       packages: write
@@ -89,10 +91,13 @@ jobs:
         run: |
           set -euo pipefail
           first="$(scripts/publish-images.sh prefixes | head -n 1)"
+          : > "$RUNNER_TEMP/verified-digests"
           for name in $(scripts/publish-images.sh images); do
             digest="$(docker buildx imagetools inspect "$first/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
             scripts/publish-images.sh copy "$name" "$TAG" "$digest"
             scripts/publish-images.sh verify "$name" "$digest"
+            # Keep the digest that was verified; the tagging step reuses it, it never looks it up again.
+            echo "$name $digest" >> "$RUNNER_TEMP/verified-digests"
           done
       - name: Add the version and beta tags (the same digests, nothing is rebuilt)
         env:
@@ -100,10 +105,9 @@ jobs:
         run: |
           set -euo pipefail
           for p in $(scripts/publish-images.sh prefixes); do
-            for name in $(scripts/publish-images.sh images); do
-              digest="$(docker buildx imagetools inspect "$p/$name:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+            while read -r name digest; do
               docker buildx imagetools create -t "$p/$name:$VERSION" -t "$p/$name:beta" "$p/$name@$digest"
-            done
+            done < "$RUNNER_TEMP/verified-digests"
           done
       - name: Write release.json from what the registries now hold, and sign it
         env:

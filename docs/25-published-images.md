@@ -19,7 +19,7 @@ In the repository: Settings → Secrets and variables → Actions.
 |---|---|---|
 | `IMAGE_PREFIXES` | variable | Space- or comma-separated `<registry>/<namespace>` list; the first is pushed to, the others get a copy. Empty means `ghcr.io/<repository owner>`. Only `ghcr.io` and `docker.io` have a login step. |
 | `DOCKERHUB_PUBLISH` | variable | `true` turns Docker Hub on. Once on, a `docker.io/<namespace>` entry must be in the list and both secrets must exist, or the run **fails** (it never skips). Off: `docker.io` entries are ignored. |
-| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | secrets | Docker Hub account name and a read-and-write access token. Only ever read by the workflows. |
+| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | secrets of the **`publish` environment** | Docker Hub account name and a read-and-write access token. Keep them in the `publish` environment (limited to `main`), never as ordinary repository secrets: agent branches run Actions too and could read a repository secret. |
 | `PUBLISH_IMAGES` | variable | Image names to publish. Default: `boss-man-server boss-man-launcher boss-man-netguard`. |
 
 The runner image (`boss-man-runner`) is **not** in the default set: until the Claude pack (BOS-972) merges, it contains Claude Code, which must not be redistributed. Once the pack has merged, add `boss-man-runner` to `PUBLISH_IMAGES`. The publish job then refuses the runner unless `scripts/image-tests.sh no-anthropic` passes on it (with the expected-fail marker off).
@@ -28,8 +28,9 @@ The runner image (`boss-man-runner`) is **not** in the default set: until the Cl
 
 1. GitHub's registry needs nothing in the repository: the workflow uses the run's own token. After the first publish, each package starts private. Make it public: GitHub → your profile or organisation → Packages → the package → Package settings → Danger zone → Change visibility → Public. Do it for each published image.
 2. For Docker Hub: create the account or organisation, then one **public** repository for each published image, named exactly like the image (`boss-man-server`, `boss-man-launcher`, `boss-man-netguard`, later `boss-man-runner`).
-3. Create an access token on Docker Hub (Account settings → Personal access tokens) with *Read & Write* permission. Store it as the `DOCKERHUB_TOKEN` secret and your Docker Hub name as `DOCKERHUB_USERNAME`.
-4. Set the variables: `IMAGE_PREFIXES` to `ghcr.io/<your GitHub owner> docker.io/<your Docker Hub namespace>` and `DOCKERHUB_PUBLISH` to `true`.
+3. Create an access token on Docker Hub (Account settings → Personal access tokens) with *Read & Write* permission (scope it to the published repositories if Docker Hub offers that).
+4. In GitHub: repository Settings → Environments → New environment, named `publish`. Under Deployment branches and tags choose *Selected branches and tags*, add `main`. Under Environment secrets add `DOCKERHUB_TOKEN` (the token) and `DOCKERHUB_USERNAME` (your Docker Hub name). Do not add them under Secrets and variables → Actions.
+5. Set the variables: `IMAGE_PREFIXES` to `ghcr.io/<your GitHub owner> docker.io/<your Docker Hub namespace>` and `DOCKERHUB_PUBLISH` to `true`.
 
 ## Checking by hand
 

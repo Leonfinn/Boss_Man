@@ -30,6 +30,7 @@ jobs:
     # Only a CI run that passed on a push to main (not the nightly run, not a pull request).
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-24.04
+    environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read
     outputs:
@@ -76,6 +77,7 @@ jobs:
         arch: [amd64, arm64]
     # Native runners, no emulation (as CI's images job).
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read
       packages: write
@@ -140,6 +142,7 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.settings.outputs.images) }}
     runs-on: ubuntu-24.04
+    environment: publish # holds the Docker Hub secrets; only main may use it
     permissions:
       contents: read
       packages: write
