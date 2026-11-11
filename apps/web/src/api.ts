@@ -276,6 +276,8 @@ export type Ticket = {
   mergeNote?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
+  /** The open card behind `ownerQuestion`, so the Board's button opens that exact card. */
+  ownerQuestionId?: string | null;
   approvedBy?: string | null;
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */

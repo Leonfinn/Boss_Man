@@ -2400,7 +2400,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // after the owner acted is already how `staleAt` folds it, so nothing is lost.
       const aboutTicket = (c: DecisionContext) => c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall";
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
-        if (r.staleAt) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
+        // (BOS-1159) A flagged card that still holds up a live ticket stays in the main list with its
+        // answer buttons: the Board shows that ticket as waiting on the owner, and the raising agent may
+        // never get to confirm or withdraw, so folding it left the owner a "Answer in Decisions" button
+        // that led to nothing. The card itself says the owner acted since it was written.
+        if (r.staleAt && r.blocks.length === 0) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
         const c = contextOf(r);
         const t = cardTicket.get(r.id);
         if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
