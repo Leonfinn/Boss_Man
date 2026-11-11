@@ -598,7 +598,8 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "HOME seen: $HOME"; echo "XDG seen: ${
  self="$wt/check-all.sh"; : >"$self"
  # shellcheck disable=SC1091
  . "$wt/fn.sh"; web_tests "$wt" >"$wt/out4" 2>&1) || fail "web_tests missing HOME: $(cat "$wt/out4")"
-grep -q "HOME seen: " "$wt/out4" && ! grep -q "HOME seen: $wt/no-such-home" "$wt/out4" || fail "web_tests: kept an unusable HOME: $(cat "$wt/out4")"
+grep -q "HOME seen: " "$wt/out4" || fail "web_tests: stub did not run: $(cat "$wt/out4")"
+! grep -q "HOME seen: $wt/no-such-home" "$wt/out4" || fail "web_tests: kept an unusable HOME: $(cat "$wt/out4")"
 grep -q "XDG seen: .*/.config" "$wt/out4" || fail "web_tests: no XDG_CONFIG_HOME for the missing HOME: $(cat "$wt/out4")"
 mkdir -p "$wt/good-home"
 (set -euo pipefail; export HOME="$wt/good-home" PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
