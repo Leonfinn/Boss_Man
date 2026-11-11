@@ -167,6 +167,21 @@ describe("a CEO-reissued after-merge card (BOS-1155)", () => {
     const [afterNone] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(afterNone!.stateNote).toBe("Health check returns 200 pass");
   });
+
+  // The mapped options on the reissued card are what record a verdict: pass and fail land on criterion 2 (index 1) of the ticket's note.
+  for (const [option, verdict] of [["Answers fine", "pass"], ["Does not answer", "fail"]] as const) {
+    it(`answering the reissued card with "${option}" records criterion 2 as ${verdict}`, async () => {
+      const c = (ctx = await setup());
+      const { t, d } = await linkedCard(c);
+      const ceo = await c.mcp(c.ceo.id);
+      const map = { "Answers fine": "pass", "Does not answer": "fail", "Cannot tell yet": "none" };
+      await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, ...reissue, optionVerdicts: map } });
+      const fresh = (await c.db.select().from(decisions)).find((x) => x.id !== d.id && x.question === reissue.question)!;
+      await c.decisions.answer(fresh.id, option);
+      const [after] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+      expect(after!.stateNote).toMatch(new RegExp(`\\b2 ${verdict}\\b`));
+    });
+  }
 });
 
 describe("open cards behind Answer in Decisions (BOS-1159)", () => {
@@ -191,9 +206,10 @@ describe("open cards behind Answer in Decisions (BOS-1159)", () => {
     const { t, d } = await blocked(c);
     expect((await boardCard(c, t.id)).ownerQuestionId).toBe(d.id);
     await c.decisions.answer(d.id, "Done");
-    // The ticket page lists only open cards (the web filter is `kind === "decision" && open`), so a closed one must say open: false.
+    // The ticket page lists only open cards (the web filter is `kind === "decision" && open`). /links drops an answered card altogether
+    // (the answer deletes the wait), so the list for that card is empty, not one entry with open: false.
     const w = (await links(c, t.id)).waitsOn.filter((x) => x.kind === "decision" && x.id === d.id);
-    expect(w.every((x) => !x.open)).toBe(true);
+    expect(w).toEqual([]);
     const b = await boardCard(c, t.id);
     expect(b.ownerQuestionId).toBeNull();
     expect(b.ownerQuestion).toBeNull();
