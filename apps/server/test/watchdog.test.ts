@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, notifications, reviewHolds, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { readWatchdogSettings } from "@boss-man/shared";
@@ -735,6 +735,24 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     // Hand-offs at 1 h and 2 h idle; the next would be at 4 h.
     expect(flags[0]!.handOffs).toBe(2);
     expect(bt.scrumMasterWakes).toBe(2);
+  });
+
+  it("BOS-1167: no review_loop flag while a review hold is open; after it ends only later send-backs count", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Held on purpose", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+    for (const mins of [500, 400, 300, 200]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    const [hold] = await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Hold until 18 Nov", releaseAt: ctx.ago(-1000) }).returning();
+    await ctx.watchdog.run();
+    const loops = async () => (await ctx.db.select().from(watchdogFlags).where(and(eq(watchdogFlags.ticketId, t.id), eq(watchdogFlags.rule, "review_loop"), eq(watchdogFlags.status, "open")))).length;
+    expect(await loops()).toBe(0);
+    // The hold ends: the four send-backs before it no longer count.
+    await ctx.db.update(reviewHolds).set({ status: "released", closedAt: ctx.ago(60) }).where(eq(reviewHolds.id, hold!.id));
+    await ctx.watchdog.run();
+    expect(await loops()).toBe(0);
+    // Send-backs after the hold count again.
+    for (const mins of [50, 40, 30]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    await ctx.watchdog.run();
+    expect(await loops()).toBe(1);
   });
 
   it("the backtest hands a review loop off again in the sweep where it is sent back once more", async () => {
