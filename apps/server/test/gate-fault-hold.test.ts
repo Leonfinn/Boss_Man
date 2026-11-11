@@ -104,9 +104,23 @@ describe("an approved ticket that waits on another ticket is held, not checked o
     expect(board.columns.flatMap((c) => c.tickets).find((t) => t.id === id)?.reviewStage).toBe("held");
   });
 
-  it("merges by itself once the fix is merged and live, keeping the reviews; not before", async () => {
+  it("a plain ordering link releases at the blocker's merge, with no wait for a deploy", async () => {
     ctx = await setup();
-    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress" });
+    const first = await ctx.ticket("Lands first", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: id, blockerTicketId: first, until: "merged" });
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    await ctx.db.update(tickets).set({ mergeCommit: "e".repeat(40), mergedAt: new Date(), touchesRunner: true }).where(eq(tickets.id, first));
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: "9".repeat(40) } });
+    expect(await ctx.review.releaseHolds()).toEqual([id]);
+    await settled(id);
+    expect((await ctx.row(id)).mergeCommit).toBe(MERGE);
+  });
+
+  it("waiting on the merge-check fix: merges by itself once the fix is merged and live, keeping the reviews; not before", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Fix the merge check", { systemState: "in_progress", fixesMergeCheck: true });
     const id = await ctx.ticket("Approved work");
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: id, blockerTicketId: fix, until: "merged" });
     await ctx.slot(id);

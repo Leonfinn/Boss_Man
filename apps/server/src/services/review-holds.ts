@@ -8,6 +8,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 
 export type ReviewHold = typeof reviewHolds.$inferSelect;
 export const HOLD_WAKE_REASON = "review hold ready";
@@ -126,13 +127,15 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
 }
 
 /**
- * Whether a blocker ticket's change is in force for a merge waiting on it (BOS-1173): closed without merging
- * (nothing left to wait for), or merged and running (the server, and the runners for runner code: a fix to the
- * merge check that the gate's runner doesn't run yet fixes nothing). An open, unmerged ticket is never in force.
+ * Whether a merge waiting on this ticket may go on (BOS-1173). A ticket marked as fixing the merge check must be in
+ * force: closed without merging, or merged and running (on the server, and on the runners for runner code: a fix
+ * the gate's runner doesn't run yet fixes nothing). Any other ticket is a plain ordering link: finished as the link
+ * says (merged, or done; ticketBlockerFinished, BOS-989), with no wait for a deploy.
  */
-export async function ticketInForce(db: Db, ticketId: string): Promise<boolean> {
-  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, ticketId));
+export async function ticketInForce(db: Db, ticketId: string, until: "merged" | "done" = "merged"): Promise<boolean> {
+  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
   if (!b) return true;
+  if (!b.fixesMergeCheck) return ticketBlockerFinished({ ticketState: b.state, mergeCommit: b.mergeCommit, until });
   if (!b.mergeCommit) return b.state === "done";
   return (await goLiveWaitOf(db, b)) === null;
 }
@@ -144,7 +147,7 @@ export async function ticketInForce(db: Db, ticketId: string): Promise<boolean> 
  */
 export async function mergeWaits(db: Db, t: { id: string; projectId: string; fixesMergeCheck: boolean }): Promise<string[]> {
   const linked = await db
-    .select({ id: ticketDependencies.blockerTicketId })
+    .select({ id: ticketDependencies.blockerTicketId, until: ticketDependencies.until })
     .from(ticketDependencies)
     .where(and(eq(ticketDependencies.blockedTicketId, t.id), isNotNull(ticketDependencies.blockerTicketId)));
   const gate = t.fixesMergeCheck
@@ -153,9 +156,9 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
         .select({ id: tickets.id })
         .from(tickets)
         .where(and(eq(tickets.projectId, t.projectId), eq(tickets.fixesMergeCheck, true), ne(tickets.id, t.id), ne(tickets.systemState, "done")));
-  const ids = [...new Set([...linked.map((l) => l.id!), ...gate.map((g) => g.id)])].filter((id) => id !== t.id);
+  const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...gate.map((g) => ({ id: g.id, until: "merged" as const }))].filter((w) => w.id !== t.id);
   const out: string[] = [];
-  for (const id of ids) if (!(await ticketInForce(db, id))) out.push(id);
+  for (const w of waits) if (!out.includes(w.id) && !(await ticketInForce(db, w.id, w.until))) out.push(w.id);
   return out;
 }
 
