@@ -407,6 +407,12 @@ export const tickets = pgTable(
      * A deploy card whose range carries a marked merge leads with it and pages the owner once.
      */
     fixesLive: text("fixes_live"),
+    /**
+     * "Fixes the merge check" (BOS-1173): while this ticket is open and its fix isn't in force, the merge check is
+     * known to be broken for reasons no branch caused. Other approved work in the project waits on it in "Passed,
+     * held" instead of running the check and being sent back. Set by the CEO or a manager (update_ticket).
+     */
+    fixesMergeCheck: boolean("fixes_merge_check").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -918,6 +924,8 @@ export const reviewRequests = pgTable(
     comments: jsonb("comments").notNull().default([]),
     overruledByAgentId: uuid("overruled_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     overruleReason: text("overrule_reason"),
+    /** The branch head the verdict was given on (BOS-1173), so a return to review on that same head keeps the pass. Null when the runner couldn't say, and on rows from before. */
+    head: text("head"),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
