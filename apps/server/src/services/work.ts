@@ -12,6 +12,7 @@ import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
+import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
@@ -394,6 +395,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
+        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit))) : null,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
@@ -513,7 +516,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (!note || note.length > 500) throw new WorkError(422, "Say what to re-check, in 1 to 500 characters.");
       if (Number.isNaN(input.at.getTime())) throw new WorkError(422, "That isn't a valid time.");
       if (input.maxChecks !== undefined && (!Number.isInteger(input.maxChecks) || input.maxChecks < 1 || input.maxChecks > 20)) throw new WorkError(422, "maxChecks is 1 to 20.");
-      if (t.systemState !== "in_progress" && t.systemState !== "review") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress or in review; this one is ${t.systemState}.`);
+      // Blocked too (BOS-1171): a ticket that only waits should sit in Blocked and still be re-checked later.
+      if (t.systemState !== "in_progress" && t.systemState !== "review" && t.systemState !== "blocked") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress, in review or blocked; this one is ${t.systemState}.`);
       if (!t.assigneeAgentId) throw new WorkError(422, "The ticket has no agent to wake.");
       if (input.by) {
         if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");

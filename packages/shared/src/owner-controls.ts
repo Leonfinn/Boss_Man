@@ -79,6 +79,8 @@ export const OWNER_CONTROLS = {
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
+  // The Merge queue page's two views (BOS-1174).
+  "Merge queue": ["Merges", "Queued checks"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: [
     "Refresh",

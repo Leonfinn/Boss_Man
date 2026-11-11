@@ -815,7 +815,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       <div className="board-scroll">
         <div className="board">
           {lanes.map(({ col, tickets, mine, merging, held }) => {
-            const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
+            // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
+            const counted = col.tickets.filter((t) => !t.wipExempt).length;
+            const full = col.wipLimit != null && counted >= col.wipLimit;
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
             const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
@@ -861,7 +863,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <div className="lane-title">
                       <h2 id={`lane-${col.id}`}>{label(col)}</h2>
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
-                        {col.wipLimit != null ? `${shown.length} / ${col.wipLimit}` : shown.length}
+                        {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
                       </span>
                       <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
@@ -923,6 +925,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </a>
                       )}
                       {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
+                      {t.wipExempt && (
+                        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
+                          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${t.blockedBy.filter((b) => b.ticketId).map((b) => { const n = (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === b.ticketId)?.number; return n ? ticketRef(company?.ticketPrefix, n) : (b.ticketTitle ?? "a task"); }).join(", ")}`}
+                        </span>
+                      )}
                       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
                       {t.featureTitle && (
                         <span className="fchip" title={t.featureTitle}>
