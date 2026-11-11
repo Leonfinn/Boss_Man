@@ -138,7 +138,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date; decisions?: {
         .orderBy(desc(tickets.lastActivityAt))
         .limit(10);
       const recentActivity = await db
-        .select({ id: notifications.id, title: notifications.title, link: notifications.link, level: notifications.level, agent: agents.name, createdAt: notifications.createdAt })
+        .select({ id: notifications.id, title: notifications.title, body: notifications.body, link: notifications.link, level: notifications.level, agent: agents.name, createdAt: notifications.createdAt })
         .from(notifications)
         .leftJoin(agents, eq(agents.id, notifications.agentId))
         .where(eq(notifications.companyId, companyId))

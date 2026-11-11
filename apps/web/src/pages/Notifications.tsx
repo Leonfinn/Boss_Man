@@ -5,6 +5,7 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { SaveButton, useSaveState } from "../components/SaveButton";
+import { FeedItem, feedTitle } from "../components/FeedItem";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
   note: { label: "Note", tone: "", help: "The feed only" },
@@ -61,18 +62,26 @@ function RecentPhonePushes() {
 }
 
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
+  // When the question became the title, show only what follows its first line (if anything) as the body.
+  const headline = feedTitle(n.title, n.body);
+  const rest = headline === n.title ? n.body : (n.body ?? "").trim().split(/\n/).slice(1).join("\n").trim();
   return (
     <li className="card" style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px 16px", opacity: n.readAt ? 0.7 : 1 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span className={`tag ${LEVEL[n.level].tone}`}>{LEVEL[n.level].label}</span>
-        {!n.readAt && <span className="tag green">New</span>}
-        <strong style={{ fontWeight: 600 }}>{n.title}</strong>
-        <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>
-          {n.company ? `${n.company} · ` : ""}
-          {when(n.createdAt)}
-        </span>
-      </div>
-      {n.body && <MoreText text={n.body} lines={3} chars={300} />}
+      <FeedItem
+        title={headline}
+        lines={2}
+        small={
+          <>
+            <span className={`tag ${LEVEL[n.level].tone}`}>{LEVEL[n.level].label}</span>
+            {!n.readAt && <span className="tag amber">New</span>}
+            <span className="muted">
+              {n.company ? `${n.company} · ` : ""}
+              {when(n.createdAt)}
+            </span>
+          </>
+        }
+      />
+      {rest && <MoreText text={rest} lines={3} chars={300} />}
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
         <a href={n.link} onClick={() => !n.readAt && onRead(n.id)}>
           See the evidence

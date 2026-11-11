@@ -5,6 +5,7 @@ import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
+import { FeedItem, LEVEL_LABEL, feedTitle } from "../components/FeedItem";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -23,7 +24,7 @@ type DashboardData = {
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
-  recentActivity: Array<{ id: string; title: string; link: string; level: string; agent: string | null; createdAt: string }>;
+  recentActivity: Array<{ id: string; title: string; body?: string | null; link: string; level: string; agent: string | null; createdAt: string }>;
 };
 
 /** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
@@ -248,12 +249,18 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           <ul className="card dash-list">
             {d.recentActivity.length === 0 && <li className="muted">Nothing yet.</li>}
             {d.recentActivity.map((n) => (
-              <li key={n.id}>
-                <a href={n.link}>
-                  {n.agent && <strong>{n.agent} </strong>}
-                  {n.title}
-                </a>
-                <time className="muted">{ago(n.createdAt)}</time>
+              <li key={n.id} className="feed-li">
+                <FeedItem
+                  href={n.link}
+                  title={feedTitle(n.title, n.body)}
+                  small={
+                    <>
+                      <span className="tag">{LEVEL_LABEL[n.level] ?? n.level}</span>
+                      <span className="muted">{n.agent ? `${n.agent} · ` : ""}</span>
+                      <time className="muted">{ago(n.createdAt)}</time>
+                    </>
+                  }
+                />
               </li>
             ))}
           </ul>
