@@ -11,7 +11,7 @@
 import { and, asc, eq, gte, inArray, isNotNull } from "drizzle-orm";
 import { HOUR_MS, ticketRef, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, decisions, reviewRequests, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../db/schema.js";
+import { activity, agents, companies, decisions, reviewHolds, reviewRequests, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../db/schema.js";
 import { backoffGapMs, evaluate, type SnapHold, type SnapTicket } from "./watchdog-rules.js";
 
 type State = SnapTicket["state"];
@@ -83,6 +83,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   const runRows = await db.select().from(runs).where(inArray(runs.ticketId, ids));
   const reviewsReq = await db.select({ ticketId: reviewRequests.ticketId, at: reviewRequests.createdAt }).from(reviewRequests).where(inArray(reviewRequests.ticketId, ids));
   const verdicts = await db.select({ ticketId: ticketReviews.ticketId, at: ticketReviews.createdAt }).from(ticketReviews).where(and(inArray(ticketReviews.ticketId, ids), eq(ticketReviews.verdict, "changes_requested")));
+  const holdRows = await db.select({ ticketId: reviewHolds.ticketId, createdAt: reviewHolds.createdAt, closedAt: reviewHolds.closedAt }).from(reviewHolds).where(inArray(reviewHolds.ticketId, ids));
   const wakeRows = await db.select({ agentId: wakes.agentId, ticketId: wakes.ticketId, createdAt: wakes.createdAt, launchedAt: wakes.launchedAt, status: wakes.status }).from(wakes).where(inArray(wakes.ticketId, ids));
   const decs = await db.select().from(decisions).where(and(eq(decisions.companyId, companyId), gte(decisions.createdAt, new Date(from - 30 * 86_400_000))));
   const ownerKeys = decs.filter((d) => d.dedupeKey && (d.dedupeKey.startsWith("missed:") || d.dedupeKey.startsWith("merge-stuck:")));
@@ -174,6 +175,10 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   const runStartsBy = group(runRows.filter((r) => r.ticketId), (r) => r.ticketId);
   const wakesBy = group(wakeRows, (w) => w.ticketId);
   const verdictsBy = group(verdicts, (v) => v.ticketId);
+  const reviewHoldsBy = group(
+    holdRows.map((h) => ({ ticketId: h.ticketId, from: h.createdAt.getTime(), until: h.closedAt?.getTime() ?? Infinity })),
+    (h) => h.ticketId,
+  );
   const ownerBy = group(ownerKeys, (d) => d.dedupeKey!.split(":")[1] ?? null);
 
   const runsOf = runRows
@@ -206,7 +211,13 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
           (wakesBy.get(x.id) ?? []).some((w) => w.agentId === who && w.createdAt.getTime() <= t && (w.launchedAt ? w.launchedAt.getTime() > t : w.status === "queued" || w.status === "deferred")),
         awaitingPlan: x.planFirst && (!x.planApprovedAt || x.planApprovedAt.getTime() > t),
         withOwner: (ownerBy.get(x.id) ?? []).some((d) => d.createdAt.getTime() <= t && (!d.answeredAt || d.answeredAt.getTime() > t)),
-        bounces: (verdictsBy.get(x.id) ?? []).filter((v) => v.at.getTime() <= t).length,
+        // As the live sweep (BOS-1167): an open review hold is on purpose, and send-backs count only from
+        // when the last hold ended. A released and a cancelled hold both end the count, as in the live sweep.
+        held: (reviewHoldsBy.get(x.id) ?? []).some((h) => h.from <= t && t < h.until),
+        bounces: (() => {
+          const lastEnd = Math.max(0, ...(reviewHoldsBy.get(x.id) ?? []).filter((h) => h.until <= t).map((h) => h.until));
+          return (verdictsBy.get(x.id) ?? []).filter((v) => v.at.getTime() <= t && v.at.getTime() > lastEnd).length;
+        })(),
       });
     }
     const holds: SnapHold[] = [

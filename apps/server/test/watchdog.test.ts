@@ -755,6 +755,28 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect(await loops()).toBe(1);
   });
 
+  it("BOS-1199: the backtest replays review holds like the live rule", async () => {
+    await ctx.switchOn();
+    const mk = async (title: string) => {
+      const t = await ctx.ticket({ title, stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      for (const mins of [500, 400, 300, 200]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+      return t;
+    };
+    const held = await mk("Held all along");
+    await ctx.db.insert(reviewHolds).values({ ticketId: held.id, reason: "hold", createdAt: ctx.ago(550) });
+    const released = await mk("Released later");
+    await ctx.db.insert(reviewHolds).values({ ticketId: released.id, reason: "hold", status: "released", createdAt: ctx.ago(550), closedAt: ctx.ago(60) });
+    const bouncing = await mk("Never held");
+    for (const mins of [50, 40, 30]) await ctx.db.insert(ticketReviews).values({ ticketId: released.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const loops = (id: string) => bt.flags.filter((f) => f.ticketId === id && f.rule === "review_loop");
+    expect(loops(held.id)).toHaveLength(0);
+    // Flags only on the send-backs after the release, not the four before it.
+    expect(loops(released.id)).toHaveLength(1);
+    expect(new Date(loops(released.id)[0]!.firstAt).getTime()).toBeGreaterThanOrEqual(ctx.ago(50).getTime());
+    expect(loops(bouncing.id)).toHaveLength(1);
+  });
+
   it("the backtest hands a review loop off again in the sweep where it is sent back once more", async () => {
     await ctx.switchOn({ reviewHours: 6 });
     const t = await ctx.ticket({ title: "Bouncy", stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
