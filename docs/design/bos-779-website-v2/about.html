@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>About: why I built Boss Man</title>
+<title>About me: why I built Boss Man</title>
 <meta name="description" content="Who makes Boss Man, and why.">
 <link rel="stylesheet" href="mock.css">
 <link rel="stylesheet" href="about.css">
@@ -28,19 +28,17 @@
 
 <main id="main">
 
-<!-- The owner's words and photo go in the dashed boxes (owner, 9 Nov). Everything dashed is a placeholder, not copy. -->
+<!-- The owner's words go in the dashed boxes (owner, 9 Nov). Everything dashed is a placeholder, not copy.
+     Photo: the owner attached it to BOS-1080 (11 Nov), 928 x 1152. It is not in the repo: save it as img/owner.jpg (see README).
+     The first section is "About me" (owner, 11 Nov); "Why I built Boss Man" heads the story below. -->
 <section class="about-head dark">
   <div class="wrap">
     <figure class="portrait">
-      <div class="photo-slot" role="img" aria-label="Placeholder for the owner's photo">
-        <span class="slot-tag">YOUR PHOTO</span>
-        <span class="slot-hint">A photo of you, square or upright. At least 1000 px on the short side.</span>
-      </div>
+      <img class="photo" src="img/owner.jpg" width="928" height="1152" alt="The maker of Boss Man, smiling, on a clifftop above the sea.">
       <img class="sidekick" src="img/hero-clean.png" alt="">
     </figure>
     <div class="about-title">
-      <p class="kicker">About</p>
-      <h1>Why I built Boss Man</h1>
+      <h1>About me</h1>
       <p class="yours lead-slot"><span class="slot-tag">YOUR WORDS</span>One or two sentences: who you are, and what Boss Man is for, in your own voice.</p>
       <p class="byline yours inline"><span class="slot-tag">NAME</span>Your name, and what you do</p>
     </div>
@@ -49,7 +47,8 @@
 
 <section class="band story-band">
   <div class="wrap story">
-    <article class="story-text">
+    <article class="story-text" aria-labelledby="story-h">
+      <h2 id="story-h">Why I built Boss Man</h2>
       <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>The itch.</strong> What were you trying to get done, and what kept getting in the way?</p>
       <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>What you tried first.</strong> Other tools, chat windows, doing it by hand. What didn't work for you?</p>
       <blockquote class="yours pull"><span class="slot-tag">OPTIONAL</span>One line you'd like a visitor to remember. It's shown large, like this.</blockquote>

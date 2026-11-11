@@ -12,7 +12,9 @@
 .portrait { position: relative; isolation: isolate; }
 .photo-slot { aspect-ratio: 4 / 5; border-radius: 24px; border: 2px dashed var(--amber); background: var(--night-2); display: grid; align-content: center; justify-items: center; gap: 12px; padding: 32px; text-align: center; box-shadow: 0 30px 80px rgba(5, 9, 15, 0.55); }
 .photo-slot .slot-hint { max-width: 260px; font-size: 16px; color: var(--chalk-2); }
-/* When the real photo lands: <img class="photo"> in the same box, object-fit: cover, face in the upper third. */
+/* The owner's photo (BOS-1080): same 4:5 box the slot had, cropped to keep the face in the upper third. */
+.photo { display: block; width: 100%; height: auto; aspect-ratio: 4 / 5; object-fit: cover; object-position: 50% 20%; border-radius: 24px; background: var(--night-2); box-shadow: 0 30px 80px rgba(5, 9, 15, 0.55); }
+.story-text h2 { margin-bottom: 4px; }
 .portrait .sidekick { position: absolute; right: -96px; bottom: -40px; width: 210px; filter: saturate(0.86) brightness(0.95); }
 .portrait::after { content: ""; position: absolute; right: -150px; bottom: -70px; width: 320px; height: 320px; z-index: -1; background: radial-gradient(closest-side, rgba(240, 183, 92, 0.28), rgba(240, 183, 92, 0)); }
 .about-title .kicker { font-family: var(--display); font-weight: 650; font-size: 18px; color: var(--amber); margin-bottom: 14px; }
@@ -54,6 +56,7 @@
   .about-head .wrap { grid-template-columns: 1fr; gap: 40px; }
   .portrait { width: 72%; }
   .photo-slot { padding: 20px; border-radius: 18px; }
+  .photo { border-radius: 18px; }
   .photo-slot .slot-hint { font-size: 15px; }
   .portrait .sidekick { width: 120px; right: -110px; bottom: -16px; }
   .about-title h1 { font-size: 40px; }
