@@ -44,7 +44,15 @@ function setup(jobFence: { level: FenceLevel; pnpmStore?: string }, prefix = "bm
 
 describe.skipIf(level === "unavailable")("fenced check job", () => {
   it("can't read a secret outside its folder, gets its own HOME, and leaves no HOME behind", async () => {
-    const secretDir = tmp(".bm-fj-secret-", process.env.HOME ?? tmpdir());
+    // The secret must sit outside the job's folder. HOME is the usual place, but a check job whose runner is still
+    // the old code has a HOME that doesn't exist yet: create it, and fall back to the temp folder if that fails.
+    let secretBase = process.env.HOME ?? tmpdir();
+    try {
+      mkdirSync(secretBase, { recursive: true });
+    } catch {
+      secretBase = tmpdir();
+    }
+    const secretDir = tmp(".bm-fj-secret-", secretBase);
     writeFileSync(path.join(secretDir, "token"), "TOPSECRET");
     const { root, commit, ws } = setup({ level });
     const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
