@@ -276,9 +276,11 @@ export function checkQueue(db: Db) {
     const info = new Map(live.map((r) => [r.job.id, r]));
     const minutes = (d: Date | null) => (d ? Math.max(0, Math.floor((now.getTime() - d.getTime()) / 60_000)) : 0);
     const runningJobs = live.filter((r) => r.job.state === "running").sort((a, b) => (a.job.startedAt?.getTime() ?? 0) - (b.job.startedAt?.getTime() ?? 0));
-    const order = (await servable()).filter((j) => j.companyId === companyId);
+    // A check queued after the live read above is not in `info`: leave it out (it shows on the next refresh) instead of throwing in row().
+    const order = (await servable()).filter((j) => j.companyId === companyId && info.has(j.id));
     const orderIds = new Set(order.map((j) => j.id));
     const held = live.filter((r) => r.job.state === "queued" && !orderIds.has(r.job.id)).map((r) => r.job);
+    // "Slots busy" is per company: only this company's running jobs count against `limit`, since each company has its own runner slots.
     const full = runningJobs.length >= limit;
     const row = (j: CheckJob, position: number | null, heldBy: string | null) => {
       const r = info.get(j.id)!;

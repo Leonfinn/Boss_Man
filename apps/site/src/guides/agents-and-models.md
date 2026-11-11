@@ -31,19 +31,50 @@ For a Claude plan, run `claude setup-token` on your own computer and paste the t
 
 ![How a run picks an account and when work pauses: an API key just runs; a Claude plan is chosen in your order; at the hold level routine work waits, chats and reviews carry on, and your extra-usage setting decides whether urgent or all work carries on past the limit using credit.](/img/which-account-and-hold.svg =1160x640 narrow=/img/which-account-and-hold-narrow.svg:360x1190 "Which account a run uses, and what waits when a plan is nearly used up.")
 
+## When a plan is nearly used up
+
+A plan (a Claude Pro or Max plan, or a Synthetic plan) has a usage allowance. Boss Man calls the pause near the end of it the quota hold. An API key has no hold: its runs just start.
+
+Each plan's card on **Settings > Funding** has the hold settings, under **When the subscription is nearly used up**:
+
+- **Hold routine work at**: a percentage from 80 to 100. The default is 95. At this level Boss Man pauses routine work on the plan and tells you. Chats and reviews keep running.
+- **I have extra usage** (on a Synthetic plan, **I have top-up credit**): what happens once the plan is at the hold level.
+
+| Choice | Routine work | Urgent tickets |
+|---|---|---|
+| **Hold everything at the limit** (the default) | waits | runs until the limit itself, then waits. It also waits if the plan is already using extra usage. |
+| **Keep urgent work running past the limit** (Synthetic: **Keep urgent work running on top-up credit**) | waits | carries on past the limit, paid from extra usage or top-up credit |
+| **Keep all work running** (Synthetic: **Keep all work running on top-up credit**) | carries on | carries on |
+
+Chats and reviews always carry on. Use the default if the account has no extra usage or top-up credit. Boss Man can't see your extra-usage balance, so set a spending limit in your Claude account.
+
+Agents on Synthetic's Infinite mode (`infinite:` models) are never held, because those runs don't spend the plan's credits. Another agent on the same plan with a normal model is still held.
+
+## Several Claude plans
+
+If you have more than one Claude plan, Boss Man can move new runs between them.
+
+1. Add each plan's setup-token under **Settings > Secrets** (kind **Claude setup-token**).
+2. On **Settings > Funding**, add a funding source for each plan with the kind **Subscription (setup-token)** and the provider **Anthropic**.
+3. On each plan's card, under **Switch between Claude accounts**, set **Order** (1 is used first) and choose its token under **Login for this account**. Save.
+
+Each new run then goes to:
+
+1. the first plan in your order that is under its hold level;
+2. if none is, the first plan whose extra-usage setting still allows the work. So extra usage is spent only when no plan has room;
+3. if no plan allows it, nothing: the run waits for the plan that frees up first.
+
+Your first plan is used again as soon as its window resets. Runs already going finish on the plan they started on.
+
+A plan with an empty **Order** is left out of the list. An agent whose funding source has no order can't switch to the ranked plans, and Boss Man says so when it holds that agent's work. A plan after the first with no login is skipped.
+
 ## Synthetic
 
 Synthetic (synthetic.new) is a model provider for OpenCode agents. Add its key as **Synthetic API key**. Its models are named `synthetic/<model>`. Add a funding source with the kind **Subscription (setup-token)** and the provider **Synthetic**.
 
 The Funding page shows how much of the plan's weekly credits are used. Credits come back 2% at a time. Boss Man reads this at most every 5 minutes. You get a notification at 60%, 80% and 92% used.
 
-At **Hold routine work at** (95% unless you change it), Boss Man pauses routine work on the plan and tells you. Chats and reviews keep running. Agents on Synthetic's Infinite mode (`infinite:` models) don't spend the credits and are never paused.
-
-If your Synthetic account has paid top-up credit, Synthetic spends it once the weekly credits are used. Choose what happens then under **I have top-up credit** on the plan's card:
-
-- **Hold everything at the limit** (the default): routine work waits for credits to come back; urgent tickets run until the limit. Use this if the account has no top-up credit.
-- **Keep urgent work running on top-up credit**: routine work still pauses; urgent tickets, chats and reviews carry on past the limit.
-- **Keep all work running on top-up credit**: nothing pauses. You get one notification a week when work starts drawing on top-up credit.
+The quota hold works as in [When a plan is nearly used up](#when-a-plan-is-nearly-used-up). If your Synthetic account has paid top-up credit, Synthetic spends it once the weekly credits are used. Choose what happens then under **I have top-up credit** on the plan's card. With **Keep all work running on top-up credit**, you get one notification a week when work starts drawing on top-up credit.
 
 Synthetic doesn't tell Boss Man the top-up balance, so Boss Man can't show it or stop before it runs out. Check it at synthetic.new. When it runs out, Synthetic refuses the runs.
 
