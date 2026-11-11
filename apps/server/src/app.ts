@@ -1611,7 +1611,7 @@ export async function buildApp(opts: AppOptions) {
     // Skills and packs (R71): routes/skills.ts, on this owner scope.
     skillRoutes(owner, db, { skillsSvc, skillProposals });
 
-    // Permission and policy routes (risk tiers, review routing, standing rules, decision rules and grants):
+    // Permission and policy routes (review routing, standing rules, decision rules and grants):
     // routes/policy.ts, on this owner scope.
     policyRoutes(owner, db, { scheduler, secretsSvc, rules });
 
