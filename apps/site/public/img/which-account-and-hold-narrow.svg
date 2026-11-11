@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 1190" width="360" height="1190" role="img" aria-labelledby="wan-title wan-desc">
+  <title id="wan-title">Which account a run uses, and when work pauses: pick an account, then the quota hold, and what the two top-up settings change</title>
+  <desc id="wan-desc">A new run first uses the agent's account. An API key has no quota hold and just runs. A Claude plan that is ranked on the Funding page is chosen in your order: the first plan under its hold level, which is 95 percent unless you change it. If no plan has room, a plan that still allows the work is used, which can mean extra usage. If none allows it, the run waits. Chats and reviews are never held. Routine work is held at the hold level under both "Hold everything at the limit" and "Keep urgent work running on top-up credit", and runs on credit only under "Keep all work running". Urgent tickets under "Hold everything at the limit" keep running until the limit itself and then wait, and under the other two settings they carry on past the limit using the credit.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="wan-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="360" height="1190" fill="#ffffff"/>
+
+  <text x="0" y="20" class="bb" font-size="15" fill="#3d4757">Every new run picks an account first.</text>
+  <text x="0" y="40" class="bb" font-size="15" fill="#3d4757">Then the quota hold decides what waits.</text>
+
+  <!-- 1 -->
+  <rect x="0" y="58" width="360" height="150" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="58" width="360" height="34" rx="10" fill="#17202c"/><rect x="0" y="80" width="360" height="12" fill="#17202c"/>
+  <text x="14" y="81" class="d" font-size="16" fill="#eef2f6">1. The agent's account</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="114" class="bb">An API key</text><text x="94" y="114">has no quota hold.</text>
+    <text x="14" y="132">The run just starts.</text>
+    <text x="14" y="160" class="bb">A Claude plan</text><text x="108" y="160">(setup-token) has a</text>
+    <text x="14" y="178">weekly allowance, so it is checked</text>
+    <text x="14" y="196">against the hold in steps 2 and 3.</text>
+  </g>
+  <path d="M180 210 V234" stroke="#17202c" stroke-width="2.5" fill="none" marker-end="url(#wan-ar)"/>
+
+  <!-- 2 -->
+  <rect x="0" y="236" width="360" height="178" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="236" width="360" height="34" rx="10" fill="#17202c"/><rect x="0" y="258" width="360" height="12" fill="#17202c"/>
+  <text x="14" y="259" class="d" font-size="16" fill="#eef2f6">2. Pick a Claude plan</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="292">Plans you ranked on Funding, in order:</text>
+    <text x="14" y="316" class="bb">a.</text><text x="32" y="316">the first plan under its hold level;</text>
+    <text x="14" y="338" class="bb">b.</text><text x="32" y="338">else the first that still allows the work;</text>
+    <text x="14" y="360" class="bb">c.</text><text x="32" y="360">else none: the run waits.</text>
+    <text x="14" y="386">The preferred plan is used again as soon</text>
+    <text x="14" y="404">as its window resets.</text>
+  </g>
+  <path d="M180 416 V440" stroke="#17202c" stroke-width="2.5" fill="none" marker-end="url(#wan-ar)"/>
+
+  <!-- 3 -->
+  <rect x="0" y="442" width="360" height="150" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <rect x="0" y="442" width="360" height="34" rx="10" fill="#c8282f"/><rect x="0" y="464" width="360" height="12" fill="#c8282f"/>
+  <text x="14" y="465" class="d" font-size="16" fill="#ffffff">3. The quota hold</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="498">At the hold level (95% unless you change</text>
+    <text x="14" y="516">it) routine work on that plan is paused,</text>
+    <text x="14" y="534">and you are told.</text>
+    <text x="14" y="558" class="bb">Chats and reviews are never held.</text>
+    <text x="14" y="580">If every plan is full, the run waits.</text>
+  </g>
+
+  <text x="0" y="630" class="d" font-size="17" fill="#17202c">At the hold level, your setting</text>
+  <text x="0" y="652" class="d" font-size="17" fill="#17202c">"I have extra usage" decides:</text>
+
+  <!-- setting A -->
+  <rect x="0" y="668" width="360" height="156" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="668" width="360" height="34" rx="10" fill="#17202c"/><rect x="0" y="690" width="360" height="12" fill="#17202c"/>
+  <text x="14" y="691" class="bb" font-size="14" fill="#ffffff">Hold everything at the limit (default)</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="726" class="bb">Chats, reviews:</text><text x="124" y="726">carry on.</text>
+    <text x="14" y="752" class="bb">Urgent tickets:</text><text x="124" y="752">run until the limit</text>
+    <text x="124" y="768">itself, then wait.</text>
+  </g>
+  <rect x="14" y="782" width="332" height="30" rx="6" fill="#f0b75c"/>
+  <text x="26" y="802" class="bb" font-size="13" fill="#17202c">Routine work: waits for the reset.</text>
+
+  <!-- setting B -->
+  <rect x="0" y="838" width="360" height="156" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="838" width="360" height="34" rx="10" fill="#17202c"/><rect x="0" y="860" width="360" height="12" fill="#17202c"/>
+  <text x="14" y="861" class="bb" font-size="14" fill="#ffffff">Keep urgent work running on credit</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="896" class="bb">Chats, reviews:</text><text x="124" y="896">carry on.</text>
+    <text x="14" y="922" class="bb" fill="#c8282f">Urgent tickets:</text><text x="124" y="922" fill="#c8282f" class="bb">carry on past the</text>
+    <text x="124" y="938" fill="#c8282f" class="bb">limit, on credit.</text>
+  </g>
+  <rect x="14" y="952" width="332" height="30" rx="6" fill="#f0b75c"/>
+  <text x="26" y="972" class="bb" font-size="13" fill="#17202c">Routine work: waits for the reset.</text>
+
+  <!-- setting C -->
+  <rect x="0" y="1008" width="360" height="156" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <rect x="0" y="1008" width="360" height="34" rx="10" fill="#c8282f"/><rect x="0" y="1030" width="360" height="12" fill="#c8282f"/>
+  <text x="14" y="1031" class="bb" font-size="14" fill="#ffffff">Keep all work running</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="1066" class="bb">Chats, reviews:</text><text x="124" y="1066">carry on.</text>
+    <text x="14" y="1092" class="bb">Urgent tickets:</text><text x="124" y="1092">carry on, on credit.</text>
+  </g>
+  <rect x="14" y="1108" width="332" height="44" rx="6" fill="#ffffff" stroke="#c8282f" stroke-width="2"/>
+  <text x="26" y="1127" class="bb" font-size="13" fill="#c8282f">Routine work: carries on, on credit.</text>
+  <text x="26" y="1143" class="b" font-size="12" fill="#17202c">Nothing is held. Credit may run out.</text>
+
+  <text x="0" y="1184" class="b" font-size="12" fill="#3d4757">Under the hold level everything runs.</text>
+</svg>
