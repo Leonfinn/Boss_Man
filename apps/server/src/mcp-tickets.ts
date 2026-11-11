@@ -17,6 +17,7 @@ import { NOTHING_CHANGED } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
+import { addTicketDependency } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FIXES_LIVE_HELP, managerIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
@@ -532,6 +533,13 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         if (e instanceof WorkError) return fail(e.message);
         throw e;
       }
+      // BOS-1209: Blocked on an open card needs a hold row, or answering the card has nothing to release.
+      if (state === "blocked" && !sameState && !until) {
+        for (const cardId of await openCardIds(db, ticketId)) {
+          const [has] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerDecisionId, cardId))).limit(1);
+          if (!has) await addTicketDependency(db, { companyId: scope.companyId, blockedTicketId: ticketId, blockerDecisionId: cardId, actor: { type: "agent", agentId: scope.agentId ?? null }, now: () => at }).catch(() => undefined);
+        }
+      }
       // A state note is a post: the run's silence is measured from it (BOS-314).
       if (summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
       await noteRunTicket(ticketId);
@@ -579,12 +587,16 @@ export const BLOCKED_REFUSAL =
 
 /** True when an open card names this ticket (a plan card, a permission card or a question), linked or not. */
 export async function hasOpenCard(db: Db, ticketId: string) {
-  const [x] = await db
+  return (await openCardIds(db, ticketId)).length > 0;
+}
+
+/** The open cards that name this ticket: the one definition of "an open card holds it" for accepting Blocked and for releasing it. */
+export async function openCardIds(db: Db, ticketId: string): Promise<string[]> {
+  const rows = await db
     .select({ id: decisionsTable.id })
     .from(decisionsTable)
-    .where(and(eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->>'ticketId' = ${ticketId}`))
-    .limit(1);
-  return !!x;
+    .where(and(eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->>'ticketId' = ${ticketId}`));
+  return rows.map((r) => r.id);
 }
 
 /** True when the ticket has merged and still has after-merge criteria without a reported pass or fail. */
