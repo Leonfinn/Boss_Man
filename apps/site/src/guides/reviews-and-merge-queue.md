@@ -6,6 +6,8 @@ order: 7
 lead: Every change an agent makes is reviewed by another agent, then checked and merged by Boss Man. The ticket's risk level decides who reviews it and whether you sign it off.
 ---
 
+![A ticket's path from review to live: review by risk level, your sign-off for high and critical work, the merge line, the merge check with a way back to the agent, the merge, then go-live and the after-merge checks.](/img/review-to-live.svg =1160x600 narrow=/img/review-to-live-narrow.svg:360x1330 "From review to live: a change is reviewed, checked and merged, then waits until it is running before its last checks.")
+
 ## Risk levels
 
 | Risk | Plan approved by | Reviewed by | Your sign-off |
