@@ -273,7 +273,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
             {d.recentTickets.length === 0 && <li className="muted">No tasks yet.</li>}
             {d.recentTickets.map((t) => (
               <li key={t.id}>
-                <span className={`tag ${STATE_TONE[t.state] ?? ""}`}>{t.state === "done" && t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <span className={`tag ${STATE_TONE[t.state] ?? ""}`}>{t.state === "done" && t.outcome === "cancelled" ? "Cancelled" : t.state.charAt(0).toUpperCase() + t.state.slice(1).replace(/_/g, " ")}</span>
                 <a href={`#/tickets/${t.id}`}>{t.title}</a>
                 <span className="muted">{t.assignee ?? "Unassigned"}</span>
                 <time className="muted">{ago(t.lastActivityAt)}</time>
