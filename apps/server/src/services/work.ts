@@ -72,6 +72,10 @@ type TicketPatch = {
   noCode?: boolean;
   /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
   ownerSetup?: string | null;
+  /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
+  ownerSetupOverride?: string | null;
+  /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
+  setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
@@ -654,9 +658,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       // A merged ticket's steps are frozen against agents (BOS-443); the owner's web edit still works.
       if (patch.ownerSetup !== undefined) {
-        const frozen = setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
+        // DR-052: the CEO fixing steps that failed the go-live card check (the caller checked its card is open).
+        const frozen = patch.setupFix ? null : setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
         if (frozen) throw new WorkError(409, frozen);
         fields.ownerSetup = patch.ownerSetup?.trim() || null;
+        // An override covers only the text it came with, so any other write of the steps clears it.
+        fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
       }
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;

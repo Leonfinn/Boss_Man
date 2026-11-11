@@ -155,7 +155,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
     .from(tickets)
     .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
   const flaggedTickets = noted.map((n) => n.id);
-  if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now }).where(inArray(tickets.id, flaggedTickets));
+  if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now, stateNoteStaleReason: input.reason }).where(inArray(tickets.id, flaggedTickets));
 
   // A card's tickets are the ones its context names (ticketId, blockedTicketId) or blocks, plus for
   // a permission or stall card the ticket of the run it names and for a deploy the ticket it

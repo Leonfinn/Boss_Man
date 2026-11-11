@@ -531,6 +531,12 @@ host_extra_facts() {
   if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
   out+="$sep\"paths\": {\"install\": $(jstr "$installdir"), \"src\": $(jstr "$srcdir"), \"deployer\": $(jstr "$deployerdir")}"
   out+="$sep\"compose\": {\"files\": [$cfl], \"bluegreen\": $bg, \"liveColour\": $(jstr "$colour")}"
+  # --- DR-052: the .env file the stack starts with, so an owner card can name it ({{host.env.file}}) instead of
+  # saying ".env". This deployer runs every compose command from $REPO with no --env-file, so Compose reads the .env
+  # there; that file is reported only when it exists. The server never works it out from the src folder itself.
+  local envfile=""
+  [[ -n $srcdir && -f $srcdir/.env ]] && envfile="$srcdir/.env"
+  [[ $envfile =~ ^/[A-Za-z0-9_./-]{1,300}$ ]] && out+="$sep\"env\": {\"file\": $(jstr "$envfile")}"
   # --- BOS-990: the fingerprint (sha256) of the script this deployer is running from, and of the copy in the checkout
   # (the version that is live). The server compares them: different means the host's copy needs the owner's copy step.
   out+="$sep\"deployer\": {\"scriptSha\": $(jstr "$(file_sha256 "${BASH_SOURCE[0]:-$0}")"), \"repoSha\": $(jstr "$(file_sha256 "$REPO/scripts/host-deployer.sh")")}"

@@ -57,7 +57,8 @@ import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
-import { type CardLint, type HostFacts, type SelfDeployFacts, NOT_OVERRIDABLE, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
+import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
+import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
@@ -71,7 +72,6 @@ import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, les
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import type { ClearWhen } from "./alert-clearing.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
-import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
@@ -580,17 +580,21 @@ export const ownerSetupKey = (ticketId: string) => `owner-setup:${ticketId}`;
  * the same key DR-011 used when a ticket was alone, so a repeat go-live pass can't stack a second card.
  * Returns the row, or null when a card is already open for the first ticket.
  */
-export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; steps: string[]; commit: string }) {
-  // The card check (DR-008), the part that exists today: any command block must be copy-safe. A step set
-  // that fails it raises no card and is logged, so the developer is the one who fixes the steps, never the
-  // owner meeting an un-runnable command. Newer lint rules run here too once they land on main.
-  const bad = ownerSetupProblem(t.steps);
+export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; steps: string[]; commit: string; facts?: OwnerSetupFacts; override?: string | null }) {
   const [first, ...others] = t.tickets;
   if (!first) return null;
-  if (bad) {
-    await record(db, { companyId: t.companyId, ticketId: first.ticketId, kind: "owner_setup_refused", summary: `The setup card wasn't raised: ${bad}`, at: new Date() });
+  // DR-052: the same fill and card check every owner card gets, on the text the owner will read: host tokens are
+  // filled from the deployer's report (or, unreported, become a pointer to where Boss Man shows them), then the
+  // whole lint runs. Steps that fail never reach the owner and are never dropped either: the CEO gets a card to fix
+  // them, and the owner's card goes out on a later pass once they pass (release-log.ts retries while it is open).
+  const check = checkOwnerSetup(t.steps, t.facts ?? {}, "raise");
+  const override = t.override?.trim() || null;
+  if (check.hard.length || (check.soft.length && !override)) {
+    await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft], commit: t.commit });
     return null;
   }
+  const unknownHost = check.generic ? `\n\nBoss Man doesn't know this server's folders yet, so where a step needs one it says where to look it up (${THIS_HOST_POINTER}).` : "";
+  const overridden = check.soft.length && override ? `\n\nThe CEO let these steps past Boss Man's card check: ${override}` : "";
   const heading =
     others.length === 0
       ? `"${first.title}" is live.`
@@ -602,16 +606,18 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `${heading}${others.length ? " To start using them all:" : " To start using it:"}\n\n${t.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}`,
+      question: `${heading}${others.length ? " To start using them all:" : " To start using it:"}\n\n${check.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}${unknownHost}${overridden}`,
       options: [TODO_DONE],
       recommendedOption: TODO_DONE,
       tier: "owner",
       dedupeKey: ownerSetupKey(first.ticketId),
-      context: { type: "owner_setup", ticketId: first.ticketId, tickets: t.tickets, steps: t.steps, commit: t.commit } satisfies DecisionContext,
+      context: { type: "owner_setup", ticketId: first.ticketId, tickets: t.tickets, steps: check.steps, commit: t.commit } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (!row) return null;
+  // The steps went out, so a CEO card about them is done with (DR-052).
+  for (const x of t.tickets) await clearOwnerTodo(db, ownerSetupFixKey(x.ticketId), `The fixed setup steps went to the owner.`);
   await record(db, {
     companyId: row.companyId,
     ticketId: first.ticketId,
@@ -620,6 +626,40 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
     at: new Date(),
   });
   return row;
+}
+
+/** The dedupe key for the CEO's card about a live ticket whose setup steps failed the card check (DR-052). */
+export const ownerSetupFixKey = (ticketId: string) => `owner-setup-fix:${ticketId}`;
+export const OWNER_SETUP_FIX_PREFIX = "owner-setup-fix:";
+
+/**
+ * DR-052 point 4: a live ticket's setup steps failed the card check, so instead of the owner's card the CEO gets one
+ * to fix them. One per ticket (the first of a shared card), never stacked; it closes by itself when the owner's card
+ * goes out. While it is open the CEO may change the merged ticket's steps (work.ts `setupFix`).
+ */
+async function raiseOwnerSetupFix(db: Db, t: { companyId: string; tickets: { ticketId: string; title: string }[]; findings: LintFinding[]; commit: string }) {
+  const first = t.tickets[0]!;
+  const [co] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+  const nums = await db.select({ id: tickets.id, number: tickets.number }).from(tickets).where(inArray(tickets.id, t.tickets.map((x) => x.ticketId)));
+  const refOf = (x: { ticketId: string; title: string }) => ticketRef(co?.prefix, nums.find((n) => n.id === x.ticketId)?.number) ?? `"${x.title}"`;
+  const names = t.tickets.map(refOf).join(", ");
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `${names} ${t.tickets.length > 1 ? "are" : "is"} live, but the setup steps can't go to the owner as written:\n${lintLines(t.findings)}\nFix the steps with update_ticket ownerSetup on ${refOf(first)} (allowed while this card is open, though the ticket is merged), or pass lintOverride with the reason if a finding is wrong. ${HOST_TOKEN_HELP} Leave this card open: Boss Man raises the owner's card on its next pass once the steps pass, and closes this one itself.`,
+      // A "Got it" notice the CEO can settle; the real close is the owner's card going out (raiseOwnerSetup).
+      options: ["Got it"],
+      recommendedOption: "Got it",
+      tier: "ceo",
+      dedupeKey: ownerSetupFixKey(first.ticketId),
+      context: { type: "question", ticketId: first.ticketId, triedFirst: "Boss Man checked the setup steps against this server's host facts when the change went live, and they failed the owner-card check." } satisfies DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+  if (row) await record(db, { companyId: t.companyId, ticketId: first.ticketId, kind: "decision_raised", summary: `The setup steps are live but failed the owner-card check, so the CEO was asked to fix them: ${t.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ").slice(0, 400)}`, at: new Date() });
+  return row ?? null;
 }
 
 /**
@@ -747,25 +787,6 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (soft.length && !override) return { error: `These steps can't go to the owner as written:\n${lintLines(soft)}\n${tail}${a.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
   const lint: CardLint = { warn, ...(soft.length && override ? { override: { reason: override, findings: soft } } : {}), ...(proof ? { proof } : {}) };
   return { error: null, steps, ...(lint.warn.length || lint.override || lint.proof ? { lint } : {}) };
-}
-
-/**
- * Why a ticket's owner setup steps can't become a card (DR-008's card check over server-built text), or
- * null. Today that's the copy-safe rule: every command block in the steps must be one line the owner can
- * paste as it is. Length is left to the author and review, not the card.
- */
-export function ownerSetupProblem(steps: string[]): string | null {
-  const text = steps.join("\n");
-  if (!text.trim()) return "it has no steps";
-  const pieces = parseStep(text);
-  const stray = strayFence(pieces);
-  if (stray !== null) return `a \`\`\` isn't a complete command block, so it would show as raw text: ${stray}`;
-  for (const piece of pieces) {
-    if (piece.type !== "command") continue;
-    const problem = commandProblem(piece.text);
-    if (problem) return `a command is not copy-safe (${problem}): ${piece.text}`;
-  }
-  return null;
 }
 
 /** An agent's model setup as the CEO sets it and the owner sees it (BOS-128). */

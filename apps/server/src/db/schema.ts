@@ -397,6 +397,9 @@ export const tickets = pgTable(
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
     ownerSetup: text("owner_setup"),
+    /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
+     * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
+    ownerSetupOverride: text("owner_setup_override"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
@@ -416,6 +419,8 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
+    stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */

@@ -22,6 +22,7 @@ import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
+import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
@@ -194,7 +195,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   if (retroAgent) registerRetro(server, services.retro, scope);
   registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
   registerRoadmap(server, db, services.work, scope);
-  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals }, scope, hooks, false);
+  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts }, scope, hooks, false);
   registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
   registerViewImage(server, services.images, scope);
   registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
@@ -223,7 +224,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     return me?.role === "ceo" || me?.role === "manager";
   }
 
-  registerTicketAdmin(server, db, { work, engagements, feedback }, scope);
+  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts }, scope);
 
   server.registerTool(
     "sizing_guide",
@@ -351,7 +352,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         holdsMerge: z.boolean().optional(),
         triedFirst: z.string().max(1000),
         ownerMustDo: z.boolean().optional(),
-        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17).`),
         stillNeeded: z.string().max(500).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
@@ -1066,7 +1067,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         const byPrefix = q && ID_PREFIX.test(q.trim()) ? q.trim() : null;
         const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt, stateNoteStaleReason: tickets.stateNoteStaleReason })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like), byPrefix ? idStartsWith(byPrefix) : undefined) : undefined))
@@ -1306,7 +1307,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
-  registerTicketMoves(server, db, { review, work, feedback, skillProposals }, scope, hooks, true);
+  registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts }, scope, hooks, true);
   registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.

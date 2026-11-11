@@ -1,5 +1,5 @@
 {
-  "id": "62c763cb-6fed-43f1-ac30-771d8b03262b",
+  "id": "584f968f-4794-4ab4-ba42-0e24b816c0f7",
   "prevId": "d673a958-3260-42e6-bb52-e0b9bb4a433a",
   "version": "7",
   "dialect": "postgresql",
@@ -2198,43 +2198,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "recheck_stage": {
-          "name": "recheck_stage",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "recheck_stage_at": {
-          "name": "recheck_stage_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "rechecked_at": {
-          "name": "rechecked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "rechecked_by_agent_id": {
-          "name": "rechecked_by_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "recheck_note": {
-          "name": "recheck_note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "recheck_count": {
-          "name": "recheck_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
         }
       },
       "indexes": {
@@ -2308,19 +2271,6 @@
           "tableTo": "agents",
           "columnsFrom": [
             "for_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "decisions_rechecked_by_agent_id_agents_id_fk": {
-          "name": "decisions_rechecked_by_agent_id_agents_id_fk",
-          "tableFrom": "decisions",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "rechecked_by_agent_id"
           ],
           "columnsTo": [
             "id"
@@ -9454,6 +9404,12 @@
         },
         "owner_setup": {
           "name": "owner_setup",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_setup_override": {
+          "name": "owner_setup_override",
           "type": "text",
           "primaryKey": false,
           "notNull": false
