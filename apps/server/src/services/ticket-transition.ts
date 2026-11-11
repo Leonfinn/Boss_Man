@@ -17,7 +17,7 @@ export async function systemMoveTicket(
   input: { ticketId: string; from?: SystemState[]; to: SystemState; reason: string; now: Date; /** Replaces the ticket's state note in the same write (a release says what freed it). */ stateNote?: string },
 ): Promise<typeof tickets.$inferSelect | null> {
   try {
-    const fields = input.stateNote ? { stateNote: input.stateNote, stateNoteAt: input.now, stateNoteStaleAt: null } : undefined;
+    const fields = input.stateNote ? { stateNote: input.stateNote, stateNoteAt: input.now } : undefined;
     const { ticket } = await moveTicket(db, input.ticketId, input.to, { from: input.from, note: input.reason, overLimit: true, internal: true, now: input.now, fields });
     return ticket;
   } catch (e) {
