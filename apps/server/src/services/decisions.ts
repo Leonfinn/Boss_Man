@@ -71,6 +71,7 @@ import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
+import { runFolder } from "./run-folder.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -1757,7 +1758,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const judgeMode = company?.mode ?? "watch";
       const judgedCommand = commandOf(info.rawInput);
       // Very long commands are not judged (the old recommendation stays): the patterns are not built for them and this runs on the server loop.
-      const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined, workspaceRoot);
+      const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? runFolder(workspaceRoot, run?.agentId ?? "", { ticketId: run?.ticketId }).replace(/[^A-Za-z0-9]/g, "-") : undefined, workspaceRoot);
       // The model second opinion (BOS-338) is asked only when the rules judge allows: it can only make a card stricter.
       const askSecond = !!reading && reading.verdict === "allow" && judgeMode !== "off" && !!secondOpinion && (await secondOpinion.enabled(runner.companyId).catch(() => false));
       const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel, ...(askSecond ? { second: { state: "pending" as const } } : {}) } : undefined;
@@ -3238,7 +3239,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
-        const onTicket = [...unblocked, ...kept].find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0] ?? kept[0];
+        let onTicket: { id: string } | undefined = [...unblocked, ...kept].find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0] ?? kept[0];
+        // BOS-1120: an alert card blocks no ticket, so its answer would wake the agent with none and open a run with no checkout.
+        // Wake it on the ticket the alert is about (the ladder's ticket, else the stalled run's); if that ticket has finished
+        // there is nothing to wake the agent for, so the answer is recorded and no run starts.
+        let skipWake = false;
+        if (!onTicket) {
+          const ladderTicket = (ctx as { ladder?: { ticketId?: string | null } }).ladder?.ticketId ?? null;
+          const stalledRunId = ctx.type === "stalled_run" ? ctx.runId : null;
+          const [stalled] = stalledRunId ? await db.select({ ticketId: runs.ticketId, endedAt: runs.endedAt }).from(runs).where(eq(runs.id, stalledRunId)) : [];
+          const aboutId = ladderTicket ?? stalled?.ticketId ?? null;
+          const [st] = aboutId ? await db.select({ id: tickets.id, systemState: tickets.systemState, mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, aboutId)) : [];
+          if (st) {
+            if (st.systemState === "done" || st.mergeCommit) skipWake = true;
+            else onTicket = st;
+          } else if (ctx.type === "stalled_run") skipWake = true;
+        }
+        if (skipWake) return { id, answer, delivered, endedHere };
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";

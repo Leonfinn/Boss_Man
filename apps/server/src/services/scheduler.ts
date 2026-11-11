@@ -3,11 +3,11 @@
 // limit and priority order. Before launching it checks budgets and fails closed (R34),
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
-import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
 import { pickAccount } from "./claude-accounts.js";
@@ -1039,7 +1039,7 @@ export function schedulerService(
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
       fundingSourceId: onSource ?? agent.fundingSourceId,
-      cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, reply ? `reply/${agent.id}` : (workTicketId ?? agent.id)),
+      cwd: chat ? chat.cwd(w.companyId, w.agentId) : runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply }),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
@@ -1047,7 +1047,7 @@ export function schedulerService(
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
-      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(path.posix.join(workspaceRoot, reply ? `reply/${agent.id}` : (workTicketId ?? agent.id))) : ""),
+      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : ""),
       mcpToken,
       // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
       // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
