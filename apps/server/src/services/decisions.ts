@@ -6,7 +6,7 @@ import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -70,11 +70,12 @@ import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
+import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similarQuestion } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
+import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -473,30 +474,18 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
  * A plan card whose run is still alive stays: that run is waiting on its answer, and closing it would leave the run hanging.
  * Both shapes count: the plan an agent submits (a question card with plan) and ExitPlanMode's (a permission card with plan).
  */
-export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date }) {
+export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown> }) {
   const at = input.now ?? new Date();
   const rows = await db
-    .select({ id: decisions.id, kind: decisions.kind, context: decisions.context })
+    .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, context: decisions.context })
     .from(decisions)
     .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, input.newCardId), sql`${decisions.context}->>'ticketId' = ${input.ticketId}`, sql`${decisions.context}->>'plan' = 'true'`, sql`${decisions.context}->>'type' in ('permission', 'question')`));
   const note = `superseded by ${input.newCardId}`;
   let cleared = 0;
   for (const r of rows) {
-    const runId = (r.context as { runId?: unknown }).runId;
-    if (r.kind === "permission" && typeof runId === "string" && UUID_RE.test(runId)) {
-      const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
-      if (run && !run.endedAt) continue;
-    }
-    const [done] = await db
-      .update(decisions)
-      .set({ status: "withdrawn", answeredAt: at, dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note, at: at.toISOString() } satisfies Withdrawal }) })
-      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
-      .returning({ id: decisions.id });
-    if (!done) continue;
-    cleared++;
-    await markDecisionNotificationRead(db, r.id, at);
-    await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
-    await record(db, { companyId: input.companyId, ticketId: input.ticketId, kind: "decision_withdrawn", summary: `Boss Man closed an older plan card by itself: ${note}`, at });
+    // BOS-1193: the shared close path, so the old card's approve links are revoked and its ticket is released too.
+    if (await holdsLiveRun(db, r.context)) continue;
+    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at })) cleared++;
   }
   return cleared;
 }
@@ -1519,7 +1508,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (row && t && run?.agentId)
       await addTicketDependency(db, { companyId: runner.companyId, blockedTicketId: t.id, blockerDecisionId: row.id, actor: { type: "agent", agentId: run.agentId }, hold: true, now }).catch(() => undefined);
     // BOS-1161: an older open plan card for this ticket is superseded by this one. A failure never loses the new card.
-    if (row && t) await supersedePlanCards(db, { companyId: runner.companyId, ticketId: t.id, newCardId: row.id, now: now() }).catch((err) => log(`closing older plan cards for ${t.id} failed: ${(err as Error).message}`));
+    if (row && t) await supersedePlanCards(db, { companyId: runner.companyId, ticketId: t.id, newCardId: row.id, now: now(), release: (id) => releaseIfFree(id, false) }).catch((err) => log(`closing older plan cards for ${t.id} failed: ${(err as Error).message}`));
     if (row && ladder && ceoId)
       await wakeLadderCeo(runner.companyId, row, { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ladder }, ceoId, [
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,
@@ -1872,7 +1861,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+      // A card this one replaces (BOS-1193): checked before anything is written, so a wrong id changes nothing.
+      let replaced: { id: string; question: string; companyId: string } | null = null;
+      if (input.replaces) {
+        const [old] = await db.select().from(decisions).where(and(eq(decisions.id, input.replaces), eq(decisions.companyId, input.companyId), eq(decisions.status, "open")));
+        if (!old) throw new AnswerError("replaces: no open card with that ID in your company.");
+        const [me] = input.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId))) : [];
+        if (!me || (me.role !== "ceo" && old.raisedByAgentId !== input.agentId)) throw new AnswerError("replaces: you can only replace a card you raised.");
+        if (old.kind !== "question" || (old.context as { type?: string }).type !== "question") throw new AnswerError("replaces: only a question card can be replaced this way; a plan card is replaced by submitting the new plan.");
+        replaced = old;
+      }
       // Ordering links may only point at open cards in the raiser's own company (BOS-625).
       const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
       const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
@@ -1917,7 +1916,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       // BOS-1161: a new plan card closes the older open plan cards for the ticket.
-      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now() }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
+      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
+      // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
+      // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
+      if (!input.plan) {
+        const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now };
+        const note = `superseded by ${raised.id}`;
+        if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
+        else if (input.agentId) {
+          const same = await db
+            .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId })
+            .from(decisions)
+            .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, raised.id), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
+          for (const o of same) if (similarQuestion(o.question, input.question)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
+        }
+      }
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
       // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
       clearTallyCache();
@@ -2441,12 +2454,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // would hide a reading behind a server update that resets it. An agent re-checking such a card
       // after the owner acted is already how `staleAt` folds it, so nothing is lost.
       const aboutTicket = (c: DecisionContext) => c.type === "review_loop" || c.type === "risk_review" || c.type === "check_stuck" || c.type === "review_stall";
+      // (BOS-1193) Cards in a live re-check, and which of them the owner must still see.
+      const isRechecking = (r: (typeof sorted)[number]) => !!r.staleAt && (r.recheckStage === "author" || r.recheckStage === "ceo");
+      const hiddenRechecks = await hiddenWhileRechecked(db, sorted);
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
         // (BOS-1159) A flagged card that still holds up a live ticket stays in the main list with its
         // answer buttons: the Board shows that ticket as waiting on the owner, and the raising agent may
         // never get to confirm or withdraw, so folding it left the owner a "Answer in Decisions" button
         // that led to nothing. The card itself says the owner acted since it was written.
-        if (r.staleAt && r.blocks.length === 0) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
+        // (BOS-1193, DR-054) A card being re-checked is folded away whatever it blocks: the Board agrees (it shows "card being
+        // re-checked", not "Answer in Decisions"), and the card is back here, flagged as lapsed, if nobody settles it in an hour.
+        // Urgent cards, a request holding a live run and merge/review-loop cards stay in the main list, marked.
+        if (hiddenRechecks.has(r.id)) return { reason: `Being re-checked by ${r.agentName ?? "the agent"} (${r.staleReason ?? "something it depends on changed"}). It comes back here if it is not confirmed or closed within the hour.` };
         const c = contextOf(r);
         const t = cardTicket.get(r.id);
         if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
@@ -2488,7 +2507,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       return Promise.all(
         finalRows.map(async (r) => {
-          const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
+          // (BOS-1193) A card kept in the main list while it is re-checked says who is checking it; one that nobody re-checked in
+          // time says plainly who failed to, not "may be out of date".
+          const rechecking = isRechecking(r) ? { by: r.agentName ?? "the agent", stage: r.recheckStage as "author" | "ceo" } : null;
+          const notRechecked = r.staleAt && r.recheckStage === "lapsed" ? `Not re-checked: ${r.agentName ?? "the agent that raised it"} and the CEO didn't confirm this within an hour. Flagged because ${r.staleReason ?? "something it depends on changed"}.` : null;
+          const withRefs = { ...r, refs: refs.get(r.id) ?? {}, rechecking, notRechecked };
           const w = waitingOf(r);
           const step = handsOnIds.has(r.id) ? (stepOf[r.id] ?? null) : null;
           const e = edgeLabels.get(r.id);
@@ -2750,7 +2773,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ownerTierInfo && !(await isStale(d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
-      if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
+      // BOS-1193: except a plan card whose run has ended. Nothing is waiting on it any more, and it is the CEO's to close
+      // when it is a duplicate, stale, or being re-checked (below); a run that is still alive is still refused.
+      const planCard = (ctx as { plan?: boolean }).plan === true;
+      if (ctx.type === "permission" && (!planCard || (await holdsLiveRun(db, d.context)))) throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
+      // A card being re-checked is the CEO's to settle (BOS-1193), duplicate or stale or not.
+      const inRecheck = !!d.staleAt && (d.recheckStage === "author" || d.recheckStage === "ceo");
       // Fail closed: only system and info cards may be cleared outright, and a live merge card never:
       // it is waiting on the owner and can only be answered, not dropped (BOS-149).
       const direct = isSystemCard(d) && ctx.type !== "check_stuck";
@@ -2761,14 +2789,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (!(await isStale(d))) {
           throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
         }
-      } else if (!direct && !(await isStale(d)) && !(await isDuplicate(d))) {
+      } else if (!direct && !inRecheck && !(await isStale(d)) && !(await isDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       const closed = await db.transaction(async (tx) => {
         const [row] = await tx
           .update(decisions)
-          .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: mergeContext({ withdrawn: withdrawal }) })
+          .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, recheckStage: null, context: mergeContext({ withdrawn: withdrawal }) })
           .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
           .returning({ id: decisions.id });
         if (row) await revokeApproveTokens(tx as unknown as Db, d.id, now());
@@ -3337,9 +3365,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // ticket cap, stalled run) must go through their own answer path: withdrawing a risk_review
       // card would delete the dependency and let the ticket merge without the owner's sign-off.
       const type = (d.context as { type?: string } | null)?.type;
-      if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
+      // BOS-1193: a plan card is the author's to take back too (the plan they submitted, or ExitPlanMode's once its run has
+      // ended: a live run is waiting on the answer). Sign-off, merge and other flow cards still have to be answered.
+      const isPlanCard = (d.context as { plan?: boolean } | null)?.plan === true && (type === "question" || type === "permission");
+      if (isPlanCard && (await holdsLiveRun(db, d.context))) throw new AnswerError("This plan card holds a live run that is waiting for the answer, so it can't be withdrawn until the run ends.");
+      if (!isPlanCard && (d.kind !== "question" || type !== "question")) throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
       const closed = await db.transaction(async (tx) => {
-        const [row] = await tx.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+        const [row] = await tx.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, recheckStage: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
         if (row) await revokeApproveTokens(tx as unknown as Db, id, now());
         return row;
       });
@@ -3350,6 +3382,35 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       for (const f of freed) await releaseIfFree(f.ticketId, false);
       await record(db, { companyId: d.companyId, agentId: actor.agentId, ticketId: freed[0]?.ticketId, kind: "decision_withdrawn", summary: `Withdrew "${d.question}"${reason ? `: ${reason}` : ""}`, at: now() });
       return { id, withdrawn: true };
+    },
+
+    /**
+     * An author, or the CEO, confirms a card that is being re-checked still holds (BOS-1193, DR-054). The flag clears and
+     * the one line on what was checked goes in the card's history; nothing is written on the card's face. Refused when Boss
+     * Man can see the card is dead (the validity table), so a card it would close can't be confirmed. Only an author's own
+     * card, or any card at the CEO's stage or before, for the CEO.
+     */
+    async confirmRecheck(id: string, actor: { agentId: string }, checked: string) {
+      const line = checked.replace(/\s+/g, " ").trim().slice(0, 300);
+      if (line.length < 10) throw new AnswerError("Say in one line what you checked against the live state (at least 10 characters). It is kept in the card's history.");
+      const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      if (!d) return null;
+      const [a] = await db.select({ role: agents.role, companyId: agents.companyId, name: agents.name }).from(agents).where(eq(agents.id, actor.agentId));
+      const isCeo = a?.role === "ceo" && a.companyId === d.companyId;
+      if (!isCeo && d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only confirm a card you raised.");
+      if (!d.staleAt || !d.recheckStage) throw new AnswerError("This card is not being re-checked, so there is nothing to confirm.");
+      if (d.recheckStage === "lapsed") throw new AnswerError("This card was not re-checked in time and is back with the owner; it is theirs to answer.");
+      const dead = await cardInvalidReason(db, d);
+      if (dead) throw new AnswerError(`Boss Man can see this card is no longer valid (${dead}), so it can't be confirmed. Withdraw it instead.`);
+      const [row] = await db
+        .update(decisions)
+        .set({ staleAt: null, staleReason: null, recheckStage: null, recheckStageAt: null, recheckedAt: now(), recheckedByAgentId: actor.agentId, recheckNote: line, recheckCount: sql`${decisions.recheckCount} + 1` })
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), isNotNull(decisions.recheckStage)))
+        .returning({ id: decisions.id });
+      if (!row) return null;
+      clearTallyCache();
+      await record(db, { companyId: d.companyId, agentId: actor.agentId, kind: "decision_rechecked", summary: `${a?.name ?? "An agent"} re-checked "${d.question.slice(0, 120)}" and it still holds: ${line}`, at: now() });
+      return { id };
     },
   };
 }
