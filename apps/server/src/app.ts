@@ -43,6 +43,7 @@ import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
 import { releaseLogService } from "./services/release-log.js";
+import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
 import { runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
@@ -326,6 +327,9 @@ export async function buildApp(opts: AppOptions) {
     closeTicket: (id) => work.updateTicket(id, { state: "done" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
+    // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
+    // hostFacts is created just below; this only runs on a later release pass.
+    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
