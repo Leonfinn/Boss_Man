@@ -61,6 +61,7 @@ import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
+import { registerMergeLineExport } from "./mcp-merge-line.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -201,6 +202,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
+  registerMergeLineExport(server, db, scope);
   return server;
 }
 
