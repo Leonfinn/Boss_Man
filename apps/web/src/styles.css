@@ -195,8 +195,9 @@ p { margin: 0; }
 .decision .actions.stacked { flex-direction: column; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
 .decision .actions.stacked .answer { display: grid; grid-template-columns: minmax(150px, max-content) minmax(0, 1fr); gap: 4px 14px; align-items: center; }
 .decision .actions.stacked .answer .effect { margin: 0; font-size: 14px; color: var(--muted); }
-.decision .rec-tag { text-transform: uppercase; font-size: 10px; margin-left: 6px; }
-.decision .btn.primary .rec-tag { background: rgba(255, 255, 255, 0.22); color: #fff; }
+.decision .rec-tag { margin-left: 6px; }
+/* On the filled button a darker chip keeps white text above 4.5:1 (a lighter one dropped it to about 3.9). */
+.decision .btn.primary .rec-tag { background: rgba(0, 0, 0, 0.28); color: #fff; }
 /* A question's own options: full-width rows, left-aligned, long text wrapping inside. */
 .decision .actions.wide { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
 .decision .actions.wide .btn { width: 100%; text-align: left; height: auto; white-space: normal; overflow-wrap: anywhere; }
