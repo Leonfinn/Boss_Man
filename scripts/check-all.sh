@@ -205,14 +205,14 @@ BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(BOSSMAN_CHECK_SLOTS="${SLOTS:-
 export BOSSMAN_CHECK_THREADS GOMAXPROCS="${GOMAXPROCS:-$BOSSMAN_CHECK_THREADS}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$BOSSMAN_CHECK_THREADS}" TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$BOSSMAN_CHECK_THREADS}"
 echo "check-all: CPU budget $BOSSMAN_CHECK_THREADS threads per step (BOSSMAN_CHECK_THREADS)"
 # One memory ceiling per check (BOS-1165; see scripts/check-mem-guard.mjs): the runner has one Docker limit for everything in it, and
-# without this a runaway check could take all of it. BOSSMAN_CHECK_MEMORY_MB sets it (default 6144 = twice the 3 GB a slot is sized
-# for; 0 = no ceiling, measure only). A nested check-all (the script tests) is already inside the outer check's ceiling.
+# without this a runaway check could take all of it. BOSSMAN_CHECK_MEMORY_MB sets it (default 6912 = 1.5 times the largest peak measured,
+# 4.5 GB; the slot is sized at 3 GB for the average; 0 = no ceiling, measure only). A nested check-all (the script tests) is already inside the outer check's ceiling.
 # The guard is a safety net: with no writable temp dir it is skipped, never a reason to fail the check.
 mem_peak=""
 if [ -z "${BOSSMAN_CHECK_GUARDED:-}" ] && [ -f "$(dirname "$self")/check-mem-guard.mjs" ] && command -v node >/dev/null; then mem_peak="$(mktemp 2>/dev/null)" || mem_peak=""; fi
 if [ -n "$mem_peak" ]; then
   export BOSSMAN_CHECK_GUARDED=1
-  mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6144}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6144
+  mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6912}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6912
   node "$(dirname "$self")/check-mem-guard.mjs" "$$" "$mem_mb" "$mem_peak" &
   mem_guard=$!
   trap 'kill "$mem_guard" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
