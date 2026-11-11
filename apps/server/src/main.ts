@@ -6,6 +6,9 @@ import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
+import { checkLimitReconciler } from "./services/check-limit.js";
+import { checkQueue } from "./services/check-queue.js";
+import { getHold } from "./services/maintenance.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
@@ -45,6 +48,13 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
   },
 });
 
+const checkQueueSvc = checkQueue(db);
+const checkLimit = checkLimitReconciler({
+  slots: () => checkQueueSvc.slots(),
+  launch: launcher,
+  holdActive: async () => !!(await getHold(db)),
+  startDrain: () => maintenance.start({ kind: "settings" }),
+});
 const bg = createBackground(
   [
     // Scheduling passes; run ends and new wakes also prompt one.
@@ -84,6 +94,8 @@ const bg = createBackground(
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
+    // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
+    { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // Every company's runner stays connected: tells that company's CEO and the owner when one does not, and checks a deploy brought them all back (BOS-467). // leader-only
     { name: "runner watch", everyMs: Number(env.BOSSMAN_RUNNER_WATCH_MS ?? 30_000), run: () => runnerWatch.step() },
