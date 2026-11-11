@@ -11,6 +11,14 @@ cd "$(dirname "$self")/.."
 if [ -n "${HOME:-}" ] && [ ! -d "$HOME" ]; then
   mkdir -p "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
   export HOME
+  # The runner points the XDG folders inside that HOME; they must follow it, or Chromium and Vite can't write there.
+  export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
+fi
+if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_CONFIG_HOME:-$HOME/.config}" 2>/dev/null || {
+    export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
+    mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
+  }
 fi
 
 # Only the merge gate runs the full check. Inside an agent session (Claude Code sets CLAUDECODE; the runner's own
