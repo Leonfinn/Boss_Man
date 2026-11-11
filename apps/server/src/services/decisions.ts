@@ -1929,7 +1929,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             .from(decisions)
             .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, raised.id), eq(decisions.raisedByAgentId, input.agentId), eq(decisions.kind, "question"), sql`${decisions.context}->>'type' = 'question'`, sql`${decisions.context}->>'plan' is null`, input.blocksTicketId ? sql`${decisions.context}->>'ticketId' = ${input.blocksTicketId}` : sql`${decisions.context}->>'ticketId' is null`));
           // A card that offers other choices, or recommends another, is a different ask (BOS-195): it stays.
-          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...o.options].sort().join("\u0000") === [...input.options].sort().join("\u0000");
+          const sameChoices = (o: (typeof same)[number]) => o.recommendedOption === input.recommended && [...((o.options as string[] | null) ?? [])].sort().join("\u0000") === [...input.options].sort().join("\u0000");
           for (const o of same) if (similarQuestion(o.question, input.question) && sameChoices(o)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
         }
       }

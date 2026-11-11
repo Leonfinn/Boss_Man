@@ -85,13 +85,15 @@ export async function hiddenWhileRechecked(db: Db, cards: Array<{ id: string; st
   if (!checking.length) return new Set();
   const runIds = [...new Set(checking.map((c) => (c.context as Ctx).runId).filter((r): r is string => typeof r === "string" && UUID_RE.test(r)))];
   const live = new Set(runIds.length ? (await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.id, runIds), isNull(runs.endedAt)))).map((r) => r.id) : []);
-  const hidden = new Set<string>();
-  for (const c of checking) {
-    const x = c.context as Ctx & { urgentPush?: unknown; ladder?: unknown };
-    const visible = !!x.urgentPush || !!x.ladder || MERGE_OR_REVIEW_TYPES.has(x.type ?? "") || (x.type === "permission" && typeof x.runId === "string" && live.has(x.runId));
-    if (!visible) hidden.add(c.id);
-  }
-  return hidden;
+  return new Set(
+    checking
+      .filter((c) => {
+        const x = c.context as Ctx & { urgentPush?: unknown; ladder?: unknown };
+        const visible = !!x.urgentPush || !!x.ladder || MERGE_OR_REVIEW_TYPES.has(x.type ?? "") || (x.type === "permission" && typeof x.runId === "string" && live.has(x.runId));
+        return !visible;
+      })
+      .map((c) => c.id),
+  );
 }
 
 export type CloseDeps = {
