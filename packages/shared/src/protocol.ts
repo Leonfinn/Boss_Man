@@ -164,8 +164,9 @@ export const RunnerCommand = z.discriminatedUnion("type", [
       .max(100)
       .optional(),
     /**
-     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence runs it as before
-     * and says so (run.started's fenced); one without the "fence" feature ignores it.
+     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence refuses the run with
+     * FENCE_UNAVAILABLE_ERROR (BOS-373), except a boardToolsOnly run, which starts unfenced and says so
+     * (run.started's fenced); one without the "fence" feature ignores it.
      */
     fence: z.boolean().optional(),
   }),
@@ -438,6 +439,12 @@ export const FENCE_MODES = ["off", "watch", "enforce"] as const;
 export type FenceMode = (typeof FENCE_MODES)[number];
 /** What Off means, in BOS-373's words, said wherever the owner chooses Off (BOS-940): Settings and the fence card. */
 export const FENCE_OFF_CONSEQUENCE = "With the fence Off, agents can read the runner's key and this company's git login.";
+/**
+ * Why a runner ends a run asked to be fenced that it can't fence (BOS-373, DR-047), instead of starting it unfenced.
+ * The server holds such a company's work as soon as it sees the runner's report, so this covers the gap before that.
+ */
+export const FENCE_UNAVAILABLE_ERROR =
+  "This run was asked to run inside the agent fence, but this runner can't fence agents, so it didn't start: unfenced, an agent could read the runner's key and this company's git login. It runs again once the host can fence, or after the owner chooses Off (Settings → Permissions → Agent fence).";
 /** Flip once BOS-323 is merged and its test shows the git gap closed. */
 export const FENCE_ENFORCE_AVAILABLE = false;
 /** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */

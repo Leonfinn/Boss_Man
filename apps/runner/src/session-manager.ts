@@ -11,7 +11,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { FENCE_DENIED_PATTERN, infiniteLaunchModel, isDaemonOnlySecret, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, FENCE_UNAVAILABLE_ERROR, infiniteLaunchModel, isDaemonOnlySecret, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
@@ -68,7 +68,7 @@ export type SessionManagerOptions = {
   /**
    * The agent fence (DR-004, BOS-321), for runs started with fence: this runner's level from its
    * self-test, where each agent's own home goes, and the shared pnpm store. Without it, or on an
-   * unavailable level, such runs start unfenced, as before. Each run's temp folder goes under runTmpRoot
+   * unavailable level, such runs are refused (BOS-373), except board-tools-only ones, which start unfenced. Each run's temp folder goes under runTmpRoot
    * (default: run-tmp beside agentsRoot), outside every agent's home, so it is granted to that run alone (BOS-555).
    */
   fence?: { level: FenceLevel; agentsRoot: string; runTmpRoot?: string; pnpmStore?: string };
@@ -869,6 +869,14 @@ export class SessionManager {
     // model and the reported one agree (BOS-279).
     if (cmd.agentKind === "opencode" && isInfiniteModel(cmd.model)) cmd = { ...cmd, model: infiniteLaunchModel(cmd.model!) };
 
+    // Fail closed (BOS-373, DR-047): a run asked to be fenced never starts unfenced on its own. Unfenced, it runs as the
+    // runner's own user and can read the runner's key and the git login of a daemon fetch. Only the owner's choice (fence
+    // Off, so no fence is asked for) runs agents unfenced. Board-tools-only runs (owner chat) have no file or shell tools.
+    if (cmd.fence && !cmd.boardToolsOnly && (this.opts.fence?.level ?? "unavailable") === "unavailable") {
+      emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: FENCE_UNAVAILABLE_ERROR });
+      return;
+    }
+
     let env: NodeJS.ProcessEnv;
     let secrets: Record<string, string>;
     try {
@@ -958,7 +966,8 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
-    // The fence (BOS-321): asked for per run; a runner that can't fence runs it as before and says so.
+    // The fence (BOS-321): asked for per run. Only a board-tools-only run reaches here on a runner that can't fence
+    // (any other was refused at the start, BOS-373); it runs unfenced and says so.
     let launch = { bin, args: adapterArgs(cmd.agentKind) };
     let fenced: boolean | undefined;
     let runTmp: string | null = null;
