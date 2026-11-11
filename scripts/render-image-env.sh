@@ -9,7 +9,7 @@ set -euo pipefail
 
 die() { echo "render-image-env: $*" >&2; exit 1; }
 f="${1:-}" want="${2:-}"
-[ -n "$f" ] && [ -f "$f" ] || die "usage: render-image-env.sh <release.json> [registry]"
+if [ -z "$f" ] || [ ! -f "$f" ]; then die "usage: render-image-env.sh <release.json> [registry]"; fi
 command -v jq >/dev/null 2>&1 || die "jq is not installed"
 jq -e '.schema == 1 and (.registries | type == "array" and length > 0) and (.images | type == "array")' "$f" >/dev/null 2>&1 || die "$f is not a release.json this script understands (schema 1)"
 

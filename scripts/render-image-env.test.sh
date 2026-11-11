@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Tests scripts/render-image-env.sh (BOS-974): no network, no Docker. Also checks that the compose file accepts the result.
+# ok/bad only print a line and set a flag, so A && ok || bad cannot run both.
+# shellcheck disable=SC2015
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 S=scripts/render-image-env.sh
