@@ -110,10 +110,12 @@ reads:
 ## #/merge-queue
 sections: 
   - Merge queue
+  - Queued checks
   - Recently finished
   - Running now
   - Waiting to merge
 reads: 
+  - /api/companies/:id/check-queue
   - /api/companies/:id/merge-queue
 
 ## #/notifications
