@@ -3,11 +3,15 @@ import { dateIn, dateInCacheSize, milestoneHorizon, milestoneStatus, timeZoneOr 
 
 const today = "2026-10-16";
 
-// Cases already pinned in plan-roadmap.test.ts (done wins over a past date, no work, unscheduled,
-// late, the 14-day at-risk boundary, the Now/Next/Later day boundaries and a pinned horizon) are
-// not repeated here.
+// Most cases already pinned in plan-roadmap.test.ts (done wins over a past date, no work,
+// unscheduled, the 14-day at-risk boundary, the Now/Next/Later day boundaries and a pinned
+// horizon) are not repeated here. "late" is repeated on purpose so this file alone proves it.
 
 describe("milestoneStatus", () => {
+  it("marks a milestone late when its date has already passed", () => {
+    expect(milestoneStatus({ total: 5, done: 2, blocked: 0 }, "2026-10-10", today)).toBe("late");
+  });
+
   it("tracks a half-done milestone that is not blocked, even when it is due very soon", () => {
     expect(milestoneStatus({ total: 4, done: 2, blocked: 0 }, "2026-10-20", today)).toBe("on_track");
   });
