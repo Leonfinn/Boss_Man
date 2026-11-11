@@ -593,18 +593,23 @@ grep -q "NODE_PATH seen: $wt/gnm" "$wt/out2" || fail "web_tests: no NODE_PATH fa
 grep -q "NODE_PATH seen: /keep/me" "$wt/out3" || fail "web_tests: overwrote NODE_PATH: $(cat "$wt/out3")"
 # A HOME that does not exist (a fenced job on an old runner) must not reach the browser tests: they get a home of their own,
 # which is removed afterwards. A usable HOME is left alone.
-printf '%s\n' '#!/usr/bin/env bash' 'echo "HOME seen: $HOME"; echo "XDG seen: ${XDG_CONFIG_HOME:-none}"' >"$wt/bin2/pnpm"
-(set -euo pipefail; export HOME="$wt/no-such-home" PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
- self="$wt/check-all.sh"; : >"$self"
- # shellcheck disable=SC1091
- . "$wt/fn.sh"; web_tests "$wt" >"$wt/out4" 2>&1) || fail "web_tests missing HOME: $(cat "$wt/out4")"
-grep -q "HOME seen: " "$wt/out4" || fail "web_tests: stub did not run: $(cat "$wt/out4")"
-! grep -q "HOME seen: $wt/no-such-home" "$wt/out4" || fail "web_tests: kept an unusable HOME: $(cat "$wt/out4")"
-grep -q "XDG seen: .*/.config" "$wt/out4" || fail "web_tests: no XDG_CONFIG_HOME for the missing HOME: $(cat "$wt/out4")"
+#
+# The fallback now sits at the top of check-all.sh so every step has it (BOS-1095: the shell tests' Chrome demo failed too).
+# The block is lifted out of the script and run with a missing and a usable HOME.
+awk '/^check_home=""$/{p=1} p{print} p&&/^fi$/{exit}' "$here/check-all.sh" >"$wt/home-block.sh"
+[ -s "$wt/home-block.sh" ] || fail "HOME fallback block not found in check-all.sh"
+home_case() { # home_case <label> <HOME value>; prints "HOME=.. XDG=.. exists=.." after the block, then whether the folder is gone after exit
+  (set -euo pipefail; export HOME="$2"; unset XDG_CONFIG_HOME
+   # shellcheck disable=SC1090
+   . "$wt/home-block.sh"
+   echo "HOME=$HOME XDG=${XDG_CONFIG_HOME:-none} dir=$([ -d "$HOME/.config" ] && echo yes || echo no)") >"$wt/home-$1" 2>&1 || fail "HOME case $1: $(cat "$wt/home-$1")"
+}
+home_case missing "$wt/no-such-home"
+tail -n 1 "$wt/home-missing" | grep -q "HOME=$wt/no-such-home" && fail "unusable HOME kept: $(cat "$wt/home-missing")"
+tail -n 1 "$wt/home-missing" | grep -q "XDG=.*/.config dir=yes" || fail "no home/XDG folders for a missing HOME: $(cat "$wt/home-missing")"
+fb="$(tail -n 1 "$wt/home-missing" | sed 's/^HOME=\([^ ]*\) .*/\1/')"
+[ ! -e "$fb" ] || fail "fallback HOME not removed at exit: $fb"
 mkdir -p "$wt/good-home"
-(set -euo pipefail; export HOME="$wt/good-home" PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
- self="$wt/check-all.sh"; : >"$self"
- # shellcheck disable=SC1091
- . "$wt/fn.sh"; web_tests "$wt" >"$wt/out5" 2>&1) || fail "web_tests good HOME: $(cat "$wt/out5")"
-grep -q "HOME seen: $wt/good-home" "$wt/out5" || fail "web_tests: replaced a usable HOME: $(cat "$wt/out5")"
+home_case good "$wt/good-home"
+tail -n 1 "$wt/home-good" | grep -q "HOME=$wt/good-home XDG=none" || fail "a usable HOME was replaced: $(cat "$wt/home-good")"
 echo "check-all.test.sh: ok"

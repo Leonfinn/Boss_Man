@@ -16,6 +16,19 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -
   exit 2
 fi
 
+# A fenced check job on a runner that predates the home-folder fix has a HOME that doesn't exist and can't be created. Chrome
+# (its crash handler and profile folder), git, npm and others then fail in whichever step needs them (BOS-1095: web tests, then
+# the shell tests' Chrome demo). When HOME isn't a writable folder, the whole run gets a home of its own under the temp folder,
+# with XDG folders, removed when the run ends. The child run inherits it, so this happens once, before any step.
+check_home=""
+if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
+  check_home="$(mktemp -d)"
+  echo "check-all: HOME ${HOME:-unset} is not usable; this run uses $check_home"
+  export HOME="$check_home" XDG_CONFIG_HOME="$check_home/.config" XDG_CACHE_HOME="$check_home/.cache" XDG_DATA_HOME="$check_home/.local/share"
+  mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+  trap 'rm -rf "$check_home"' EXIT
+fi
+
 # Where finished runs are kept (result + full log), keyed by the git tree of the checked-out files, so a check that
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
@@ -64,7 +77,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   # The child leaves per-file test times here (vitest JSON reports, shell test times); record() folds them into $STORE/<tree>.test-times (BOS-654).
   times_dir="$(mktemp -d)"
-  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"' EXIT
+  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"; [ -z "$check_home" ] || rm -rf "$check_home"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
   key=""
@@ -254,24 +267,13 @@ web_tests() {
     gnm="$(npm root -g 2>/dev/null || true)"
     if [ -n "$gnm" ] && [ -d "$gnm/playwright" ]; then export NODE_PATH="$gnm"; fi
   fi
-  # Chromium keeps its crash database under XDG_CONFIG_HOME (default $HOME/.config) and its crashpad handler kills the browser
-  # ("--database is required") when that folder can't be made. A fenced check job on a runner that predates the home-folder fix
-  # has a HOME that doesn't exist and can't be created, so every real-browser test skipped (BOS-1095, reproduced in the fence).
-  # When HOME isn't a usable folder, give the web tests a home of their own under the temp folder.
-  webhome=()
-  if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
-    wh="$(mktemp -d)"
-    webhome=(HOME="$wh" XDG_CONFIG_HOME="$wh/.config" XDG_CACHE_HOME="$wh/.cache")
-    echo "check-all: HOME ${HOME:-unset} is not usable; web tests use $wh"
-  fi
   # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
   # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
   set +e
-  env ${webhome[@]+"${webhome[@]}"} BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
+  env BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   rm -rf "$shots"
-  [ "${#webhome[@]}" -eq 0 ] || rm -rf "${wh:?}"
   if [ "$rc" -eq 0 ]; then
     node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
   fi
