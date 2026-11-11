@@ -53,10 +53,11 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
  */
 const UNTIERED_INSERTS: Record<string, number> = {
   // The agent's own question, a permission ask, an undelivered-answer notice: the owner is who they ask.
-  // Was 3. The advise reissue insert (BOS-1110) now has the word "tier" in a comment inside the scan window, so the scan no longer counts it; it still has no tier field (the owner default is right for it).
-  "services/decisions.ts": 2,
+  "services/decisions.ts": 3,
   // Disk, runner update, self-deploy, budget and cost-cap cards are the owner's own to answer.
   "services/disk.ts": 1,
+  // An engagement's "approve the work?" card: the owner's to answer (it was hidden by the old scan's loose spread test).
+  "services/engagements.ts": 1,
   "services/maintenance.ts": 1,
   "services/runners.ts": 1,
   "services/scheduler.ts": 3,
@@ -75,7 +76,10 @@ describe("raw decision inserts name their tier (BOS-1015)", () => {
         const rest = text.slice(m.index, m.index + 4000);
         const end = rest.search(/\.onConflict|\.returning\(|\n\s*\);?\n/);
         const body = end > 0 ? rest.slice(0, end) : rest.slice(0, 1500);
-        if (!/\btier\b/.test(body) && !/\.\.\.[a-zA-Z]/.test(body)) {
+        // Only code counts: a comment that says "tier" is not a tier (BOS-1119).
+        const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+        if (!/\btier\b/.test(code) &&!/\.values\(\s*\{\s*\.\.\.[a-zA-Z]/.test(code)) {
+          // (a spread opening the values, as in `{ ...ask, ... }`, may carry the tier; one deeper, inside `context`, never does)
           const rel = file.slice(SRC.length + 1);
           found[rel] = (found[rel] ?? 0) + 1;
         }
