@@ -2,9 +2,9 @@
 // One counting rule decides what counts as WIP, for a board column and for an agent alike:
 // tickets whose state is in_progress (a ticket that only waits on a queued check still counts;
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
-import { and, asc, eq, ne, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity, agents, settings, tickets } from "../db/schema.js";
+import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
 export const DEFAULT_AGENT_WIP_LIMIT = 2;
@@ -32,12 +32,15 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
  * unfinished ticket, a plan-first one whose plan waits on the owner, and a merged one that only waits for its
  * after-merge (go-live) check. A ticket with only a schedule_check booked still counts: nobody visibly holds it.
  */
-export const cantMoveSql = sql`(
+/** The tickets table or an alias of it (a subquery's `doing`, `mine`): only the columns the rule reads. */
+type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
+export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
-          where d.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
-  or (${tickets.planFirst} and ${tickets.planApprovedAt} is null and ${tickets.plan} is not null)
-  or (${tickets.mergedAt} is not null and ${tickets.goLiveWait} is not null)
+          where d.blocked_ticket_id = ${t.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
+  or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
+  or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
 )`;
+export const cantMoveSql = cantMoveFor(tickets);
 
 export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string) => countWip(db, and(eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`, where), exceptId);
 
@@ -59,8 +62,8 @@ export async function wasStarted(db: Db, ticketId: string): Promise<boolean> {
   return !!r;
 }
 
-/** The note a held ticket carries (see agentWipHold); the free-slot start finds held tickets by it. */
-export const isWipHeldNote = (note: string | null | undefined) => !!note && /^Waiting: .* is at the limit of \d+ in-progress tickets?; starts when one finishes\.$/.test(note);
+/** The status reason a wake carries when its launch was refused by a WIP limit: such a wake doesn't use up the day's idle-slot allowance (BOS-1180). */
+export const WIP_REFUSED_REASON = "held by the WIP limit";
 
 export type WipHold = { reason: string; limit: number; scope: "agent" | "company" };
 
@@ -108,15 +111,30 @@ export async function oldestInProgress(db: Db, agentId: string): Promise<string 
   return r?.id ?? null;
 }
 
+/** Whether the ticket has an unresolved dependency: a ticket not done, an engagement not signed off, or an open decision. */
+export async function ticketIsBlocked(db: Db, ticketId: string): Promise<boolean> {
+  const deps = await db
+    .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
+    .from(ticketDependencies)
+    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(eq(ticketDependencies.blockedTicketId, ticketId));
+  return deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
+}
+
 /**
- * When a ticket leaves in_progress, the agent's oldest Ready ticket that the limit held may start.
- * Returns its id for the caller to wake the agent on, or null. Held tickets carry the "Waiting:" state note.
+ * The one "can this Ready ticket start now?" test every start path uses (BOS-1180): the agent has no live run and no
+ * queued wake, the WIP limit has room (`agentWipHold`), the ticket isn't blocked, and its plan isn't waiting for approval.
+ * Whether the agent is paused or the company is paused is the sweeps' filter, not the ticket's.
  */
-export async function nextHeldTicket(db: Db, agentId: string): Promise<string | null> {
-  const rows = await db
-    .select({ id: tickets.id, note: tickets.stateNote })
-    .from(tickets)
-    .where(and(eq(tickets.assigneeAgentId, agentId), eq(tickets.systemState, "ready"), sql`${tickets.stateNote} like 'Waiting: %'`))
-    .orderBy(asc(tickets.createdAt));
-  return rows.find((r) => isWipHeldNote(r.note))?.id ?? null;
+export async function canStartNow(db: Db, t: typeof tickets.$inferSelect): Promise<boolean> {
+  if (t.systemState !== "ready" || !t.assigneeAgentId) return false;
+  if (t.planFirst && !t.planApprovedAt) return false;
+  const [live] = await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), or(eq(runs.agentId, t.assigneeAgentId), eq(runs.ticketId, t.id)), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`))).limit(1);
+  if (live) return false;
+  const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, t.assigneeAgentId), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+  if (queued) return false;
+  if ((await agentWipHold(db, t)).hold) return false;
+  return !(await ticketIsBlocked(db, t.id));
 }
