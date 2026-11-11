@@ -233,6 +233,8 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
+  /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
+  wipExempt?: "waits" | "plan" | "live" | null;
   blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
