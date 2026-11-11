@@ -178,7 +178,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
   const HOUR = 3_600_000;
 
   it("gives the next free slot to an 18-hour-old engagement wake ahead of newer scheduled wakes", async () => {
-    ctx = await setup({ instance: 1, company: 1 });
+    // The stale-wake drop (BOS-1136) is turned off here: this test is about ranking by age.
+    ctx = await setup({ instance: 1, company: 1, staleWakeMs: 1e12 });
     const busy = await ctx!.agent("Busy");
     const checker = await ctx!.agent("Checker");
     const watcher = await ctx!.agent("Watcher");
@@ -204,7 +205,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
   });
 
   it("caps the age bonus: past it the oldest wake goes first, whatever its class or stored priority", async () => {
-    ctx = await setup({ instance: 1, company: 1 });
+    // The stale-wake drop (BOS-1136) is turned off here: this test is about ranking by age.
+    ctx = await setup({ instance: 1, company: 1, staleWakeMs: 1e12 });
     const a = await ctx!.agent("A");
     const b = await ctx!.agent("B");
     // 3 hours at priority 3 would be rank 15 without the cap, ahead of 18 hours at priority 2 (rank 10).
