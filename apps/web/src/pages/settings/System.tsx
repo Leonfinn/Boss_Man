@@ -426,7 +426,7 @@ export function CheckQueueSetting() {
         </p>
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
-            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB of memory each).
+            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory ceiling per runner). The ceiling is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
             {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
             {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}
           </p>
