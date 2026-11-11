@@ -8,6 +8,7 @@
 // the shapes below are the bits of its API the tests use. Vite and Playwright are skipped, not
 // failed, where they are not installed (the runner and CI have both).
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 
 export type Page = Awaited<ReturnType<Browser["newPage"]>>;
 export type Browser = {
@@ -40,7 +41,9 @@ export async function launch(): Promise<Browser | null> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         // --disable-dev-shm-usage: Docker's default /dev/shm is 64 MB, which parallel Chromium launches exhaust.
-        const args = ["--no-sandbox", "--disable-dev-shm-usage"];
+        // --disable-crash-reporter + --crash-dumps-dir: in the fenced job Chromium's crashpad handler dies with
+        // "--database is required" (no crash folder it can resolve), taking the browser with it (BOS-1095 gate log).
+        const args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-crash-reporter", `--crash-dumps-dir=${tmpdir()}`];
         return await chromium.launch(executablePath ? { executablePath, args } : { args });
       } catch (e) {
         why(`chromium launch failed (${executablePath ?? "playwright default"}, try ${attempt})`, e);
