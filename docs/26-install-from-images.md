@@ -66,7 +66,7 @@ Run these in the folder with the two files.
    docker compose --env-file images.env run --rm setup
    ```
 
-   It writes the master key and the database password into a Docker volume called `config` (in a project named `boss-man`, the volume is `boss-man_config`). **Back this volume up.** Without `master.key`, the secrets Boss Man stores cannot be read again.
+   It writes the master key into a Docker volume called `config` and the database password into a second one called `db-secret` (in a project named `boss-man`, they are `boss-man_config` and `boss-man_db-secret`). The database container gets only `db-secret`, so it never sees the master key. **Back up both volumes.** Without `master.key`, the secrets Boss Man stores cannot be read again, and without the database password the server cannot reach its database.
 
 2. Download the runner images the launcher starts for each company:
 
