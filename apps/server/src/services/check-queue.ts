@@ -9,7 +9,7 @@
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
-import { ticketRef } from "@boss-man/shared";
+import { checkFailureFacts, ticketRef } from "@boss-man/shared";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
@@ -192,13 +192,14 @@ export function checkQueue(db: Db) {
    */
   async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
+    const facts = ok ? "" : checkFailureFacts(result.logTail);
     const [row] = await db
       .update(checkJobs)
       .set({
         state: ok ? "passed" : "failed",
         exitCode: result.exitCode,
         logTail: result.logTail.slice(-8192),
-        reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : `The check failed with exit code ${result.exitCode ?? "none"}.`,
+        reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : typeof result.exitCode === "number" ? `The check failed with exit code ${result.exitCode}${facts ? ` (${facts})` : ""}.` : `The check was stopped before it reported${facts ? ` (${facts})` : ""}.`,
         endedAt: now,
       })
       .where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.commit, result.commit), sentTo(result.runnerId)))
