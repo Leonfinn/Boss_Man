@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "state_note_stale_reason" text;
