@@ -160,4 +160,27 @@ describe.skipIf(!built)("BOS-1124 tags and feed items as painted at 1667 x 724",
       await browser.close();
     }
   }, 60_000);
+
+  it("the screens open at 1550, 1667 x 724 and a phone width without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)", async () => {
+    const browser = await launch();
+    if (!browser) return;
+    const dir = process.env.BOSSMAN_SCRATCH;
+    try {
+      for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) {
+        for (const route of ["board", "decisions", "agents", "notifications", "dashboard"]) {
+          const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
+          await page.goto(`${base}/#/${route === "dashboard" ? "" : route}`, { waitUntil: "networkidle" });
+          const wide = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+          expect(wide, `${route} at ${w}px scrolls sideways`).toBe(false);
+          if (dir) {
+            mkdirSync(dir, { recursive: true });
+            await page.screenshot({ path: path.join(dir, `bos-1124-${route}-${w}.png`) }).catch(() => undefined);
+          }
+          await page.close();
+        }
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 120_000);
 });
