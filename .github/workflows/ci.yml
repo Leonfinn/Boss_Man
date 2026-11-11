@@ -4,15 +4,20 @@ name: CI
 # which already passed scripts/check-all.sh on the owner's machine, so each job runs only for what that
 # can't cover (see "changes"); both run nightly and on demand as a backstop.
 on:
-  # bossman-ci/** is the merge gate's push of the exact merge commit it is about to land (BOS-1070): every job runs on it,
-  # and the gate merges only once all of them pass. bossman/** (a pull request's branch) runs every job too.
+  # bossman-ci/** is the merge gate's push of the exact merge commit it is about to land (BOS-1070), and the gate merges
+  # only once every job that ran passed. bossman/** is a pull request's branch. On both, check, web-browser and host-steps
+  # always run; the Docker image jobs run only when the change touches the image paths (the owner: merges must not build
+  # images; the weekly run below builds them all).
   # No paths-ignore here: a guide under docs/ is a host-steps trigger, and the changes job turns a docs-only push to main into all-false.
   push:
     branches: [main, "bossman/**", "bossman-ci/**"]
   pull_request:
     paths-ignore: ["docs/**", "**/*.md"]
   schedule:
+    # Nightly: everything but the image builds. Weekly (Sunday): everything, images included. The changes job
+    # tells them apart by github.event.schedule, so keep its WEEKLY value equal to the second line.
     - cron: "17 3 * * *"
+    - cron: "47 4 * * 0"
   workflow_dispatch:
 
 # A newer push to a pull request, or the gate publishing a ticket's merge again after main moved,
@@ -36,9 +41,31 @@ jobs:
       - id: f
         env:
           BEFORE: ${{ github.event.before }}
+          SCHEDULE: ${{ github.event.schedule }}
+          WEEKLY: "47 4 * * 0"
         run: |
-          # Anything but a push to main, or a push whose base we can't see, runs everything. That includes every
-          # bossman/** and bossman-ci/** push: the gate waits on these runs, so none of their jobs is skipped (BOS-1070).
+          # images_paths: Docker builds and container tests, which the runner can't do (it has no Docker socket).
+          images_paths='(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/'
+          # The nightly run builds no images; the weekly run and a run by hand build everything.
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$SCHEDULE" != "$WEEKLY" ]; then
+            printf 'check=true\nimages=false\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          # A gate push (bossman-ci/**) or a pull request's branch push (bossman/**): the gate waits on these runs, so
+          # check, web and host-steps always run (BOS-1070). Images only when the change touches their paths: for the
+          # gate's merge commit that is its diff against the first parent (main); for a branch, against where it left main.
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in push:refs/heads/bossman-ci/* | push:refs/heads/bossman/*)
+            case "$GITHUB_REF" in
+              refs/heads/bossman-ci/*) base="$(git rev-parse --verify -q "$GITHUB_SHA^1")" || base= ;;
+              *) base="$(git merge-base origin/main "$GITHUB_SHA")" || base= ;;
+            esac
+            # No base to diff against (should not happen with fetch-depth 0): build the images rather than skip them.
+            images=true
+            if [ -n "$base" ]; then
+              images="$(git diff --name-only "$base" "$GITHUB_SHA" | grep -qE "$images_paths" && echo true || echo false)"
+            fi
+            printf 'check=true\nimages=%s\nhoststeps=true\nweb=true\n' "$images" >>"$GITHUB_OUTPUT"; exit 0
+          esac
+          # Anything else but a push to main, or a push whose base we can't see, runs everything.
           if [ "$GITHUB_EVENT_NAME" != push ] || [ "$GITHUB_REF" != refs/heads/main ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             printf 'check=true\nimages=true\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
           fi
@@ -47,8 +74,7 @@ jobs:
           echo "hoststeps=$(grep -qE '^(deploy/|docker-compose[^/]*$|scripts/rehearse/|docs/20-https-tailscale\.md|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
           # check: leader.test.ts needs a real Postgres, and dependency or CI changes can differ on GitHub's machines.
           echo "check=$(grep -qE '^(apps/server/src/leader\.ts|apps/server/src/db/|apps/server/drizzle/|apps/server/test/leader\.test\.ts|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
-          # images: Docker builds and container tests, which the runner can't do (it has no Docker socket).
-          echo "images=$(grep -qE '(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          echo "images=$(grep -qE "$images_paths" <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
           # web: the web suite in a real browser (rendered-layout tests skip without one).
           echo "web=$(grep -qE '^(apps/web/|packages/shared/|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
 
