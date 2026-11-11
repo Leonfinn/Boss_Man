@@ -27,6 +27,20 @@ function answer(p: string): unknown {
   if (p === "/api/setup-progress") return { dismissed: true };
   if (p === "/api/companies") return [company];
   if (p === "/api/notifications") return { items: [notice("n1", "Boss Man Co needs a decision", QUESTION), notice("n2", LONG, null)], unread: 2 };
+  if (p === "/api/companies/c1/dashboard") {
+    const days = Array.from({ length: 14 }, (_, i) => ({ day: new Date(Date.now() - (13 - i) * 86_400_000).toISOString().slice(0, 10), running: 0, succeeded: i % 3, failed: i % 5 === 0 ? 1 : 0, other: 0, created: 1, done: i % 2 }));
+    return {
+      agents: [],
+      stats: { agents: 0, running: 0, paused: 0, inProgress: 1, inReview: 1, open: 2, blocked: 1, decisionsWaiting: 1, monthCostMicros: 0, monthSubscriptionTokens: { input: 0, output: 0 }, monthSubscriptionRuns: 0, monthSubscriptionUnrecorded: 0 },
+      runsByDay: days,
+      ticketsByDay: days,
+      recentTickets: [{ id: "t1", title: "Calmer status tags", state: "review", outcome: null, assignee: null, lastActivityAt: now() }],
+      recentActivity: [
+        { id: "a1", title: "Boss Man Co needs a decision", body: QUESTION, link: "#/decisions", level: "ask", agent: null, createdAt: now() },
+        { id: "a2", title: LONG, body: null, link: "#/decisions", level: "note", agent: null, createdAt: now() },
+      ],
+    };
+  }
   if (p === "/api/notifications/pushes") return { items: [] };
   if (p === "/api/notifications/unseen") return { count: 0 };
   if (p === "/api/runs" || p === "/api/decisions" || p === "/api/decisions/advised" || p === "/api/decisions/with-team" || p === "/api/decisions/closed-notices") return [];
