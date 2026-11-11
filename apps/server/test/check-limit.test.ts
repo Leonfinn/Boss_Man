@@ -69,3 +69,14 @@ describe("checkLimitReconciler", () => {
     expect(await rec.step()).toBe("off");
   });
 });
+
+describe("CHECK_MEMORY_CEILING_BYTES (BOS-1165)", () => {
+  it("matches the default ceiling check-all.sh applies, so the panel shows the figure that is enforced", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { CHECK_MEMORY_CEILING_BYTES } = await import("../src/services/check-limit.js");
+    const script = readFileSync(new URL("../../../scripts/check-all.sh", import.meta.url), "utf8");
+    const m = /BOSSMAN_CHECK_MEMORY_MB:-(\d+)/.exec(script);
+    expect(m).not.toBeNull();
+    expect(Number(m![1]) * 1024 ** 2).toBe(CHECK_MEMORY_CEILING_BYTES);
+  });
+});
