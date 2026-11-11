@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks check-all.sh's retry logic with a stub in place of the real checks (BOSSMAN_CHECK_BODY).
-# shellcheck disable=SC2016  # the stub bodies are meant to expand later, inside the child
+# shellcheck disable=SC2016,SC2030,SC2031  # stub bodies expand later, inside the child; web_tests cases set env in their own subshells
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
@@ -576,4 +576,19 @@ cp "$here/check-no-skips.mjs" "$wt/check-no-skips.mjs"
 printf '%s' '{"numPassedTests":1,"testResults":[]}' >"$wt/vitest-web.json"
 web_case "passing vitest" 0 0
 web_case "failing vitest" 1 1
+# With no NODE_PATH, web_tests must hand vitest npm's global folder (when it holds playwright); a set NODE_PATH stays as it is.
+mkdir -p "$wt/gnm/playwright" "$wt/bin2"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "NODE_PATH seen: ${NODE_PATH:-none}"' >"$wt/bin2/pnpm"
+printf '%s\n' '#!/usr/bin/env bash' "echo \"$wt/gnm\"" >"$wt/bin2/npm"
+chmod +x "$wt/bin2/pnpm" "$wt/bin2/npm"
+(set -euo pipefail; unset NODE_PATH; export PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out2" 2>&1) || fail "web_tests NODE_PATH fallback: $(cat "$wt/out2")"
+grep -q "NODE_PATH seen: $wt/gnm" "$wt/out2" || fail "web_tests: no NODE_PATH fallback: $(cat "$wt/out2")"
+(set -euo pipefail; export NODE_PATH=/keep/me PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out3" 2>&1) || fail "web_tests keep NODE_PATH: $(cat "$wt/out3")"
+grep -q "NODE_PATH seen: /keep/me" "$wt/out3" || fail "web_tests: overwrote NODE_PATH: $(cat "$wt/out3")"
 echo "check-all.test.sh: ok"

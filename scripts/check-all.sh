@@ -248,6 +248,12 @@ web_tests() {
   [ -n "$report" ] || report="$(mktemp)"
   shots="$(mktemp -d)"
   out="$(mktemp)"
+  # Playwright is a global npm tool. A fenced check job on a runner that predates the NODE_PATH pass-through gets no NODE_PATH, so
+  # the real-browser tests skip (BOS-1095). With none set, use npm's own global folder when it exists; no host path is assumed.
+  if [ -z "${NODE_PATH:-}" ] && command -v npm >/dev/null 2>&1; then
+    gnm="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$gnm" ] && [ -d "$gnm/playwright" ]; then export NODE_PATH="$gnm"; fi
+  fi
   # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
   # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
   set +e
