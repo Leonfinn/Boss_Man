@@ -74,6 +74,24 @@ describe("notify (R86)", () => {
     expect(c.sent.some((x) => x.type === "run.message")).toBe(false);
   });
 
+  it("doesn't steer work into a reply run or a watch run, which have no checkout of the ticket (BOS-1082)", async () => {
+    const c = (ctx = await setup());
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.bob.id, ticketId: c.ticket.id, purpose: "reply", startedAt: new Date() });
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.bob.id, ticketId: c.ticket.id, origin: "ticket watch", startedAt: new Date() });
+    const w = await c.scheduler.notify(c.bob.id, { ticketId: c.ticket.id, reason: "review", note: "x" });
+    expect(w.status).toBe("queued");
+    expect(c.sent.some((x) => x.type === "run.message")).toBe(false);
+  });
+
+  it("tells a run that starts with no ticket checkout so, naming its folder (BOS-1082)", async () => {
+    const c = (ctx = await setup());
+    await c.scheduler.wake({ agentId: c.alice.id, reason: "chased", note: "hello" });
+    await c.scheduler.tick();
+    const start = c.starts().find((s) => s.agentId === c.alice.id)!;
+    expect(start.workspace).toBeUndefined();
+    expect(start.prompt).toContain(`started in ${start.cwd}, which is not a copy of the repo`);
+  });
+
   it("steers a ticketless notice into a ticketless run", async () => {
     const c = (ctx = await setup());
     const run = await c.liveRun(c.bob.id, null);

@@ -219,10 +219,6 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const route = rawRoute;
   const page = route[0] ?? "dashboard";
   const routeCompany = route[1] && route[1] !== "all" ? companies.data?.find((c) => c.id === route[1]) : undefined;
-  const redirect = page ? settingsRedirect(route, routeCompany?.id) : null;
-  useEffect(() => {
-    if (redirect) go(redirect);
-  }, [redirect, go]);
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
@@ -273,6 +269,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const [collapsed, setCollapsed] = useState<boolean>(collapsedByDefault);
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  // An old bare address such as #/funding carries no company, so the redirect uses the company already
+  // selected (BOS-1044), not only the one in the address. It waits for the company list, or it would send
+  // a bare #/funding to the menu before it knows which company to use.
+  const redirect = page && companies.data ? settingsRedirect(route, routeCompany?.id ?? current?.id) : null;
+  useEffect(() => {
+    if (redirect) go(redirect);
+  }, [redirect, go]);
   // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
   // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
   // turns the badge to the warning colour when a jam is there to see.

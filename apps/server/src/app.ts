@@ -16,7 +16,6 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
-import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "./services/agent-wip.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
@@ -27,7 +26,7 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
-import { AnswerError, decisionsService } from "./services/decisions.js";
+import { AnswerError, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerWatchService } from "./services/runner-watch.js";
@@ -91,15 +90,17 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
-import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS, type CheckQueueMode } from "./services/check-queue.js";
+import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
+import { settingsLimitsRoutes } from "./routes/settings-limits.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { logoType } from "./services/image-type.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -108,7 +109,7 @@ import { diskService, type DiskLimits } from "./services/disk.js";
 import { opencodeVacuumAlerts } from "./services/opencode-vacuum.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
-import { NotifySettings, NtfyUrl, notificationsService } from "./services/notifications.js";
+import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
@@ -278,6 +279,7 @@ export async function buildApp(opts: AppOptions) {
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
+  setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
   const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
@@ -344,7 +346,7 @@ export async function buildApp(opts: AppOptions) {
   });
   notes.setApproveHook(phoneApprove);
   // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
-  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", now: opts.now });
   decisionsSvc.setSecondOpinion(secondOpinion);
   app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
@@ -889,6 +891,11 @@ export async function buildApp(opts: AppOptions) {
   const mergeJam = mergeJamService(db, {
     view: (companyId) => mergeQueue.get(companyId),
     notify: (input) => notes.notify(input),
+    // A card holding an approved merge that looks stale goes to the CEO once (BOS-1078).
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
+    },
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -1051,46 +1058,9 @@ export async function buildApp(opts: AppOptions) {
     return { username: owner.username };
   });
 
-  // Phone Approve (BOS-243 rules 3, 4, 8): an ntfy http action posts {"token": "..."} here, with no
-  // session. JSON in and out, never a page; request logging is off and the body is never logged or
-  // echoed, so the token can't reach a log, the error buffer or a response. Its own parsers, in their
-  // own scope, so a bad body gets a plain JSON answer rather than the error handler's message.
-  await app.register(async (phone) => {
-    phone.removeAllContentTypeParsers();
-    phone.addContentTypeParser("application/json", { parseAs: "string", bodyLimit: 1024 }, (_req, body, done) => done(null, { json: body }));
-    phone.addContentTypeParser("*", { parseAs: "string", bodyLimit: 1024 }, (_req, _body, done) => done(null, { json: null }));
-    phone.setErrorHandler((err, _req, reply) => {
-      const status = (err as { statusCode?: number }).statusCode;
-      if (status && status >= 400 && status < 500) return reply.code(status).send({ ok: false, error: "bad_request" });
-      // A fixed line only: the error itself could quote the request.
-      app.log.warn("phone approve: a tap failed inside the server");
-      return reply.code(500).send({ ok: false, error: "internal_error" });
-    });
-    // The "Got it" button on the test push: a tap proves the phone received it. Same body rules as Approve.
-    phone.post("/api/phone/got-it", { logLevel: "silent" }, async (req, reply) => {
-      const raw = (req.body as { json?: string | null } | undefined)?.json;
-      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
-      let token: unknown;
-      try {
-        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
-      } catch {
-        return reply.code(400).send({ ok: false, error: "bad_request" });
-      }
-      return (await notes.confirmTest(token)) ? { ok: true } : reply.code(404).send({ ok: false, error: "not_found" });
-    });
-    phone.post("/api/phone/approve", { logLevel: "silent" }, async (req, reply) => {
-      const raw = (req.body as { json?: string | null } | undefined)?.json;
-      if (typeof raw !== "string") return reply.code(415).send({ ok: false, error: "json_only" });
-      let token: unknown;
-      try {
-        token = (JSON.parse(raw) as { token?: unknown } | null)?.token;
-      } catch {
-        return reply.code(400).send({ ok: false, error: "bad_request" });
-      }
-      const r = await phoneApprove.redeem(token, req.ip);
-      return reply.code(r.status).send(r.body);
-    });
-  });
+  // Phone Approve (BOS-243 rules 3, 4, 8): its own scope, parsers and error handler, kept in
+  // routes/devices-notifications.ts.
+  await phoneApproveRoutes(app, { notes, phoneApprove });
 
   app.post("/api/logout", async (req, reply) => {
     const token = req.cookies[SESSION_COOKIE];
@@ -1111,31 +1081,8 @@ export async function buildApp(opts: AppOptions) {
       return o;
     });
 
-    // Device profiles (BOS-641): the owner's browsers report their measured screens so a layout
-    // ticket can be checked at the real device. Only screen facts; one row per signed-in browser.
-    owner.get("/api/devices", async (req) => {
-      const ownerId = await currentOwnerId(req);
-      return ownerId ? deviceProfiles.list(ownerId) : [];
-    });
-    owner.post("/api/devices", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      return deviceProfiles.report(ownerId, req.body);
-    });
-    owner.patch("/api/devices/:id", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      const { id } = IdParam.parse(req.params);
-      const { label } = z.object({ label: z.string().trim().min(1).max(80) }).parse(req.body);
-      const p = await deviceProfiles.rename(ownerId, id, label);
-      return p ?? reply.code(404).send({ error: "not_found" });
-    });
-    owner.delete("/api/devices/:id", async (req, reply) => {
-      const ownerId = await currentOwnerId(req);
-      if (!ownerId) return reply.code(401).send({ error: "not_signed_in" });
-      const { id } = IdParam.parse(req.params);
-      return (await deviceProfiles.remove(ownerId, id)) ? { ok: true } : reply.code(404).send({ error: "not_found" });
-    });
+    // Device profiles (BOS-641): the owner's browsers report their measured screens.
+    deviceRoutes(owner, { deviceProfiles, currentOwnerId });
 
     // Companies: creating one always creates its CEO (R18).
     const CompanyInput = z.object({
@@ -1200,7 +1147,8 @@ export async function buildApp(opts: AppOptions) {
       return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id), projects: allProjects.filter((p) => p.companyId === c.id) }));
     });
 
-    // The company review policy, standing rules, permission rules and grants: routes/policy.ts, registered below.
+    // What each risk tier means (R61) is served from routes/settings-limits.ts, registered below with the limits.
+    // Review routing, standing rules, permission rules and grants: routes/policy.ts, registered below.
     // This binding is shared with routes/projects.ts, which checks a project's own policy against its company's.
     const checkPolicy = (companyId: string, body: unknown) => checkPolicyIn(db, companyId, body);
     // A project's own review policy: routes/projects.ts, registered with the project routes below.
@@ -1271,126 +1219,11 @@ export async function buildApp(opts: AppOptions) {
       return secretsSvc.accessLog(id, limit);
     });
 
-    // Notifications (R44): the feed, settings and a test push.
-    owner.get("/api/notifications", async (req) => {
-      const q = z
-        .object({
-          before: z.coerce.date().optional(),
-          limit: z.coerce.number().int().min(1).max(200).optional(),
-          status: z.enum(["unread", "read"]).optional(),
-          level: z.enum(["note", "flag", "page", "ask"]).optional(),
-          company: z.union([z.literal("none"), Uuid]).optional(),
-        })
-        .parse(req.query);
-      return { items: await notes.list(q), unread: await notes.unread() };
-    });
-    owner.post("/api/notifications/read", async (req) => {
-      const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
-      await notes.markRead(b.all ? "all" : (b.ids ?? []));
-      return { unread: await notes.unread() };
-    });
-    // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
-    // Infinite-mode agents have their own "background" slots instead (BOS-279), so slow free runs never take a normal one.
-    const runLimits = async () => {
-      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-      const v = row?.value as { instance?: number; company?: number; background?: number } | undefined;
-      return {
-        instance: v?.instance ?? scheduler.limits.instance,
-        company: v?.company ?? scheduler.limits.company,
-        background: v?.background ?? scheduler.limits.background,
-        defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
-      };
-    };
-    owner.get("/api/run-limits", async () => runLimits());
-    owner.put("/api/run-limits", async (req) => {
-      const value = z
-        .object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16), background: z.number().int().min(0).max(16).optional() })
-        .refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." })
-        .parse(req.body);
-      // A saved value without background (an older save) keeps whatever is stored, so this write never resets it to the default.
-      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-      const before = row?.value as { background?: number } | undefined;
-      const merged = { instance: value.instance, company: value.company, background: value.background ?? before?.background ?? DEFAULT_LIMITS.background };
-      await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
-      return runLimits();
-    });
-    // Tickets in progress per agent, and (optionally) in the whole company (BOS-1029). null is "No limit".
-    owner.get("/api/wip-limits", async () => ({ ...(await readWipLimits(db)), defaultAgent: DEFAULT_AGENT_WIP_LIMIT }));
-    owner.put("/api/wip-limits", async (req) => {
-      const value = z.object({ agent: z.number().int().min(1).max(50).nullable(), company: z.number().int().min(1).max(1000).nullable() }).parse(req.body);
-      await db.insert(settings).values({ key: "wip_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
-      return { ...value, defaultAgent: DEFAULT_AGENT_WIP_LIMIT };
-    });
-    /** Whether phone Approve buttons are on, and if not why, for Notifications (BOS-243). */
-    const approveStatus = async (s: NotifySettings) => {
-      const { gate: g } = await phoneApprove.gate(s);
-      return g.on ? { on: true } : { on: false, why: g.why };
-    };
-    // BOS-798: Settings → Server and runner → Checks. The owner's switch for the server-owned check queue (DR-003) and its slots.
-    // Owner only: no agent tool or route writes these settings.
-    const checkQueueView = async () => {
-      const rows = await db.select({ id: runnersTable.id, company: companies.name }).from(runnersTable).innerJoin(companies, eq(companies.id, runnersTable.companyId));
-      const live = rows.filter((r) => runners.isConnected(r.id));
-      const slots = await checkQueueSvc.slots();
-      // BOS-993: the limit a runner really gets (the launcher works it out from the setting, .env bounds and host memory) and whether runners already have it.
-      const lc = await launch.checks();
-      const hold = await getHold(db);
-      const runner = lc
-        ? {
-            slots: lc.slots,
-            memoryBytes: lc.memoryBytes,
-            // Only meaningful once the launcher has been sent the setting; before that it is the .env value.
-            reason: lc.requested === slots ? lc.reason : null,
-            // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
-            runnerCount: lc.runners.length,
-            pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,
-            applying: hold?.kind === "settings",
-          }
-        : null;
-      return {
-        mode: await checkQueueSvc.mode(),
-        slots,
-        runner,
-        maxSlots: MAX_CHECK_SLOTS,
-        defaultSlots: DEFAULT_CHECK_SLOTS,
-        // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
-        runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
-      };
-    };
-    owner.get("/api/settings/check-queue", async () => checkQueueView());
-    owner.put("/api/settings/check-queue", async (req) => {
-      const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
-      const was = await checkQueueSvc.mode();
-      const slotsWere = await checkQueueSvc.slots();
-      await checkQueueSvc.setSlots(b.slots);
-      await checkQueueSvc.setMode(b.mode);
-      // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
-      // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
-      let applying = false;
-      if (launch.enabled && b.slots !== slotsWere) {
-        try {
-          await launch.setChecks(b.slots);
-          const lc = await launch.checks();
-          if (lc?.runners.some((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes)) {
-            await maintenance.start({ kind: "settings" }); // leader-only
-            applying = true;
-          }
-        } catch (e) {
-          app.log.error(`check slots: could not apply to the runners: ${(e as Error).message}`);
-        }
-      }
-      // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
-      // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
-      let cancelled = 0;
-      if (was === "server" && b.mode === "legacy")
-        for (const id of await checkQueueSvc.queuedIds())
-          if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
-      if (b.mode === "server") await checks.pump();
-      return { ...(await checkQueueView()), cancelled, applying };
-    });
-    // BOS-313: check the merged result before pushing it (off by default while it rolls out).
-    owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
-    owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
+    // Notifications (R44): the feed.
+    notificationRoutes(owner, { notes });
+    // The run and WIP limits and the check-queue and merged-result settings: routes/settings-limits.ts, on this owner scope.
+    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
+
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
     // BOS-770: Settings → Server and runner. The .env network-guard allow entries and which ones Boss Man already covers. Read only.
@@ -1403,39 +1236,8 @@ export async function buildApp(opts: AppOptions) {
         return reply.code(400).send({ error: e instanceof Error ? e.message : "Couldn't save that fact." });
       }
     });
-    // The address the phone app must use for ntfy: the add-on's own NTFY_BASE_URL as the host reports it (null: not reported).
-    const phoneNtfyAddress = async () => (await hostFacts.value("ntfy.baseUrl").catch(() => null)) ?? null;
-    const phoneNtfyContainer = async () => (await hostFacts.value("ntfy.container").catch(() => null)) ?? null;
-    owner.get("/api/notification-settings", async () => {
-      const s = await notes.getSettings();
-      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
-    });
-    owner.put("/api/notification-settings", async (req) => {
-      const b = NotifySettings.omit({ ntfy: true })
-        .extend({
-          ntfy: z.object({ url: NtfyUrl, topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
-        })
-        .parse(req.body);
-      const current = await notes.getSettings();
-      let tokenSecretId = current.ntfy?.tokenSecretId ?? null;
-      if (b.ntfy?.token === null) tokenSecretId = null;
-      else if (b.ntfy?.token) {
-        // The token goes into the encrypted secrets store, like every other credential.
-        tokenSecretId = tokenSecretId
-          ? ((await secretsSvc.rotate(tokenSecretId, b.ntfy.token, { acceptUnusualFormat: true })) ? tokenSecretId : null)
-          : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
-      }
-      const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
-    });
-    owner.post("/api/notification-settings/test", async (_req, reply) => {
-      try {
-        await notes.test();
-        return { ok: true };
-      } catch (err) {
-        return reply.code(502).send({ error: "push_failed", message: `The test push didn't go through: ${(err as Error).message}` });
-      }
-    });
+    // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
 
     /** Issues the company's runner token. It is shown once; issuing again replaces it. */
     owner.post("/api/companies/:id/runner", async (req, reply) => {
@@ -1903,6 +1705,8 @@ export async function buildApp(opts: AppOptions) {
       if (b.enabled && (!b.model || !b.baseUrl)) return reply.code(400).send({ error: "invalid_request", message: "Set the provider address and the model first." });
       return secondOpinion.setSettings(id, b);
     });
+    // BOS-1052: how often the model answered vs fell back to the rules judge in the last 24 h.
+    owner.get("/api/companies/:id/second-opinion/stats", async (req) => secondOpinion.stats(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/second-opinion/test", async (req) => {
       IdParam.parse(req.params);
       return secondOpinion.test(SecondOpinionSettings.parse(req.body));

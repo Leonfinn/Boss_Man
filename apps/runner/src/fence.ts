@@ -187,6 +187,24 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
  * copies, the merge gate's results), and the gate's own store (`<store>-gate`) would land on the
  * runner's root disk (BOS-633).
  */
+/**
+ * A short folder name for a run's or check job's temp folder (BOS-1087). A Unix socket path may be at most 107 bytes
+ * and headless Chromium adds ~45 to TMPDIR, so TMPDIR must stay short: 8 hex characters of the UUID, not all 36.
+ * `taken` holds names live runs already use; on a clash the next 8 characters are tried (never one run's folder for two).
+ */
+export function shortTmpName(uuid: string, taken: ReadonlySet<string> = new Set()): string {
+  const hex = uuid.replace(/-/g, "").toLowerCase();
+  for (let i = 0; i + 8 <= hex.length; i += 8) {
+    const name = hex.slice(i, i + 8);
+    if (!taken.has(name)) return name;
+  }
+  return hex; // all four slices taken: a UUID's full 32 characters can't clash
+}
+
+/** Room a TMPDIR must leave for a socket path under it (Chromium's SingletonSocket needs about 45, tests allow 50). */
+export const SOCKET_SUFFIX_ROOM = 50;
+export const SUN_PATH_MAX = 107;
+
 export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
   return { level, agentsRoot: path.join(dataDir, "agents"), runTmpRoot: path.join(dataDir, "run-tmp"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
 }

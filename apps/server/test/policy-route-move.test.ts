@@ -19,7 +19,6 @@ async function setup() {
 
 /** Every route the policy block owns, with its method. Moving the block must not change any of them. */
 const POLICY_ROUTES: Array<[string, string]> = [
-  ["GET", "/api/risk-tiers"],
   ["GET", "/api/companies/:id/review-policy"],
   ["PUT", "/api/companies/:id/review-policy"],
   ["GET", "/api/projects/:id/review-policy"],
@@ -50,6 +49,8 @@ describe("policy routes (moved out of app.ts)", () => {
   it("still registers routes the policy move must not disturb", async () => {
     const { app } = await setup();
     // The secrets block that sat between the moved blocks, and route groups registered around them.
+    // The risk-tier help lives in routes/settings-limits.ts (main moved it first), so it must still answer here.
+    expect(app.hasRoute({ method: "GET", url: "/api/risk-tiers" })).toBe(true);
     expect(app.hasRoute({ method: "GET", url: "/api/secrets" })).toBe(true);
     expect(app.hasRoute({ method: "POST", url: "/api/secrets/:id/grants" })).toBe(true);
     expect(app.hasRoute({ method: "POST", url: "/api/companies/:id/runner" })).toBe(true);

@@ -22,7 +22,7 @@ export type SecondOpinionPreset = { label: string; note: string; baseUrl: string
  * /chat/completions endpoint works; these are suggestions, never defaults.
  */
 export const SECOND_OPINION_PRESETS: SecondOpinionPreset[] = [
-  { label: "gpt-oss-safeguard-20b on OpenRouter", note: "Recommended: agreed with the CEO on 93% of cards, about $1.50 a month.", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-oss-safeguard-20b", recommended: true },
+  { label: "gpt-oss-safeguard-20b on OpenRouter", note: "Recommended: agreed with the CEO on 93% of cards, about $1.50 a month. Only one company (Groq) runs it for OpenRouter, so at busy times it can turn requests away (429) and cards use the rules judge alone; the line under Test shows how often. If that happens a lot, use it on your own Ollama or try DeepSeek on Synthetic.", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-oss-safeguard-20b", recommended: true },
   { label: "gpt-oss-safeguard-20b on your own Ollama", note: "The same model run locally: nothing leaves your network. Use the address of your Ollama server.", baseUrl: "http://localhost:11434/v1", model: "gpt-oss-safeguard:20b", recommended: true },
   { label: "DeepSeek V4.1 Flash on Synthetic", note: "Cheap, 84% agreement.", baseUrl: "https://api.synthetic.new/openai/v1", model: "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017", recommended: false },
   { label: "Claude Haiku 5.5 on OpenRouter", note: "Not recommended: 77% agreement.", baseUrl: "https://openrouter.ai/api/v1", model: "anthropic/claude-haiku-5.5", recommended: false },

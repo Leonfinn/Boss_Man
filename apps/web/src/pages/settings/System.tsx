@@ -252,7 +252,7 @@ export function RunLimits() {
   const [i, c, g] = [Number(v.instance), Number(v.company), Number(v.background)];
   const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i && Number.isInteger(g) && g >= 0 && g <= 16;
   return (
-    <Section id="run-limits-h" title="How many agents run at once">
+    <Section id="run-limits-h" title="Agents at once">
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />

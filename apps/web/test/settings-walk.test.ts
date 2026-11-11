@@ -15,6 +15,8 @@ const built = existsSync(path.join(DIST, "index.html"));
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOSS", nextTicketNumber: 12, agents: [], projects: [] };
 
+const fundingSource = { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic", monthlyGrantMicros: null, cycleAnchor: null };
+
 function answer(p: string): unknown {
   if (p === "/api/setup") return { needsSetup: false };
   if (p === "/api/me") return { username: "owner" };
@@ -22,13 +24,16 @@ function answer(p: string): unknown {
   if (p === "/api/companies") return [company];
   if (p === "/api/notifications") return { items: [], unread: 0 };
   if (p === "/api/notifications/unseen") return { count: 0 };
-  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices", "/api/funding-sources"].includes(p)) return [];
+  if (p === "/api/funding-sources") return [fundingSource];
+  if (p === "/api/funding-sources/f1/status") return { source: fundingSource, credit: null, quota: [{ window: "five_hour", utilization: 0.42, resetsAt: null, status: null }], windowsSeen: ["five_hour"], forecasts: {}, daily: [], totalSpentMicros: 0, coverage: "all" };
+  if (p === "/api/budgets") return [{ policy: { id: "b1", scopeKind: "instance", scopeId: "x", windowKind: "calendar_month", limitMicros: 5_000_000, onLimit: "pause" }, status: { usedMicros: 1_000_000, limitMicros: 5_000_000, fractionUsed: 0.2, state: "ok" } }];
+  if (["/api/runs", "/api/decisions", "/api/decisions/advised", "/api/decisions/with-team", "/api/decisions/closed-notices", "/api/devices"].includes(p)) return [];
   if (p === "/api/health") return { role: "leader", version: "1.2.0", commit: "aaaaaaaaaaaa", colour: null, startedAt: now() };
   if (p === "/api/bluegreen") return { enabled: false };
   if (p === "/api/kill-switch") return { paused: false };
   if (p === "/api/maintenance") return { on: false, last: null };
   if (p === "/api/runner-report") return { live: [], update: null };
-  if (p === "/api/self-deploy") return { enabled: false };
+  if (p === "/api/self-deploy") return { enabled: true, status: null, available: null };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
   if (p === "/api/netguard-allow") return { report: null };
@@ -73,16 +78,21 @@ afterAll(async () => {
 async function launch(): Promise<any | null> {
   let chromium: any;
   try {
-    chromium = createRequire(import.meta.url)("playwright").chromium;
+    const req = createRequire(import.meta.url);
+    try {
+      chromium = req("playwright").chromium;
+    } catch {
+      chromium = req("playwright-core").chromium;
+    }
   } catch {
     console.warn("settings-walk: playwright is not installed; the browser walk was skipped");
     return null;
   }
   for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
     try {
-      return await chromium.launch(executablePath ? { executablePath } : {});
-    } catch {
-      /* next */
+      return await chromium.launch({ ...(executablePath ? { executablePath } : {}), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    } catch (e) {
+      console.warn(`settings-walk: launch ${executablePath ?? "bundled"} failed: ${String(e).slice(0, 300)}`);
     }
   }
   console.warn("settings-walk: no Chromium could be launched; the browser walk was skipped");
@@ -97,7 +107,7 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "How many agents run at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
   transfer: ["Import a company"],
 };
 const SIZES = [
@@ -126,14 +136,17 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           for (const h of headings) {
             expect(found.some((f: string) => f === h || f.startsWith(h)), `${vp.name}: "${h}" on ${id}; found ${JSON.stringify(found)}; errors ${JSON.stringify(errors)}; body ${JSON.stringify((await page.locator("main, body").first().innerText()).split("TypeError")[1]?.slice(0, 200))}`).toBe(true);
           }
+          // BOS-1053: headings alone missed the Funding page losing its status cards and the budget-policy table.
+          if (id === "funding") {
+            expect(await page.locator(".set-page .source-card").count(), `${vp.name}: a status card per funding source on funding`).toBe(1);
+            expect(await page.locator(".set-page table").count(), `${vp.name}: the budget-policy table on funding`).toBeGreaterThan(0);
+            expect(found, `${vp.name}: Spending limits on funding`).toContain("Spending limits");
+          }
           // No page sideways-scrolls (a phone with a wide table would).
           const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
           if (over > 1) wide.push(`${vp.name}/${id} +${over}px`);
         }
-        // KNOWN (BOS-1020 finding): at 380 px the Watchdog (+226 px) and Permissions (+146 px) pages scroll sideways.
-        // Drop these two from KNOWN_WIDE when they are fixed, so the walk guards them too.
-        const KNOWN_WIDE = ["phone/watchdog", "phone/permissions"];
-        expect(wide.filter((w) => !KNOWN_WIDE.some((k) => w.startsWith(`${k} `))), "pages that scroll sideways").toEqual([]);
+        expect(wide, "pages that scroll sideways").toEqual([]);
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         await page.close();
       }
@@ -141,6 +154,43 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       await browser.close();
     }
   }, 90_000);
+
+  // BOS-1063: a plain "#id" link replaced the route and sent the owner to the dashboard.
+  it("every 'On this page' link keeps the route and brings its own section into view", async () => {
+    const browser = await launch();
+    if (!browser) return;
+    try {
+      for (const vp of SIZES) {
+        const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
+        for (const id of ["team", "permissions", "system"]) {
+          await page.goto(`${base}/#/settings/c1/${id}`);
+          await page.waitForSelector(".set-jump a", { timeout: 8000 });
+          await new Promise((r) => setTimeout(r, 500));
+          const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
+          expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
+          for (const target of hrefs) {
+            await page.locator(`.set-jump a[href="#${target}"]`).click();
+            await new Promise((r) => setTimeout(r, 900));
+            expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
+            const inView = await page.evaluate((t: string) => {
+              const el = document.getElementById(t);
+              if (!el) return "missing";
+              const r = el.getBoundingClientRect();
+              return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
+            }, target);
+            expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
+            // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
+            if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
+              await page.screenshot({ path: path.join(process.env.BOSSMAN_SHOT_DIR, `after-checks-${vp.name}.png`) });
+            }
+          }
+        }
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+  }, 180_000);
 
   async function landsOn(pairs: ReadonlyArray<readonly [string, string]>) {
     const browser = await launch();
@@ -167,11 +217,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
     ]);
   }, 60_000);
 
-  // KNOWN BUG (BOS-1020 finding): the old bare #/funding and #/secrets carry no company id, and App.tsx resolves the
-  // company for the redirect from the address only (never the company already selected), so they land on the bare
-  // #/settings menu instead of Funding / Secrets. When fixed, this test starts passing and `it.fails` flags it:
-  // change it to a plain `it`.
-  it.fails("lands the old bare #/funding and #/secrets on Funding and Secrets", async () => {
+  it("lands the old bare #/funding and #/secrets on Funding and Secrets", async () => {
     await landsOn([
       ["funding", "settings/c1/funding"],
       ["secrets", "settings/c1/secrets"],

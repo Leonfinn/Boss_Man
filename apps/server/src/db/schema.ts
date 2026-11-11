@@ -1161,6 +1161,12 @@ export const notifications = pgTable(
     decisionId: uuid("decision_id").unique().references(() => decisions.id, { onDelete: "cascade" }),
     pushedAt: timestamp("pushed_at", { withTimezone: true }),
     pushError: text("push_error"),
+    /** Why this one counted as urgent enough for the phone (BOS-1097); null when it never pushed. */
+    pushReason: text("push_reason"),
+    /** When the push was cleared from the phone after its card settled (BOS-1097). */
+    pushClearedAt: timestamp("push_cleared_at", { withTimezone: true }),
+    /** Why a clear did not happen, e.g. the ntfy server is too old to clear (BOS-1097). */
+    pushClearNote: text("push_clear_note"),
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },

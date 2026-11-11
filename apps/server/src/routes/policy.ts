@@ -1,11 +1,12 @@
-// Permission and policy routes: risk tiers, review routing, standing rules, decision (permission)
-// rules and the grants that back them. Moved out of app.ts unchanged (BOS-298 step 15).
+// Permission and policy routes: review routing, standing rules, decision (permission) rules and
+// the grants that back them. Moved out of app.ts unchanged (BOS-298 step 15). The risk-tier help
+// lives in routes/settings-limits.ts, which main moved first.
 // The caller passes its owner scope, so requireOwner and the app's error handler still apply:
 // this registers routes on that instance rather than through app.register, which would add a new scope.
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { RISK_TIERS, SENIOR_DEV, TOOL_KINDS, riskSummary } from "@boss-man/shared";
+import { TOOL_KINDS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
@@ -28,18 +29,6 @@ export function policyRoutes(
   },
 ) {
   const { scheduler, secretsSvc, rules } = deps;
-
-  /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
-  // With ?companyId the reviewer and sign-off come from that company's review policy.
-  owner.get("/api/risk-tiers", async (req) => {
-    const { companyId } = z.object({ companyId: Uuid.optional() }).parse(req.query);
-    if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
-    const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
-    if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
-    const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
-    const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
-    return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
-  });
 
   // Review routing: per risk tier, who approves plans, who reviews code and whether the owner signs off.
   // Validates the policy, and that every agent it names belongs to the company.

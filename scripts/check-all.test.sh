@@ -28,6 +28,8 @@ run() {
 
 run 0 1 "success" 'echo x >>"$COUNT"'
 run 3 3 "EAGAIN retried, final rc kept" 'echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3'
+run 3 3 "agent that could not start under load retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t start claude-code-acp: x (EAGAIN)"; exit 3'
+run 3 1 "a plain run-ended error is not retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t set up the agent'"'"'s skills"; exit 3'
 run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
@@ -49,7 +51,7 @@ run 0 1 "merge gate runs even if the marker is set" 'echo x >>"$COUNT"' "$here/.
 scratch_case() { # scratch_case <label> <scratch dir> <stub body> <expected rc>
   local label=$1 dir=$2 body=$3 want=$4 rc=0
   mkdir -p "$dir"
-  (cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$dir" BOSSMAN_TICKET=11111111-1111-4111-8111-111111111111 BOSSMAN_CHECK_BODY="$body" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
+  (cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$dir" BOSSMAN_TICKET="${BOSSMAN_TICKET_FOR_CASE:-11111111-1111-4111-8111-111111111111}" BOSSMAN_CHECK_BODY="$body" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
   [ "$rc" = "$want" ] || fail "$label: rc $rc, want $want: $(cat "$t/out")"
 }
 scratch_case "scratch: a passing run" "$t/scratch.own" 'echo a step of output' 0
@@ -63,12 +65,24 @@ grep -q "(exit 3)" "$t/scratch.own/check-all.log" || fail "scratch: a failure's 
 grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$t"/scratch.own)"
 # A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
 mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
-keep="/tmp/bossman-scratch-11111111-1111-4111-8111-111111111111.log"
-if [ ! -w "$t/scratch.denied" ]; then
-  rm -f "$keep"
+# A ticket id of its own for this run, so no leftover or parallel run shares the /tmp file name.
+tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$$" "$RANDOM" "$RANDOM" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
+keep="/tmp/bossman-scratch-$tid.log"
+# -w says yes for a fenced /tmp that still refuses a write, so probe with a real write.
+if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && rm -f "/tmp/bossman-probe-$tid"; then
+  BOSSMAN_TICKET_FOR_CASE=$tid
   scratch_case "scratch: a run that can't write it" "$t/scratch.denied" 'echo through the temp folder' 0
   grep -q "through the temp folder" "$keep" || fail "scratch: no /tmp log for a fenced run: $(cat "$t/out")"
   grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the /tmp log is not marked finished"
+  rm -f "$keep"
+  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its log is kept under another name.
+  : >"$keep"; chmod 444 "$keep"
+  if [ ! -w "$keep" ]; then
+    scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
+    # shellcheck disable=SC2144
+    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log || fail "scratch: no fallback log beside a taken name: $(cat "$t/out")"
+    rm -f /tmp/bossman-scratch-"$tid".*.log
+  fi
   rm -f "$keep"
 fi
 chmod 755 "$t/scratch.denied"

@@ -1,0 +1,69 @@
+/* BOS-779 mock-up: the About page, on top of mock.css. Dashed amber boxes are placeholders for the owner's own
+   photo and words; they are not part of the design and go when the real ones arrive. */
+
+/* Placeholders */
+.slot-tag { display: inline-block; padding: 1px 8px; margin-right: 10px; border-radius: 4px; background: var(--amber); color: var(--ink); font-family: var(--sans); font-weight: 700; font-size: 13px; font-style: normal; letter-spacing: 0.04em; vertical-align: 2px; }
+.yours { border: 2px dashed var(--amber-deep); border-radius: 12px; padding: 18px 22px; }
+.dark .yours { border-color: var(--amber); }
+
+/* Head: the owner's photo beside the title, Boss Man standing at his shoulder */
+.about-head { padding: 72px 0 88px; overflow: hidden; }
+.about-head .wrap { display: grid; grid-template-columns: 440px 1fr; gap: 72px; align-items: center; }
+.portrait { position: relative; isolation: isolate; }
+.photo-slot { aspect-ratio: 4 / 5; border-radius: 24px; border: 2px dashed var(--amber); background: var(--night-2); display: grid; align-content: center; justify-items: center; gap: 12px; padding: 32px; text-align: center; box-shadow: 0 30px 80px rgba(5, 9, 15, 0.55); }
+.photo-slot .slot-hint { max-width: 260px; font-size: 16px; color: var(--chalk-2); }
+/* When the real photo lands: <img class="photo"> in the same box, object-fit: cover, face in the upper third. */
+.portrait .sidekick { position: absolute; right: -96px; bottom: -40px; width: 210px; filter: saturate(0.86) brightness(0.95); }
+.portrait::after { content: ""; position: absolute; right: -150px; bottom: -70px; width: 320px; height: 320px; z-index: -1; background: radial-gradient(closest-side, rgba(240, 183, 92, 0.28), rgba(240, 183, 92, 0)); }
+.about-title .kicker { font-family: var(--display); font-weight: 650; font-size: 18px; color: var(--amber); margin-bottom: 14px; }
+.about-title h1 { font-size: 64px; }
+.lead-slot { margin-top: 28px; font-size: 21px; line-height: 1.55; max-width: 620px; }
+.byline { margin-top: 20px; font-weight: 700; color: var(--chalk-2); }
+.byline.inline { display: inline-block; padding: 10px 16px; }
+
+/* The story: one reading column at a comfortable measure, a short facts panel beside it */
+.story-band { background: var(--paper); }
+.story { display: grid; grid-template-columns: minmax(0, 680px) 340px; justify-content: space-between; gap: 72px; align-items: start; }
+.story-text { display: grid; gap: 28px; font-size: 20px; line-height: 1.65; }
+.story-text strong { font-family: var(--display); font-weight: 650; }
+.story-text .pull { margin: 12px 0; font-family: var(--display); font-stretch: 112%; font-weight: 750; font-size: 34px; line-height: 1.2; letter-spacing: -0.01em; border-left-width: 6px; border-left-style: solid; border-left-color: var(--amber); }
+.story-help { font-size: 16px; }
+.in-short { position: sticky; top: 32px; padding: 28px 28px 32px; border-radius: 18px; background: var(--board); box-shadow: 0 0 0 1px var(--line-light); }
+.in-short h2 { font-size: 24px; font-stretch: 100%; letter-spacing: 0; }
+.in-short dl { margin: 20px 0 24px; display: grid; gap: 16px; }
+.in-short dt { font-family: var(--display); font-weight: 650; font-size: 15px; color: var(--amber-deep); }
+.in-short dd { margin-top: 2px; font-size: 17px; }
+
+/* What next: the roadmap, with the mascot's thumbs-up at full size */
+.next { display: grid; grid-template-columns: 360px 1fr; gap: 72px; align-items: center; }
+.next img { width: 100%; }
+.next .actions { margin-top: 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 16px 28px; }
+
+@media (max-width: 1100px) {
+  .about-head .wrap { grid-template-columns: 300px 1fr; gap: 48px; }
+  .about-title h1 { font-size: 50px; }
+  .portrait .sidekick { width: 150px; right: -56px; bottom: -32px; }
+  .story { grid-template-columns: 1fr; gap: 48px; }
+  .in-short { position: static; }
+  .in-short dl { grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+  .next { grid-template-columns: 240px 1fr; gap: 48px; }
+}
+
+@media (max-width: 640px) {
+  .about-head { padding: 40px 0 56px; }
+  .about-head .wrap { grid-template-columns: 1fr; gap: 40px; }
+  .portrait { width: 72%; }
+  .photo-slot { padding: 20px; border-radius: 18px; }
+  .photo-slot .slot-hint { font-size: 15px; }
+  .portrait .sidekick { width: 120px; right: -110px; bottom: -16px; }
+  .about-title h1 { font-size: 40px; }
+  .lead-slot { font-size: 18px; }
+  .story-text { font-size: 18px; gap: 22px; }
+  .story-text .pull { font-size: 26px; }
+  .yours { padding: 14px 16px; }
+  .in-short { padding: 22px; }
+  .in-short dl { grid-template-columns: 1fr; }
+  .next { grid-template-columns: 1fr; gap: 28px; }
+  .next img { width: 200px; }
+  .next .actions .btn { width: 100%; }
+}

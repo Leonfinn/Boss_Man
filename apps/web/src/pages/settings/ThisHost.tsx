@@ -214,7 +214,7 @@ export function NetguardAllow() {
   const automatic = r.automatic ?? [];
   const notAllowed = automatic.filter((e) => e.notAllowed !== null);
   return (
-    <Section id="netguard-allow-h" title="Network guard: addresses runners may reach">
+    <Section id="netguard-allow-h" title="Network guard">
       <p className="muted" style={{ fontSize: 14 }}>
         Two lists: the addresses Boss Man opens for your runners by itself, and any extra addresses you added in your .env. This page only reports; it never changes .env.
       </p>

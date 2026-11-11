@@ -98,7 +98,7 @@ export function Watchdog({ company }: { company: Company }) {
           ))}
         </select>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "max-content 90px max-content", gap: "8px 10px", alignItems: "center" }}>
+      <div className="wd-limits">
         {WATCHDOG_LIMITS.map((l) => (
           <div key={l.key} style={{ display: "contents" }}>
             <label htmlFor={`wd-${l.key}`}>{l.label}</label>
