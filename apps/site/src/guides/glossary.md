@@ -11,6 +11,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Add-ons**: Optional extras that Boss Man works without: Tailscale, ntfy, Penpot and runner add-ons. Each one is off until you turn it on. ([Guide 9](/guides/add-ons))
 - **Advice on permission cards**: A setting under **Settings > Reviews and CEO** that lets Boss Man suggest which button to press on a permission card: **Advise**, **Watch** or **Off**. It never answers a card for you. ([Guide 6](/guides/permissions#advice-on-permission-cards))
+- **After-merge check**: A Done when line ticked **On a real host (checked after merge)**, because it can only be checked on the live system. Reviewers skip it, and the ticket stays open after the merge until it has a pass or fail. ([Guide 7](/guides/reviews-and-merge-queue#after-it-goes-live))
 - **Agent**: An AI worker in a company, with a role, instructions and a model. Each agent is a session of Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 - **Agent program**: The program an agent runs in: Claude Code, Codex or OpenCode. Each one can use different AI accounts. ([Guide 5](/guides/agents-and-models#agent-programs-and-accounts))
 - **Approved, merging**: The Review lane on the board for tickets that every reviewer approved, while Boss Man checks and merges them. ([Guide 4](/guides/board-and-decisions#the-three-review-lanes))
@@ -85,6 +86,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## Q
 
+- **Queued checks**: The tab on the **Merge queue** page that lists every check running or waiting on the company's runner, with its ticket, kind, place in line and wait. ([Guide 7](/guides/reviews-and-merge-queue#queued-checks))
 - **Quiet hours**: Hours you set under **Notifications > How you're told**, when pages and asks become flags and flags become notes. ([Guide 8](/guides/phone-notifications#quiet-hours-and-limits))
 
 ## R
