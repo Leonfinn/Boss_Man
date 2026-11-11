@@ -600,7 +600,7 @@ awk '/^check_home=""$/{p=1} p{print} p&&/^fi$/{exit}' "$here/check-all.sh" >"$wt
 [ -s "$wt/home-block.sh" ] || fail "HOME fallback block not found in check-all.sh"
 home_case() { # home_case <label> <HOME value>; prints "HOME=.. XDG=.. exists=.." after the block, then whether the folder is gone after exit
   (set -euo pipefail; export HOME="$2"; unset XDG_CONFIG_HOME
-   # shellcheck disable=SC1090
+   # shellcheck disable=SC1090,SC1091
    . "$wt/home-block.sh"
    echo "HOME=$HOME XDG=${XDG_CONFIG_HOME:-none} dir=$([ -d "$HOME/.config" ] && echo yes || echo no)") >"$wt/home-$1" 2>&1 || fail "HOME case $1: $(cat "$wt/home-$1")"
 }
