@@ -59,7 +59,7 @@ import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
-import { closeFenceCard } from "./services/fence-default.js";
+import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
 import { planningService } from "./services/planning.js";
@@ -1132,6 +1132,8 @@ export async function buildApp(opts: AppOptions) {
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
       if (chosenAt) await closeFenceCard(db, id, chosenAt);
+      // Choosing Off is one of the held card's two ways out (BOS-373).
+      if (chosenAt && b.fenceMode === "off") await closeFenceUnavailableCard(db, id, chosenAt, "The owner chose Off in Settings.");
       // The disk cap is the owner's own setting (BOS-274): keep a record of who changed it and to what.
       if (diskCapGb !== undefined) {
         const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;

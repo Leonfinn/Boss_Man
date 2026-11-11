@@ -5,12 +5,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { FENCE_DENIED_PATTERN, FENCE_OFF_CONSEQUENCE, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, companies, decisions, runners } from "../src/db/schema.js";
-import { FENCE_KEEP_OFF, FENCE_TO_WATCH, fenceCardKey, fenceDefaultSweep } from "../src/services/fence-default.js";
+import { agents, companies, decisions, runners, wakes } from "../src/db/schema.js";
+import { FENCE_HELD, FENCE_KEEP_OFF, FENCE_KEEP_STOPPED, FENCE_RUN_UNFENCED, FENCE_TO_WATCH, fenceCardKey, fenceDefaultSweep, fenceUnavailableKey } from "../src/services/fence-default.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -54,7 +54,7 @@ describe("the fence setting (BOS-325)", () => {
     expect(await c.launch()).not.toHaveProperty("fence");
   });
 
-  it("watch asks a runner that can fence to fence the run, and leaves one that can't alone", async () => {
+  it("watch asks a runner that can fence to fence the run, and doesn't ask one without the fence feature", async () => {
     const c = (ctx = await setup(["fence"]));
     expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" })).statusCode).toBe(200);
     expect(await c.launch()).toMatchObject({ fence: true });
@@ -121,21 +121,14 @@ describe("the fence stops being off by unspoken default (DR-049 point 3, BOS-940
   /** A company made before BOS-940: still at the old default Off, never chosen. */
   const oldOff = (c: NonNullable<typeof ctx>) => c.db.update(companies).set({ fenceMode: "off", fenceModeChosenAt: null }).where(eq(companies.id, c.company.id));
 
-  it("a new company on a runner that can fence stays at watch; one whose runner can't goes to off, with the reason in the activity", async () => {
+  it("never changes a mode by itself: an unchosen watch on a runner that can't fence stays watch, and nobody chose Off (BOS-373)", async () => {
     const c = (ctx = await setup(["fence"]));
     await c.report("full");
-    expect(await fenceDefaultSweep(c.db, new Date())).toEqual({ turnedOff: 0, raised: 0 });
+    expect(await fenceDefaultSweep(c.db, new Date())).toEqual({ raised: 0, heldCards: 0, released: 0 });
     expect(await mode(c)).toEqual({ m: "watch", at: null });
     await c.report("unavailable");
-    expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ turnedOff: 1 });
-    expect((await mode(c)).m).toBe("off");
-    const log = await c.db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")));
-    expect(JSON.stringify(log)).toMatch(/can't fence agents/);
-    // A runner that hasn't reported yet is left alone.
-    await c.db.update(companies).set({ fenceMode: "watch" }).where(eq(companies.id, c.company.id));
-    await c.db.update(runners).set({ sandbox: null }).where(eq(runners.id, c.runnerRow.id));
     await fenceDefaultSweep(c.db, new Date());
-    expect((await mode(c)).m).toBe("watch");
+    expect(await mode(c)).toEqual({ m: "watch", at: null });
   });
 
   it("never turns off a watch the owner chose, even when the host loses its fence", async () => {
@@ -227,5 +220,108 @@ describe("the fence stops being off by unspoken default (DR-049 point 3, BOS-940
     const [o] = await c.db.select().from(companies).where(eq(companies.id, other!.id));
     expect(o).toMatchObject({ fenceMode: "watch" });
     expect(o!.fenceModeChosenAt).not.toBeNull();
+  });
+});
+
+describe("no agent run goes unfenced unless the owner chose Off (BOS-373)", () => {
+  const heldCards = (c: NonNullable<typeof ctx>) => c.db.select().from(decisions).where(and(eq(decisions.companyId, c.company.id), sql`${decisions.context}->>'type' = 'fence_unavailable'`));
+  const workWakes = (c: NonNullable<typeof ctx>) => c.db.select({ status: wakes.status, statusReason: wakes.statusReason, reason: wakes.reason }).from(wakes).where(and(eq(wakes.companyId, c.company.id), isNull(wakes.runId)));
+
+  it("holds agent work while the runner reports it can't fence, at a watch the owner chose and at an unchosen one, and says why", async () => {
+    for (const chosen of [true, false]) {
+      const c = (ctx = await setup(["fence"]));
+      await c.report("full");
+      if (chosen) await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "watch" });
+      // The host gets worse after Watch was saved: a kernel downgrade, a move into an LXC.
+      await c.report("unavailable");
+      expect(await c.launch(), `chosen=${chosen}`).toBeUndefined();
+      const waiting = await workWakes(c);
+      expect(waiting.length).toBeGreaterThan(0);
+      for (const w of waiting) expect(w).toMatchObject({ status: "queued", statusReason: FENCE_HELD });
+      await c.app.close();
+      await c.close();
+      ctx = undefined;
+    }
+  });
+
+  it("holds an Off nobody chose too, and lets the owner's own Off through, unfenced", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.db.update(companies).set({ fenceMode: "off", fenceModeChosenAt: null }).where(eq(companies.id, c.company.id));
+    await c.report("unavailable");
+    expect(await c.launch()).toBeUndefined();
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "off" })).statusCode).toBe(200);
+    await c.req("POST", "/api/scheduler/tick");
+    expect(c.commands[0]).toBeDefined();
+    expect(c.commands[0]).not.toHaveProperty("fence");
+  });
+
+  it("still starts the owner's chat with the CEO, which has board tools only", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.report("unavailable");
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "How is it going?" })).statusCode).toBe(201);
+    await c.req("POST", "/api/scheduler/tick");
+    expect(c.commands.find((s) => s.boardToolsOnly)).toBeDefined();
+  });
+
+  it("starts fenced again by itself once the runner can fence", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.report("unavailable");
+    expect(await c.launch()).toBeUndefined();
+    await c.report("partial");
+    await c.req("POST", "/api/scheduler/tick");
+    expect(c.commands[0]).toMatchObject({ fence: true });
+  });
+
+  it("raises one owner card with the two ways out, withdraws it when the runner can fence, and asks again on a later episode", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.report("unavailable");
+    expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ heldCards: 1 });
+    for (let i = 0; i < 3; i++) expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ heldCards: 0 });
+    const [card] = await heldCards(c);
+    expect(card).toMatchObject({ status: "open", tier: "owner", options: [FENCE_KEEP_STOPPED, FENCE_RUN_UNFENCED], recommendedOption: FENCE_KEEP_STOPPED, dedupeKey: fenceUnavailableKey(c.company.id) });
+    expect(card!.question).toContain(FENCE_OFF_CONSEQUENCE);
+    expect(card!.question).toContain("Chat with the CEO still works");
+    // The CEO can't answer it for the owner.
+    const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, c.company.id), eq(agents.role, "ceo")));
+    await expect(c.decisions.answer(card!.id, FENCE_RUN_UNFENCED, { settledBy: { agentId: ceo!.id } } as never)).rejects.toThrow(/Only the owner/);
+    await c.report("full");
+    expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ released: 1 });
+    expect((await heldCards(c))[0]).toMatchObject({ status: "withdrawn", dedupeKey: null });
+    await c.report("unavailable");
+    expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ heldCards: 1 });
+    expect((await heldCards(c)).filter((d) => d.status === "open")).toHaveLength(1);
+  });
+
+  it("\"Run agents without the fence\" is the owner's Off: recorded as chosen, and held work starts unfenced", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.report("unavailable");
+    expect(await c.launch()).toBeUndefined();
+    await fenceDefaultSweep(c.db, new Date());
+    const [card] = await heldCards(c);
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: FENCE_RUN_UNFENCED })).statusCode).toBe(200);
+    const [co] = await c.db.select({ m: companies.fenceMode, at: companies.fenceModeChosenAt }).from(companies).where(eq(companies.id, c.company.id));
+    expect(co!.m).toBe("off");
+    expect(co!.at).not.toBeNull();
+    await c.req("POST", "/api/scheduler/tick");
+    expect(c.commands[0]).toBeDefined();
+    expect(c.commands[0]).not.toHaveProperty("fence");
+  });
+
+  it("\"Keep agents stopped\" keeps the work held and isn't asked again in the same episode; choosing Off in Settings withdraws an open card", async () => {
+    const c = (ctx = await setup(["fence"]));
+    await c.report("unavailable");
+    await fenceDefaultSweep(c.db, new Date());
+    const [card] = await heldCards(c);
+    expect((await c.req("POST", `/api/decisions/${card!.id}/answer`, { answer: FENCE_KEEP_STOPPED })).statusCode).toBe(200);
+    expect(await fenceDefaultSweep(c.db, new Date())).toMatchObject({ heldCards: 0 });
+    expect(await c.launch()).toBeUndefined();
+    // A new episode's card, then Off from Settings.
+    await c.report("full");
+    await fenceDefaultSweep(c.db, new Date());
+    await c.report("unavailable");
+    await fenceDefaultSweep(c.db, new Date());
+    expect((await heldCards(c)).filter((d) => d.status === "open")).toHaveLength(1);
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { fenceMode: "off" })).statusCode).toBe(200);
+    expect((await heldCards(c)).filter((d) => d.status === "open")).toHaveLength(0);
   });
 });

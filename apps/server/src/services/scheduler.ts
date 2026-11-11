@@ -7,6 +7,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel,parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { fenceHold } from "./fence-default.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
@@ -1095,7 +1096,8 @@ export function schedulerService(
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
-      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      // The company's fence setting (BOS-325). A runner that can't fence only gets here for an owner-chosen Off or a
+      // board-tools-only run (the fence hold in tickOnce, BOS-373), so it is not asked.
       ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
@@ -1710,6 +1712,20 @@ export function schedulerService(
       }
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
+      // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
+      // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
+      const fenceRows = await db
+        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, runnerId: runners.id, level: sql<string | null>`${runners.sandbox}->>'level'` })
+        .from(companies)
+        .innerJoin(runners, eq(runners.companyId, companies.id));
+      const fenceHeld = new Map<string, string>();
+      for (const r of fenceRows) {
+        if (!deps.runners.isConnected(r.runnerId)) continue;
+        const why = fenceHold(r, r.level);
+        if (why) fenceHeld.set(r.companyId, why);
+      }
+      // Board-tools-only runs (owner chat, the PA) have no file or shell tools, so the fence hold doesn't apply to them.
+      const boardOnlyAgents = fenceHeld.size ? new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.duty, "assistant"))).map((a) => a.id)) : new Set<string>();
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
@@ -1734,6 +1750,11 @@ export function schedulerService(
         }
         if (pausedAgents.has(w.agentId)) {
           await wait("agent paused");
+          continue;
+        }
+        const fenceWhy = fenceHeld.get(w.companyId);
+        if (fenceWhy && !(w.reason === CHAT_REASON && deps.chat) && !boardOnlyAgents.has(w.agentId)) {
+          await wait(fenceWhy);
           continue;
         }
         // A wake that outlived its ticket is a replay of an old note or nudge, and starting it wakes its

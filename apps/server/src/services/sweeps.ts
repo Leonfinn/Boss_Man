@@ -1352,8 +1352,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.endUnconfirmedCancels(t);
       // Runs past the company's time limit (BOS-846). Off by default; a failing read must not take the pass down.
       if (opts.cancelRun) await runTimeLimitSweep(db, { now, cancel: opts.cancelRun, alert: opts.alert }).run().catch(() => ({ stopped: 0 }));
-      // A fence mode nobody chose (BOS-940): Off where the runner can't fence, or one card asking about an old Off.
-      await fenceDefaultSweep(db, t).catch(() => ({ turnedOff: 0, raised: 0 }));
+      // The fence cards: one asking about an old unchosen Off (BOS-940), one per episode of agent work held because
+      // the runner can't fence (BOS-373), which goes by itself when the episode ends.
+      await fenceDefaultSweep(db, t).catch(() => ({ raised: 0, heldCards: 0, released: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);
