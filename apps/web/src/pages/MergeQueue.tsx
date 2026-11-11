@@ -1,6 +1,7 @@
 // The merge queue (BOS-587): approved work waiting to merge, the check running now, and how the
 // last ones ended. Read-only and in plain words; it never changes the queue. It reloads on the
 // usual live-update poll, so a merge that starts or finishes shows without a page reload.
+import { useState } from "react";
 import type { Company } from "../api";
 import { api } from "../api";
 import { usePoll } from "../hooks";
@@ -203,8 +204,50 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; heldBy: string | null };
+type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
+const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
+
+/** The "Queued checks" tab (BOS-1174): every check running or waiting in the server's check queue. Read-only. */
+export function QueuedChecks({ companyId }: { companyId: string }) {
+  const { data, error } = usePoll((signal) => api<CheckQueueData>(`/api/companies/${companyId}/check-queue`, { signal }), 10_000, `check-queue-${companyId}`);
+  if (error && !data) return <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p>;
+  if (!data) return <p className="muted">Loading…</p>;
+  return (
+    <section>
+      <h2>Queued checks</h2>
+      <p className="muted" style={{ fontSize: 14 }}>
+        {data.running} of {data.slots} check {data.slots === 1 ? "slot" : "slots"} running. Running first, then waiting in the order they will start.
+        {data.mode === "legacy" ? " The server-owned check queue is switched off, so only checks it already knows about are listed." : ""}
+      </p>
+      {!data.rows.length ? (
+        <p className="muted">No checks queued</p>
+      ) : (
+        <div className="mq-list" data-checks-list="true">
+          {data.rows.map((r) => (
+            <article key={r.id} className="card mq-item" data-check-state={r.state}>
+              <div className="mq-head">
+                <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
+                <span className="mq-wait">{waited(r.minutes)}</span>
+              </div>
+              <p className="mq-line">
+                <span className={`tag ${r.state === "running" ? "blue" : "grey"}`}>{r.state === "running" ? "running" : r.position ? `waiting, place ${r.position}` : "held"}</span>{" "}
+                {KIND[r.kind]}
+                {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}
+                {r.fixesMain ? " (fixes main)" : ""}. {r.state === "running" ? "Running for" : "Waiting for"} {waited(r.minutes)}.
+              </p>
+              {r.heldBy && <p className="mq-next" data-held-by-reason="true">Held: {r.heldBy}.</p>}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function MergeQueue({ companies, companyId }: { companies: Company[]; companyId: string | undefined }) {
   const company = companies.find((c) => c.id === companyId);
+  const [tab, setTab] = useState<"merges" | "checks">("merges");
   const { data, error } = usePoll((signal) => (companyId ? api<MergeQueueData>(`/api/companies/${companyId}/merge-queue`, { signal }) : Promise.resolve(null)), 10_000, `merge-queue-${companyId}`);
   if (!companyId) return <p className="muted">Pick a company to see its merge queue.</p>;
   return (
@@ -216,6 +259,14 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
         </div>
         {data && <p className="sub">{data.waitingCount > 0 ? `${data.waitingCount} waiting to merge` : "Nothing waiting to merge"}</p>}
       </header>
+      <div className="tabs" role="tablist" aria-label="Merge queue views">
+        <button type="button" role="tab" aria-selected={tab === "merges"} onClick={() => setTab("merges")}>Merges</button>
+        <button type="button" role="tab" aria-selected={tab === "checks"} onClick={() => setTab("checks")}>Queued checks</button>
+      </div>
+      {tab === "checks" ? (
+        <QueuedChecks companyId={companyId} />
+      ) : (
+        <>
       {error ? <p className="banner" role="alert">Couldn't load the merge queue. It will try again shortly.</p> : null}
       {!data && !error ? (
         <p className="muted">Loading…</p>
@@ -226,6 +277,8 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <Recent rows={data.recent} />
         </>
       ) : null}
+        </>
+      )}
     </>
   );
 }
