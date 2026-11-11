@@ -5,7 +5,7 @@ import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
-import { FeedItem, LEVEL_LABEL, feedTitle } from "../components/FeedItem";
+import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -255,7 +255,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
                   title={feedTitle(n.title, n.body)}
                   small={
                     <>
-                      <span className="tag">{LEVEL_LABEL[n.level] ?? n.level}</span>
+                      <LevelTag level={n.level} />
                       <span className="muted">{n.agent ? `${n.agent} · ` : ""}</span>
                       <time className="muted">{ago(n.createdAt)}</time>
                     </>

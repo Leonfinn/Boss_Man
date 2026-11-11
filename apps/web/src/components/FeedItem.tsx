@@ -3,6 +3,11 @@ import type { ReactNode } from "react";
 /** The feed's own words for a notice's level (what kind of message it is). */
 export const LEVEL_LABEL: Record<string, string> = { note: "Note", flag: "Flag", page: "Page", ask: "Ask" };
 
+/** The type tag for a notice's level: only an ask waits on the owner, so only it is amber (one mapping for both lists). */
+export function LevelTag({ level, label }: { level: string; label?: string }) {
+  return <span className={`tag${level === "ask" ? " amber" : ""}`}>{label ?? LEVEL_LABEL[level] ?? level}</span>;
+}
+
 /**
  * What a feed item is about (BOS-1124, Q6). A decision card is titled "<Company> needs a decision" and carries
  * the question as its body; the question is the useful part, so it becomes the title and the company moves

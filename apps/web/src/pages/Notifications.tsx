@@ -5,7 +5,7 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { SaveButton, useSaveState } from "../components/SaveButton";
-import { FeedItem, feedTitle } from "../components/FeedItem";
+import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
   note: { label: "Note", tone: "", help: "The feed only" },
@@ -72,8 +72,8 @@ function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
         lines={2}
         small={
           <>
-            <span className={`tag ${LEVEL[n.level].tone}`}>{LEVEL[n.level].label}</span>
-            {!n.readAt && <span className="tag amber">New</span>}
+            <LevelTag level={n.level} label={LEVEL[n.level].label} />
+            {!n.readAt && <span className="tag">New</span>}
             <span className="muted">
               {n.company ? `${n.company} · ` : ""}
               {when(n.createdAt)}
