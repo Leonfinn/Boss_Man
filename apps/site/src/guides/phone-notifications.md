@@ -44,14 +44,29 @@ You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your p
 
 Under **Send to my phone**, choose **Urgent only (default)** or **All decisions**.
 
-- **Urgent only** sends a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO has marked urgent because you must act now, and the test button. A card that merely holds up a ticket (plans, merge sign-offs, after-merge checks) does not push, and a card still with the CEO never does. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. When a pushed card is answered or withdrawn, Boss Man removes it from your phone (needs ntfy 2.14 or newer), and **Notifications → Recent phone pushes** lists the last 20 with why each was sent.
+- **Urgent only** sends a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO has marked urgent because you must act now, and the test button. A card that merely holds up a ticket (plans, merge sign-offs, after-merge checks) does not push, and a card still with the CEO never does. Urgent pushes go at the top priority (5). On Android, that breaks through Do Not Disturb. On an iPhone, you cannot rely on it to break through a Focus with the current ntfy app: see [Urgent pushes on iPhone](#urgent-pushes-on-iphone). When a pushed card is answered or withdrawn, Boss Man removes it from your phone (needs ntfy 2.14 or newer), and **Notifications → Recent phone pushes** lists the last 20 with why each was sent.
 - **All decisions** also sends routine cards, such as plans, hires and ordinary deploys, at the normal priority (3).
 - Everything stays on the Decisions and Notifications pages either way.
 - Tick **Also send flags (normal priority)** if you want flags on your phone too.
 
 ## iPhone
 
-iPhones need a wake-up sent through ntfy.sh for instant delivery. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run the start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
+iPhones need a wake-up sent through ntfy.sh for instant delivery. Without it, a push can take hours to arrive. Add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run the start command again. ntfy.sh receives only the message ID, not the text. Android does not need this.
+
+The ntfy.sh wake-up is about speed only. It does not help a push break through a Focus or Do Not Disturb.
+
+### Urgent pushes on iPhone
+
+On the current ntfy app for iPhone (version 1.7.0), an urgent push may or may not break through a Focus. It depends on the app build. To give it the best chance:
+
+1. On your iPhone, open **Settings → Notifications → ntfy**. Check that **Allow Notifications** is on.
+2. Turn on **Time Sensitive Notifications**. If you do not see this switch, your build of the app cannot break through a Focus, and nothing you set will change that.
+3. Open **Settings → Focus**. For each Focus you use, such as Sleep or Do Not Disturb, add ntfy to the apps allowed to notify you. This is the safest setting, even if the Time Sensitive switch is on.
+4. Turn on a Focus and choose **Send a test to my phone** in Boss Man. The test is sent as urgent, so it shows you what a real urgent push will do.
+
+The silent switch still silences ntfy. An urgent push still appears on the screen, but it makes no sound while the phone is on silent.
+
+ntfy plans Critical alerts, which sound even on silent, for a later app version. It is not released yet, so do not rely on it.
 
 ## If the test fails
 
