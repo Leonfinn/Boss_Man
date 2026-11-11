@@ -1666,6 +1666,8 @@ export async function buildApp(opts: AppOptions) {
 
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
     owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
+    // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
+    owner.get("/api/companies/:id/check-queue", async (req) => checkQueueSvc.list(IdParam.parse(req.params).id));
 
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {
