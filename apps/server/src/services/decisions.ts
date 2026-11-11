@@ -1007,7 +1007,9 @@ const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conver
  * after the owner answered. Names the answer when there is one.
  */
 export async function releasedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
-  const [r] = await db.select({ name: agents.name }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, ticketId));
+  const [r] = await db.select({ name: agents.name, note: tickets.stateNote }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, ticketId));
+  // This answer already wrote its own line on the note (the owner's check of an after-merge criterion): keep it.
+  if (answered && r?.note?.includes(`Owner answered "${answered.question.split("\n")[0]!.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)}"`)) return undefined;
   const cut = (s: string, n: number) => { const x = s.replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
   const what = answered ? `the owner answered "${cut(answered.question, 80)}" (${cut(answered.answer, 80)})` : "what it was waiting on is settled";
   return `Ready: ${what}. Starts when ${r?.name ?? "its assignee"} has a free slot.`;
