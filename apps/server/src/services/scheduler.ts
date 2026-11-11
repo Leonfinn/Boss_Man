@@ -716,7 +716,7 @@ export function schedulerService(
       const claimed = await db.update(tickets).set({ monitorAt: null, monitorRestartAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
       if (!claimed.length) continue;
       const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
-      if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review")) {
+      if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review" && x.systemState !== "blocked")) {
         await log("Cleared the scheduled check: the ticket is no longer being worked");
         continue;
       }

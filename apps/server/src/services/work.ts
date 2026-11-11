@@ -513,7 +513,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (!note || note.length > 500) throw new WorkError(422, "Say what to re-check, in 1 to 500 characters.");
       if (Number.isNaN(input.at.getTime())) throw new WorkError(422, "That isn't a valid time.");
       if (input.maxChecks !== undefined && (!Number.isInteger(input.maxChecks) || input.maxChecks < 1 || input.maxChecks > 20)) throw new WorkError(422, "maxChecks is 1 to 20.");
-      if (t.systemState !== "in_progress" && t.systemState !== "review") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress or in review; this one is ${t.systemState}.`);
+      // Blocked too (BOS-1171): a ticket that only waits should sit in Blocked and still be re-checked later.
+      if (t.systemState !== "in_progress" && t.systemState !== "review" && t.systemState !== "blocked") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress, in review or blocked; this one is ${t.systemState}.`);
       if (!t.assigneeAgentId) throw new WorkError(422, "The ticket has no agent to wake.");
       if (input.by) {
         if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");
