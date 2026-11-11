@@ -1479,6 +1479,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       })
       .onConflictDoNothing()
       .returning({ id: decisions.id, question: decisions.question });
+    // BOS-1171: a ticket waiting on its plan card sits in Blocked, not In progress (so it doesn't use an in-progress slot).
+    // Answering the card frees it the same way as any linked card. A failure here never loses the plan card.
+    if (row && t && run?.agentId)
+      await addTicketDependency(db, { companyId: runner.companyId, blockedTicketId: t.id, blockerDecisionId: row.id, actor: { type: "agent", agentId: run.agentId }, hold: true, now }).catch(() => undefined);
     if (row && ladder && ceoId)
       await wakeLadderCeo(runner.companyId, row, { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ladder }, ceoId, [
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,

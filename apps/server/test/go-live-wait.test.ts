@@ -108,7 +108,8 @@ describe("after-merge checks wait for go-live", () => {
     const waiting = await ctx.row(id);
     expect(waiting.goLiveWait).toBe("server");
     expect(waiting.touchesRunner).toBe(false);
-    expect(waiting.systemState).toBe("in_progress");
+    // BOS-1171: it only waits for go-live, so it sits in Blocked and holds no in-progress slot.
+    expect(waiting.systemState).toBe("blocked");
     expect(await afterMergeWakes(id)).toEqual([]);
     // Nothing happens while the old commit runs.
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
@@ -121,6 +122,8 @@ describe("after-merge checks wait for go-live", () => {
     await serverRuns(NEW);
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
     expect((await ctx.row(id)).goLiveWait).toBeNull();
+    // Live: the checks are work now, so it leaves Blocked.
+    expect((await ctx.row(id)).systemState).toBe("in_progress");
     const wakeNotes = await afterMergeWakes(id);
     expect(wakeNotes).toHaveLength(1);
     expect(wakeNotes[0]!.note).toContain(LIVE.text);
