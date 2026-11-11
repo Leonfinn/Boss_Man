@@ -10,6 +10,8 @@
 # project name, waits for the server to answer, then asks the launcher to start a runner from the published runner image.
 #   INSTALL_RELEASE_JSON=release.json INSTALL_REGISTRY=ghcr.io/<owner> scripts/install-images.test.sh
 # It removes its own containers and volumes at the end (only those of its project) and touches nothing else on the host.
+# SC2015: ok and bad only print and set a flag, so "test && ok || bad" cannot run both. SC2317: cleanup runs from the EXIT trap.
+# shellcheck disable=SC2015,SC2317
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 fail=0
