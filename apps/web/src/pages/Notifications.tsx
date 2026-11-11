@@ -22,7 +22,7 @@ function RecentPhonePushes() {
   const items = pushes.data?.items ?? [];
   const tooOld = items.some((p) => p.clearNote?.startsWith("unsupported"));
   return (
-    <section aria-labelledby="recent-pushes-h" style={{ marginTop: 24 }}>
+    <section aria-labelledby="recent-pushes-h" style={{ marginBottom: 24 }}>
       <h2 id="recent-pushes-h" style={{ fontSize: 17, fontWeight: 600 }}>
         Recent phone pushes
       </h2>
@@ -507,6 +507,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} set={setFilters} />}
       {active && (
@@ -542,7 +543,6 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
           ))}
         </ul>
       )}
-      <RecentPhonePushes />
       <SettingsForm />
     </>
   );
