@@ -380,6 +380,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         hold,
         mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
+        // The card itself, so "Answer in Decisions" opens that exact card (BOS-1159).
+        ownerQuestionId: askedId,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,

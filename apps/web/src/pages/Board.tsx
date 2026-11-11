@@ -918,7 +918,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       </h3>
                       {mine && <span className="note">{t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
                       {mine && (
-                        <a className="btn primary small" href={t.ownerQuestion ? "#/decisions" : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+                        <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
                           {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
                         </a>
                       )}

@@ -8,6 +8,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
@@ -694,6 +695,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
       <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
+          <TicketOpenCards ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>

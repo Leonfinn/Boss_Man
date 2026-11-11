@@ -200,6 +200,23 @@ describe("ranked decision queue (R20)", () => {
       expect(rows[0]!.step).toBe(1);
     });
 
+    it("keeps a flagged card that holds up a live ticket answerable, and the Board links to that exact card (BOS-1159)", async () => {
+      ctx = await setup();
+      const ticket = await ctx.ticket({ title: "Close the loop", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const asked = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.worker.id, question: "Press Build and update runners?", options: ["Done", "Not yet"], recommended: "Done", blocksTicketId: ticket.id });
+      // The owner acted on the ticket, so the card is flagged "may be out of date" (as ownerActed does).
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you replied" }).where(eq(decisions.id, asked.id));
+
+      const row = (await ordered()).find((r) => r.id === asked.id)!;
+      expect(row.waiting).toBeUndefined();
+      expect(row.staleAt).toBeTruthy();
+      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
+
+      // The Board's button names the card, not just the page.
+      const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ id: string; ownerQuestionId: string | null }>;
+      expect(board.find((x) => x.id === ticket.id)!.ownerQuestionId).toBe(asked.id);
+    });
+
     it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
       ctx = await setup();
       const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
