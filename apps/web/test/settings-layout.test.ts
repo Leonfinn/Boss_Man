@@ -146,8 +146,11 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const overflow = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.scrollWidth - el.clientWidth);
         expect(overflow, `${vp.name}: menu does not scroll sideways`).toBeLessThanOrEqual(1);
         // Rows are big enough to press.
-        const row = await page.locator("nav[aria-label='Settings'] a").first().boundingBox();
-        expect(row && row.height, `${vp.name}: rows are at least 40 px`).toBeGreaterThanOrEqual(vp.touch || vp.width < 900 ? 44 : 40);
+        // (Below 900 px a page has no menu; BOS-1224 checks that below.)
+        if (vp.width >= 900) {
+          const row = await page.locator("nav[aria-label='Settings'] a").first().boundingBox();
+          expect(row && row.height, `${vp.name}: rows are at least 40 px`).toBeGreaterThanOrEqual(vp.touch ? 44 : 40);
+        }
         await saveShot(`settings-${vp.name}.png`, page);
         await saveShot(`settings-${vp.name}-full.png`, page, true);
         await page.close();
@@ -175,6 +178,16 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         } else {
           // Below 900 px a page starts with "‹ Settings", and the menu column is gone.
           expect(await page.locator(".set-back").isVisible(), `${vp.name}: back link shows`).toBe(true);
+          // BOS-1224: the whole menu is not drawn above the page, so the page starts near the top.
+          expect(await page.locator("nav[aria-label='Settings']").isVisible(), `${vp.name}: no menu above a page`).toBe(false);
+          expect(pageBox!.y, `${vp.name}: the page starts high`).toBeLessThan(400);
+        }
+        if (vp.width < 900) {
+          // The "All companies" tag stays on one line (Server and runner is a company-wide page).
+          await page.goto(`${base}/#/settings/c1/system`);
+          await page.waitForSelector(".set-scope", { timeout: 8000 });
+          const tag = await page.locator(".set-scope").boundingBox();
+          expect(tag!.height, `${vp.name}: tag is one line`).toBeLessThan(30);
         }
         await page.close();
       }
