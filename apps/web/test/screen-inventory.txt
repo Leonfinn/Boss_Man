@@ -256,6 +256,7 @@ reads:
   - /api/runner-report
   - /api/self-deploy
   - /api/settings/check-queue
+  - /api/settings/wait-for-ci
   - /api/wip-limits
 
 ## #/settings/<company>/team
