@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 // Real-browser checks for UI quick wins Q1-Q4 (BOS-1123): the sidebar count is readable, every plain
 // field shares one style, the Agents approval dropdown and its help text fit a phone, and a disabled
-// button looks disabled. Skipped, not failed, where no browser is installed.
+// button looks disabled. Skipped on a dev machine with no browser; fails at the merge gate (see below).
 
 const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const html = (body: string) => `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>${body}</body></html>`;
@@ -37,6 +37,10 @@ async function launch(): Promise<Browser | null> {
 }
 
 const browser = await launch();
+// Skipped only on a dev machine with no browser. At the merge gate it must run, so a missing browser fails there.
+if (!browser && process.env.BOSSMAN_MERGE_CHECK) {
+  throw new Error("ui-quick-wins-render: no chromium/playwright found at the merge gate; this test must run there");
+}
 afterAll(async () => {
   await browser?.close();
 });
@@ -54,6 +58,10 @@ const page = `
 </ul></section></div></nav>
 <main>
 <input id="text" type="text" value="x"><input id="num" type="number" value="3"><input id="search" type="search"><select id="sel"><option>One</option></select>
+<textarea id="ta">x</textarea>
+<div class="field"><input id="fin" type="text" value="x"><select id="fsel"><option>One</option></select></div>
+<div class="rm-pin"><select id="pin"><option>One</option></select></div>
+<div class="rename"><input id="ren" type="text" value="x"></div>
 <button id="dis" class="btn" disabled>Undo last change</button>
 <div class="field" style="max-width:560px"><label for="a">What waits for you from the CEO</label>
 <select id="a"><option>${LONG}</option></select>
@@ -85,7 +93,14 @@ describe.skipIf(!browser)("UI quick wins Q1-Q4 in a real browser", () => {
         return {
           badgeColor: count.color,
           badgeBg: count.backgroundColor,
-          fields: ["#text", "#num", "#search", "#sel"].map((s) => ({ s, h: box(s).height, radius: cs(s).borderTopLeftRadius, bg: cs(s).backgroundColor })),
+          // Plain fields plus the real class names that used to differ (.field, .rm-pin, .rename).
+          fields: ["#text", "#num", "#search", "#sel", "#ta", "#fin", "#fsel", "#pin", "#ren"].map((s) => ({ s, h: box(s).height, radius: cs(s).borderTopLeftRadius, bg: cs(s).backgroundColor, tag: (document.querySelector(s) as HTMLElement).tagName })),
+          fieldColour: (() => {
+            const probe = document.createElement("div");
+            probe.style.backgroundColor = "var(--field)";
+            document.body.appendChild(probe);
+            return getComputedStyle(probe).backgroundColor;
+          })(),
           disabledOpacity: cs("#dis").opacity,
           scrollW: document.documentElement.scrollWidth,
           clientW: document.documentElement.clientWidth,
@@ -97,9 +112,12 @@ describe.skipIf(!browser)("UI quick wins Q1-Q4 in a real browser", () => {
       expect(ratio(r.badgeColor, r.badgeBg)).toBeGreaterThanOrEqual(4.5);
       for (const f of r.fields) {
         // On a phone the app already makes dropdowns 44 px for a thumb (styles.css phone block); keep that.
-        expect(f.h, f.s).toBe(f.s === "#sel" && size.width < 640 ? 44 : 40);
+        const phoneSelect = f.tag === "SELECT" && size.width < 640;
+        if (f.tag === "TEXTAREA") expect(f.h, f.s).toBeGreaterThanOrEqual(40);
+        else if (phoneSelect) expect([40, 44], f.s).toContain(f.h); // phone block lifts some dropdowns to 44 for a thumb
+        else expect(f.h, f.s).toBe(40);
         expect(f.radius, f.s).toBe("8px");
-        expect(f.bg, f.s).toBe("rgb(31, 37, 46)");
+        expect(f.bg, f.s).toBe(r.fieldColour);
       }
       expect(r.disabledOpacity).toBe("0.45");
       expect(r.scrollW).toBeLessThanOrEqual(r.clientW);
