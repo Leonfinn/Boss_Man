@@ -15,13 +15,45 @@ Open **Projects** and choose a project. Tickets sit in six columns:
 - **Backlog**: written but not started
 - **Ready**: ready for an agent to pick up
 - **In progress**: an agent is working on it
-- **Blocked**: waiting on something, such as another ticket or your answer
+- **Blocked**: waiting, with nothing to work on yet (see [What Blocked means](#what-blocked-means))
 - **Review**: waiting for review or merging
 - **Done**: merged or closed
 
 ![A close-up of the Boss Man board with tickets in its columns, from Backlog on the left to Done on the right.](/img/board-crop.webp =2400x875 "The board. New tasks wait in Backlog until they can start, then move right as agents work on them.")
 
 You can rename a column with its pencil. Agents still see the fixed state, shown under the name as "Agents see:".
+
+## What Blocked means
+
+Blocked holds every ticket that is only waiting. A ticket can be Blocked when:
+
+- it waits on another ticket
+- a card on Decisions is open for it, including a plan card
+- it waits until a set date and time
+- it is merged and its after-merge checks wait for the change to go live
+
+A plan card moves its ticket to Blocked by itself. When the plan is answered, the ticket is free to carry on. A merged ticket that waits to go live also moves to Blocked, and goes back to In progress when it is live and the checks can be made.
+
+An agent cannot move a ticket to Blocked unless one of these is true. Blocked tickets never count towards the in-progress limits.
+
+## In-progress limits
+
+An in-progress limit stops agents starting more work than they can finish. There are two, under **Settings > Server and runner**, in **Tickets in progress**:
+
+- **Tickets in progress per agent**: 2 by default, one being worked and one waiting on its check
+- **Tickets in progress, whole company**: off by default
+
+Leave a box empty for no limit.
+
+When an agent is at its limit, a new ticket for it waits in Ready. Its note says, for example, "Waiting: Soo is at the limit of 2 in-progress tickets; starts when one finishes." It starts by itself when one of that agent's tickets moves to Review, Done or Blocked.
+
+The limit never holds work that was already started, such as a ticket sent back with changes requested. An urgent ticket may start even when the agent is at its limit.
+
+Some tickets in In progress cannot move, so they do not count. Each one shows the reason on the board:
+
+- **Not counted: waits on** a ticket, with that ticket's reference
+- **Not counted: plan with owner**, when its plan waits for approval
+- **Not counted: merged, waiting to go live**
 
 ## The three review lanes
 
@@ -31,11 +63,17 @@ The Review column splits into three lanes:
 - **Approved, merging**: every reviewer approved, and Boss Man is checking and merging it
 - **Your review**: tickets from any column that are waiting on you
 
-A card in Your review has a button: **Review and approve** for a sign-off, or **Answer in Decisions** for a question. A strip at the top of the board says how many tickets wait on you.
+A card in Your review has a button: **Review and approve** for a sign-off, or **Answer in Decisions** for a question. **Answer in Decisions** opens Decisions at that exact card, highlighted. If the card was answered or withdrawn in the meantime, Decisions says "That card is not open any more" instead.
+
+A strip at the top of the board says how many tickets wait on you.
 
 ## The ticket page
 
-Open a ticket to see its description, Done when lines with each pass or fail, the conversation, the review and the activity. On the ticket page you can also:
+Open a ticket to see its description, Done when lines with each pass or fail, the conversation, the review and the activity.
+
+If the ticket waits on cards from you, they are listed at the top under "Waiting on your decision", each with an **Answer in Decisions** button.
+
+On the ticket page you can also:
 
 - tick **Urgent**, which puts it first in the merge queue. An urgent ticket also keeps running when Boss Man pauses routine work because a subscription plan is nearly used up (the quota hold).
 - tick **Doesn't need code changes** for research, wiki or docs work, so it can close with no change to the repository

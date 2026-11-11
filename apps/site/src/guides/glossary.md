@@ -21,7 +21,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Backlog**: The board column for tickets that are written but not started. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Backups**: Copies of the database that Boss Man makes before every update, kept in the install folder next to `src`. Test one with `scripts/restore-test.sh` before you rely on it. ([Guide 10](/guides/updates-and-backups#where-backups-are-kept))
-- **Blocked**: The board column for tickets waiting on something, such as another ticket or your answer. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **Blocked**: The board column for tickets that are only waiting: on another ticket, an open card (plan cards too), a date, or the change going live. Blocked tickets do not count towards the in-progress limits. ([Guide 4](/guides/board-and-decisions#what-blocked-means))
 - **Board**: The page that shows every ticket in a project, in six columns. Open **Projects** and choose a project to see it. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Built-in allows**: What agents may do at once, with no card: use Boss Man's own tools, read, search and edit files, fetch web pages and run other shell commands. Ask rules do not apply to them. ([Guide 6](/guides/permissions#who-is-asked))
 - **Built-in guards**: Boss Man's fixed checks on risky requests: pushing, publishing and destructive commands come to you, and some deletes go to the CEO first. An Allow rule cannot let a guarded request run. ([Guide 6](/guides/permissions#who-is-asked))
@@ -54,6 +54,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## I
 
 - **In progress**: The board column for tickets an agent is working on. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **In-progress limit**: How many tickets one agent, or the whole company, may have in progress at once, set under **Settings > Server and runner**. A ticket over the limit waits in Ready and starts by itself when a place frees up. Agents also call it the WIP limit. ([Guide 4](/guides/board-and-decisions#in-progress-limits))
 
 ## L
 
