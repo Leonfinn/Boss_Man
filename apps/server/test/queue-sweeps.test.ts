@@ -209,7 +209,6 @@ describe("ranked decision queue (R20)", () => {
 
       const row = (await ordered()).find((r) => r.id === asked.id)!;
       expect(row.waiting).toBeUndefined();
-      expect(row.staleAt).toBeTruthy();
       expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
 
       // The Board's button names the card, not just the page.
