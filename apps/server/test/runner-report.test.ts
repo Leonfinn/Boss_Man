@@ -130,7 +130,7 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     const c = (ctx = await setup());
     const id = await c.company("App Co", "app-co");
     await c.runnerHello(id, "202611060800", false);
-    await c.hold(holdOn({ swapped: { "app-co": since } }));
+    await c.hold(holdOn({ swapped: { "app-co": new Date().toISOString() } }));
     const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
     expect(r.report.live.state).toBe("updating");
     expect(r.report.live.text).toMatch(/^Updating: swapping to the new runner/);
@@ -157,6 +157,44 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
     expect(r.report.live).toMatchObject({ ok: false, state: "failed" });
     expect(r.report.live.text).toMatch(/^Update failed: .*Press Start runner below\.$/);
+  });
+
+  it("a runner swapped long ago that is down now is Not connected, with Start runner (Freddy's blocker)", async () => {
+    const c = (ctx = await setup());
+    const id = await c.company("App Co", "app-co");
+    await c.runnerHello(id, "202611060800", false);
+    await c.hold(holdOn({ swapped: { "app-co": new Date(Date.now() - 20 * 60_000).toISOString() } }));
+    const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
+    expect(r.report.live.state).toBe("offline");
+    expect(r.report.live.text).toMatch(/Not connected/);
+  });
+
+  it("an update hold that is only waiting for busy agents does not call a down runner Updating", async () => {
+    const c = (ctx = await setup());
+    const id = await c.company("App Co", "app-co");
+    await c.runnerHello(id, "202611060800", false);
+    await c.hold(holdOn());
+    const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
+    expect(r.report.live.state).toBe("offline");
+  });
+
+  it("a wrap-up hold is never a swap, even for a company in its swapped list", async () => {
+    const c = (ctx = await setup());
+    const id = await c.company("App Co", "app-co");
+    await c.runnerHello(id, "202611060800", false);
+    await c.hold(holdOn({ kind: "wrapup", swapped: { "app-co": new Date().toISOString() }, tries: { "app-co": { n: 1, next: since, last: "x" } } }));
+    const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
+    expect(r.report.live.state).toBe("offline");
+  });
+
+  it("after a successful rollback the panel says it is starting by itself, not 'press Start runner'", async () => {
+    const c = (ctx = await setup());
+    const id = await c.company("App Co", "app-co");
+    await c.runnerHello(id, "202611060800", false);
+    await c.hold(holdOn({ failed: { "app-co": "the new runner would not start (3 tries: boom), so it was put back on the previous runner image and is running that" } }));
+    const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as Live;
+    expect(r.report.live.state).toBe("updating");
+    expect(r.report.live.text).not.toMatch(/Press Start runner/);
   });
 
   it("a runner the launcher froze for its network guard says Paused, with the reason", async () => {

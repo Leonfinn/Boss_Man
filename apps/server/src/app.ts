@@ -523,6 +523,7 @@ export async function buildApp(opts: AppOptions) {
       const h = await getHold(db);
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
+    swapping: (companyId) => runnerReport.swappingFor(companyId),
     errors: errorBuffer,
     stalls: () => stalls.summary(),
     cpuReserve: () => launch.cpuReserve(),

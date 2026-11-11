@@ -34,6 +34,8 @@ export type ServerStatusDeps = {
   colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
+  /** Whether this company's own runner swap is under way (runner-report swappingFor); absent: any hold counts. */
+  swapping?: (companyId: string) => Promise<boolean>;
   errors: ErrorBuffer;
   /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
   stalls?: () => StallSummary;
@@ -148,7 +150,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       // swapping: an update hold is on and the runner is away (mid-swap). It clears the moment the runner connects (BOS-382).
       // settling: the runner only just came back and is starting its queued runs; "never started" alerts wait while this is true.
       const connected = runner ? deps.isConnected(runner.id) : false;
-      const swapping = runner ? !connected && !!(await deps.hold()) : false;
+      const swapping = runner ? !connected && (deps.swapping ? await deps.swapping(companyId) : !!(await deps.hold())) : false;
       const settling = runner ? connected && !!deps.isSettling?.(runner.id, at) : false;
 
       // The ticket each waiting wake is for, and whether it's Urgent, so an urgent wake that is

@@ -118,6 +118,10 @@ export function describeLive(r: RunnerLive | null): { ok: boolean; text: string;
     const again = r.swap.retryAt ? ` The last try failed; trying again at ${clock(r.swap.retryAt)} (try ${r.swap.tries + 1}).` : "";
     return { ok: true, text: `Updating: swapping to the new runner.${again} It starts by itself; no need to press anything.`, state: "updating" };
   }
+  // The swap failed but the launcher put the old runner back: it is starting by itself, so don't invite a second press.
+  if (r.swapFailed && /put back on the previous runner image and is running that/i.test(r.swapFailed)) {
+    return { ok: true, text: "The update failed, so the runner was put back on its previous version and is starting by itself. No need to press anything.", state: "updating" };
+  }
   if (r.swapFailed) return { ok: false, text: `Update failed: ${r.swapFailed}. Press Start runner below.`, state: "failed" };
   if (r.guard) return { ok: false, text: `Paused: the network guard isn't working (${r.guard.reason}). Boss Man keeps retrying it and the runner carries on by itself once it works. If this lasts, press Restart below.`, state: "paused" };
   // A runner that is down always says what to do, whether or not an update problem is also recorded.
@@ -125,13 +129,25 @@ export function describeLive(r: RunnerLive | null): { ok: boolean; text: string;
   return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.`, state: "offline" };
 }
 
-/** This company's part of the update hold, if any (BOS-382). */
-export function swapFor(hold: Hold | null, slug: string | undefined): Pick<RunnerLive, "swap" | "swapFailed"> {
-  if (!hold || !slug) return { swap: null, swapFailed: null };
+/** How long after a runner was recreated it still counts as mid-swap; the drain's own wait to dial in (maintenance reconnectMs). */
+const SWAP_WINDOW_MS = 5 * 60_000;
+
+/**
+ * This company's part of the update hold, if any (BOS-382). A company is "swapping" only while its own swap
+ * is in progress: it was recreated within the dial-in window, or it is on its retry schedule. A hold that is
+ * only waiting for busy agents, a wrap-up hold, or a runner that crashed after it was swapped is not a swap:
+ * that runner is just down, and Start runner must stay available.
+ */
+export function swapFor(hold: Hold | null, slug: string | undefined, nowMs: number = Date.now()): Pick<RunnerLive, "swap" | "swapFailed"> {
+  const none = { swap: null, swapFailed: null };
+  if (!hold || !slug || hold.kind === "wrapup") return none;
   const failed = hold.failed?.[slug];
   if (failed) return { swap: null, swapFailed: failed };
   const t = hold.tries?.[slug];
-  return { swap: { retryAt: t?.next ?? null, tries: t?.n ?? 0 }, swapFailed: null };
+  if (t) return { swap: { retryAt: t.next, tries: t.n }, swapFailed: null };
+  const at = hold.swapped?.[slug];
+  if (at && nowMs - new Date(at).getTime() < SWAP_WINDOW_MS) return { swap: { retryAt: null, tries: 0 }, swapFailed: null };
+  return none;
 }
 
 type MaintenanceLike = { status: () => Promise<{ last?: LastUpdate | null }> };
@@ -154,6 +170,8 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
     return new Map(rows.map((r) => [r.key.slice(SLUG_KEY.length), r.value as string]));
   }
 
+  const nowMs = () => Date.now();
+
   async function liveOne(companyId: string, runner: (typeof runnersTable.$inferSelect) | null, slug?: string, hold?: Hold | null): Promise<RunnerLive> {
     let fault: string | null = null;
     let guard: RunnerLive["guard"] = null;
@@ -165,10 +183,16 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
     if (!runner) return { registered: false, connected: false, at: null, imageVersion: null, fault };
     const connected = deps.isConnected(runner.id);
     const since = connected ? deps.connectedSince(runner.id) : null;
-    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault, guard, ...swapFor(hold ?? null, slug) };
+    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault, guard, ...swapFor(hold ?? null, slug, nowMs()) };
   }
 
   return {
+    /** Whether this company's own runner swap is under way right now (server_status `swapping`). */
+    async swappingFor(companyId: string): Promise<boolean> {
+      const slug = (await slugs()).get(companyId);
+      return !!swapFor(await getHold(db), slug, nowMs()).swap;
+    },
+
     /** The update panel: every runner's live state first, then the last update as history. */
     async updatePanel() {
       const list = await db.select({ id: companies.id, name: companies.name }).from(companies);
