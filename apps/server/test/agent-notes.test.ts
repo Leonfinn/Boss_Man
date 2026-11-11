@@ -9,7 +9,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agentNotes, agents, ceoChapters, noteRequests, ownerChatMessages, paAnswers, runners, runs, ticketMessages, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { MIN_QUOTE, NOTE_LIMITS, REQUEST_LIMITS } from "../src/services/agent-notes.js";
+import { checkReviewBy, MIN_QUOTE, NOTE_LIMITS, noteReview, notesLines, REQUEST_LIMITS } from "../src/services/agent-notes.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -215,7 +215,7 @@ describe("CEO notes", { timeout: 30_000 }, () => {
     const id = idOf(await notes.call({ action: "save", title: "Website feature tasks", text: "Never claim the owner said not to split it.", why: "into tasks. I never said that" }));
     await notes.close();
     await c.end(first.runId);
-    const line = `- [${id}] Website feature tasks: Never claim the owner said not to split it. (owner said: "into tasks. I never said that")`;
+    const line = `- [${id}] Website feature tasks: Never claim the owner said not to split it. (owner said: "into tasks. I never said that"; set ${new Date().getUTCDate()} ${new Date().toLocaleString("en-GB", { month: "short", timeZone: "UTC" })}, today)`;
 
     const next = await c.chat("Thanks.");
     expect(next.prompt).toContain(`Your notes, kept from what the owner told you and from requests you accepted (the owner can see and change them; 1 of ${NOTE_LIMITS.count})`);
@@ -351,7 +351,7 @@ describe("note requests from other agents", { timeout: 30_000 }, () => {
     await c.end(run.runId);
     await c.scheduler.wake({ agentId: c.ceo.id, reason: "decision" });
     const after = await c.start();
-    expect(after.prompt).toMatch(/- \[[0-9a-f-]{36}\] Run the linter: Run pnpm lint before any move to review\. \(why: "Review bounced twice on lint errors\."; asked by Engineer on [A-Z0-9]+-\d+, accepted by you\)/);
+    expect(after.prompt).toMatch(/- \[[0-9a-f-]{36}\] Run the linter: Run pnpm lint before any move to review\. \(why: "Review bounced twice on lint errors\."; asked by Engineer on [A-Z0-9]+-\d+, accepted by you; set \d+ \w+, today\)/);
     expect(after.prompt).not.toContain("Note requests from your team");
   });
 
@@ -365,6 +365,62 @@ describe("note requests from other agents", { timeout: 30_000 }, () => {
     const [r] = await c.db.select().from(noteRequests);
     expect(say(await notes.call({ action: "accept", requestId: r!.id }))).toMatch(/the most allowed/);
     expect((await c.db.select().from(noteRequests))[0]).toMatchObject({ status: "pending", decidedAt: null });
+    await notes.close();
+  });
+});
+
+// Note age and review-due (BOS-1170): a stale note showed the CEO no date, so a "pending" move stayed on after it happened.
+describe("note age and review-due", { timeout: 30_000 }, () => {
+  const at = new Date("2026-11-15T12:00:00Z");
+  const note = { id: "n1", title: "Proxmox move", text: "pending", why: "owner said", source: "chat" as const };
+
+  it("shows set date and age in the prompt lines, with no flag for a fresh note", () => {
+    const lines = notesLines([{ ...note, updatedAt: new Date("2026-11-09T08:00:00Z") }], at).join("\n");
+    expect(lines).toContain("set 9 Nov, 6 d ago");
+    expect(lines).not.toContain("review due");
+  });
+
+  it("flags a note past its review-by day, and one untouched for 30 days", () => {
+    const fresh = new Date("2026-11-14T00:00:00Z");
+    expect(noteReview({ updatedAt: fresh, reviewBy: "2026-11-14" }, at)).toMatchObject({ reviewDue: true, reviewReason: "past its review-by date" });
+    expect(noteReview({ updatedAt: fresh, reviewBy: "2026-11-15" }, at).reviewDue).toBe(false); // the day itself is not yet past
+    expect(noteReview({ updatedAt: new Date("2026-10-16T12:00:00Z") }, at)).toMatchObject({ ageDays: 30, reviewDue: true });
+    expect(noteReview({ updatedAt: new Date("2026-10-17T12:00:00Z") }, at)).toMatchObject({ ageDays: 29, reviewDue: false });
+    const text = notesLines([{ ...note, updatedAt: new Date("2026-10-01T00:00:00Z"), reviewBy: "2026-11-01" }], at).join("\n");
+    expect(text).toContain("review by 1 Nov");
+    expect(text).toContain("review due: past its review-by date");
+  });
+
+  it("rejects a review-by that is not a real day", () => {
+    for (const bad of ["2026-02-30", "tomorrow", "2026-13-01", "11/11/2026"]) expect(() => checkReviewBy(bad)).toThrow(/YYYY-MM-DD/);
+    expect(() => checkReviewBy(null)).not.toThrow();
+    expect(() => checkReviewBy("2026-11-20")).not.toThrow();
+  });
+
+  it("the owner sets, sees and clears a review-by date; the notes list carries age and the flag", async () => {
+    const c = await setup();
+    const made = await c.req("POST", `/api/agents/${c.ceo.id}/notes`, { title: "Move", text: "pending", why: "owner said so", reviewBy: "2020-01-01" });
+    expect(made.statusCode).toBe(201);
+    const listed = (await c.req("GET", `/api/agents/${c.ceo.id}/notes`)).json().items[0];
+    expect(listed).toMatchObject({ reviewBy: "2020-01-01", reviewDue: true, reviewReason: "past its review-by date", ageDays: 0 });
+    expect((await c.req("PATCH", `/api/agent-notes/${listed.id}`, { reviewBy: "2999-01-01" })).json().reviewBy).toBe("2999-01-01");
+    expect((await c.req("GET", `/api/agents/${c.ceo.id}/notes`)).json().items[0].reviewDue).toBe(false);
+    expect((await c.req("PATCH", `/api/agent-notes/${listed.id}`, { reviewBy: null })).json().reviewBy).toBeNull();
+    expect((await c.req("PATCH", `/api/agent-notes/${listed.id}`, { reviewBy: "2026-02-30" })).statusCode).toBe(400);
+    // An old untouched note is flagged with no review-by date at all.
+    await c.db.update(agentNotes).set({ updatedAt: new Date(Date.now() - 31 * 86_400_000) }).where(eq(agentNotes.id, listed.id));
+    expect((await c.req("GET", `/api/agents/${c.ceo.id}/notes`)).json().items[0]).toMatchObject({ reviewDue: true, reviewReason: "untouched for 30 days" });
+  });
+
+  it("the CEO's notes tool saves a review-by and its list shows age and the flag", async () => {
+    const c = await setup();
+    const chat = await c.chat(SAID);
+    const notes = await c.mcp(chat.runId);
+    const saved = await notes.call({ action: "save", title: "Move", text: "pending", why: SAID, reviewBy: "2020-01-01" });
+    expect(saved.isError).toBeFalsy();
+    const listed = say(await notes.call({ action: "list" }));
+    expect(listed).toMatch(/set \d+ \w+, today; review by 1 Jan; review due: past its review-by date/);
+    expect(say(await notes.call({ action: "save", title: "Other", text: "x", why: SAID, reviewBy: "soon" }))).toMatch(/YYYY-MM-DD/);
     await notes.close();
   });
 });
