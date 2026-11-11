@@ -316,6 +316,7 @@ export async function buildApp(opts: AppOptions) {
   const releaseLog = releaseLogService(db, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     notify: (agentId, input) => scheduler.notify(agentId, input),
+    closeTicket: (id) => work.updateTicket(id, { state: "done" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     log: (m) => app.log.warn(m),
