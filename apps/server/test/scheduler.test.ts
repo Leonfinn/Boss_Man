@@ -419,6 +419,47 @@ describe("scheduler", () => {
     expect(ctx.commands[0]!.prompt).toContain("Still wanted");
   });
 
+  it("drops a ticketless nudge that waited over two hours, but starts a fresh one (BOS-1136)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: "Carry on with the thing.", createdAt: new Date(Date.now() - 16 * 3_600_000) });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    const [old] = await ctx.db.select().from(wakes);
+    expect(old!.status).toBe("dropped");
+    expect(old!.statusReason).toContain("out of date");
+    expect(ctx.commands).toHaveLength(0);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: "Carry on with the thing." });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("drops a ticketless nudge whose named tickets are all finished, by BOS-ref (BOS-1136)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Done one" })).json();
+    const b = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Open one" })).json();
+    await ctx.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
+    const ref = (t: { number: number }) => `TST-${t.number}`;
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)}` });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)} then ${ref(b)}` });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("holds a ticketless nudge while the agent's own ticket waits to start (BOS-1136)", async () => {
+    ctx = await setup({ agent: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Assigned work", assigneeAgentId: worker.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 3, note: "Look at something." });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "woken by owner", priority: 2, note: "Start." });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("Assigned work");
+  });
+
   it("drops a replay for a closed ticket, but still starts a nudge sent after it closed (BOS-256)", async () => {
     ctx = await setup({ agent: 5 });
     // A ticket the owner reopened after it closed, then closed once more: it is done, and the reopen
