@@ -6,6 +6,12 @@
 import type { LauncherChecks } from "./launcher.js";
 
 /**
+ * BOS-1165: the most memory one check may use before scripts/check-all.sh stops it (scripts/check-mem-guard.mjs): twice the 3 GB a check slot is
+ * sized for. Same number as the 6144 default of BOSSMAN_CHECK_MEMORY_MB in check-all.sh (a test keeps the two equal); the panel shows it.
+ */
+export const CHECK_MEMORY_CEILING_BYTES = 6144 * 1024 ** 2;
+
+/**
  * Why the limit in force is lower than the owner's setting, in plain words; null when it is not lower.
  * A lower limit never comes back without a reason: when the launcher gave none, a generic one is made.
  */

@@ -204,6 +204,17 @@ BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(BOSSMAN_CHECK_SLOTS="${SLOTS:-
 [[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
 export BOSSMAN_CHECK_THREADS GOMAXPROCS="${GOMAXPROCS:-$BOSSMAN_CHECK_THREADS}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$BOSSMAN_CHECK_THREADS}" TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$BOSSMAN_CHECK_THREADS}"
 echo "check-all: CPU budget $BOSSMAN_CHECK_THREADS threads per step (BOSSMAN_CHECK_THREADS)"
+# One memory ceiling per check (BOS-1165; see scripts/check-mem-guard.mjs): the runner has one Docker limit for everything in it, and
+# without this a runaway check could take all of it. BOSSMAN_CHECK_MEMORY_MB sets it (default 6144 = twice the 3 GB a slot is sized
+# for; 0 = no ceiling, measure only). A nested check-all (the script tests) is already inside the outer check's ceiling.
+if [ -z "${BOSSMAN_CHECK_GUARDED:-}" ] && [ -f "$(dirname "$self")/check-mem-guard.mjs" ] && command -v node >/dev/null; then
+  export BOSSMAN_CHECK_GUARDED=1
+  mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6144}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6144
+  mem_peak="$(mktemp)"
+  node "$(dirname "$self")/check-mem-guard.mjs" "$$" "$mem_mb" "$mem_peak" &
+  mem_guard=$!
+  trap 'kill "$mem_guard" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
+fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
 step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
