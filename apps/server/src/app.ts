@@ -10,7 +10,7 @@ import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, us
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type WorkspaceDiff } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
-import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
+import { OWNER_MESSAGE_MAX, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -1275,7 +1275,8 @@ export async function buildApp(opts: AppOptions) {
       name: z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9-]{0,31}$/, "Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).").refine((n) => n !== "bossman", "That name is Boss Man's own."),
       url: z.string().max(500).refine((u) => { try { return ["http:", "https:"].includes(new URL(u).protocol); } catch { return false; } }, "Use an http:// or https:// address."),
       transport: z.enum(["http", "sse"]),
-      secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "Use an environment variable name like SCRAPLING_MCP_TOKEN.").nullable().default(null),
+      // The git login is the daemon's alone: as a tool server's secret it would reach the agent's harness as a header (BOS-373).
+      secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "Use an environment variable name like SCRAPLING_MCP_TOKEN.").refine((n) => !isDaemonOnlySecret(n), DAEMON_ONLY_SECRET_REFUSAL).nullable().default(null),
       headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/, "Not a valid header name.").default("Authorization"),
       headerValue: z.string().max(200).default("Bearer {secret}"),
     }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), { path: ["headerValue"], message: "The header value must contain {secret}." });
@@ -1284,7 +1285,7 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       // Says whether each server's token secret is granted, since a mistyped name silently leaves the server out of every run.
       const granted = new Set((await db.select({ env: secretGrants.envName }).from(secretGrants).where(eq(secretGrants.companyId, id))).map((g) => g.env));
-      return (await db.select().from(mcpServers).where(eq(mcpServers.companyId, id)).orderBy(mcpServers.name)).map((m) => ({ ...m, secretGranted: !m.secretEnv || granted.has(m.secretEnv) }));
+      return (await db.select().from(mcpServers).where(eq(mcpServers.companyId, id)).orderBy(mcpServers.name)).map((m) => ({ ...m, secretGranted: !m.secretEnv || granted.has(m.secretEnv), secretRefused: !!m.secretEnv && isDaemonOnlySecret(m.secretEnv) }));
     });
     owner.post("/api/companies/:id/mcp-servers", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

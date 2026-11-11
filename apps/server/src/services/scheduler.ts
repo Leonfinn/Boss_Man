@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel,parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { runFolder } from "./run-folder.js";
@@ -740,7 +740,8 @@ export function schedulerService(
 
   /** The company's tool servers this agent will actually get: the runner drops a server whose token secret isn't granted to it. */
   async function toolServersFor(agent: typeof agents.$inferSelect) {
-    const servers = await db.select({ name: mcpServers.name, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, agent.companyId)).orderBy(mcpServers.name);
+    // A server whose secret is the git login is never sent (BOS-373).
+    const servers = (await db.select({ name: mcpServers.name, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, agent.companyId)).orderBy(mcpServers.name)).filter((s) => !s.secretEnv || !isDaemonOnlySecret(s.secretEnv));
     if (!servers.some((s) => s.secretEnv)) return servers.map((s) => s.name);
     const grants = await db.select({ id: secretGrants.id, envName: secretGrants.envName }).from(secretGrants).where(and(eq(secretGrants.companyId, agent.companyId), isNull(secretGrants.deployTargetId)));
     const limits = grants.length ? await db.select().from(secretGrantAgents).where(inArray(secretGrantAgents.grantId, grants.map((g) => g.id))) : [];
@@ -1065,7 +1066,8 @@ export function schedulerService(
           ticketId: w.ticketId,
         });
     }
-    const toolServers = chat ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
+    // A tool server saved with the git login as its secret (before BOS-373 refused it) is left out: the token would reach the agent's harness.
+    const toolServers = chat ? [] : (await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId))).filter((s) => !s.secretEnv || !isDaemonOnlySecret(s.secretEnv));
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
