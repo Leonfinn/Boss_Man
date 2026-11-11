@@ -558,4 +558,22 @@ OLD
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
+# web_tests (BOS-1095): a failing vitest must make the step fail, and a passing one must not. A stub pnpm stands in for vitest.
+# The function is lifted out of check-all.sh so the real text is tested, not a copy.
+wt="$t/web-tests"; mkdir -p "$wt/bin"
+awk '/^web_tests\(\) \{/{p=1} p{print} p&&/^\}/{exit}' "$here/check-all.sh" >"$wt/fn.sh"
+[ -s "$wt/fn.sh" ] || fail "web_tests: function not found in check-all.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "stub vitest output"; exit "${STUB_VITEST_RC:-0}"' >"$wt/bin/pnpm"; chmod +x "$wt/bin/pnpm"
+web_case() { # web_case <label> <stub vitest exit> <want rc>
+  local rc=0
+  (set -euo pipefail; export PATH="$wt/bin:$PATH" STUB_VITEST_RC=$2 BOSSMAN_CHECK_TIMES_DIR="$wt"
+   self="$wt/check-all.sh"; : >"$self"
+   # shellcheck disable=SC1091
+   . "$wt/fn.sh"; web_tests "$wt" >"$wt/out" 2>&1) || rc=$?
+  [ "$rc" -eq "$3" ] || fail "web_tests $1: rc $rc, want $3: $(cat "$wt/out")"
+}
+cp "$here/check-no-skips.mjs" "$wt/check-no-skips.mjs"
+printf '%s' '{"numPassedTests":1,"testResults":[]}' >"$wt/vitest-web.json"
+web_case "passing vitest" 0 0
+web_case "failing vitest" 1 1
 echo "check-all.test.sh: ok"
