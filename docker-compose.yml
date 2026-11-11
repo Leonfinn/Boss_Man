@@ -186,12 +186,15 @@ services:
 
   # Only here so `docker compose build` makes boss-man-netguard:current, which the launcher starts
   # beside each runner (BOS-324) to block private networks. It exits at once if run.
+  # BOS-1156: its own "build" profile, so `docker compose up` (even with the launcher profile on) never starts it
+  # and leaves no "Exited (0)" container in the dashboard. `docker compose build netguard` (named, as the guides
+  # and scripts do) still builds it, because naming a service turns its profile on.
   netguard:
     build:
       context: .
       dockerfile: apps/netguard/Dockerfile
     image: boss-man-netguard:current
-    profiles: ["launcher"]
+    profiles: ["build"]
     restart: "no"
     command: ["--build-only"]
     network_mode: none
