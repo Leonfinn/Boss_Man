@@ -19,7 +19,10 @@ export type Server = { resolvedUrls: { local: string[] }; close: () => Promise<v
 // A skip with no reason is hard to chase (BOS-1095: the fenced check job skipped these and the
 // gate log said nothing). Say why on stderr whenever the browser or Vite is not available.
 const why = (what: string, e?: unknown) => {
-  const msg = e instanceof Error ? e.message.split("\n")[0] : e === undefined ? "" : String(e);
+  // Playwright's first line ("Target page, context or browser has been closed") hides Chromium's own stderr, which follows
+  // in the message ([pid][err] lines). Keep those lines (not the long command line), folded to one line, so a log shows the cause.
+  const lines = e instanceof Error ? e.message.split("\n").filter((l) => l.trim() && !/<launching>|<launched>|Call log:|Browser logs:/.test(l)) : [];
+  const msg = e instanceof Error ? lines.slice(0, 6).join(" | ").slice(0, 700) : e === undefined ? "" : String(e);
   process.stderr.write(`real-page: ${what}${msg ? `: ${msg}` : ""} (TMPDIR length ${(process.env.TMPDIR ?? "").length}, HOME ${process.env.HOME ?? "unset"})\n`);
 };
 
@@ -32,10 +35,16 @@ export async function launch(): Promise<Browser | null> {
     return null;
   }
   for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
-    try {
-      return await chromium.launch(executablePath ? { executablePath, args: ["--no-sandbox"] } : { args: ["--no-sandbox"] });
-    } catch (e) {
-      why(`chromium launch failed (${executablePath ?? "playwright default"})`, e);
+    // A launch that dies while the machine is busy (many test files start Chromium at once, beside other jobs) can work a moment
+    // later; a missing executable never will, so that one is not retried.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await chromium.launch(executablePath ? { executablePath, args: ["--no-sandbox"] } : { args: ["--no-sandbox"] });
+      } catch (e) {
+        why(`chromium launch failed (${executablePath ?? "playwright default"}, try ${attempt})`, e);
+        if (/doesn't exist/.test(String((e as Error)?.message))) break;
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
     }
   }
   return null;
