@@ -148,14 +148,26 @@ a { color: inherit; text-underline-offset: 3px; }
 .pm-notes li > p:last-child { font-size: 17px; }
 
 
-/* A week, told with the art at full size */
+/* How the work goes (BOS-1080): three ways to spend your time, told with the art at full size.
+   Each card steps further down as the time grows; the bar is decoration only (the words say the time). */
 .week { margin-top: 64px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; list-style: none; padding: 0; align-items: start; }
-.week li { background: var(--paper); border-radius: 20px; padding: 32px 32px 36px; box-shadow: 0 0 0 1px var(--line-light); display: flex; flex-direction: column; }
+.week li { background: var(--paper); border-radius: 20px; padding: 28px 32px 36px; box-shadow: 0 0 0 1px var(--line-light); display: flex; flex-direction: column; }
 .week li:nth-child(2) { margin-top: 72px; }
 .week li:nth-child(3) { margin-top: 144px; }
-.week img { height: 300px; width: auto; align-self: center; margin-bottom: 28px; }
-.week .day { font-family: var(--display); font-weight: 650; font-size: 15px; color: var(--amber-deep); margin-bottom: 6px; }
+.week img { height: 280px; width: auto; align-self: center; margin: 24px 0 28px; }
+.week .day { display: grid; gap: 8px; }
+.week .dur { font-family: var(--display); font-stretch: 112%; font-weight: 750; font-size: 24px; line-height: 1.1; color: var(--amber-deep); }
+.week .bar { display: block; height: 8px; border-radius: 4px; background: #e2e7ee; overflow: hidden; }
+.week .bar i { display: block; height: 100%; border-radius: 4px; background: var(--amber); }
+.week .bar .w12 { width: 12%; }
+.week .bar .w45 { width: 45%; }
+.week .bar .w100 { width: 100%; }
 .week h3 { font-size: 26px; margin-bottom: 10px; }
+/* While you're away: what keeps going without you, on navy like the product sections */
+.away { margin-top: 56px; padding: 32px 36px; border-radius: 20px; background: var(--night); color: var(--chalk); display: grid; grid-template-columns: 220px 1fr; gap: 24px 40px; align-items: start; }
+.away h3 { font-size: 26px; color: var(--amber); }
+.away ul { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px 32px; }
+.away li { padding-top: 14px; border-top: 2px solid var(--line-dark); font-size: 16px; color: var(--chalk-2); }
 
 /* Everything else: a reference list, not a card grid */
 .more { margin-top: 64px; display: grid; grid-template-columns: 5fr 6fr; gap: 72px; align-items: start; }
@@ -240,7 +252,10 @@ a { color: inherit; text-underline-offset: 3px; }
   .week { grid-template-columns: 1fr; gap: 24px; }
   .week li, .week li:nth-child(2), .week li:nth-child(3) { margin-top: 0; display: grid; grid-template-columns: 240px 1fr; grid-template-rows: auto auto 1fr; gap: 0 32px; align-content: center; }
   .week img { height: auto; width: 240px; margin: 0; grid-row: 1 / 4; align-self: center; }
-  .week .day { align-self: end; }
+  .week .day { align-self: end; margin-bottom: 14px; grid-column: 2; }
+  .week h3, .week li > p:last-child { grid-column: 2; }
+  .away { grid-template-columns: 1fr; }
+  .away ul { grid-template-columns: 1fr 1fr; }
   .more { grid-template-columns: 1fr; gap: 48px; }
   .more .shot { aspect-ratio: 16 / 8.1; }
   .more .shot img { width: 150%; }
@@ -307,7 +322,10 @@ a { color: inherit; text-underline-offset: 3px; }
   .pm-notes { grid-template-columns: 1fr; gap: 24px; }
   .week { grid-template-columns: minmax(0, 1fr); }
   .week li, .week li:nth-child(2), .week li:nth-child(3) { display: flex; padding: 24px; min-width: 0; }
-  .week img { width: 220px; margin: 0 auto 20px; }
+  .week img { width: 180px; margin: 16px auto 20px; }
+  .week .day { margin-bottom: 0; align-self: stretch; }
+  .away { padding: 24px 20px; margin-top: 32px; }
+  .away ul { grid-template-columns: 1fr; gap: 16px; }
   .facts-list { grid-template-columns: 1fr; gap: 28px; }
   .more .shot { aspect-ratio: 8 / 7; }
   .more .shot img { width: 260%; }

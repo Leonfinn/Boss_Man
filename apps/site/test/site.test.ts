@@ -52,6 +52,21 @@ describe("build", () => {
     expect(html).toContain('<div class="check">');
   });
 
+  it("builds 'How the work goes' as three time cards in order busy, done, setup, then the away strip", () => {
+    const html = read("index.html");
+    const section = html.slice(html.indexOf("Give it five minutes or an afternoon"), html.indexOf("Reviews, permissions, models"));
+    expect(section).not.toContain("review-marker");
+    expect(section.match(/<span class="bar" aria-hidden="true">/g)).toHaveLength(3);
+    const order = ["Five minutes", "An hour", "An afternoon", "boss-busy.webp", "boss-done.webp", "boss-setup.webp", "While you're away"].map((s) => section.indexOf(s));
+    expect(order.every((n) => n > -1)).toBe(true);
+    expect(order[0]).toBeLessThan(order[1]);
+    expect(order[1]).toBeLessThan(order[2]);
+    expect(order[3]).toBeLessThan(order[4]);
+    expect(order[4]).toBeLessThan(order[5]);
+    expect(order[5]).toBeLessThan(order[6]);
+    for (const img of section.match(/<img [^>]*>/g) ?? []) expect(img).toMatch(/width="\d+" height="\d+"/);
+  });
+
   it("lists Troubleshooting, then the Glossary, then the FAQ, last in the guides list, and links every glossary term to a real guide section", () => {
     const html = read("guides/index.html");
     const cards = html.indexOf('class="g-cards"'); // the header menu links /faq too, so only look at the guide cards

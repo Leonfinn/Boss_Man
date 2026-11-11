@@ -9,6 +9,7 @@ import { agents, decisions, projects, settings, ticketMessages, tickets, wakes }
 import { raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
+import { moveTicket } from "./ticket-moves.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -149,7 +150,7 @@ export const releaseLogService = (
         for (const c of commits) lines.push(c);
         await db.delete(wakes).where(and(eq(wakes.ticketId, other.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])));
         if (deps.closeTicket) await deps.closeTicket(other.id);
-        else await db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, other.id));
+        else await moveTicket(db, other.id, "done", { outcome: "completed", internal: true, note: "Folded into the open release-log ticket" });
         await db.insert(ticketMessages).values({ companyId, ticketId: primary.id, author: "system", text: `Folded "${other.title}" into this ticket.` });
       }
       const have = new Set((primary.body ?? "").split("\n"));

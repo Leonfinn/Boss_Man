@@ -7,6 +7,7 @@ import type { RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, deploys, deployTargets, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import type { Limits } from "../src/services/scheduler.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import type { SweepLimits } from "../src/services/sweeps.js";
 
@@ -18,9 +19,9 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup(sweepLimits?: Partial<SweepLimits>) {
+async function setup(sweepLimits?: Partial<SweepLimits>, limits: Partial<Limits> = {}) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", ...(sweepLimits ? { sweepLimits } : {}) });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", limits, ...(sweepLimits ? { sweepLimits } : {}) });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -240,7 +241,8 @@ describe("free run slots go to idle in-progress work (BOS-574)", () => {
   });
 
   it("never takes a slot from a wake already held at the limit: that wake gets the next free slot", async () => {
-    const c = (ctx = await setup());
+    // The stale-wake drop (BOS-1136) is turned off: the 18-hour-old wake below must stay held, not be dropped.
+    const c = (ctx = await setup(undefined, { staleWakeMs: 1e12 }));
     // A connected runner that accepts every command, so a wake that has room really starts.
     c.runners.connect(c.runnerId, () => true);
     // Company limit 4 keeps one slot for cards: three runs fill it.
