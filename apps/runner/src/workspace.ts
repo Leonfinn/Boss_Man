@@ -1872,7 +1872,8 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       await this.cloneIfMissing(spec, auth);
-      await this.git(["fetch", "--quiet", "--tags", "--force", "origin"], { cwd: repo, env: auth });
+      // The recorded address with forced tags (BOS-373), never `origin` from config: an agent may have repointed it to take the login.
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs, true);
       const branches = await this.remoteBranches(repo);
       if (!DEPLOY_REF.test(spec.ref) || !DEPLOY_REF.test(spec.baseRef)) return { commit: null, onBase: false, branches, error: "That ref isn't a git branch, tag or commit." };
       const candidates = [`refs/remotes/origin/${spec.ref}`, `refs/tags/${spec.ref}`, spec.ref];
@@ -1926,14 +1927,17 @@ export class Workspaces {
       await this.cloneIfMissing(spec, auth);
       const format = await this.gitCode(["check-ref-format", ref], { cwd: repo });
       if (format.code !== 0) return refuse(`git refuses ${spec.name} as a tag name.`);
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
-      const heads = await this.gitCode(["ls-remote", "--heads", "origin"], { cwd: repo, env: auth });
+      // Every call that carries the login goes to the recorded address (BOS-373), never `origin` from config. cloneIfMissing
+      // has just recorded the server's repoUrl. The lease below names its expected value, so it works the same with a URL.
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const url = await this.remoteUrl(repo);
+      const heads = await this.gitCode(["ls-remote", "--heads", url], { cwd: repo, env: auth });
       if (heads.code !== 0) return { result: "failed", from: null, to: spec.commit, error: `Couldn't list the remote's branches: ${heads.stderr.slice(0, 500)}` };
       const branchNames = heads.stdout.split("\n").map((l) => l.split("\t")[1]?.replace(/^refs\/heads\//, "")).filter(Boolean);
       if (branchNames.includes(spec.name)) return refuse(`${spec.name} is also a branch on the remote, so it can't be used as the deploy tag.`);
       if (!(await this.onBase(repo, spec.commit, spec.baseRef))) return refuse(`${spec.commit.slice(0, 7)} isn't on ${spec.baseRef}, so the tag stays where it is.`);
       const read = async (): Promise<string | null | Error> => {
-        const r = await this.gitCode(["ls-remote", "origin", ref], { cwd: repo, env: auth });
+        const r = await this.gitCode(["ls-remote", url, ref], { cwd: repo, env: auth });
         if (r.code !== 0) return new Error(r.stderr.slice(0, 500));
         const line = r.stdout.split("\n").find((l) => l.split("\t")[1] === ref);
         return line ? line.split("\t")[0]! : null;
@@ -1941,7 +1945,7 @@ export class Workspaces {
       const before = await read();
       if (before instanceof Error) return { result: "failed", from: null, to: spec.commit, error: `Couldn't read the tag from the remote: ${before.message}` };
       if (before === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
-      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, "origin", `${spec.commit}:${ref}`], { cwd: repo, env: auth });
+      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, url, `${spec.commit}:${ref}`], { cwd: repo, env: auth });
       if (pushed.code === 0) return { result: "moved", from: before, to: spec.commit };
       const after = await read();
       if (after === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
