@@ -400,3 +400,43 @@ describe("submit_plan (BOS-531)", () => {
     expect(isError(r)).toBe(true);
   });
 });
+
+describe("alert answers wake on the alert's ticket (BOS-1120)", () => {
+  const alertCard = async (c: Awaited<ReturnType<typeof setup>>, ticketId: string) =>
+    (
+      await c.db
+        .insert(decisions)
+        .values({
+          companyId: c.company.id,
+          kind: "question",
+          question: "Engineer looks stuck.",
+          options: ["Got it"],
+          recommendedOption: "Got it",
+          tier: "owner",
+          dedupeKey: `alert:${randomUUID()}`,
+          raisedByAgentId: c.worker.id,
+          context: { type: "question", ladder: { rung: "owner", since: new Date().toISOString(), ticketId, about: [c.worker.id], hops: [] } },
+        })
+        .returning()
+    )[0]!;
+
+  it("wakes the asker on the ticket the alert is about", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Live work", c.worker.id);
+    const d = await alertCard(c, t.id);
+    await c.decisions.answer(d.id, "Got it");
+    const rows = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ticketId).toBe(t.id);
+  });
+
+  it("starts no run when the alert's ticket is already done", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Finished work", c.worker.id);
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
+    const d = await alertCard(c, t.id);
+    await c.decisions.answer(d.id, "Got it");
+    const rows = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
+    expect(rows).toHaveLength(0);
+  });
+});

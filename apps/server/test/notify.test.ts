@@ -89,6 +89,8 @@ describe("notify (R86)", () => {
     await c.scheduler.tick();
     const start = c.starts().find((s) => s.agentId === c.alice.id)!;
     expect(start.workspace).toBeUndefined();
+    // BOS-1120: never the bare <root>/<agentId> folder, which can be a stale copy of an old ticket.
+    expect(start.cwd).toBe(`/ws/agents/${c.alice.id}`);
     expect(start.prompt).toContain(`started in ${start.cwd}, which is not a copy of the repo`);
   });
 
