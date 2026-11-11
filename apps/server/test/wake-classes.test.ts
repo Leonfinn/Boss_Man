@@ -50,6 +50,10 @@ describe("wake classes: the table", () => {
     "agent or company gone",
     "a ticket it waited on finished",
     "the owner wrote on this ticket",
+    // Why a card was flagged "may be out of date" (BOS-1161, stale-requests.ts), not a wake's reason.
+    "a ticket it is about merged",
+    "the runners were rebuilt",
+    "the ticket it is about changed state",
     "snoozed twice in a row and still tripping",
     "runner update",
     // Why a runner restarted (BOS-594), and the setting-change drain's label: not wakes.
