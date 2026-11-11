@@ -22,7 +22,8 @@ fi
 # with XDG folders, removed when the run ends. The child run inherits it, so this happens once, before any step.
 check_home=""
 if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
-  check_home="$(mktemp -d)"
+  # The temp folder first; a host whose default temp folder isn't writable falls back to this ticket's scratch folder.
+  check_home="$(mktemp -d 2>/dev/null || mktemp -d "${BOSSMAN_SCRATCH:-.}/check-home.XXXXXX")"
   echo "check-all: HOME ${HOME:-unset} is not usable; this run uses $check_home"
   export HOME="$check_home" XDG_CONFIG_HOME="$check_home/.config" XDG_CACHE_HOME="$check_home/.cache" XDG_DATA_HOME="$check_home/.local/share"
   mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
