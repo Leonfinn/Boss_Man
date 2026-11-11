@@ -2046,6 +2046,11 @@ export function schedulerService(
     async onTicketMerged(ticketId: string, causedByRunId?: string | null) {
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(and(eq(ticketDependencies.blockerTicketId, ticketId), eq(ticketDependencies.until, "merged")));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
+      // BOS-1161: a merge settles questions about the ticket (and what waits on it) as much as finishing does, and only the
+      // merge happens for a ticket with an after-merge check left. Cards that named the merge in clearsWhen are closed by the
+      // closer; the rest are flagged and their authors woken.
+      const [merged] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      if (merged) await ownerActed(db, { companyId: merged.companyId, ticketIds: [ticketId], reason: "a ticket it is about merged", now: now(), wake: (input) => this.notify(input.agentId, input) });
     },
 
     /**

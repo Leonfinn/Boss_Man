@@ -1,5 +1,5 @@
 {
-  "id": "97d8cbd5-a9e7-412d-aa7b-9750e35cdf51",
+  "id": "584f968f-4794-4ab4-ba42-0e24b816c0f7",
   "prevId": "d673a958-3260-42e6-bb52-e0b9bb4a433a",
   "version": "7",
   "dialect": "postgresql",
@@ -9408,6 +9408,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "owner_setup_override": {
+          "name": "owner_setup_override",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "owner_setup_decision_id": {
           "name": "owner_setup_decision_id",
           "type": "uuid",
@@ -9454,12 +9460,6 @@
         },
         "state_note_stale_at": {
           "name": "state_note_stale_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "wip_held_at": {
-          "name": "wip_held_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

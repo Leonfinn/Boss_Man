@@ -40,14 +40,23 @@ export function effectiveDueDate(ticketDue: string | null, milestoneTarget: stri
 
 /** A ticket's state note for an agent, with its age; flagged when the ticket has moved or the owner has acted since it was written (R85, BOS-123). */
 export function stateNoteLine(
-  t: { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null },
+  t: { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null; stateNoteStaleReason?: string | null },
   now: Date,
 ): string | null {
   if (!t.stateNote || !t.stateNoteAt) return null;
-  const m = Math.max(0, Math.round((now.getTime() - t.stateNoteAt.getTime()) / 60_000));
-  const age = m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
-  const stale = (t.stateNoteStaleAt != null && t.stateNoteStaleAt > t.stateNoteAt) || t.stateNoteAt < t.lastActivityAt;
-  return `State note (${age} ago): ${t.stateNote}${stale ? " (may be out of date)" : ""}`;
+  const ago = (d: Date) => {
+    const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
+    return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+  };
+  const byOwner = t.stateNoteStaleAt != null && t.stateNoteStaleAt > t.stateNoteAt;
+  // Say what the owner did and when, so the reader checks that and not the whole note (BOS-1192).
+  const flag = byOwner ? ` (${staleNoteWhy(t.stateNoteStaleReason, ago(t.stateNoteStaleAt!))})` : t.stateNoteAt < t.lastActivityAt ? " (may be out of date)" : "";
+  return `State note (${ago(t.stateNoteAt)} ago): ${t.stateNote}${flag}`;
+}
+
+/** The plain statement that goes after a state note the owner's action touched: what they did and how long ago (BOS-1192). */
+export function staleNoteWhy(reason: string | null | undefined, ago: string): string {
+  return reason ? `after this was written, ${reason}, ${ago} ago` : `the owner acted on this ticket ${ago} ago, after this was written`;
 }
 
 /** A company's ticket prefix, as in HOL-12: 1 to 10 capital letters or digits. */

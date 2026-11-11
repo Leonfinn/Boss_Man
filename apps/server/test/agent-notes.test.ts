@@ -215,7 +215,10 @@ describe("CEO notes", { timeout: 30_000 }, () => {
     const id = idOf(await notes.call({ action: "save", title: "Website feature tasks", text: "Never claim the owner said not to split it.", why: "into tasks. I never said that" }));
     await notes.close();
     await c.end(first.runId);
-    const line = `- [${id}] Website feature tasks: Never claim the owner said not to split it. (owner said: "into tasks. I never said that"; set ${new Date().getUTCDate()} ${new Date().toLocaleString("en-GB", { month: "short", timeZone: "UTC" })}, today)`;
+    // The "set" day comes from the note's own saved time, not a second clock read here, so a run across midnight UTC can't split them.
+    const [saved] = await c.db.select().from(agentNotes).where(eq(agentNotes.id, id));
+    const setOn = `${saved!.updatedAt.getUTCDate()} ${saved!.updatedAt.toLocaleString("en-GB", { month: "short", timeZone: "UTC" })}`;
+    const line = `- [${id}] Website feature tasks: Never claim the owner said not to split it. (owner said: "into tasks. I never said that"; set ${setOn}, today)`;
 
     const next = await c.chat("Thanks.");
     expect(next.prompt).toContain(`Your notes, kept from what the owner told you and from requests you accepted (the owner can see and change them; 1 of ${NOTE_LIMITS.count})`);

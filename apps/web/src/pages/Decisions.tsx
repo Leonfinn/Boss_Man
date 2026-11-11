@@ -872,7 +872,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {d.staleAt && !done && (
                       <p role="status" style={{ fontWeight: 600 }}>
-                        The owner acted since this was written{d.staleReason ? ` (${d.staleReason})` : ""}. The agent that raised it has been asked to confirm or withdraw it.
+                        {d.staleReason ? `Since this was written, ${d.staleReason}.` : "Something you did on this ticket since this was written may have settled it."} The agent that raised it has been asked to confirm or withdraw it.
                       </p>
                     )}
                     {rule && (
