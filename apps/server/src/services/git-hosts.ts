@@ -9,7 +9,16 @@ export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string;
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
 export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number };
-export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
+/** A failed CI job on the host, with its page (BOS-1070). */
+export type CiRun = { id: number; name: string; url: string };
+/**
+ * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
+ * because of the account's spending limit or payments, which isn't the agent's to fix.
+ */
+export type CiStatus = { state: "passed" | "failed" | "pending" | "none"; failed: CiRun[]; waiting: string[]; billing: boolean };
+const FAILED_CONCLUSIONS = ["failure", "timed_out", "cancelled", "startup_failure", "action_required", "stale"];
+const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?failed/i;
+export type MergeAttempt ={ merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
 
@@ -111,14 +120,78 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * Whether a token can reach the repo and push to it (R58, R56): one read of the repo, whose
      * answer carries the token's permissions on both hosts. Gitea needs the write:repository scope.
      */
-    async checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canPush: boolean; message: string }> {
+    async checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canPush: boolean; canReadChecks?: boolean; message: string }> {
       const res = await call(cfg, token, "GET", "");
       if (res.status === 401 || res.status === 403) return { ok: false, canPush: false, message: `The host refused the token (HTTP ${res.status}).` };
       if (res.status === 404) return { ok: false, canPush: false, message: "The token can't see the repo: check its owner and name, and that the token has access to it." };
       if (!res.ok || !res.json || Array.isArray(res.json)) return { ok: false, canPush: false, message: `The host answered ${res.status}.` };
       const perms = (res.json.permissions ?? {}) as { push?: boolean; admin?: boolean };
       const canPush = perms.push === true || perms.admin === true;
-      return { ok: true, canPush, message: canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail." };
+      const message = canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail.";
+      // GitHub: can the merge gate read CI results (BOS-1070)? A fine-grained token needs Checks: Read-only.
+      const branch = typeof res.json.default_branch === "string" ? res.json.default_branch : null;
+      if (cfg.kind !== "github" || !branch) return { ok: true, canPush, message };
+      const probe = await call(cfg, token, "GET", `/commits/${encodeURIComponent(branch)}/check-runs?per_page=1`).catch(() => null);
+      const canReadChecks = !!probe?.ok;
+      return { ok: true, canPush, canReadChecks, message: `${message} ${canReadChecks ? "It can read GitHub checks." : `It can't read GitHub checks${probe ? ` (HTTP ${probe.status})` : ""}, so the merge gate can't wait for CI: give it Repository permissions → Checks: Read-only.`}` };
+    },
+
+    /**
+     * Whether CI on a commit is finished and green, for the merge gate (BOS-1070). GitHub makes a job's check run only when the
+     * job starts, so the runs alone can read "passed" while later jobs haven't begun: the workflow's check suite, which stays
+     * in progress until its last job ends, says whether anything is still to come. Suites with no runs are other apps' and are
+     * left out (they can sit "queued" for ever). Elsewhere (Gitea) it is the commit statuses, as checks() reads them.
+     */
+    async ciStatus(cfg: GitHostConfig, token: string, sha: string): Promise<CiStatus> {
+      if (cfg.kind !== "github") {
+        const c = await this.checks(cfg, token, sha);
+        return { state: c.state, failed: c.failing.map((name) => ({ id: 0, name, url: "" })), waiting: [], billing: false };
+      }
+      const suitesRes = await call(cfg, token, "GET", `/commits/${encodeURIComponent(sha)}/check-suites?per_page=100`);
+      const suites = (suitesRes.json && !Array.isArray(suitesRes.json) ? suitesRes.json.check_suites : null) as Array<Record<string, unknown>> | null;
+      if (!suitesRes.ok || !Array.isArray(suites)) throw new GitHostError(suitesRes.status, `Couldn't read the check suites on ${sha.slice(0, 8)}: ${messageOf(suitesRes.json, suitesRes.status)}`);
+      const runsRes = await call(cfg, token, "GET", `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100&filter=latest`);
+      const runs = (runsRes.json && !Array.isArray(runsRes.json) ? runsRes.json.check_runs : null) as Array<Record<string, unknown>> | null;
+      if (!runsRes.ok || !Array.isArray(runs)) throw new GitHostError(runsRes.status, `Couldn't read the checks on ${sha.slice(0, 8)}: ${messageOf(runsRes.json, runsRes.status)}`);
+      const live = suites.filter((s) => Number(s.latest_check_runs_count) > 0);
+      const failed = runs
+        .filter((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)))
+        .map((r) => ({ id: Number(r.id), name: String(r.name), url: String(r.html_url ?? r.details_url ?? "") }));
+      const waiting = runs.filter((r) => r.status !== "completed").map((r) => String(r.name));
+      const outputOf = (r: Record<string, unknown>) => {
+        const o = (r.output ?? {}) as { title?: unknown; summary?: unknown };
+        return `${String(o.title ?? "")} ${String(o.summary ?? "")}`;
+      };
+      const billing = runs.some((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)) && BILLING_TEXT.test(outputOf(r)));
+      const suiteFailed = live.some((s) => s.status === "completed" && FAILED_CONCLUSIONS.includes(String(s.conclusion)));
+      const suitePending = live.some((s) => s.status !== "completed");
+      const state = failed.length || suiteFailed ? "failed" : !live.length && !runs.length ? "none" : suitePending || waiting.length ? "pending" : "passed";
+      return { state, failed, waiting, billing };
+    },
+
+    /**
+     * The failure annotations of failed CI jobs (BOS-1070): vitest's GitHub reporter writes one per failing test, with its
+     * name, so the agent is told what failed. Up to `per` lines per job; the generic "Process completed with exit code" goes.
+     */
+    async failures(cfg: GitHostConfig, token: string, runs: CiRun[], per = 10): Promise<Array<{ run: CiRun; lines: string[]; billing: boolean }>> {
+      if (cfg.kind !== "github") return [];
+      const out: Array<{ run: CiRun; lines: string[]; billing: boolean }> = [];
+      for (const run of runs.slice(0, 5)) {
+        const res = await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null);
+        const rows = res?.ok && Array.isArray(res.json) ? res.json : [];
+        const failing = rows.filter((a) => a.annotation_level === "failure");
+        const billing = failing.some((a) => BILLING_TEXT.test(`${String(a.title ?? "")} ${String(a.message ?? "")}`));
+        const lines = failing
+          .filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")))
+          .map((a) => {
+            const where = typeof a.path === "string" && a.path && a.path !== ".github" ? `${a.path}${a.start_line ? `:${a.start_line}` : ""}: ` : "";
+            const title = typeof a.title === "string" && a.title ? `${a.title}: ` : "";
+            return `${where}${title}${String(a.message ?? "").split("\n")[0]}`.slice(0, 300);
+          })
+          .slice(0, per);
+        out.push({ run, lines, billing });
+      }
+      return out;
     },
 
     /** The checks on a commit: GitHub check runs, or Gitea's commit statuses. */

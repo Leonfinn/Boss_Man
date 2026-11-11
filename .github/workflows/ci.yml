@@ -4,21 +4,22 @@ name: CI
 # which already passed scripts/check-all.sh on the owner's machine, so each job runs only for what that
 # can't cover (see "changes"); both run nightly and on demand as a backstop.
 on:
-  # bossman/** pushes run only host-steps (DR-024) and web-browser (BOS-601); the other jobs skip them. No paths-ignore here: a guide under docs/ is a host-steps trigger,
-  # and the changes job turns a docs-only push to main into all-false.
+  # bossman-ci/** is the merge gate's push of the exact merge commit it is about to land (BOS-1070): every job runs on it,
+  # and the gate merges only once all of them pass. bossman/** (a pull request's branch) runs every job too.
+  # No paths-ignore here: a guide under docs/ is a host-steps trigger, and the changes job turns a docs-only push to main into all-false.
   push:
-    branches: [main, "bossman/**"]
+    branches: [main, "bossman/**", "bossman-ci/**"]
   pull_request:
     paths-ignore: ["docs/**", "**/*.md"]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
-# A newer push to a pull request makes its older run pointless. Main keeps every run: a later
-# push may skip a job the earlier one needed.
+# A newer push to a pull request, or the gate publishing a ticket's merge again after main moved,
+# makes the older run pointless. Main keeps every run: a later push may skip a job the earlier one needed.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/bossman') }}
 
 jobs:
   changes:
@@ -36,8 +37,9 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          # Anything but a push to main, or a push whose base we can't see, runs everything.
-          if [ "$GITHUB_EVENT_NAME" != push ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+          # Anything but a push to main, or a push whose base we can't see, runs everything. That includes every
+          # bossman/** and bossman-ci/** push: the gate waits on these runs, so none of their jobs is skipped (BOS-1070).
+          if [ "$GITHUB_EVENT_NAME" != push ] || [ "$GITHUB_REF" != refs/heads/main ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             printf 'check=true\nimages=true\nhoststeps=true\nweb=true\n' >>"$GITHUB_OUTPUT"; exit 0
           fi
           files="$(git diff --name-only "$BEFORE" "$GITHUB_SHA")"
@@ -94,7 +96,7 @@ jobs:
 
   check:
     needs: changes
-    if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.check == 'true' }}
+    if: needs.changes.outputs.check == 'true'
     runs-on: ubuntu-latest
     # A real Postgres for the leader-lock, migrate-lock and db-restart tests (PGlite cannot share locks across connections).
     # Same image as docker-compose.yml: the migrations need pgvector (0036_semantic_wiki.sql).
@@ -147,7 +149,7 @@ jobs:
 
   images:
     needs: changes
-    if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.images == 'true' }}
+    if: needs.changes.outputs.images == 'true'
     # Builds and tests every image natively on x86 and on ARM (BOS-971, plan: BOS-935), no emulation.
     # Nothing is pushed: the runner image contains Claude Code, which must not be redistributed.
     # Steps that don't depend on the processor (compose files, Caddy, shell tests) run on x86 only.

@@ -8,7 +8,7 @@ import { usePoll } from "../hooks";
 import { ago } from "./Dashboard";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
-type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
+type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] } };
 type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -32,6 +32,11 @@ function waited(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** BOS-1070: "Waiting for GitHub CI: images (arm64), check, 12 min so far." */
+export function ciWaitText(ci: { minutes: number; waiting: string[] }): string {
+  return `Waiting for GitHub CI${ci.waiting.length ? `: ${ci.waiting.join(", ")}` : ""}, ${Math.max(0, ci.minutes)} min so far. It merges only once CI passes.`;
 }
 
 /** "12:55" today, "9 Nov, 12:55" on another day. */
@@ -107,6 +112,11 @@ function Running({ rows, slots }: { rows: RunningNow[]; slots: number }) {
               <p className="mq-line">
                 Slot {r.slot}: {PHASE[r.phase]} (the {r.what === "merge_check" ? "merge check" : "agent's own check"}). Started {waited(r.minutes)} ago at {new Date(r.startedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} by {r.startedBy}.
               </p>
+              {r.ci && (
+                <p className="mq-line" data-ci-wait>
+                  {ciWaitText(r.ci)}
+                </p>
+              )}
               {r.overLimit && <p className="mq-next">Next: Boss Man keeps trying by itself; if it can't finish, it puts a card in your Decisions.</p>}
             </article>
           ))}
