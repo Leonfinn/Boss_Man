@@ -478,6 +478,21 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
+  /**
+   * Where a flagged card is in its re-check (BOS-1193, DR-054): "author" (the agent that raised it has 30 minutes),
+   * "ceo" (the CEO has a further 30), or "lapsed" (neither confirmed it, so it is back with the owner and says so).
+   * Null when the card is not being re-checked. The card stays `open` throughout, so holds and answers keep working.
+   */
+  recheckStage: text("recheck_stage"),
+  /** When the card entered its current re-check stage; the deadline for the stage counts from here. */
+  recheckStageAt: timestamp("recheck_stage_at", { withTimezone: true }),
+  /** When the last re-check confirmed the card still holds; events older than this don't flag it again. */
+  recheckedAt: timestamp("rechecked_at", { withTimezone: true }),
+  /** The agent that confirmed it, and the one line on what they checked (kept for the card's history, never on its face). */
+  recheckedByAgentId: uuid("rechecked_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  recheckNote: text("recheck_note"),
+  /** How many times a re-check confirmed this card; a card confirmed twice and flagged again within a day goes straight to the CEO. */
+  recheckCount: integer("recheck_count").notNull().default(0),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.

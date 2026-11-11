@@ -179,6 +179,10 @@ export type Decision = {
   /** An owner action made this card possibly out of date; the raising agent is checking it (BOS-123). */
   staleAt?: string | null;
   staleReason?: string | null;
+  /** BOS-1193: set while the card is being re-checked but still shown (urgent, a live run, a merge card): who is checking it. */
+  rechecking?: { by: string; stage: "author" | "ceo" } | null;
+  /** BOS-1193: set when nobody re-checked the card in an hour; says plainly who failed to. */
+  notRechecked?: string | null;
   companyName: string;
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
@@ -278,6 +282,8 @@ export type Ticket = {
   ownerQuestion?: string | null;
   /** The open card behind `ownerQuestion`, so the Board's button opens that exact card. */
   ownerQuestionId?: string | null;
+  /** The agent re-checking a card this ticket waits on (BOS-1193); the board says so instead of asking the owner to answer. */
+  recheckingBy?: string | null;
   approvedBy?: string | null;
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */
