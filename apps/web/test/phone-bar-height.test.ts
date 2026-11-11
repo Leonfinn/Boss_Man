@@ -27,7 +27,7 @@ function phoneBlocks(src: string): string[] {
 
 describe("the phone top bar keeps its natural height (BOS-1213)", () => {
   it("a general rule below 641px resets .side min-height to 0", () => {
-    const rules = phoneBlocks(css).flatMap((b) => [...b.matchAll(/(?:^|[}\/])\s*\.side\s*\{([^}]*)\}/g)].map((x) => x[1]));
+    const rules = phoneBlocks(css).flatMap((b) => [...b.matchAll(/(?:^|[}\/])\s*\.side\s*\{([^}]*)\}/g)].map((x) => x[1] ?? ""));
     expect(rules.some((r) => /min-height:\s*0\b/.test(r))).toBe(true);
   });
 
