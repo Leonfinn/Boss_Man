@@ -128,7 +128,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const errors: string[] = [];
         page.on("pageerror", (e: any) => errors.push(String(e)));
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
         await new Promise((r) => setTimeout(r, 400));
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
@@ -167,7 +167,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       for (const vp of [sizes[0]!, sizes[1]!, sizes[2]!]) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: 1, hasTouch: vp.touch });
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
         await new Promise((r) => setTimeout(r, 300));
         const nav = await page.locator("nav[aria-label='Settings']").boundingBox();
         const pageBox = await page.locator(".set-page").boundingBox();
@@ -194,7 +194,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       // The phone's opening screen is the menu itself, each row with its hint.
       const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
       await phone.goto(`${base}/#/settings`);
-      await phone.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+      await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
       await new Promise((r) => setTimeout(r, 300));
       expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: nine rows").toBe(9);
       expect(await phone.locator("nav[aria-label='Settings'] .set-item-hint").first().isVisible(), "phone menu: hints show").toBe(true);
