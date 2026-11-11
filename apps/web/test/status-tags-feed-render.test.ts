@@ -4,6 +4,7 @@
 //  - Notifications: a "<Company> needs a decision" card shows its question as the title, the company in the
 //    small line above, and a very long title is cut to its lines with the full text on hover.
 // Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or CI.
+import { execFileSync } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
@@ -14,7 +15,8 @@ import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { feedTitle } from "../src/components/FeedItem";
 
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
-const built = existsSync(path.join(DIST, "index.html"));
+const builtNow = () => existsSync(path.join(DIST, "index.html"));
+const built = builtNow();
 // At the merge gate and in CI a missing build or browser fails the test; on a bare dev machine it skips.
 const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.CI);
 
@@ -101,7 +103,10 @@ let base = "";
 const type = (f: string) => (f.endsWith(".js") ? "text/javascript" : f.endsWith(".css") ? "text/css" : f.endsWith(".html") ? "text/html" : "application/octet-stream");
 
 beforeAll(async () => {
-  server = createServer((req, res) => {
+  // The merge gate and CI run the tests before their own web build step, so build here when dist is missing
+  // (the later build overwrites it). A failed build fails the test; a bare dev machine just skips.
+  if (strict && !builtNow()) execFileSync("pnpm", ["build"], { cwd: path.dirname(DIST), stdio: "pipe", timeout: 240_000 });
+  server =createServer((req, res) => {
     const p = new URL(req.url ?? "/", "http://x").pathname;
     if (p.startsWith("/api/")) {
       res.writeHead(200, { "content-type": "application/json" });
@@ -176,7 +181,7 @@ describe("feedTitle", () => {
 
 describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1667 x 724", () => {
   it("tags are sentence case, 12 px body font with a dot and 4.5:1; the feed leads with the question and cuts long titles", async () => {
-    expect(built, "apps/web/dist is missing; the merge gate and CI build the web app first").toBe(true);
+    expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
     const browser = await launch();
     if (!browser) {
       expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
@@ -219,7 +224,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
   }, 60_000);
 
   it("the screens open at 1550, 1667 x 724 and a phone width without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)", async () => {
-    expect(built, "apps/web/dist is missing; the merge gate and CI build the web app first").toBe(true);
+    expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
     const browser = await launch();
     if (!browser) {
       expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
