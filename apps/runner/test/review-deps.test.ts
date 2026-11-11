@@ -124,7 +124,10 @@ describe("a review copy's packages (BOS-693)", () => {
 
 describe.skipIf(level === "unavailable")("a review copy's install is fenced (BOS-693)", () => {
   it("can't read a secret outside the review copy", async () => {
-    const secretDir = mkdtempSync(path.join(process.env.HOME ?? tmpdir(), ".bm-rd-secret-"));
+    // A check job on a runner older than BOS-1095 gets a HOME that was never created: make it, or use the temp folder.
+    let secretBase = process.env.HOME ?? tmpdir();
+    try { mkdirSync(secretBase, { recursive: true }); } catch { secretBase = tmpdir(); }
+    const secretDir = mkdtempSync(path.join(secretBase, ".bm-rd-secret-"));
     writeFileSync(path.join(secretDir, "token"), "TOPSECRET");
     const root0 = mkdtempSync(path.join(tmpdir(), "bm-rd-store-"));
     const store = path.join(root0, "store");
