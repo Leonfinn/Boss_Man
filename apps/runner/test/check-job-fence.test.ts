@@ -67,6 +67,25 @@ describe.skipIf(level === "unavailable")("fenced check job", () => {
   });
 });
 
+describe("check job finds the global browser tools (BOS-1095)", () => {
+  it("gets NODE_PATH and PLAYWRIGHT_BROWSERS_PATH, and can read the folders they name", async () => {
+    // The real-browser web tests need `require("playwright")` (a global npm tool, found through NODE_PATH). Without
+    // it they skipped inside the gate and BOS-1071 failed every merge on the skips.
+    const globalModules = tmp("bm-fj-global-");
+    mkdirSync(path.join(globalModules, "playwright"));
+    writeFileSync(path.join(globalModules, "playwright", "index.js"), "module.exports = { chromium: 'found' };\n");
+    const browsers = tmp("bm-fj-browsers-");
+    writeFileSync(path.join(browsers, "marker"), "browsers-here");
+    const { commit, root } = setup({ level });
+    const ws = new Workspaces(root, { ...process.env, NODE_PATH: globalModules, PLAYWRIGHT_BROWSERS_PATH: browsers }, undefined, undefined, { level });
+    const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `node -e 'console.log("pw=" + require("playwright").chromium)'; echo browsers=$PLAYWRIGHT_BROWSERS_PATH; cat "$PLAYWRIGHT_BROWSERS_PATH/marker"`, 60_000);
+    expect(r.output).toContain("pw=found");
+    expect(r.output).toContain(`browsers=${browsers}`);
+    expect(r.output).toContain("browsers-here");
+  });
+});
+
 describe("unfenced check job (BOS-655)", () => {
   it("still gets its own HOME/TMPDIR and the pnpm store on the workspaces volume, and leaves no HOME behind", async () => {
     const { root, commit } = setup({ level: "unavailable" });
