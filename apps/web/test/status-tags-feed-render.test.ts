@@ -3,7 +3,7 @@
 //  - Status tags: sentence case, 12 px body font (not the code font), a coloured dot, 4.5:1 text contrast.
 //  - Notifications: a "<Company> needs a decision" card shows its question as the title, the company in the
 //    small line above, and a very long title is cut to its lines with the full text on hover.
-// Skipped, not failed, where the build or a browser is missing (the gate builds the web app first).
+// Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or CI.
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
@@ -14,6 +14,8 @@ import { feedTitle } from "../src/components/FeedItem";
 
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
 const built = existsSync(path.join(DIST, "index.html"));
+// At the merge gate and in CI a missing build or browser fails the test; on a bare dev machine it skips.
+const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.CI);
 
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", nextTicketNumber: 12, agents: [], projects: [] };
@@ -154,10 +156,14 @@ describe("feedTitle", () => {
   });
 });
 
-describe.skipIf(!built)("BOS-1124 tags and feed items as painted at 1667 x 724", () => {
+describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1667 x 724", () => {
   it("tags are sentence case, 12 px body font with a dot and 4.5:1; the feed leads with the question and cuts long titles", async () => {
+    expect(built, "apps/web/dist is missing; the merge gate and CI build the web app first").toBe(true);
     const browser = await launch();
-    if (!browser) return;
+    if (!browser) {
+      expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
+      return;
+    }
     try {
       const page = await browser.newPage({ viewport: { width: 1667, height: 724 }, deviceScaleFactor: 1 });
       await page.goto(`${base}/#/notifications`, { waitUntil: "networkidle" });
@@ -195,8 +201,12 @@ describe.skipIf(!built)("BOS-1124 tags and feed items as painted at 1667 x 724",
   }, 60_000);
 
   it("the screens open at 1550, 1667 x 724 and a phone width without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)", async () => {
+    expect(built, "apps/web/dist is missing; the merge gate and CI build the web app first").toBe(true);
     const browser = await launch();
-    if (!browser) return;
+    if (!browser) {
+      expect(strict, "no browser could be launched; the merge gate and CI must supply one").toBe(false);
+      return;
+    }
     const dir = process.env.BOSSMAN_SCRATCH;
     try {
       for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) {
