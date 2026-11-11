@@ -3,11 +3,11 @@
 // limit and priority order. Before launching it checks budgets and fails closed (R34),
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
-import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
 import { pickAccount } from "./claude-accounts.js";
@@ -15,6 +15,9 @@ import { activity, agents, companies, costEvents, decisions, engagements, fundin
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { systemMoveTicket } from "./ticket-transition.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
+import { agentWipHold, isWipHeldNote, oldestInProgress } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -28,12 +31,13 @@ import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
+import { fairOrder, HELD_AGENT, HELD_ALL_COMPANIES, HELD_BACKGROUND, HELD_CHAT, HELD_COMPANY, HELD_REPLY } from "./fair-share.js";
 import { conversationLines } from "./ticket-chat.js";
 import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { ClearWhen } from "./alert-clearing.js";
-import { AGE_STEP_MS, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
+import { agedRank, reasonsOfClass, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 export { WAKE_CLASS, wakeClass, type WakeClass, type WakeOutcome } from "./wake-classes.js";
 
 export type Limits = {
@@ -46,10 +50,17 @@ export type Limits = {
   selfWakesPer10Min: number;
   /** Wakes with no ticket an agent may get in an hour, not counting the owner's own (R68). */
   ticketlessPerHour: number;
+  /** A ticketless wake an agent started (a nudge, say) that has waited this long is dropped, not delivered (BOS-1136). */
+  staleWakeMs: number;
   /** How long the wiki maintainer's upkeep wake waits for more finished tickets, so a busy hour starts a few runs, not one per ticket and over ticketlessPerHour. */
   wikiBatchMs: number;
   /** Subscription utilisation at which low-priority work waits for the reset. */
   quotaHoldAt: number;
+  /**
+   * Agents on an `infinite:` model (BOS-279) run in the background: their own slots, so slow free runs can't
+   * starve normal work. This is the count when the owner hasn't saved one in Settings (default 2).
+   */
+  background: number;
   /** Wakes at or above this priority ignore the quota hold. */
   highPriority: number;
   /**
@@ -74,15 +85,27 @@ export type Limits = {
 export const WIKI_REASON = "wiki upkeep";
 /** A watcher's report on the tickets it watches (R80). Scheduled by Boss Man, so not counted as ticketless churn. */
 export const WATCH_REASON = "ticket watch";
+/**
+ * A short parallel CEO run (BOS-434): started when an owner message or a card for the CEO arrives
+ * while a long CEO run is open. It runs in the reply lane (runs.purpose "reply"): one extra slot per
+ * agent outside the work limits, with the CEO's run tools, and ends after the answer.
+ */
+export const CEO_REPLY_REASON = "ceo reply";
+export const REPLY_PURPOSE = "reply";
+/** BOS-1082: said to a run that starts with no ticket checkout, so the agent doesn't take its folder for a lost one. */
+export const noCheckoutNote = (folder: string) =>
+  `\n\nThis run has no ticket checkout: it started in ${folder}, which is not a copy of the repo. Don't edit code, run checks or create a worktree here. To change code, work on a run woken on that ticket: it starts in the ticket's own checkout.`;
 // TREE_REASON (mcp.ts) wakes the watcher when everything in its watched tree has stopped.
 /** An assigned ticket nobody is working on, found by the sweep (R82). */
 export const MISSED_REASON = "missed work";
 /** An urgent ticket in progress that nobody is working on, found by the sweep (BOS-346). */
 export const URGENT_IDLE_REASON = "urgent idle";
+/** A free run slot given to an in-progress ticket nobody is working on (BOS-574, DR-029). */
+export const IDLE_SLOT_REASON = "idle slot";
+/** Free run slots and idle agents with nothing ready: the CEO is asked to hand out work (BOS-615). */
+export const IDLE_AGENTS_REASON = "idle agents";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
-/** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
-export const DECISION_REASON = "decision";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
@@ -97,12 +120,47 @@ const LOOP_EXCHANGES = 4;
 
 /** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
 export const CARRY_ON_MS = 15 * 60_000;
-const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
+export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
+/**
+ * Why a closed ticket's wake is dropped (BOS-256). A wake that waited for a reason (quiet hours, the
+ * subscription quota, a paused company) can outlive the ticket it is for. When nothing on the ticket has
+ * happened since a person or Boss Man closed it, starting it would only replay the old note or nudge, so
+ * the wake is dropped instead. Said in plain words, as it is the wake's recorded reason.
+ */
+const CLOSED_TICKET_REASON = "the ticket was already finished, so there was nothing to do";
+
+/**
+ * The wakes whose only job is to replay something that already happened: a note that the owner moved the
+ * ticket, a colleague's nudge or message, a chase, an assignment or an unblock (BOS-256). Every other
+ * reason is left alone, because it can still be real work on a closed ticket: a watch or tree wake gives
+ * its final update, a review or check wake closes one out, and a decision or alert card is answered on
+ * the card. Only these replays are dropped for a ticket that was finished before they could start.
+ */
+const REPLAY_REASONS = new Set(["woken by owner", "nudge", "message", "chased", "assigned", "unblocked"]);
+
+/**
+ * Whether these waiting wakes for this ticket have nothing to act on any more (BOS-256): every one is a
+ * replay, the ticket is closed (done, cancelled included), and every one was queued at or before the
+ * moment it closed. `stateChangedAt` is when it closed (a database trigger sets it on every state
+ * change), so a wake created after that is something new — a nudge or message sent once the ticket was
+ * finished — and is not a replay. It compares wake times with the close time, not the ticket's last
+ * activity: nudges, messages and chases don't update that, so they would be mistaken for replays (R
+ * review on BOS-256). Someone who reopens it moves the state clock, so their work keeps its wake too.
+ */
+function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { systemState: string; stateChangedAt: Date | null }): boolean {
+  // Only replays; a watch, review, check or card wake is left to its own handling even on a closed ticket.
+  if (!open.length || !open.every((w) => REPLAY_REASONS.has(w.reason))) return false;
+  if (t.systemState !== "done") return false;
+  // No close time recorded: treat it as just closed, so a replay is still dropped rather than waking anyone.
+  if (!t.stateChangedAt) return true;
+  return open.every((w) => w.createdAt.getTime() <= t.stateChangedAt!.getTime());
+}
+
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -119,6 +177,8 @@ export type WakeInput = {
   defer?: { until: Date; why: string };
   /** Set by notify(): deliver the note into this live run instead of starting one. */
   steerRunId?: string | null;
+  /** A card the CEO must answer soon (a permission card): with a CEO run already open, also starts a reply-lane run (BOS-434). Not stored. */
+  replyLane?: boolean;
 };
 
 /**
@@ -131,8 +191,19 @@ const outcomeOf = (row: typeof wakes.$inferSelect, merged = false): WakeResult =
 /** A message the owner didn't send via a run counts as the owner's; one an agent sent is agent-started. */
 const wakeClassOf = (w: { reason: string; causedByRunId?: string | null }): WakeClass => (fromOwner(w) ? "waiting" : w.reason === "message" ? "agent" : wakeClass(w.reason));
 
+/** Runs still going that are real work, not the owner's chat or the CEO's reply lane (BOS-349). */
+const liveWorkRuns = async (db: Db) =>
+  (await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`))).length;
+
 /** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
 type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
+
+/** The plan-first instruction, by harness: only Claude Code is in plan mode and has ExitPlanMode; OpenCode runs in build mode and has no plan tool (BOS-531). */
+export function planFirstText(agentKind: string): string {
+  if (agentKind === "claude") return "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.";
+  // Any harness but Claude Code (today OpenCode) has no plan mode, so it submits its plan through the bossman submit_plan tool.
+  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
+}
 
 export function schedulerService(
   db: Db,
@@ -174,38 +245,71 @@ export function schedulerService(
     const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "backlog" && t?.state !== "ready") return false;
     const waits = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     // A launch starts a ticket handed to it; the start check's backlog rule asks about a wake nobody
     // handed over, which a launch always is.
-    const waiting = waits.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    const waiting = waits.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (waiting.length) return false;
-    const [col] = await db
-      .select({ id: workflowColumns.id })
-      .from(workflowColumns)
-      .where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "in_progress")))
-      .orderBy(asc(workflowColumns.position))
-      .limit(1);
-    await db
-      .update(tickets)
-      .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
-      .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+    // The agent's WIP limit may hold the start: the ticket then waits in Ready and nothing starts (BOS-1029).
+    const moved = await systemMoveTicket(db, { ticketId, from: ["backlog", "ready"], to: "in_progress", reason: "Boss Man: started on the wake", now: now() });
+    if (moved?.systemState !== "in_progress") return false;
     if (t.featureId) await deps.onFeature?.(t.featureId);
     return true;
   }
 
+  /**
+   * The WIP limit's answer for a wake whose ticket was held in Ready: the reason, and the agent's oldest
+   * in-progress ticket to carry on with instead (BOS-1029). Null when the ticket isn't held.
+   */
+  async function wipHeldRefusal(ticketId: string): Promise<string | null> {
+    const [t] = await db.select({ state: tickets.systemState, note: tickets.stateNote, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+    if (t?.state !== "ready" || !isWipHeldNote(t.note) || !t.agentId) return null;
+    const oldest = await oldestInProgress(db, t.agentId);
+    if (!oldest) return `${t.note} (Not started.)`;
+    const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
+    return `you are at your limit of in-progress tickets, so it stays in Ready and starts when one finishes. Carry on with your oldest unfinished ticket, "${o?.title ?? oldest}", instead.`;
+  }
+
+  /**
+   * A freed slot starts a held ticket by itself (BOS-1029): an agent under its limit with a held Ready ticket is woken on it,
+   * and the launch then starts it. One per pass per agent, oldest first.
+   */
+  async function wakeHeldStarts(self: { notify: (agentId: string, input: { ticketId: string; reason: string; note: string }) => Promise<unknown> }) {
+    const held = await db
+      .select({ id: tickets.id, note: tickets.stateNote, agentId: tickets.assigneeAgentId })
+      .from(tickets)
+      .where(and(eq(tickets.systemState, "ready"), isNotNull(tickets.assigneeAgentId), like(tickets.stateNote, "Waiting: %")))
+      .orderBy(asc(tickets.createdAt));
+    const seen = new Set<string>();
+    for (const h of held) {
+      if (!h.agentId || seen.has(h.agentId) || !isWipHeldNote(h.note)) continue;
+      seen.add(h.agentId);
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(and(eq(agents.id, h.agentId), isNull(agents.retiredAt)));
+      if (!a) continue;
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, h.id));
+      if (!t || (await agentWipHold(db, t)).hold) continue;
+      // Already woken (queued or running on it): don't pile another note on every pass.
+      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, h.agentId), eq(wakes.ticketId, h.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+      if (waiting) continue;
+      await self.notify(h.agentId, { ticketId: h.id, reason: "assigned", note: "Your WIP limit has room again, so this held ticket can start now." });
+    }
+  }
+
   /** Why a launch did not start a ticket it was woken for, in words the agent can act on (BOS-254). */
   async function startRefusalFor(ticketId: string): Promise<string | null> {
+    const held = await wipHeldRefusal(ticketId);
+    if (held) return held;
     const deps = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    const waiting = deps.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
     if (!waiting.length) return null;
     const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
     return `it still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished.`;
@@ -230,6 +334,22 @@ export function schedulerService(
     const off = new Set(source.quotaDisabledWindows ?? []);
     const threshold = source.quotaHoldAt ?? limits.quotaHoldAt;
     return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
+  }
+
+  /**
+   * The funding source ids Infinite mode runs are paid from (BOS-279): a Synthetic plan with an agent on an
+   * `infinite:` model and no other live agent. Those runs don't spend the plan's credits (checked on the live
+   * API), so the quota hold never applies to them and there is no "paused" note to send. A plan that also pays
+   * for a normal agent is held for that agent, so the owner is told (BOS-852: it used to be skipped).
+   */
+  async function infiniteSourceIds() {
+    const rows = await db
+      .select({ id: fundingSources.id, model: agents.model })
+      .from(fundingSources)
+      .innerJoin(agents, eq(agents.fundingSourceId, fundingSources.id))
+      .where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "synthetic"), isNull(agents.retiredAt)));
+    const mixed = new Set(rows.filter((r) => !isInfiniteModel(r.model)).map((r) => r.id));
+    return new Set(rows.filter((r) => !mixed.has(r.id)).map((r) => r.id));
   }
 
   /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
@@ -268,6 +388,9 @@ export function schedulerService(
 
   /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
   async function swapAdvice(source: typeof fundingSources.$inferSelect) {
+    // Synthetic spends the account's paid top-up credit once the weekly allowance is used (BOS-934).
+    if (source.provider === "synthetic")
+      return ` If the Synthetic account has top-up credit, set "I have top-up credit" to "Keep all work running" on the Funding page to carry on with it.`;
     if (source.provider !== "anthropic") return "";
     const pool = await claudeAccounts(source);
     for (const other of pool.filter((p) => p.id !== source.id)) {
@@ -283,7 +406,10 @@ export function schedulerService(
   async function quotaNotices(t: Date) {
     if (!deps.notifyOwner) return;
     const sources = await db.select().from(fundingSources).where(eq(fundingSources.kind, "subscription"));
+    // A Synthetic plan whose work is all Infinite mode can't be held (BOS-279), so there is nothing to announce about it.
+    const infinite = await infiniteSourceIds();
     for (const source of sources) {
+      if (infinite.has(source.id)) continue;
       const samples = await latestQuotaWindows(source.id);
       if (samples.length === 0) continue;
       const full = holdingWindows(source, samples, t);
@@ -294,7 +420,7 @@ export function schedulerService(
       const urgentStillRuns = source.quotaOverage !== "pause" || !(overage || full.some((s) => s.utilization >= 1));
       if (held && !source.quotaHeldNotified) {
         const first = full.reduce((a, b) => (b.utilization > a.utilization ? b : a));
-        const reset = first.resetsAt ? ` until ${first.resetsAt.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+        const reset = first.resetsAt ? ` until ${formatDate("en-GB", first.resetsAt, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
         const stillRuns = urgentStillRuns ? "Chats, reviews, deploy approvals and urgent tickets still run." : "Chats, reviews and deploy approvals still run; urgent tickets wait too, because the limit is reached.";
         await deps
           .notifyOwner({
@@ -590,7 +716,7 @@ export function schedulerService(
       const claimed = await db.update(tickets).set({ monitorAt: null, monitorRestartAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
       if (!claimed.length) continue;
       const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
-      if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review")) {
+      if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review" && x.systemState !== "blocked")) {
         await log("Cleared the scheduled check: the ticket is no longer being worked");
         continue;
       }
@@ -628,7 +754,8 @@ export function schedulerService(
     // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
     // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
     const notes = agent.role === "ceo" ? await ceoNotesLines(db, agent.companyId, agent.id) : [];
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    // The built-in rules sit in the trusted prompt, ahead of the brief whose standing rules add to them (BOS-754).
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", ...BUILT_IN_RULES, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     const toolServers = await toolServersFor(agent);
     if (toolServers.length)
       lines.push(
@@ -666,7 +793,11 @@ export function schedulerService(
         if (brief)
           lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
-        lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        lines.push(
+          "",
+          "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.",
+          "Keep proofs and check logs (a recording, a screenshot, a long test output, a check log) in $BOSSMAN_SCRATCH, this ticket's folder on the runner's kept disk: it survives runner restarts, where /tmp is wiped. scripts/check-quick.sh and scripts/check-all.sh write their logs there by themselves when it is set. If it isn't set on this run, /tmp is all you have; say where you put the proof in your state note. Never commit proofs or logs to the repo.",
+        );
         if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
@@ -681,11 +812,11 @@ export function schedulerService(
         if (t.t.systemState === "in_progress")
           lines.push(
             "",
-            `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
+            `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If your ticket has to wait for another ticket, say so with update_ticket waitsOn (until merged, the default, or done), not only in a note: nothing acts on a note, and the link wakes you when that point is reached. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
           );
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
-        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
+        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", planFirstText(agent.agentKind));
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
         const talk = await conversationLines(db, t.t.id);
@@ -698,8 +829,13 @@ export function schedulerService(
     if (w.reason === REVIEW_REASON) {
       lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
       const copy = await reviewCopy(w);
-      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included. Read the code around the change and run its checks there before you give your verdict; nothing you change there reaches the ticket. For any other ticket listed, use the review tool's diff and tickets read.`);
+      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }
+    if (w.reason === CEO_REPLY_REASON)
+      lines.push(
+        "",
+        "This is a short reply run. Another run of yours is busy with a long task and can't answer in time. Do only this: if the owner wrote to you, answer with ticket_reply (read the ticket first if you need to); if a card is waiting on you, read it with the decisions tool and answer it. Don't start, change or take over any work, edit files or run long commands. Once you have answered, stop.",
+      );
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
@@ -807,6 +943,59 @@ export function schedulerService(
       .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
   }
 
+  /**
+   * The waiting wakes for this wake's ticket that have outlived it (BOS-256), or null when it still has
+   * work. It reads the ticket once, and only for a wake with a ticket; a wake with none launches as
+   * before. The ids are the ticket's other waiting wakes, so the whole replay goes in one step.
+   */
+  async function finishedTicketWake(w: typeof wakes.$inferSelect): Promise<{ finished: true; ids: string[] } | null> {
+    if (!w.ticketId) return null;
+    const [t] = await db.select({ systemState: tickets.systemState, stateChangedAt: tickets.stateChangedAt }).from(tickets).where(eq(tickets.id, w.ticketId));
+    if (!t || t.systemState !== "done") return null;
+    const waiting = await db
+      .select({ id: wakes.id, reason: wakes.reason, createdAt: wakes.createdAt })
+      .from(wakes)
+      .where(and(eq(wakes.ticketId, w.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+    if (!finishedSince(waiting, t)) return null;
+    return { finished: true, ids: waiting.map((x) => x.id).filter((id) => id !== w.id) };
+  }
+
+  /**
+   * Why a ticketless wake an agent started (a nudge, say) is no longer worth delivering (BOS-1136), or null.
+   * It is stale when it has waited longer than `staleWakeMs`, or when its note names tickets (as PREFIX-number
+   * or by id) and every one of them is finished. Only this class: a person's message, a card or a scheduled
+   * wake is never dropped here.
+   */
+  async function staleAgentWake(w: typeof wakes.$inferSelect): Promise<string | null> {
+    if (w.ticketId || wakeClassOf(w) !== "agent") return null;
+    const waited = now().getTime() - w.createdAt.getTime();
+    if (waited > limits.staleWakeMs) return `it waited ${Math.round(waited / 3_600_000)} hours, so it is out of date`;
+    if (!w.note) return null;
+    const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, w.companyId));
+    const named: Array<{ systemState: string }> = [];
+    const ids = [...new Set(w.note.match(NOTE_TICKET_IDS) ?? [])];
+    if (ids.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.id, ids)))));
+    const prefix = company?.prefix;
+    if (prefix) {
+      const re = new RegExp(`\\b${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)\\b`, "gi");
+      const numbers = [...new Set([...w.note.matchAll(re)].map((m) => Number(m[1])))];
+      if (numbers.length) named.push(...(await db.select({ systemState: tickets.systemState }).from(tickets).where(and(eq(tickets.companyId, w.companyId), inArray(tickets.number, numbers)))));
+    }
+    return named.length && named.every((x) => x.systemState === "done") ? "every ticket it named was already finished" : null;
+  }
+
+  /** Whether the agent has a ready or in-progress ticket that hasn't started a run yet, so a ticketless wake must not take its slot (BOS-1136). */
+  async function hasWaitingTicket(agentId: string): Promise<boolean> {
+    const [row] = await db
+      .select({ id: wakes.id })
+      .from(wakes)
+      .innerJoin(tickets, eq(tickets.id, wakes.ticketId))
+      .where(and(eq(wakes.agentId, agentId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId), eq(tickets.assigneeAgentId, agentId), inArray(tickets.systemState, ["ready", "in_progress"])))
+      .limit(1);
+    return !!row;
+  }
+
+  /** The launch of one wake, or why it doesn't start (BOS-256); see launch(). */
   async function launch(w: typeof wakes.$inferSelect, onSource?: string): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
@@ -830,7 +1019,8 @@ export function schedulerService(
     const runTicketId = onTicket ?? w.ticketId;
     // Starting work is for a wake with a ticket of its own; a reviewer was handed a ticket in
     // review, so neither starting nor the start check applies to it.
-    const startsTicket = !!w.ticketId && w.reason !== WATCH_REASON;
+    const reply = w.reason === CEO_REPLY_REASON;
+    const startsTicket = !!w.ticketId && w.reason !== WATCH_REASON && !reply;
     const startedIt = startsTicket ? await startTicket(w.ticketId!) : false;
     const notStarted = startsTicket && !startedIt ? await startRefusalFor(w.ticketId!) : null;
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
@@ -844,18 +1034,21 @@ export function schedulerService(
     const copy = await reviewCopy(w, onTicket);
     const briefAt = now();
     // A watch wake carries its ticket for the queue and the caps, but its run only reports on it: no worktree, no start, no ticket brief.
-    const workTicketId = w.reason === WATCH_REASON ? null : w.ticketId;
-    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(workTicketId === w.ticketId ? w : { ...w, ticketId: null }, agent, company.name, briefAt, notStarted);
-    // A CEO's run belongs to its current chapter (CEO continuity).
-    const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
+    // A reply run reads its ticket but does no work on it: no worktree, and no start (BOS-434).
+    const workTicketId = w.reason === WATCH_REASON || reply ? null : w.ticketId;
+    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(workTicketId === w.ticketId || reply ? w : { ...w, ticketId: null }, agent, company.name, briefAt, notStarted);
+    // A CEO's run belongs to its current chapter (CEO continuity); a reply run is outside it, as the long run holds the chapter.
+    const chapter = !chat && !reply && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     // Why the run started is kept on it, so a run with no ticket still says what it was for
     // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake that
     // lists several starts on none (BOS-268), and picking one of them would point the card at
     // the wrong ticket.
     const origin = w.reason;
     const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : reply ? REPLY_PURPOSE : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
+    // BOS-1082: a run with no ticket checkout (no ticket, a watch or a reply) is told so, so it doesn't take its folder for a lost checkout.
+    const noCheckout = !chat && agent.role !== "ceo" && !copy && !(ticket?.repoUrl && workTicketId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
@@ -883,7 +1076,7 @@ export function schedulerService(
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
       fundingSourceId: onSource ?? agent.fundingSourceId,
-      cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, workTicketId ?? agent.id),
+      cwd: chat ? chat.cwd(w.companyId, w.agentId) : runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply }),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
@@ -891,12 +1084,17 @@ export function schedulerService(
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
-      prompt: chapter?.prompt ?? wakePrompt,
+      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : ""),
       mcpToken,
+      // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
+      // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
+      mcpRequired: true,
       ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
+      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
@@ -906,7 +1104,7 @@ export function schedulerService(
       return { ok: false, reason: "runner offline" };
     }
     await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: null }).where(eq(wakes.id, w.id));
-    if (!chat) {
+    if (!chat && !reply) {
       // The cursor moves only now the run is sent, so a failed launch loses no changes (R83).
       await db.update(agents).set({ briefSeenAt: briefAt }).where(eq(agents.id, agent.id));
       await record(db, { companyId: w.companyId, agentId: agent.id, ticketId: w.ticketId, kind: "run_started", summary: `Started (${w.reason})`, at: now() });
@@ -941,9 +1139,81 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
+  /** The all-companies, per-company and background run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
+  async function limitsNow() {
+    const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
+    const stored = lrow?.value as { instance?: number; company?: number; background?: number } | undefined;
+    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company, maxBackground: stored?.background ?? limits.background };
+  }
+
   const self = {
     limits,
     hasRoom,
+
+    /**
+     * How many more work runs the company could start now (BOS-574): the instance and company limits
+     * (the owner's Settings first), less the slot kept for cards, the work runs going and the wakes
+     * already waiting. 0 while everything is paused, an update hold is on, or in the owner's quiet
+     * hours, when a routine wake would only wait. The idle-slot sweep fills no more than this.
+     */
+    async freeSlots(companyId: string): Promise<number> {
+      if (await globallyPaused()) return 0;
+      if (await getHold(db)) return 0;
+      if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
+      const { maxTotal, maxCompany } = await limitsNow();
+      const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
+      const live = await db.select({ companyId: runs.companyId, agentId: runs.agentId, model: runs.model }).from(runs).where(and(isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.purpose} is distinct from ${REPLY_PURPOSE}`));
+      // Infinite-mode runs (BOS-279) take no normal slot, so they don't fill one here either.
+      const work = live.filter((r) => !isInfiniteModel(r.model));
+      // Only wakes that would take a slot of their own (BOS-667). A wake held until later (quiet hours, a
+      // retry time) or by the quota can't start now, and a wake whose agent already has its runs going
+      // starts only in the slot that run frees, so neither stands in for a slot that is in use. Counting
+      // them let the idle-slot sweep see a full house while slots sat empty (7 Nov, 5 of 10 slots).
+      const t = now();
+      const queue = await db
+        .select({ companyId: wakes.companyId, agentId: wakes.agentId, model: agents.model })
+        .from(wakes)
+        .innerJoin(agents, eq(agents.id, wakes.agentId))
+        .where(
+          and(
+            or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)), sql`coalesce(${wakes.statusReason}, '') not like ${QUOTA_HOLD_LIKE}`)),
+            sql`coalesce(${wakes.statusReason}, '') <> 'agent paused'`,
+            ne(wakes.reason, CHAT_REASON),
+            ne(wakes.reason, CEO_REPLY_REASON),
+          ),
+        );
+      // A wake for an Infinite-mode agent waits for a background slot (BOS-279), like its live runs above,
+      // so it neither fills a normal slot nor hides a free one (BOS-1113).
+      const queueNormal = queue.filter((w) => !isInfiniteModel(w.model));
+      const room = new Map<string, number>();
+      for (const r of live) if (r.agentId) room.set(r.agentId, (room.get(r.agentId) ?? limits.agent) - 1);
+      const waiting: typeof queue = [];
+      for (const w of queueNormal) {
+        const left = room.get(w.agentId) ?? limits.agent;
+        if (left <= 0) continue;
+        room.set(w.agentId, left - 1);
+        waiting.push(w);
+      }
+      const total = work.length + waiting.length;
+      const mine = work.filter((r) => r.companyId === companyId).length + waiting.filter((w) => w.companyId === companyId).length;
+      // A company with nothing running or waiting still gets one, however full other companies'
+      // queues are: the scheduler gives an idle company's wake the next free slot (BOS-582, DR-032).
+      const allCompanies = mine === 0 ? Math.max(1, maxTotal - reserved - total) : maxTotal - reserved - total;
+      return Math.max(0, Math.min(allCompanies, maxCompany - reserved - mine));
+    },
+
+    /**
+     * The run limits in force (the owner's Settings over the defaults) and how many work runs are
+     * going, across all companies and in this one, for server_status (BOS-582). Counts only: no other
+     * company's agents or tickets.
+     */
+    async runLimits(companyId: string) {
+      const { maxTotal, maxCompany } = await limitsNow();
+      const live = await db.select({ companyId: runs.companyId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
+      // Infinite-mode runs (BOS-279) sit in the background slots, so they don't count against the normal limits.
+      const work = live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && !isInfiniteModel(r.model));
+      return { allCompanies: { limit: maxTotal, running: work.length }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
+    },
 
     /**
      * Whether the CEO could run right now (DR-015 A, BOS-469 point 1 and 7): an account with room and no
@@ -951,7 +1221,7 @@ export function schedulerService(
      * waits instead of landing on the owner.
      */
     async ceoCanRun(companyId: string): Promise<boolean> {
-      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      const [ceo] = await db.select({ id: agents.id, fundingSourceId: agents.fundingSourceId, paused: agents.paused, model: agents.model }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo) return true;
       // A clean run since the last usage/auth failure says the account has room again.
       const since = new Date(now().getTime() - 24 * 3_600_000);
@@ -964,7 +1234,8 @@ export function schedulerService(
       const lastFail = recent.findIndex((r) => /error:.*(usage limit|rate limit|weekly limit|5-hour limit|five-hour limit|quota|limit reached|authentication|unauthori[sz]ed|forbidden|identity verification|invalid api key|credit balance)/i.test(r.outcome ?? ""));
       if (lastFail !== -1 && !recent.slice(0, lastFail).some((r) => r.endedAt && !/^(error|lost|interrupted)/i.test(r.outcome ?? ""))) return false;
       // The account test the scheduler uses for a routine run: soft hold only, and no window at its limit.
-      if (ceo.fundingSourceId) {
+      // A CEO on an Infinite-mode model is never held by the quota (BOS-279), so the plan's reading doesn't stop it.
+      if (ceo.fundingSourceId && !isInfiniteModel(ceo.model)) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, ceo.fundingSourceId));
         if (source) {
           const samples = await latestQuotaWindows(source.id);
@@ -975,10 +1246,39 @@ export function schedulerService(
       return true;
     },
 
+    /**
+     * The CEO's reply lane (BOS-434, fix A of BOS-428). An owner message on a ticket, or a card that
+     * must reach the CEO soon (input.replyLane), would otherwise wait behind the CEO's one long run:
+     * a steer is only read between its tool calls. So when the CEO has a work run open, the same
+     * note also starts a short parallel run in the reply lane. The normal delivery still happens.
+     * When the CEO is idle and the caller asked for the lane (input.replyLane), the reply wake
+     * replaces the plain one (DR-048 part A): a runner-update hold stops a plain wake but lets a
+     * reply-lane wake through while any work run is live. Returns that wake's outcome when it
+     * replaced the plain one, so the caller queues nothing more.
+     */
+    async replyLane(agent: typeof agents.$inferSelect, input: Pick<WakeInput, "reason" | "ticketId" | "note" | "causedByRunId" | "replyLane">): Promise<WakeResult | undefined> {
+      if (agent.role !== "ceo" || agent.retiredAt) return undefined;
+      const wanted = input.replyLane || (input.reason === "message" && !input.causedByRunId);
+      if (!wanted) return undefined;
+      const [open] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.agentId, agent.id), isNull(runs.endedAt), isNull(runs.purpose))).limit(1);
+      const swap = !open && !!input.replyLane && input.reason !== CEO_REPLY_REASON;
+      if (!open && !swap) return undefined;
+      const lane = await this.notify(agent.id, { reason: CEO_REPLY_REASON, ticketId: input.ticketId ?? null, priority: 4, note: input.note ?? null });
+      return swap ? lane : undefined;
+    },
+
+    /** replyLane() for a caller that has the agent's id, not its row. */
+    async replyLaneFor(agentId: string, input: Pick<WakeInput, "reason" | "ticketId" | "note" | "causedByRunId" | "replyLane">) {
+      const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+      if (agent) await this.replyLane(agent, input);
+    },
+
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
-    async wake(input: WakeInput) {
+    async wake(input: WakeInput): Promise<WakeResult> {
       const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId));
       if (!agent) throw new Error("No such agent.");
+      const swapped = await this.replyLane(agent, input);
+      if (swapped) return swapped;
       let depth = 0;
       let causedByAgentId: string | null = null;
       // Boss Man's own wakes (a resume after a restart, a watchdog sweep) are not an agent waking
@@ -1063,7 +1363,7 @@ export function schedulerService(
       // A wake someone is waiting on, or one Boss Man scheduled, is never dropped for it and does
       // not use the allowance up (R68, BOS-272, DR-002).
       if (!base.ticketId && cls === "agent") {
-        const since = new Date(now().getTime() - 3_600_000);
+        const since = sinceHours(now());
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
@@ -1113,18 +1413,19 @@ export function schedulerService(
      * waiting for the same agent, ticket and reason, held for that reason's batch window; and
      * otherwise a new wake is queued, through every guard in wake().
      */
-    async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">) {
+    async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">): Promise<WakeResult> {
       const ticketId = input.ticketId ?? null;
       const note = input.note ?? null;
       const urgent = await isUrgentTicket(ticketId);
       const priority = input.priority ?? 2;
       const t = now();
       // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
-      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
+      if (note && input.reason !== CHAT_REASON && input.reason !== CEO_REPLY_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)
-          .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat")), ticketId ? eq(runs.ticketId, ticketId) : isNull(runs.ticketId), input.causedByRunId ? ne(runs.id, input.causedByRunId) : undefined))
+          // BOS-1082: a reply run and a watch run name the ticket but have no checkout of it, so work is never steered into them.
+          .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), or(isNull(runs.purpose), notInArray(runs.purpose, ["chat", REPLY_PURPOSE])), ticketId ? or(isNull(runs.origin), ne(runs.origin, WATCH_REASON)) : undefined, ticketId ? eq(runs.ticketId, ticketId) : isNull(runs.ticketId), input.causedByRunId ? ne(runs.id, input.causedByRunId) : undefined))
           .orderBy(desc(runs.startedAt))
           .limit(1);
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
@@ -1138,6 +1439,12 @@ export function schedulerService(
         .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, input.reason), ticketId ? eq(wakes.ticketId, ticketId) : isNull(wakes.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
         .orderBy(asc(wakes.createdAt))
         .limit(1);
+      // A note that joins a wake already waiting never reaches wake(), so the reply lane is offered here too.
+      if (waiting) {
+        const [ag] = await db.select().from(agents).where(eq(agents.id, agentId));
+        const swapped = ag ? await this.replyLane(ag, input) : undefined;
+        if (swapped) return swapped;
+      }
       if (!waiting) return this.wake({ ...input, agentId, ...(window > 0 && !urgent ? { defer: { until: new Date(t.getTime() + window), why: `waiting briefly for more "${input.reason}"` } } : {}) });
       // Each note waits the window again, up to answerBatchMaxMs after the first.
       const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + window);
@@ -1190,7 +1497,7 @@ export function schedulerService(
 
     async afterTicketRun(runId: string) {
       const [run] = await db.select().from(runs).where(eq(runs.id, runId));
-      if (!run?.ticketId || !run.agentId || run.purpose === "chat") return;
+      if (!run?.ticketId || !run.agentId || run.purpose === "chat" || run.purpose === REPLY_PURPOSE) return;
       const [t] = await db.select().from(tickets).where(eq(tickets.id, run.ticketId));
       if (!t || t.assigneeAgentId !== run.agentId) return;
       const since = run.startedAt;
@@ -1240,7 +1547,7 @@ export function schedulerService(
         const [hour] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(nudges)
-          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, new Date(now().getTime() - 60 * 60_000)), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
+          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, sinceHours(now())), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
         if ((hour?.n ?? 0) >= cap) return { ok: false, error: `Your company has sent its limit of ${cap} nudges in the last hour, so this one wasn't sent. ${ticketId ? "Write it on the ticket with ticket_reply" : "Write it on a ticket with ticket_reply (create one if needed)"}; ${to.name} reads it there.` };
       }
       const since = new Date(now().getTime() - 10 * 60_000);
@@ -1323,51 +1630,67 @@ export function schedulerService(
     settled: () => lane.catch(() => undefined),
 
     async tickOnce() {
-      const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
+      const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
+      await wakeHeldStarts(this).catch((e) => deps.log?.(`held starts: ${e instanceof Error ? e.message : String(e)}`));
       const queue = await db
         .select()
         .from(wakes)
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t), like(wakes.statusReason, QUOTA_HOLD_LIKE)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
-      // Priority order, but a wake Boss Man scheduled gains 1 for every 15 minutes it has waited, so a
-      // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
-      // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
-      // equal ranks stay oldest first.
+      // Priority order, but a wake Boss Man scheduled or an agent started gains 1 for every 15 minutes
+      // it has waited, up to a cap, so neither a low-priority watch nor an engagement or nudge can wait
+      // for ever behind a full house of newer work (DR-002, DR-031). The stored priority, and so the
+      // quota hold, is untouched. Someone-is-waiting wakes go first. Equal ranks go oldest first.
       // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
       const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
       const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
-      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      const rank = (w: (typeof queue)[number]) => agedRank(w.priority, wakeClassOf(w), t.getTime() - w.createdAt.getTime()) + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
-      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
+      queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
+      // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
+      // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
+      // may swap at any moment, so chats are held too, exactly as before.
+      let pass = queue;
       if (await getHold(db)) {
-        const unmarked = queue.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
+        const work = await liveWorkRuns(db);
+        // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
+        const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
+        pass = through;
+        const held = queue.filter((w) => !through.includes(w));
+        const unmarked = held.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
         if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
-        return { ...result, waiting: queue.length };
+        if (through.length === 0) return { ...result, waiting: queue.length };
       }
 
-      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
-      // An owner chat has its own slot per agent and uses none of the work slots below.
-      const working = active.filter((r) => r.purpose !== "chat");
-      // The owner's Settings override the instance and company limits when saved (settings.run_limits).
-      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
-      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
-      const maxTotal = stored?.instance ?? limits.instance;
-      const maxCompany = stored?.company ?? limits.company;
-      let total = working.length;
+      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
+      // The owner's Settings override the instance, company and background limits when saved (settings.run_limits).
+      const { maxTotal, maxCompany, maxBackground } = await limitsNow();
+      // Infinite-mode runs (BOS-279) have slots of their own, so slow free work can't take a normal one or be starved by it.
+      let total = 0;
+      let background = 0;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
       // An agent's chat run doesn't hold up its own work, or the other way round: one of each.
       const chatting = new Set<string>();
+      // The CEO's reply lane (BOS-434) is a slot of its own, beside the work slots and the chat slot.
+      const replying = new Set<string>();
       for (const r of active) {
         if (r.purpose === "chat") chatting.add(r.agentId ?? r.companyId);
+        else if (r.purpose === REPLY_PURPOSE) replying.add(r.agentId ?? r.companyId);
         else {
-          byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
+          // An Infinite-mode run takes a background slot, not a normal one: deliberately not counted in
+          // total or byCompany, or slow free work would eat the company's normal capacity (BOS-279).
+          if (isInfiniteModel(r.model)) background++;
+          else {
+            total++;
+            byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
+          }
           if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
         }
       }
@@ -1386,7 +1709,9 @@ export function schedulerService(
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
 
-      for (const w of queue) {
+      // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
+      // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
+      for (const w of fairOrder(pass, (id) => !byCompany.get(id), (x) => x.reason === CHAT_REASON || x.reason === CEO_REPLY_REASON)) {
         const defer = async (reason: string, notBefore: Date | null) => {
           // A quota-held wake is looked at again every pass (BOS-449); only write when something changed.
           if (w.status === "deferred" && w.statusReason === reason && (w.notBefore?.getTime() ?? null) === (notBefore?.getTime() ?? null)) {
@@ -1409,10 +1734,64 @@ export function schedulerService(
           await wait("agent paused");
           continue;
         }
+        // A wake that outlived its ticket is a replay of an old note or nudge, and starting it wakes its
+        // agent for nothing (BOS-256). Once the ticket is closed (done, cancelled included) and nothing on it
+        // changed after it closed, the wake is dropped. As with the loop guards, the whole of a ticket's
+        // waiting wakes go together, so the next pass doesn't start the one that was beside it.
+        const finished = await finishedTicketWake(w);
+        if (finished) {
+          await db.update(wakes).set({ status: "dropped", statusReason: CLOSED_TICKET_REASON }).where(inArray(wakes.id, [w.id, ...finished.ids]));
+          result.dropped += 1 + finished.ids.length;
+          continue;
+        }
+        // A stale nudge or other agent-started wake with no ticket is dropped, not delivered (BOS-1136).
+        const stale = await staleAgentWake(w);
+        if (stale) {
+          await db.update(wakes).set({ status: "dropped", statusReason: stale }).where(eq(wakes.id, w.id));
+          await db.update(nudges).set({ dropped: true }).where(eq(nudges.wakeId, w.id));
+          const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
+          await record(db, { companyId: w.companyId, agentId: w.agentId, ticketId: null, kind: "nudge", summary: `A "${w.reason}" wake for ${who?.name ?? "an agent"} was dropped instead of delivered: ${stale}`, at: now() });
+          result.dropped++;
+          continue;
+        }
+        // A ticketless wake an agent started doesn't take the slot its own assigned ticket is waiting for (BOS-1136).
+        if (!w.ticketId && wakeClassOf(w) === "agent" && (await hasWaitingTicket(w.agentId))) {
+          await wait("holding while the agent's assigned ticket starts");
+          continue;
+        }
         const isChat = w.reason === CHAT_REASON;
+        const isReply = w.reason === CEO_REPLY_REASON;
+        // An Infinite-mode agent (BOS-279) takes a background slot instead of the instance and company ones, and
+        // no card slot is kept among the background ones: they are slow and low-priority by design.
+        const [waker] = isChat || isReply ? [] : await db.select({ model: agents.model }).from(agents).where(eq(agents.id, w.agentId));
+        const backgroundWake = !isChat && !isReply && isInfiniteModel(waker?.model);
         // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
         const spare = wakeClassOf(w) === "waiting" ? 0 : reserved;
-        if (isChat ? chatting.has(w.agentId) : total + spare >= maxTotal || (byCompany.get(w.companyId) ?? 0) + spare >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
+        // The most specific limit that holds the wake is the one named, so server_status tells the
+        // all-companies limit apart from the company's own (BOS-582). A company with nothing running
+        // may use the slot kept for cards across all companies, as a card may: otherwise a busy
+        // company's cards would take every slot that frees (DR-032).
+        const mine = byCompany.get(w.companyId) ?? 0;
+        const held = isReply
+          ? replying.has(w.agentId)
+            ? HELD_REPLY
+            : null
+          : isChat
+          ? chatting.has(w.agentId)
+            ? HELD_CHAT
+            : null
+          : (byAgent.get(w.agentId) ?? 0) >= limits.agent
+            ? HELD_AGENT
+            : backgroundWake
+              ? background >= maxBackground
+                ? HELD_BACKGROUND
+                : null
+              : mine + spare >= maxCompany
+                ? HELD_COMPANY
+                : total + (mine === 0 ? 0 : spare) >= maxTotal
+                  ? HELD_ALL_COMPANIES
+                  : null;
+        if (held) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
           if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {
@@ -1423,7 +1802,7 @@ export function schedulerService(
             }
             if (left !== w.note) await db.update(wakes).set({ note: left }).where(eq(wakes.id, w.id));
           }
-          await wait("at a concurrency limit");
+          await wait(held);
           continue;
         }
 
@@ -1507,7 +1886,9 @@ export function schedulerService(
         let onSource: string | undefined;
         if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
-          if (source?.kind === "subscription") {
+          // Infinite mode doesn't spend the plan's credits (BOS-279), so an agent on an infinite model never waits for the
+          // quota. It's the agent's own model that matters, not its plan: a normal agent sharing the plan is still held.
+          if (source?.kind === "subscription" && !isInfiniteModel(agent?.model)) {
             // An agent on one of the owner's ranked Claude subscriptions goes to the first one with
             // room (BOS-383); an agent on any other source is checked against its own as before.
             const pool = source.fallbackRank != null && source.provider === "anthropic" ? await claudeAccounts(source) : [];
@@ -1558,15 +1939,23 @@ export function schedulerService(
           continue;
         }
         result.launched++;
-        if (isChat) chatting.add(w.agentId);
+        if (isReply) replying.add(w.agentId);
+        else if (isChat) chatting.add(w.agentId);
         else {
-          total++;
-          byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
           byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
+          // Same as the pass's initial count: an Infinite-mode run takes a background slot, not a company one.
+          if (backgroundWake) background++;
+          else {
+            total++;
+            byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
+          }
         }
       }
       return result;
     },
+
+    /** The server-wide hold the tick honours, for the owner's "Stop all work" switch and banner (BOS-836). */
+    globallyPaused,
 
     async setGlobalPause(paused: boolean) {
       await db.insert(settings).values({ key: "paused", value: paused }).onConflictDoUpdate({ target: settings.key, set: { value: paused } });
@@ -1603,6 +1992,92 @@ export function schedulerService(
     },
 
     /**
+     * A ticket in backlog or blocked whose blockers are all resolved moves to ready and its assignee is woken
+     * (BOS-603: a backlog ticket was never released). With no assignee there is nobody to wake, so the CEO gets
+     * one notice instead and the ticket stays put. A ticket parked on purpose (a "blocked until" time still
+     * ahead, or a note that says parked) keeps its state, and its assignee is told the blocker finished but the
+     * ticket is left where it is (BOS-742). Safe to call again: a released ticket no longer matches, and the
+     * notice is keyed on the ticket. Returns whether it released, noticed or told a parked ticket's assignee.
+     */
+    async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
+      const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
+      const deps = await db
+        .select({ ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status, decisionStatus: decisions.status })
+        .from(ticketDependencies)
+        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(eq(ticketDependencies.blockedTicketId, ticketId));
+      if (deps.some((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
+      // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
+      // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
+      // blocker; a later blocker that frees has a newer time and is news.
+      if (parkedOnPurpose(cur, now())) {
+        if (!cur.assigneeAgentId) return false;
+        const [newest] = await db
+          .select({ at: max(tickets.stateChangedAt) })
+          .from(ticketDependencies)
+          .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+          .where(eq(ticketDependencies.blockedTicketId, ticketId));
+        const key = `unblocked-parked:${ticketId}:${newest?.at ? newest.at.toISOString() : "none"}`;
+        const [told] = await db.select({ id: activity.id }).from(activity).where(and(eq(activity.companyId, cur.companyId), eq(activity.kind, "watchdog"), sql`${activity.detail}->>'key' = ${key}`)).limit(1);
+        if (told) return false;
+        const note = await unblockedNote(db, cur.id);
+        await this.notify(cur.assigneeAgentId, {
+          ticketId: cur.id,
+          reason: "unblocked",
+          causedByRunId,
+          note: `What this ticket was waiting on has finished, but the ticket is parked on purpose${cur.blockedUntil ? ` until ${cur.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}, so it is left where it is. Move it when you mean to start it.${note ? `\n${note}` : ""}`,
+        });
+        await db.insert(activity).values({ companyId: cur.companyId, ticketId: cur.id, kind: "watchdog", summary: `Told ${cur.assigneeAgentId === null ? "nobody" : "the assignee"} that this ticket is free: it is parked on purpose, so it stays put.`, detail: { key } });
+        return true;
+      }
+      if (!cur.assigneeAgentId) {
+        if (!deps.length) return false;
+        // A blocked ticket has always gone to ready here, assignee or not; keep that.
+        if (cur.systemState === "blocked") {
+          await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
+          return true;
+        }
+        const rows = await db
+          .insert(decisions)
+          .values({
+            companyId: cur.companyId,
+            kind: "question",
+            question: `"${cur.title}" was waiting on other work, which is now finished, but nobody is assigned to it, so it has not started. Assign it to someone.`,
+            options: ["Got it"],
+            recommendedOption: "Got it",
+            dedupeKey: `unblocked-unassigned:${cur.id}`,
+            tier: "ceo",
+            context: { type: "question" },
+          })
+          .onConflictDoNothing()
+          .returning({ id: decisions.id });
+        return rows.length > 0;
+      }
+      const t = await systemMoveTicket(db, { ticketId, from: ["backlog", "blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
+      if (!t?.assigneeAgentId) return false;
+      await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
+      return true;
+    },
+
+    /**
+     * After a ticket's branch merges (BOS-989): dependents that wait on it "until merged" are released the same
+     * way as when it is done, so their assignee is woken (BOS-603/742). A dependent waiting until done is left alone
+     * by releaseIfUnblocked, which still sees the blocker unfinished.
+     */
+    async onTicketMerged(ticketId: string, causedByRunId?: string | null) {
+      const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(and(eq(ticketDependencies.blockerTicketId, ticketId), eq(ticketDependencies.until, "merged")));
+      for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
+      // BOS-1161: a merge settles questions about the ticket (and what waits on it) as much as finishing does, and only the
+      // merge happens for a ticket with an after-merge check left. Cards that named the merge in clearsWhen are closed by the
+      // closer; the rest are flagged and their authors woken.
+      const [merged] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      if (merged) await ownerActed(db, { companyId: merged.companyId, ticketIds: [ticketId], reason: "a ticket it is about merged", now: now(), wake: (input) => this.notify(input.agentId, input) });
+    },
+
+    /**
      * After a ticket is done: dependents whose blockers are all resolved move to ready,
      * and their assignees are woken. Wakes caused by an agent's run carry the chain depth.
      */
@@ -1612,16 +2087,7 @@ export function schedulerService(
       const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
-      for (const { id } of dependents) {
-        const blockers = await db
-          .select({ state: tickets.systemState })
-          .from(ticketDependencies)
-          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-          .where(eq(ticketDependencies.blockedTicketId, id));
-        if (blockers.some((b) => b.state !== "done")) continue;
-        const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, id), eq(tickets.systemState, "blocked"))).returning();
-        if (t?.assigneeAgentId) await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
-      }
+      for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
       // The wiki maintainer files what finished work produced (R73). One waiting run covers
       // every ticket finished before it starts, and a paused maintainer's run waits.
       const [done] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));

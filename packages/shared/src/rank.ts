@@ -18,7 +18,9 @@ export type RankInput = {
 };
 
 export type RankParts = { blocking: number; urgency: number; age: number; liveRun: number };
-export type Rank = { score: number; parts: RankParts; reasons: string[]; dueDate: string | null };
+/** The rank reason that is only the card's age. Marked so a page can hide it by position, not by its
+ * wording (BOS-869): the page shows the age itself, and a reworded reason must not show twice. */
+export type Rank = { score: number; parts: RankParts; reasons: string[]; ageReason: string; dueDate: string | null };
 
 /** P1 work counts four times as much as unlinked work. */
 export function objectiveWeight(priority: number | null): number {
@@ -79,10 +81,74 @@ export function rankDecision(input: RankInput, now: Date): Rank {
   const hours = Math.max(0, (now.getTime() - input.createdAt.getTime()) / 3_600_000);
   // One point a day, up to a week, so old rows rise without swamping real blockers.
   const age = round1(Math.min(7, hours / 24));
-  reasons.push(hours < 1 ? "Raised just now" : hours < 48 ? `Waiting ${Math.floor(hours)} h` : `Waiting ${Math.floor(hours / 24)} days`);
+  const ageReason = hours < 1 ? "Raised just now" : hours < 48 ? `Waiting ${Math.floor(hours)} h` : `Waiting ${Math.floor(hours / 24)} days`;
+  reasons.push(ageReason);
 
   const liveRun = input.holdsLiveRun ? 5 : 0;
   if (liveRun) reasons.unshift("An agent is paused until you answer");
 
-  return { score: round1(blocking + urgency + age + liveRun), parts: { blocking, urgency, age, liveRun }, reasons, dueDate };
+  return { score: round1(blocking + urgency + age + liveRun), parts: { blocking, urgency, age, liveRun }, reasons, ageReason, dueDate };
+}
+
+/** A card that orders it relative to another: the card it depends on, and a short label for it. */
+export type OrderLink = { decisionId: string; label: string };
+
+/**
+ * The queue's do-this-next order (BOS-551). Cards that need the owner's hands are put in an order
+ * that respects their "do after" / "do before" links between one another; a card with no ordering
+ * information keeps today's rank. `cards` arrive in the base order (newest first by when raised),
+ * which is the tie-break for anything the links don't separate, so an unordered queue is unchanged.
+ *
+ * A "do after" on B means B comes after A. A "do before" on A means A comes before B. Links to a card
+ * that isn't in `cards` (already answered, hidden, or another company) are ignored. A cycle is broken
+ * rather than looping: the card the base order ranks earlier comes first, and the rest follow.
+ *
+ * Returns the ids in do-this-next order, plus each one's 1-based step. Only cards listed in `cards`
+ * appear; anything else stays where the caller has it.
+ */
+export function orderOwnerCards(
+  cards: Array<{ id: string; doAfter?: OrderLink[]; doBefore?: OrderLink[] }>,
+): { order: string[]; steps: Record<string, number> } {
+  const ids = cards.map((c) => c.id);
+  const live = new Set(ids);
+  const base = new Map(ids.map((id, i) => [id, i]));
+  // Edges a -> b meaning "a must be done before b".
+  const after = new Map<string, Set<string>>(ids.map((id) => [id, new Set<string>()]));
+  const add = (before: string, afterId: string) => {
+    if (before === afterId || !live.has(before) || !live.has(afterId)) return;
+    after.get(before)!.add(afterId);
+  };
+  for (const c of cards) {
+    for (const l of c.doAfter ?? []) add(l.decisionId, c.id);
+    for (const l of c.doBefore ?? []) add(c.id, l.decisionId);
+  }
+
+  // Kahn's algorithm; among the cards that are free to go next, the base order picks (newest first).
+  const indeg = new Map(ids.map((id) => [id, 0]));
+  for (const [from, tos] of after) for (const to of tos) indeg.set(to, (indeg.get(to) ?? 0) + 1);
+  const ready = ids.filter((id) => (indeg.get(id) ?? 0) === 0).sort((a, b) => base.get(a)! - base.get(b)!);
+  const order: string[] = [];
+  while (order.length < ids.length) {
+    if (!ready.length) {
+      // A cycle: take the card the base order ranks first among what's left, so we always finish.
+      const left = ids.filter((id) => !order.includes(id)).sort((a, b) => base.get(a)! - base.get(b)!);
+      const pick = left[0]!;
+      indeg.set(pick, 0);
+      ready.push(pick);
+    }
+    const id = ready.shift()!;
+    if (order.includes(id)) continue;
+    order.push(id);
+    for (const to of after.get(id) ?? []) {
+      const n = (indeg.get(to) ?? 0) - 1;
+      indeg.set(to, n);
+      if (n === 0 && !order.includes(to) && !ready.includes(to)) {
+        ready.push(to);
+        ready.sort((a, b) => base.get(a)! - base.get(b)!);
+      }
+    }
+  }
+  const steps: Record<string, number> = {};
+  order.forEach((id, i) => (steps[id] = i + 1));
+  return { order, steps };
 }

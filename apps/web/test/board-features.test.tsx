@@ -9,6 +9,7 @@ import { Features } from "../src/pages/Features";
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  localStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -143,16 +144,23 @@ describe("board lanes", () => {
     expect(puts[0]).toEqual(["/api/projects/p1/columns", [{ name: "Soon", systemState: "ready", wipLimit: null }, { name: "In progress", systemState: "in_progress", wipLimit: 3 }]]);
   });
 
-  it("splits review into agent review and your review, and flags what waits on the owner", async () => {
-    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
+  it("splits review into awaiting review, approved and merging, and your review, and flags what waits on the owner", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low", reviewStage: "awaiting_review" }), card({ id: "t8", title: "Approved, in the merge line", reviewStage: "merging", mergeNote: "Waiting for a check slot." }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     const strip = await screen.findByRole("link", { name: /2 tasks are waiting on you/ });
     expect(strip.textContent).toContain("Needs your sign-off");
     expect(strip.getAttribute("href")).toBe("#your-review");
-    const agent = screen.getByRole("region", { name: "Agent review" });
+    const agent = screen.getByRole("region", { name: "Awaiting review" });
     expect(within(agent).getByText("Agent still reviewing")).toBeTruthy();
     expect(within(agent).queryByText("Needs your sign-off")).toBeNull();
+    // BOS-667: approved work only waiting to merge is in its own lane, not counted as awaiting review.
+    expect(within(agent).queryByText("Approved, in the merge line")).toBeNull();
+    const merging = screen.getByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText("Approved, in the merge line")).toBeTruthy();
+    expect(within(merging).getByText("Waiting for a check slot.")).toBeTruthy();
+    expect(within(merging).getByRole("link", { name: "See the merge queue" }).getAttribute("href")).toBe("#/merge-queue/c1");
+    expect(within(merging).queryByText("Agent still reviewing")).toBeNull();
     const mine = screen.getByRole("region", { name: "Your review" });
     expect(mine.id).toBe("your-review");
     expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
@@ -313,12 +321,117 @@ describe("features page", () => {
   it("lists each feature's tasks with state and assignee, and the progress count", async () => {
     stub();
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    const arrow = await screen.findByRole("button", { name: "Show tasks of Dark mode" });
+    fireEvent.click(arrow);
     const list = await screen.findByRole("list", { name: "Tasks of Dark mode" });
     expect(within(list).getByText("Build the toggle")).toBeTruthy();
     expect(within(list).getByText("Dev")).toBeTruthy();
     expect(within(list).getByText("unassigned")).toBeTruthy();
     expect(within(list).getByText("in progress")).toBeTruthy();
-    expect(screen.getByText("1/2 tasks")).toBeTruthy();
+    expect(screen.getByText("1 of 2 complete")).toBeTruthy();
+  });
+
+  it("loads with the tasks folded, the summary in the WORK column, and the arrow opens and closes them", async () => {
+    stub();
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    const arrow = await screen.findByRole("button", { name: "Show tasks of Dark mode" });
+    expect(arrow.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
+    const work = screen.getByRole("button", { name: "1 of 2 complete" });
+    expect(work.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(arrow);
+    expect(screen.getByRole("button", { name: "Hide tasks of Dark mode" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("list", { name: "Tasks of Dark mode" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide tasks of Dark mode" }));
+    expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
+  });
+
+  it("counts cancelled tasks as neither done nor total, and names the blocked ones", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/features"))
+          return json({
+            ...scored,
+            features: [
+              feature({
+                id: "f1",
+                tickets: {
+                  total: 4,
+                  done: 1,
+                  items: [
+                    { id: "t1", title: "One", state: "done", outcome: "completed", assignee: null },
+                    { id: "t2", title: "Two", state: "ready", outcome: null, assignee: null },
+                    { id: "t3", title: "Three", state: "blocked", outcome: null, assignee: null },
+                    { id: "t4", title: "Gone", state: "done", outcome: "cancelled", assignee: null },
+                  ],
+                },
+              }),
+              feature({ id: "f2", title: "No tasks yet", tickets: { total: 0, done: 0, items: [] } }),
+            ],
+          });
+        if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+        return json([]);
+      }),
+    );
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    expect(await screen.findByRole("button", { name: "1 of 3 complete · 1 blocked" })).toBeTruthy();
+    // A feature with no tasks shows a dash and no arrow.
+    expect(screen.getByText("No tasks yet")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show tasks of No tasks yet" })).toBeNull();
+  });
+
+  it("remembers which features are open in the browser across a reload", async () => {
+    stub();
+    const first = render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show tasks of Dark mode" }));
+    expect(JSON.parse(localStorage.getItem("bossman.features.open") ?? "")).toEqual({ ids: ["f1"] });
+    first.unmount();
+
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    expect((await screen.findByRole("button", { name: "Hide tasks of Dark mode" })).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("list", { name: "Tasks of Dark mode" })).toBeTruthy();
+    localStorage.clear();
+  });
+
+  it("Expand all opens every feature's tasks and Collapse all folds them again", async () => {
+    stub();
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand all" }));
+    expect(screen.getByRole("list", { name: "Tasks of Dark mode" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
+    localStorage.clear();
+  });
+
+  it("after Expand all, a single feature's arrow still folds just that one and leaves the others open", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/features"))
+          return json({
+            ...scored,
+            features: [
+              feature(),
+              feature({ id: "f2", title: "Export", tickets: { total: 1, done: 0, items: [{ id: "t3", title: "Build export", state: "ready", outcome: null, assignee: null }] } }),
+            ],
+          });
+        if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
+        return json([]);
+      }),
+    );
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand all" }));
+    expect(screen.getByRole("list", { name: "Tasks of Dark mode" })).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Tasks of Export" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide tasks of Dark mode" }));
+    expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
+    expect(screen.getByRole("list", { name: "Tasks of Export" })).toBeTruthy();
+    // Not every feature is open now, so the link offers "Expand all" again.
+    expect(screen.getByRole("button", { name: "Expand all" })).toBeTruthy();
   });
 });
 

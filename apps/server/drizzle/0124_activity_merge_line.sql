@@ -1,0 +1,1 @@
+CREATE INDEX "activity_merge_line" ON "activity" USING btree ("ticket_id","at") WHERE "activity"."kind" = 'merge_line';

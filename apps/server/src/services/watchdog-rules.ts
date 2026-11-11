@@ -17,6 +17,10 @@ export type SnapTicket = {
   withOwner: boolean;
   /** In review with every review passed: it waits for the merge sweep, not for a reviewer or its author (BOS-362). */
   mergeWaiting?: boolean;
+  /** A reviewer passed it but holds the merge on purpose (BOS-808): quiet, whatever the other reviews say. */
+  held?: boolean;
+  /** The ticket was made ready and then released from its last blocker at this time (BOS-659). */
+  unblockedAt?: Date | null;
   /** Send-backs so far. */
   bounces: number;
 };
@@ -89,7 +93,8 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     const runs = (runsBy.get(x.id) ?? []).filter((r) => r.startedAt.getTime() <= t);
     const live = runs.some((r) => !r.endedAt || r.endedAt.getTime() > t);
 
-    if (x.bounces > s.reviewBounces) add("review_loop", { bounces: x.bounces });
+    // A review hold is on purpose (BOS-808): no bounce flag while it lasts (BOS-1167). The snapshot counts only send-backs after the last hold.
+    if (!x.held && x.bounces > s.reviewBounces) add("review_loop", { bounces: x.bounces });
 
     // Rule 2: waiting on the owner's decision. No agent is chased; the owner is reminded.
     const holds = (holdsBy.get(x.id) ?? []).filter((h) => !h.resolved);
@@ -117,6 +122,24 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       if (x.awaitingPlan || x.scheduled) continue;
       const mine = runs.filter((r) => r.agentId === x.assigneeAgentId);
       const last = mine.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())[0];
+      // Rule 1 of the idle-capacity rules (BOS-659): the agent is idle on an in-progress ticket and nothing
+      // is scheduled for it. Two shapes, both handed to the Scrum Master at the short limit:
+      //   - it never ran on it (or every run it had was before it entered in-progress, so none is kept);
+      //   - it picked it up and then let go: a run started just after the ticket moved (the scheduler's
+      //     pickup) and has ended normally, nothing since. Its normal end used to fall through to the
+      //     45-minute grace and the two-hour long rule, so half the slots sat empty for hours (BOS-659 live
+      //     follow-up). A crash keeps its own rule and grace, because Boss Man's free recovery goes first; a
+      //     run that straddles or precedes the move stays the long rules' shape, so one idle spell is one flag.
+      if (!last) {
+        const idle = t - since;
+        if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
+        continue;
+      }
+      if (last.endedAt && !isCrash(last.outcome) && since < last.startedAt.getTime() && t - last.endedAt.getTime() < RUN_ENDED_GRACE_MS) {
+        const idle = t - last.endedAt.getTime();
+        if (idle >= s.idleAgentMinutes * 60_000) add("idle_agent", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
+        continue;
+      }
       // Inside the grace after a run, Boss Man's own free fixes go first; nothing is flagged yet.
       if (last?.endedAt && t - last.endedAt.getTime() < RUN_ENDED_GRACE_MS) continue;
       if (last?.endedAt) {
@@ -131,9 +154,19 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       }
       const idle = t - since - covered(mine.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.inProgressHours * H) add("stale_in_progress", { idleMs: idle, limitMs: s.inProgressHours * H });
+    } else if (x.state === "ready") {
+      // Rule 2 of the idle-capacity rules (BOS-659): every ticket it waited on is done or cancelled (so
+      // `holds` is empty by now), it is assigned, no run has ever started on it, and it has been free for
+      // the short limit. Handed straight to the Scrum Master: the slots are free and this work could have
+      // started. The short grace lets the scheduler start it first; a ticket made ready with no blocker was
+      // never waiting to be started, so it is left to the missed-work sweep.
+      if (!runs.length && x.unblockedAt) {
+        const idle = t - Math.max(since, x.unblockedAt.getTime());
+        if (idle >= s.idleAgentMinutes * 60_000) add("unstarted", { idleMs: idle, limitMs: s.idleAgentMinutes * 60_000 });
+      }
     } else if (x.state === "review") {
       // Approved by everyone: the merge sweep owns it, and raises a merge card of its own if it can't land.
-      if (x.mergeWaiting) continue;
+      if (x.mergeWaiting || x.held) continue;
       const idle = t - since - covered(runs.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.reviewHours * H) add("stale_review", { idleMs: idle, limitMs: s.reviewHours * H });
     } else if (x.state === "blocked") {
@@ -163,6 +196,11 @@ export function ruleLimitMs(rule: WatchdogRule, s: WatchdogSettings) {
       return Math.max(s.blockedUntilGraceHours, 1) * H;
     case "owner_decision_waiting":
       return 24 * H;
+    case "idle_agent":
+    case "unstarted":
+      // One hand-off per condition until it clears (BOS-659): nothing repeats this for a day; a run that
+      // gets the agent going closes the flag on the next sweep.
+      return BACKOFF_CAP_MS;
     case "review_loop":
       return s.reviewHours * H;
     default:

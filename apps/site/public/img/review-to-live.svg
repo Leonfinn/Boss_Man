@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 600" width="1160" height="600" role="img" aria-labelledby="rl-title rl-desc">
+  <title id="rl-title">From review to live: reviews by risk level, your sign-off for high-risk work, the merge line, the merge check, the merge, then go-live and the after-merge checks</title>
+  <desc id="rl-desc">A ticket's path after the agent asks for review. First it is reviewed by risk level: trivial and low work by the CEO, medium, high and critical work by a senior developer, and every review the ticket needs must approve. High and critical work also needs your sign-off on a card. Approved work joins the merge line, where urgent work goes first and then the longest wait. Boss Man runs the merge check you chose for the ticket. If it fails, the work has conflicts or nothing changed, the ticket goes back to the agent, who fixes it and asks for review again. If it passes, the branch is merged or a pull request is opened. After the merge the change must go live: the server update, and the runner rebuild if runner code changed. While it waits, the ticket sits in Blocked. Once the change is live, the after-merge checks run and the ticket is done when each has been reported. A ticket with no after-merge checks is done at the merge.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="rl-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+    <marker id="rl-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#c8282f"/></marker>
+  </defs>
+  <rect width="1160" height="600" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">After an agent asks for review, a change goes through these steps before it is live.</text>
+
+  <!-- row 1 -->
+  <text x="0" y="52" class="d" font-size="18" fill="#17202c">Before the merge</text>
+
+  <rect x="0" y="64" width="200" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="64" width="200" height="34" rx="10" fill="#17202c"/><rect x="0" y="86" width="200" height="12" fill="#17202c"/>
+  <text x="14" y="87" class="d" font-size="16" fill="#eef2f6">1. Review</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="14" y="124">Another agent reviews it.</text><text x="14" y="146">Trivial, low: the CEO</text><text x="14" y="164">Medium: senior developer</text><text x="14" y="182">High, critical: senior dev.</text></g>
+  <text x="14" y="212" class="bb" font-size="13" fill="#17202c">Every review it needs</text><text x="14" y="230" class="bb" font-size="13" fill="#17202c">must approve.</text>
+
+  <rect x="240" y="64" width="200" height="190" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <rect x="240" y="64" width="200" height="34" rx="10" fill="#c8282f"/><rect x="240" y="86" width="200" height="12" fill="#c8282f"/>
+  <text x="254" y="87" class="d" font-size="16" fill="#ffffff">2. Your sign-off</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="254" y="124">High and critical work only.</text><text x="254" y="146">A card asks you:</text></g>
+  <rect x="254" y="160" width="172" height="30" rx="6" fill="#c8282f"/><text x="340" y="180" class="bb" font-size="13" text-anchor="middle" fill="#ffffff">Approve and merge</text>
+  <rect x="254" y="198" width="172" height="30" rx="6" fill="#17202c"/><text x="340" y="218" class="bb" font-size="13" text-anchor="middle" fill="#ffffff">Send it back</text>
+
+  <rect x="480" y="64" width="200" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="480" y="64" width="200" height="34" rx="10" fill="#17202c"/><rect x="480" y="86" width="200" height="12" fill="#17202c"/>
+  <text x="494" y="87" class="d" font-size="16" fill="#eef2f6">3. Merge line</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="494" y="124">Approved, merging.</text><text x="494" y="146">Urgent work goes first,</text><text x="494" y="164">then the longest wait.</text></g>
+  <text x="494" y="198" class="bb" font-size="13" fill="#17202c">See it under Merge queue</text><text x="494" y="216" class="bb" font-size="13" fill="#17202c">in the sidebar.</text>
+
+  <rect x="720" y="64" width="200" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="720" y="64" width="200" height="34" rx="10" fill="#17202c"/><rect x="720" y="86" width="200" height="12" fill="#17202c"/>
+  <text x="734" y="87" class="d" font-size="16" fill="#eef2f6">4. Merge check</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="734" y="124">Runs the command you</text><text x="734" y="142">chose for the ticket.</text></g>
+  <text x="734" y="176" class="bb" font-size="13" fill="#c8282f">Fails, clashes, or changed</text><text x="734" y="194" class="bb" font-size="13" fill="#c8282f">nothing? Goes back to the</text><text x="734" y="212" class="bb" font-size="13" fill="#c8282f">agent to fix.</text>
+
+  <rect x="960" y="64" width="200" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="960" y="64" width="200" height="34" rx="10" fill="#17202c"/><rect x="960" y="86" width="200" height="12" fill="#17202c"/>
+  <text x="974" y="87" class="d" font-size="16" fill="#eef2f6">5. Merged</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="974" y="124">If the check passes, the</text><text x="974" y="142">branch is merged, or a</text><text x="974" y="160">pull request is opened,</text><text x="974" y="178">as your project is set.</text></g>
+
+  <g stroke="#17202c" stroke-width="2.5" fill="none" marker-end="url(#rl-ar)">
+    <path d="M202 159 H236"/><path d="M442 159 H476"/><path d="M682 159 H716"/><path d="M922 159 H956"/>
+  </g>
+  <text x="221" y="150" class="b" font-size="11" text-anchor="middle" fill="#3d4757">if high</text>
+
+  <!-- bounce back -->
+  <path d="M820 256 V290 H100 V258" fill="none" stroke="#c8282f" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#rl-arr)"/>
+  <text x="130" y="310" class="bb" font-size="13" fill="#c8282f">Check failed: the ticket goes back to In progress. The agent fixes it and asks for review again.</text>
+
+  <!-- connector to row 2 -->
+  <path d="M1060 256 V346 H100 V376" fill="none" stroke="#17202c" stroke-width="2.5" marker-end="url(#rl-ar)"/>
+  <text x="1048" y="338" class="bb" font-size="13" text-anchor="end" fill="#17202c">Merged is not live yet</text>
+
+  <!-- row 2 -->
+  <text x="130" y="372" class="d" font-size="18" fill="#17202c">After the merge</text>
+
+  <rect x="0" y="380" width="200" height="200" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="380" width="200" height="34" rx="10" fill="#17202c"/><rect x="0" y="402" width="200" height="12" fill="#17202c"/>
+  <text x="14" y="403" class="d" font-size="16" fill="#eef2f6">6. Go-live</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="14" y="440">The change must be running:</text><text x="14" y="458">the server update, and the</text><text x="14" y="476">runner rebuild if runner</text><text x="14" y="494">code changed.</text></g>
+  <rect x="14" y="512" width="172" height="52" rx="8" fill="#f0b75c"/><text x="26" y="533" class="bb" font-size="13" fill="#17202c">The ticket waits in</text><text x="26" y="551" class="bb" font-size="13" fill="#17202c">Blocked until then.</text>
+
+  <rect x="240" y="380" width="200" height="200" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="240" y="380" width="200" height="34" rx="10" fill="#17202c"/><rect x="240" y="402" width="200" height="12" fill="#17202c"/>
+  <text x="254" y="403" class="d" font-size="16" fill="#eef2f6">7. After-merge checks</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="254" y="440">Checks that need the live</text><text x="254" y="458">app start once it is live.</text><text x="254" y="476">The agent is woken and</text><text x="254" y="494">the ticket moves back to</text><text x="254" y="512">In progress.</text></g>
+
+  <rect x="480" y="380" width="200" height="200" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="480" y="380" width="200" height="34" rx="10" fill="#17202c"/><rect x="480" y="402" width="200" height="12" fill="#17202c"/>
+  <text x="494" y="403" class="d" font-size="16" fill="#eef2f6">8. Done</text>
+  <g class="b" font-size="13" fill="#17202c"><text x="494" y="440">Each check has been</text><text x="494" y="458">reported, pass or fail.</text></g>
+
+  <g stroke="#17202c" stroke-width="2.5" fill="none" marker-end="url(#rl-ar)">
+    <path d="M202 480 H236"/><path d="M442 480 H476"/>
+  </g>
+
+  <!-- shortcuts -->
+  <rect x="720" y="380" width="440" height="200" rx="12" fill="#eef2f6" stroke="#c3cbd6" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <text x="740" y="412" class="d" font-size="17" fill="#17202c">Shortcuts</text>
+  <g class="b" font-size="14" fill="#17202c">
+    <text x="740" y="446">No after-merge checks on the ticket?</text><text x="740" y="466" class="bb">It is done at the merge (step 5).</text>
+    <text x="740" y="506">Change already live when it merges?</text><text x="740" y="526" class="bb">The after-merge checks start at once.</text>
+    <text x="740" y="560" font-size="13" fill="#3d4757">Step 2 is skipped for trivial, low and medium work.</text>
+  </g>
+</svg>

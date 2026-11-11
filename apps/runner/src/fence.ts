@@ -2,8 +2,9 @@
 // Landlock helper, so the adapter and everything it starts (Claude Code, shell commands, file
 // edits, browsers) can only write the session's own folders, and can't read other agents' files
 // and secrets, signal the runner, or reach other sessions' sockets. Proven in the BOS-315 spike.
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,8 +52,11 @@ export type FenceSpec = {
   /** The agent's own home (harness state and caches) and this run's temp folder inside it. */
   home: string;
   tmp: string;
-  /** The ticket's shared bare repo and its worktree's admin folder, while tickets use worktrees (until Sandbox 3). */
-  repo?: { bare: string; admin: string | null };
+  /**
+   * The ticket's shared bare repo, and for a worktree its admin folder. A ticket's own clone
+   * (BOS-323) keeps everything it writes in its own .git, so the shared repo is read-only to it.
+   */
+  repo?: { bare: string; admin: string | null; clone?: boolean };
   /** More folders to read (skills, the adapter's install) or write (the pnpm store, the check queue). */
   readOnly?: string[];
   readWrite?: string[];
@@ -70,8 +74,10 @@ export function fenceProfile(spec: FenceSpec): FenceRules {
   const rw = [spec.cwd, spec.home, spec.tmp, "/dev/shm", "/dev/pts", ...(spec.readWrite ?? [])];
   if (spec.repo) {
     ro.push(spec.repo.bare);
-    rw.push(...["objects", "refs", "logs"].map((d) => path.join(spec.repo!.bare, d)));
-    if (spec.repo.admin) rw.push(spec.repo.admin);
+    if (!spec.repo.clone) {
+      rw.push(...["objects", "refs", "logs"].map((d) => path.join(spec.repo!.bare, d)));
+      if (spec.repo.admin) rw.push(spec.repo.admin);
+    }
   }
   const uniq = (list: string[]) => [...new Set(list.filter(Boolean).map((p) => path.resolve(p)))];
   return { ro: uniq(ro), rw: uniq(rw), roFiles: [], rwFiles: DEVICES_RW };
@@ -125,7 +131,8 @@ export function worktreeAdmin(bare: string, cwd: string): string | null {
  * The shared repo's grant for a session working in one of its worktrees. Git won't create the
  * folders a commit writes once the repo's root is read-only, so they're made here first.
  */
-export function repoGrant(bare: string, cwd: string): { bare: string; admin: string | null } {
+export function repoGrant(bare: string, cwd: string): { bare: string; admin: string | null; clone?: boolean } {
+  if (statSync(path.join(cwd, ".git"), { throwIfNoEntry: false })?.isDirectory()) return { bare, admin: null, clone: true };
   for (const d of ["objects", "refs", "logs"]) mkdirSync(path.join(bare, d), { recursive: true });
   return { bare, admin: worktreeAdmin(bare, cwd) };
 }
@@ -139,12 +146,17 @@ export function repoGrant(bare: string, cwd: string): { bare: string; admin: str
  */
 export const checkQueueDirs = (dir: string) => ({ queue: path.join(dir, "queue"), gate: path.join(dir, "gate") });
 
-export const checkQueueEnv = (dir: string) => {
+/**
+ * slot: the runner's own copy of scripts/check-slot.sh (BOSSMAN_CHECK_SLOT, set by the runner image), passed on only when
+ * the file is there. With it every waiter, whatever branch it checks, follows one copy of the queue rules (BOS-614).
+ */
+export const checkQueueEnv = (dir: string, slot?: string) => {
   const { queue, gate } = checkQueueDirs(dir);
   return {
     CHECK_ALL_LOCK: path.join(queue, "check-all"),
     BOSSMAN_CHECK_STORE: path.join(gate, "check-results"),
     CHECK_ALL_PAIR_PROOF: path.join(gate, "check-pair-passed"),
+    ...(slot && path.isAbsolute(slot) && existsSync(slot) ? { BOSSMAN_CHECK_SLOT: slot } : {}),
   };
 };
 
@@ -169,10 +181,50 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
 
 /**
  * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
- * the runner's data volume, and the pnpm store pnpm already uses at the workspaces volume's root.
+ * the runner's data volume, and the pnpm store under the workspaces volume's root.
+ * The store is always a folder under the volume, never the volume's root itself or `/`: the fence
+ * grants everything beneath a rule, so the root would hand agents the whole volume (other agents'
+ * copies, the merge gate's results), and the gate's own store (`<store>-gate`) would land on the
+ * runner's root disk (BOS-633).
  */
+/**
+ * A short folder name for a run's or check job's temp folder (BOS-1087). A Unix socket path may be at most 107 bytes
+ * and headless Chromium adds ~45 to TMPDIR, so TMPDIR must stay short: 8 hex characters of the UUID, not all 36.
+ * `taken` holds names live runs already use; on a clash the next 8 characters are tried (never one run's folder for two).
+ */
+export function shortTmpName(uuid: string, taken: ReadonlySet<string> = new Set()): string {
+  const hex = uuid.replace(/-/g, "").toLowerCase();
+  for (let i = 0; i + 8 <= hex.length; i += 8) {
+    const name = hex.slice(i, i + 8);
+    if (!taken.has(name)) return name;
+  }
+  return hex; // all four slices taken: a UUID's full 32 characters can't clash
+}
+
+/** Room a TMPDIR must leave for a socket path under it (Chromium's SingletonSocket needs about 45, tests allow 50). */
+export const SOCKET_SUFFIX_ROOM = 50;
+export const SUN_PATH_MAX = 107;
+
 export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
-  return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+  return { level, agentsRoot: path.join(dataDir, "agents"), runTmpRoot: path.join(dataDir, "run-tmp"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+}
+
+/**
+ * The shared pnpm store the runner will actually use (BOS-568), where PNPM_STORE_DIR may move it (e.g. to a
+ * folder on a bigger volume). Empty means `<workspacesRoot>/.pnpm-store`. The value must be a folder strictly
+ * under the workspaces volume: `/`, the volume's root and anything above it are refused, since the fence would
+ * grant the whole volume and the gate store beside the store would leave the volume's own disk (BOS-633).
+ */
+export function pnpmStoreDir(workspacesRoot: string, raw: string | undefined): string {
+  const p = (raw ?? "").trim();
+  if (!p) return path.join(workspacesRoot, ".pnpm-store");
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${path.join(workspacesRoot, ".pnpm-store")}, not ${raw}`);
+  const resolved = path.posix.normalize(p).replace(/\/+$/, "") || "/";
+  const root = path.resolve(workspacesRoot);
+  if (resolved === "/" || resolved === root || !resolved.startsWith(root + "/")) {
+    throw new Error(`PNPM_STORE_DIR must be a folder under ${root} (the runner's only writable volume), not ${raw}: the volume's root would grant agents the whole volume and put the gate's store on the root disk`);
+  }
+  return resolved;
 }
 
 /**
@@ -200,6 +252,52 @@ export function sandboxSelfTest(): SandboxReport {
     }
   }
   return { landlockAbi: abi, errno, level: probe === false ? "unavailable" : level, missing, userns, probe };
+}
+
+/**
+ * Prunes one pnpm store of packages no install references any more (BOS-633). Both stores only ever grow as
+ * lockfiles change, on the volume every agent's work lives on, so the runner does this daily. pnpm's store
+ * lock makes it safe beside a running install, and it never removes a package something still links to.
+ * Runs asynchronously (a large store can take minutes) so the runner's event loop, connection and live sessions
+ * keep going; the child is killed on the timeout. Never rejects: a missing store, a wrong pnpm or a busy lock is
+ * logged and skipped, and there is always the next run.
+ */
+export async function pruneStore(
+  storeDir: string,
+  log: (m: string) => void = () => {},
+  bin = "pnpm",
+): Promise<{ pruned: boolean; why?: string }> {
+  if (!existsSync(storeDir)) return { pruned: false, why: "no store yet" };
+  try {
+    const { stdout, stderr } = await promisify(execFile)(bin, ["store", "prune", "--store-dir", storeDir], {
+      encoding: "utf8",
+      timeout: 10 * 60_000,
+      killSignal: "SIGKILL",
+    });
+    log(`pnpm store prune of ${storeDir}: ${(stdout || "").trim().split("\n").pop() ?? "done"}`);
+    return { pruned: true };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message: string; killed?: boolean };
+    const why = e.killed
+      ? "timed out"
+      : (e.stderr || e.stdout || "").trim().split("\n").slice(-3).join(" ") || e.message;
+    log(`pnpm store prune of ${storeDir} failed: ${why}`);
+    return { pruned: false, why };
+  }
+}
+
+/**
+ * Prunes the shared store and the gate's store beside it, one after the other, one failing without stopping the
+ * other. The gate store is exactly `${shared}-gate`: validation keeps that path on the same volume as the shared
+ * store (pnpmStoreDir), so a prune can never reach the root disk. Nothing in this repo creates the gate store yet
+ * (the merge gate's installs use the ambient PNPM_STORE_DIR like every other run), so pruning it is a no-op until
+ * that exists; pruneStore skips the folder when it is absent, and there is no fence grant for it (sessions only
+ * get the shared store, and the gate is fenced separately).
+ */
+export async function pruneStores(shared: string, log: (m: string) => void = () => {}, bin = "pnpm") {
+  const sharedResult = await pruneStore(shared, log, bin);
+  const gateResult = await pruneStore(`${shared}-gate`, log, bin);
+  return { shared: sharedResult, gate: gateResult };
 }
 
 /**

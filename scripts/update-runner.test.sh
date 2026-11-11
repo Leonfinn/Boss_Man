@@ -21,12 +21,14 @@ cd "$T/repo"
 run() { : >"$FAKE_LOG"; rm -f "$T/deployer/inbox/drain.json"; ./update-runner.sh "$@" >"$T/out" 2>&1; }
 logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 
-# Default: image promoted, drain requested, no runner touched.
+# Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
 run
 logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted"
 logged "docker tag boss-man-netguard:current boss-man-netguard:previous" || fail "the previous network guard image was not kept"
 logged "recreate-all" && fail "default recreated the runners"
-logged "compose up" && fail "default restarted compose runners"
+logged "compose up -d --no-build" && fail "default restarted compose runners"
+logged "docker compose build launcher" || fail "default did not rebuild the launcher"
+logged "compose up -d --no-deps launcher" || fail "default did not recreate the launcher"
 [[ -s $T/deployer/inbox/drain.json ]] || fail "no drain request written"
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/deployer/inbox/drain.json" || fail "drain.json is not JSON"
 [[ $(find "$T/deployer/inbox" -type f | wc -l) == 1 ]] || fail "temp file left in the inbox"
@@ -50,7 +52,7 @@ logged "exec launcher-1 node dist/main.js recreate-all" || fail "--now did not r
 # No deployer folder (manual run): tells the owner where to start the drain, recreates nothing.
 saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
 run
-grep -q "Settings > Runner update" "$T/out" || fail "no manual instructions"
+grep -q "Settings > Server and runner > Updates > Runner update" "$T/out" || fail "no manual instructions"
 logged "recreate-all" && fail "manual run recreated the runners"
 # ...unless .env names the deployer folder, which is how a hand run finds it.
 echo "BOSSMAN_DEPLOYER=$saved" >.env
@@ -73,6 +75,40 @@ logged "docker tag boss-man-netguard:previous boss-man-netguard:current" || fail
 logged "recreate-all" && fail "rollback recreated at once"
 run --rollback --now
 logged "recreate-all" || fail "rollback --now did not recreate"
+
+# --settings (BOS-594): no build, the launcher re-reads .env, and a drain marked "setting change"; no runner touched.
+run --settings
+logged "docker build" && fail "--settings built an image"
+logged "compose up -d --no-deps launcher" || fail "--settings did not recreate the launcher"
+logged "recreate-all" && fail "--settings recreated the runners at once"
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (j.reason !== "setting change") process.exit(1)' "$T/deployer/inbox/drain.json" || fail "--settings drain request does not say setting change"
+# ...the image drain's request carries no reason, so the server treats it as an update as before.
+run
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ("reason" in j) process.exit(1)' "$T/deployer/inbox/drain.json" || fail "an image update's drain request carries a reason"
+# ...without a deployer folder it refuses and changes nothing (the Settings button would only drain onto a new image).
+saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
+if run --settings; then fail "--settings without a deployer folder succeeded"; fi
+logged "compose up" && fail "--settings without a deployer folder touched the launcher"
+export BOSSMAN_DEPLOYER="$saved"
+# ...without a launcher there is nothing to drain onto: refuse unless --now.
+if HAVE_LAUNCHER=0 run --settings; then fail "--settings without a launcher succeeded"; fi
+logged "compose up" && fail "--settings without a launcher restarted something"
+run --settings --now
+logged "compose up -d --no-deps launcher" || fail "--settings --now did not recreate the launcher first"
+logged "recreate-all" || fail "--settings --now did not recreate the runners"
+[[ ! -e $T/deployer/inbox/drain.json ]] || fail "--settings --now asked for a drain"
+
+# BOS-764 (QA, BOS-826): the image is stamped with the commit it is built from, so Boss Man can close a "Build and update runners"
+# ask the image already satisfies. Outside a git checkout the stamp is empty (the runner then reports none) and the build still runs.
+run
+logged "--build-arg BOSSMAN_IMAGE_COMMIT= " || fail "a build outside a checkout did not pass an empty image commit: $(grep 'docker build --pull' "$FAKE_LOG")"
+logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "a build outside a checkout was not promoted"
+git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+head="$(git rev-parse HEAD)"
+run
+logged "--build-arg BOSSMAN_IMAGE_COMMIT=$head " || fail "the build did not stamp the checkout's commit: $(grep 'docker build --pull' "$FAKE_LOG")"
+# ...and the stamp is the 40-character sha the runner and the server both require.
+[[ $head =~ ^[0-9a-f]{40}$ ]] || fail "the checkout commit is not a full sha: $head"
 
 # A failed canary promotes nothing and asks for nothing.
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi

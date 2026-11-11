@@ -1,0 +1,12 @@
+Boss Man
+Copyright the Boss Man contributors.
+
+Boss Man is licensed under the Apache License, Version 2.0 (see the LICENSE file in the source
+repository, and https://www.apache.org/licenses/LICENSE-2.0).
+
+This image also contains third-party software under its own licenses:
+- the Debian base system and the Node.js runtime (licenses are in /usr/share/doc/*/copyright),
+- the JavaScript packages the application depends on (each carries its license in its own folder).
+
+The complete list of packages in this image is its SBOM, attached to the image in the registry
+(`docker buildx imagetools inspect <image> --format '{{ json .SBOM }}'`).

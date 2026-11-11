@@ -5,7 +5,12 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
-import { Credentials, Funding, ProjectRow, Runner } from "./Settings";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
+import { Credentials } from "./settings/Credentials";
+import { Funding } from "./settings/Funding";
+import { ProjectRow } from "./settings/Projects";
+import { Runner } from "./settings/Runner";
 
 type Progress = { dismissed: boolean; step: number; companyId: string | null };
 export type ChecklistItem = { id: string; label: string; done: boolean };
@@ -25,6 +30,8 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
   const [name, setName] = useState(company?.name ?? "");
   const [mission, setMission] = useState(company?.mission ?? "");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // The mission box is kept in this browser as it is typed (DR-045); it goes once the company is saved.
+  const missionKey = `setup-mission/${company?.id ?? "new"}`;
   const [busy, setBusy] = useState(false);
   const sv = useSaveState({ name, mission });
   const save = async (e: FormEvent) => {
@@ -38,6 +45,7 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
         const { company: c } = await api<{ company: Company }>("/api/companies", { method: "POST", body: { name: name.trim(), ...(mission.trim() ? { mission: mission.trim() } : {}) } });
         onCreated(c.id);
       }
+      clearDraft(missionKey);
       sv.markSaved();
       setNote({ ok: true, text: "Saved." });
     } catch (err) {
@@ -54,7 +62,7 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
       </div>
       <div className="field">
         <label htmlFor="setup-mission">What it's for</label>
-        <textarea id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Build and run Boss Man itself: features from the roadmap, fixes from feedback." value={mission} onChange={(e) => setMission(e.target.value)} />
+        <DraftTextarea draftKey={missionKey} id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Build and run Boss Man itself: features from the roadmap, fixes from feedback." value={mission} onChange={setMission} />
       </div>
       {company ? (
         <SaveButton {...sv} busy={busy} disabled={!name.trim()} style={{ alignSelf: "flex-start" }} />
@@ -154,7 +162,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
       )}
       {(both || hosts.has("gitea")) && (
         <section aria-label="Gitea token steps">
-          <h4 style={{ margin: "8px 0 4px" }}>Gitea (self-hosted, e.g. http://192.168.68.67:3003)</h4>
+          <h4 style={{ margin: "8px 0 4px" }}>Gitea (self-hosted, e.g. http://192.0.2.10:3003)</h4>
           <ol style={{ margin: 0, paddingLeft: 20 }}>
             <li>Gitea → Settings → Applications → Generate New Token.</li>
             <li>Name it and set the repository scope to Read and Write (<span className="mono">write:repository</span>).</li>
@@ -228,6 +236,8 @@ function TicketStep({ company }: { company: Company }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-ticket-${company.id}`);
   const ceo = company.agents.find((a) => a.role === "ceo");
   const [form, setForm] = useState({ title: "", body: "", toCeo: false });
+  // The task description is kept in this browser as it is typed (DR-045); it goes once the task is added.
+  const bodyKey = `setup-ticket-body/${company.id}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const project = projects.data?.[0];
   const add = async (e: FormEvent) => {
@@ -239,6 +249,7 @@ function TicketStep({ company }: { company: Company }) {
         body: { title: form.title.trim(), body: form.body.trim() || null, ...(form.toCeo && ceo ? { assigneeAgentId: ceo.id } : {}) },
       });
       setForm({ title: "", body: "", toCeo: false });
+      clearDraft(bodyKey);
       setNote({ ok: true, text: `Added. Open it from the Kanban, or at #/tickets/${t.id}.` });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -253,7 +264,7 @@ function TicketStep({ company }: { company: Company }) {
       </div>
       <div className="field">
         <label htmlFor="setup-ticket-body">Description</label>
-        <textarea id="setup-ticket-body" rows={4} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
+        <DraftTextarea draftKey={bodyKey} id="setup-ticket-body" rows={4} value={form.body} onChange={(text) => setForm({ ...form, body: text })} />
       </div>
       {ceo && (
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>

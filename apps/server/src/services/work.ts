@@ -1,15 +1,33 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
-import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
+import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
+import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
+import { derivedSignoff } from "./signoff.js";
+import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
+import { fixesLiveProblem } from "./decisions.js";
+import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
+
+/**
+ * Once a ticket is merged, its owner setup steps are the ones review saw: an agent may no longer change
+ * them, because the "Ready to use" card is raised at go-live from whatever is stored and nothing checks it
+ * again (BOS-443). The owner's own web edit is unaffected (it passes no actor), and an empty patch changes nothing.
+ */
+function setupFrozenRefusal(mergeCommit: string | null, current: string | null, patch: { byAgentId?: string | null; ownerSetup?: string | null }): string | null {
+  if (!mergeCommit || !patch.byAgentId || patch.ownerSetup === undefined) return null;
+  const next = patch.ownerSetup?.trim() || null;
+  if (next === (current?.trim() || null)) return null;
+  return 'This ticket is merged, so its setup steps are frozen: they are the ones review saw, and Boss Man raises the owner\'s "Ready to use" card from them when it goes live. An agent can\'t change them now. If they are wrong, ask the owner to fix them on the ticket page, or open a follow-up ticket with the right steps.';
+}
 
 /** Ticket ids a wake's note or a nudge's reason names, the way those notes write them. */
 const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -53,13 +71,33 @@ type TicketPatch = {
   noCode?: boolean;
   /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
   ownerSetup?: string | null;
+  /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
+  ownerSetupOverride?: string | null;
+  /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
+  setupFix?: boolean;
+  /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
+  fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
+  /** A move into review: "new" opens a review round (the owner's move), "keep" (the default here) leaves it to the caller (review.ts moves tickets into review itself). */
+  reviewRound?: "new" | "keep";
+  /** Why it moved, for the one history line (the owner's move says "Owner moved it to Done"). Defaults to the state note. */
+  moveReason?: string;
   /** Boss Man's own move (a review sent back, a landing): not an agent starting work, so the start check (BOS-254) does not apply. */
   internal?: boolean;
+  /** Write only if the ticket is still at this version (R81, BOS-897): checked in the UPDATE itself, so a change landing after the caller's read is not overwritten. */
+  expectedVersion?: number;
+  /** The title the page loaded: refuse the edit if the stored one changed since (BOS-905). */
+  titleLoaded?: string | null;
+  /** The description the page loaded: refuse the edit if the stored one changed since (BOS-905). Absent means not checked. */
+  bodyLoaded?: string | null;
+  /** The acceptance criteria the page loaded: refuse the edit if the stored ones changed since (BOS-905). */
+  acceptanceCriteriaLoaded?: Criterion[];
 };
+
+export { staleVersionMessage };
 
 /** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
 const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
@@ -92,11 +130,46 @@ export function startRefusal(
   return null;
 }
 
+/** The text fields a page can edit, each one checked on its own so an unrelated change doesn't hold it up (BOS-905). */
+const EDIT_FIELDS = ["title", "body", "acceptanceCriteria"] as const;
+type EditField = (typeof EDIT_FIELDS)[number];
+export type EditConflict = { field: EditField; message: string };
+const FIELD_NOUN: Record<EditField, string> = { title: "title", body: "description", acceptanceCriteria: "acceptance criteria" };
+
+/** What was stored for a text field, as the page compares it. */
+function storedEditField(t: typeof tickets.$inferSelect, field: EditField): string | null {
+  if (field === "title") return t.title;
+  if (field === "body") return t.body ?? null;
+  return JSON.stringify(readCriteria(t.acceptanceCriteria));
+}
+
+/**
+ * A save that would overwrite someone else's change to the same field (BOS-905, BOS-298 step 13): the page
+ * sends what it loaded for each text field it edits, and a mismatch refuses the save with a 409. Only the
+ * edited field is compared, because the version moves on every state change and would refuse unrelated edits.
+ * A field sent without its loaded value (an older client, another caller) is not checked.
+ */
+export function editConflicts(t: typeof tickets.$inferSelect, patch: TicketPatch): EditConflict[] {
+  const loaded: Partial<Record<EditField, string | null>> = {
+    title: patch.title !== undefined && "titleLoaded" in patch ? (patch.titleLoaded ?? null) : undefined,
+    body: patch.body !== undefined && "bodyLoaded" in patch ? (patch.bodyLoaded ?? null) : undefined,
+    acceptanceCriteria: patch.acceptanceCriteria !== undefined && patch.acceptanceCriteriaLoaded !== undefined ? JSON.stringify(patch.acceptanceCriteriaLoaded) : undefined,
+  };
+  return EDIT_FIELDS.filter((f) => loaded[f] !== undefined && loaded[f] !== storedEditField(t, f)).map((field) => ({
+    field,
+    message: `The ${FIELD_NOUN[field]} was changed by someone else after you opened it, so your save was refused and nothing was overwritten. Your edit is still here. Reload the ticket to see the latest, then save again if you still want your change.`,
+  }));
+}
+
 export type WorkHooks = {
   onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+  /** A move into review that asks for a round (the owner's): request the reviews and wake the reviewers. */
+  onReview?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   /** A task of this feature started, finished, reopened, moved or was added: its status may need to follow. */
   onFeature?: (featureId: string) => Promise<unknown>;
+  /** The merges this process is running, with their phase (the review service's markers), so an approved card can say where it is. */
+  runningMerges?: () => Array<{ ticketId: string; phase?: MergePhase }>;
   now?: () => Date;
 };
 
@@ -161,7 +234,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     const col = target.columnId ? cols.find((c) => c.id === target.columnId) : cols.find((c) => c.systemState === (target.state ?? "backlog"));
     if (!col) throw new WorkError(422, "That column isn't on this project's board.");
     if (col.wipLimit != null && !opts.overLimit) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.columnId, col.id));
+      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)));
       if (inCol.filter((t) => t.id !== opts.ticketId).length >= col.wipLimit) {
         throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
       }
@@ -237,8 +310,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const pendingAny = new Set(
         (inReview.length ? await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(and(inArray(reviewRequests.ticketId, inReview), inArray(reviewRequests.status, ["pending", "approved"]))) : []).map((r) => r.ticketId),
       );
+      // DR-021: the owner's lane follows the derived sign-off state, card or not. "Approved with no open card"
+      // used to read as landing, so a ticket whose card was lost vanished from Your review (BOS-494).
+      const signoffWaiting = new Map<string, string>();
+      for (const r of rows) {
+        if (r.t.systemState !== "review") continue;
+        const d = await derivedSignoff(db, r.t);
+        if (d.state === "waiting") signoffWaiting.set(r.t.id, d.reviewer);
+      }
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
-      for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
+      for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !signoffWaiting.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work. A run counts for a
       // ticket when it is on it, was about it without being on it (a nudge that named it), or a
       // wake's note names it (a review wake can list several tickets in one run). Chat runs don't.
@@ -260,6 +341,21 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
+      // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
+      // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
+      const passed = await passedReviewTickets(db, inReview);
+      const holds = new Map<string, HoldView>();
+      for (const id of await heldTicketIds(db, inReview)) {
+        const v = await holdView(db, id);
+        if (v) holds.set(id, v);
+      }
+      const merging = new Map((hooks.runningMerges?.() ?? []).map((m) => [m.ticketId, m.phase ?? "checking"] as const));
+      const mergeNote = (t: typeof tickets.$inferSelect) => {
+        const phase = merging.get(t.id);
+        if (phase) return phase === "queued" ? "Waiting for a check slot." : `Now ${PHASE_LABEL[phase]}.`;
+        if (t.pullRequestUrl) return t.pullRequestNote ? `Pull request waiting on the git host: ${t.pullRequestNote.slice(0, 120)}` : "Pull request open; merges when the git host's checks pass.";
+        return "Waiting to be checked and merged.";
+      };
       // A held wake whose reason is the subscription quota (BOS-227), so the card can show it and offer Run now.
       // A ticket's wake can be merged into another of its assignee's wakes, so the assignee's held
       // wakes count too (BOS-253), not just ones naming the ticket.
@@ -277,14 +373,24 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
         const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
+        const waitingOnOwner = !!waitingDecisionId || signoffWaiting.has(t.id) || unreviewed.has(t.id) || !!askedId;
+        // Only for a ticket in review that isn't the owner's to act on: those are in Your review.
+        // A reviewer's hold (BOS-808): passed, but kept from merging on purpose. Its own stage, apart from waiting for a reviewer or merging.
+        const hold = t.systemState === "review" ? (holds.get(t.id) ?? null) : null;
+        const reviewStage = t.systemState !== "review" || waitingOnOwner ? null : hold ? ("held" as const) : passed.has(t.id) || withPr.has(t.id) || merging.has(t.id) ? ("merging" as const) : ("awaiting_review" as const);
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id) || !!askedId,
+        waitingOnOwner,
+        reviewStage,
+        hold,
+        mergeNote: reviewStage === "merging" ? mergeNote(t) : null,
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
+        // The card itself, so "Answer in Decisions" opens that exact card (BOS-1159).
+        ownerQuestionId: askedId,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
-        approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,
+        approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : (signoffWaiting.get(t.id) ?? null),
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
         parentTitle: rows.find((r) => r.t.id === t.parentTicketId)?.t.title ?? null,
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
@@ -294,7 +400,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
+        wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit))) : null,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
@@ -319,11 +427,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
 
     async createTicket(projectId: string, input: TicketPatch & { title: string }) {
       const p = await project(projectId);
-      if (p.archivedAt) throw new WorkError(409, `${p.name} is archived. Unarchive it in Settings → Projects to add tasks to it.`);
+      if (p.archivedAt) throw new WorkError(409, `${p.name} is archived. Unarchive it on the Projects page to add tasks to it.`);
       if (input.assigneeAgentId) await assertAgentInCompany(input.assigneeAgentId, p.companyId);
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
       if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
+      const badFix = input.fixesLive ? fixesLiveProblem(input.fixesLive) : null;
+      if (badFix) throw new WorkError(400, badFix);
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
@@ -347,6 +457,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
+          fixesLive: input.fixesLive?.trim() || null,
           urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
@@ -411,7 +522,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (!note || note.length > 500) throw new WorkError(422, "Say what to re-check, in 1 to 500 characters.");
       if (Number.isNaN(input.at.getTime())) throw new WorkError(422, "That isn't a valid time.");
       if (input.maxChecks !== undefined && (!Number.isInteger(input.maxChecks) || input.maxChecks < 1 || input.maxChecks > 20)) throw new WorkError(422, "maxChecks is 1 to 20.");
-      if (t.systemState !== "in_progress" && t.systemState !== "review") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress or in review; this one is ${t.systemState}.`);
+      // Blocked too (BOS-1171): a ticket that only waits should sit in Blocked and still be re-checked later.
+      if (t.systemState !== "in_progress" && t.systemState !== "review" && t.systemState !== "blocked") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress, in review or blocked; this one is ${t.systemState}.`);
       if (!t.assigneeAgentId) throw new WorkError(422, "The ticket has no agent to wake.");
       if (input.by) {
         if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");
@@ -479,11 +591,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
+      const expected = patch.expectedVersion;
+      if (expected !== undefined && t.version !== expected) throw new WorkError(409, await staleVersionMessage(db, t.companyId, ticketId, expected));
+      // Someone else changed the text the page is saving: refuse it before anything is written (BOS-905).
+      const conflict = editConflicts(t, patch)[0];
+      if (conflict) throw new WorkError(409, conflict.message, conflict.field);
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, internal: _internal, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, reviewRound: _round, moveReason: _why, expectedVersion: _v, titleLoaded: _tl, bodyLoaded: _bl, acceptanceCriteriaLoaded: _acl, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {
@@ -509,12 +626,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       const reparent = newParent !== undefined && newParent !== t.parentTicketId;
       if (reparent) Object.assign(fields, { parentTicketId: newParent });
-      const moves = patch.columnId !== undefined || patch.state !== undefined || !!dest;
-      // A move between projects keeps the state, in the new board's column for it.
-      const col = moves ? await placement(dest?.id ?? t.projectId, { columnId: patch.columnId, state: patch.state ?? (dest ? t.systemState : undefined) }, { ticketId, overLimit: patch.overLimit || !!dest }) : null;
+      // The state the ticket ends in: a column's own state wins over `state`; a move between projects keeps the state.
+      const wanted = patch.columnId ? (await columnsOf(dest?.id ?? t.projectId)).find((c) => c.id === patch.columnId) : null;
+      if (patch.columnId && !wanted) throw new WorkError(422, "That column isn't on this project's board.");
+      const target: SystemState = wanted?.systemState ?? patch.state ?? t.systemState;
       // Starting work (BOS-254): a run can't begin a ticket that still waits on something unfinished,
       // or one in the Backlog nobody handed it. The owner, the CEO and managers override.
-      if (col?.systemState === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
+      if (target === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
         const deps = await db
           .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
           .from(ticketDependencies)
@@ -526,23 +644,43 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (refusal) throw new WorkError(409, refusal);
       }
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
-      if (patch.ownerSetup !== undefined) fields.ownerSetup = patch.ownerSetup?.trim() || null;
+      // A merged ticket's steps are frozen against agents (BOS-443); the owner's web edit still works.
+      if (patch.ownerSetup !== undefined) {
+        // DR-052: the CEO fixing steps that failed the go-live card check (the caller checked its card is open).
+        const frozen = patch.setupFix ? null : setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
+        if (frozen) throw new WorkError(409, frozen);
+        fields.ownerSetup = patch.ownerSetup?.trim() || null;
+        // An override covers only the text it came with, so any other write of the steps clears it.
+        fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
+      }
+      if (patch.fixesLive !== undefined) {
+        const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
+        if (bad) throw new WorkError(400, bad);
+        fields.fixesLive = patch.fixesLive?.trim() || null;
+      }
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))
         fields.planFirst = patch.risk ? planFirstByDefault(patch.risk) : false;
-      const [updated] = await db
-        .update(tickets)
-        .set({
-          ...fields,
-          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? (t.systemState === "done" ? t.outcome : null) ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
-          lastActivityAt: now(),
-          ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}),
-        })
-        .where(eq(tickets.id, ticketId))
-        .returning();
-      if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
+      // Every state change, and the write of the other fields with it, goes through moveTicket (DR-047): the
+      // column, the WIP limit, the no-code reopen rule (BOS-532), the history line, the merge line's "left"
+      // event (BOS-769), and the done, review and feature steps after a real change.
+      const { ticket: updated } = await moveTicket(db, ticketId, target, {
+        by: patch.byAgentId,
+        expectedVersion: expected,
+        outcome: patch.outcome,
+        note: patch.moveReason ?? patch.stateNote,
+        // A move to another project keeps the state in that board's column and never stops at a limit.
+        overLimit: patch.overLimit,
+        internal: patch.internal,
+        reviewRound: patch.reviewRound ?? "keep",
+        columnId: patch.columnId,
+        projectId: dest?.id,
+        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}) },
+        hooks,
+        now: now(),
+      });
       if (dest) {
         const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));
         for (const k of kids) {
@@ -562,13 +700,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
-      if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
-      for (const fid of new Set([t.featureId, updated!.featureId])) if (fid) await hooks.onFeature?.(fid);
-      return updated!;
+      if ((updated!.ownerSetup ?? null) !== (t.ownerSetup ?? null))
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "reorganised", agentId: patch.byAgentId ?? undefined, summary: `${patch.byAgentId ? ((await db.select({ name: agents.name }).from(agents).where(eq(agents.id, patch.byAgentId)))[0]?.name ?? "An agent") : "The owner"} changed the owner's setup steps`, at: now() });
+      return updated;
     },
 
     /** A ticket can wait on another ticket in its company, or on an engagement its company requested (R25). */
-    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string }, byAgentId: string | null = null) {
+    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string; until?: "merged" | "done" }, byAgentId: string | null = null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
       if (!!blocker.ticketId === !!blocker.engagementId) throw new WorkError(422, "Give exactly one blocker: a ticket or an engagement.");
@@ -581,15 +719,37 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const [e] = await db.select().from(engagements).where(and(eq(engagements.id, blocker.engagementId!), eq(engagements.requesterCompanyId, t.companyId)));
         if (!e) throw new WorkError(422, "Only an engagement this company requested can block its tickets.");
       }
+      // The same link again only changes when it is released (BOS-989), so a repeat call can't stack two rows.
+      if (blocker.ticketId) {
+        const [same] = await db.select().from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, blocker.ticketId)));
+        if (same) {
+          const until = blocker.until ?? same.until;
+          if (until === same.until) return same;
+          const [changed] = await db.update(ticketDependencies).set({ until }).where(eq(ticketDependencies.id, same.id)).returning();
+          await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: `Waits on ticket ${blocker.ticketId} until it is ${until}`, at: now() });
+          return changed!;
+        }
+      }
       const dep = await addTicketDependency(db, {
         companyId: t.companyId,
         blockedTicketId: ticketId,
         blockerTicketId: blocker.ticketId ?? null,
         blockerEngagementId: blocker.engagementId ?? null,
+        until: blocker.until,
         actor: { type: "agent", agentId: byAgentId },
       });
-      await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
+      await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId} until it is ${blocker.until ?? "done"}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
       return dep;
+    },
+
+    /** Takes a "waits on" link off a ticket (BOS-989). True if there was one. */
+    async removeDependency(ticketId: string, blockerTicketId: string, byAgentId: string | null = null) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t) throw new WorkError(404, "No such ticket.");
+      const gone = await db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, blockerTicketId))).returning({ id: ticketDependencies.id });
+      if (!gone.length) return false;
+      await record(db, { companyId: t.companyId, ticketId, agentId: byAgentId ?? undefined, kind: "dependency", summary: `No longer waits on ticket ${blockerTicketId}`, at: now() });
+      return true;
     },
 
     /** True if `blocker` already (transitively) waits on `ticket`. */

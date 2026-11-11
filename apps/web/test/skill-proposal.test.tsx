@@ -45,6 +45,7 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   score: 10,
   parts: { blocking: 0, urgency: 0, age: 1, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   context: { type: "skill", proposalId: "p1" },
   ...over,

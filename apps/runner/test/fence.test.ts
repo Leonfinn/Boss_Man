@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, applyCheckSlots, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, pnpmStoreDir, probeLandlock, pruneStore, pruneStores, repoGrant, runnerFence, sandboxSelfTest, shortTmpName, SOCKET_SUFFIX_ROOM, SUN_PATH_MAX, worktreeAdmin } from "../src/fence.js";
+import { randomUUID } from "node:crypto";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -68,16 +69,71 @@ describe("fence profile", () => {
   });
 });
 
+// BOS-1087: headless Chromium makes <TMPDIR>/org.chromium.Chromium.XXXXXX/SingletonSocket (~45 bytes); a Unix socket path
+// may be 107 bytes at most. The old TMPDIR (run-tmp/<36-char uuid>) was 67 bytes on the usual /home/node/runner-data.
+describe("temp folders leave room for a Unix socket", () => {
+  const DATA = "/home/node/runner-data";
+  it("keeps a fenced run's TMPDIR at 40 bytes or fewer, for any run id, on the usual data folder", () => {
+    const { runTmpRoot } = runnerFence("full", DATA, "/home/node/workspaces");
+    for (const id of ["ffffffff-ffff-4fff-8fff-ffffffffffff", "00000000-0000-4000-8000-000000000000", randomUUID()]) {
+      const tmp = path.join(runTmpRoot, shortTmpName(id));
+      expect(Buffer.byteLength(tmp)).toBeLessThanOrEqual(40);
+      expect(Buffer.byteLength(tmp) + SOCKET_SUFFIX_ROOM).toBeLessThanOrEqual(SUN_PATH_MAX);
+    }
+  });
+
+  it("a Chromium-style singleton socket really fits under it", () => {
+    const tmp = path.join(runnerFence("full", DATA, "/home/node/workspaces").runTmpRoot, shortTmpName(randomUUID()));
+    const socket = path.join(tmp, "org.chromium.Chromium.AbC123", "SingletonSocket");
+    expect(Buffer.byteLength(socket)).toBeLessThanOrEqual(SUN_PATH_MAX);
+  });
+
+  it("picks the next slice of the id when a live run already uses the first, and never two the same", () => {
+    const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    expect(shortTmpName(id)).toBe("aaaaaaaa");
+    expect(shortTmpName(id, new Set(["aaaaaaaa"]))).toBe("bbbb4ccc");
+    expect(shortTmpName(id, new Set(["aaaaaaaa", "bbbb4ccc"]))).toBe("8dddeeee");
+  });
+});
+
 describe("the runner's fence setting", () => {
   it("puts agent homes in the data volume and uses the workspaces volume's pnpm store", () => {
-    expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", pnpmStore: "/ws/.pnpm-store" });
+    expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", runTmpRoot: "/data/run-tmp", pnpmStore: "/ws/.pnpm-store" });
+  });
+
+  // BOS-568: the store can be moved with PNPM_STORE_DIR, e.g. to a folder on a bigger volume; never a relative path.
+  it("moves the shared pnpm store wherever PNPM_STORE_DIR says", () => {
+    expect(runnerFence("full", "/data", "/ws")).toMatchObject({ pnpmStore: "/ws/.pnpm-store" });
+    expect(pnpmStoreDir("/ws", undefined)).toBe("/ws/.pnpm-store");
+    expect(pnpmStoreDir("/ws", "  ")).toBe("/ws/.pnpm-store");
+    expect(pnpmStoreDir("/ws", "/ws/big//pnpm/")).toBe("/ws/big/pnpm");
+    expect(() => pnpmStoreDir("/ws", "pnpm-store")).toThrow(/absolute/);
+    expect(() => pnpmStoreDir("/ws", "/big/../etc")).toThrow(/absolute/);
+  });
+
+  // BOS-633: the workspaces root itself (and /) would grant agents the whole volume, and the gate's store
+  // (/home/node/workspaces-gate) would land on the root disk: the very failure BOS-568 fixed.
+  it("refuses a shared store at the workspaces root, above it, or /", () => {
+    expect(() => pnpmStoreDir("/home/node/workspaces", "/home/node/workspaces")).toThrow(/root/);
+    expect(() => pnpmStoreDir("/home/node/workspaces", "/home/node/workspaces/")).toThrow(/root/);
+    expect(() => pnpmStoreDir("/ws", "/")).toThrow();
+    expect(() => pnpmStoreDir("/ws", "/wsx")).toThrow(/under/);
+    expect(() => pnpmStoreDir("/ws", "/home/node/workspaces-other")).toThrow(/under/);
+    expect(() => pnpmStoreDir("/ws", "/tmp/pnpm-store")).toThrow(/under/);
   });
 
   // main.ts starts the daemon, so no test runs it. Without this setting every run asked to be
   // fenced ran unfenced while hello still offered the fence (found building BOS-323).
   it("is passed to the runner's SessionManager from its self-test", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
-    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: runnerFence\(sandbox\.level, dataDir, workspacesRoot\),[\s\S]*?\n\}\);/);
+    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: \{ \.\.\.runnerFence\(sandbox\.level, dataDir, workspacesRoot\), pnpmStore: storeDir \},[\s\S]*?\n\}\);/);
+    // The unfenced merge gate installs from its own gate store (4th arg); fenced server-queued jobs use the
+    // shared store agents write (5th arg), since they are fenced like agents (BOS-568, BOS-316).
+    expect(main).toMatch(/new Workspaces\(workspacesRoot, process\.env, coordDir, gateStore, \{ level: sandbox\.level, pnpmStore: storeDir \}\);/);
+    expect(main).toMatch(/assertSeparateStore\(storeDir, gateStore\)/);
+    // The store comes from PNPM_STORE_DIR through the same check, and both stores are pruned on a schedule (BOS-633).
+    expect(main).toMatch(/const storeDir = pnpmStoreDir\(workspacesRoot, env\.PNPM_STORE_DIR\)/);
+    expect(main).toMatch(/pruneStores\(storeDir, log\)/);
   });
 });
 
@@ -201,6 +257,44 @@ describe.skipIf(!live)("fence, live", () => {
     }
   });
 
+  // BOS-436: the fence leaves /proc readable, so the runner's memory (its token) is safe only if the
+  // kernel refuses a fenced process ptrace-level access to a process outside the fence. Landlock does
+  // that (its ptrace hook), which this keeps true. The unfenced control shows the read itself works.
+  it("can't read the runner's memory through /proc/<pid>/mem", () => {
+    const needle = "BMTOKEN-" + "x9f3k2m7q1";
+    const holder = spawn(process.execPath, ["-e", `const s = Buffer.from(${JSON.stringify(needle)}); process.stdout.write("up\\n"); setInterval(() => s.length, 500);`], { stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      const inside = mkdtempSync(path.join(tmpdir(), "bm-fence-"));
+      const reader = path.join(inside, "read-mem.pl");
+      writeFileSync(
+        reader,
+        `my ($pid, $needle) = @ARGV;
+open(my $m, "<", "/proc/$pid/maps") or do { print "REFUSED maps\\n"; exit 0 };
+open(my $f, "<:raw", "/proc/$pid/mem") or do { print "REFUSED mem\\n"; exit 0 };
+while (<$m>) {
+  next unless /^([0-9a-f]+)-([0-9a-f]+) rw/;
+  my ($a, $b) = (hex $1, hex $2);
+  next if $b - $a > 64 * 1024 * 1024;
+  seek($f, $a, 0) or next;
+  my $buf;
+  my $n = read($f, $buf, $b - $a);
+  if ($n && index($buf, $needle) >= 0) { print "LEAKED\\n"; exit 0 }
+}
+print "NOT FOUND\\n";
+`,
+      );
+      // Give the holder time to start.
+      spawnSync("sleep", ["1"]);
+      const control = spawnSync("perl", [reader, String(holder.pid), needle], { encoding: "utf8" });
+      if (!control.stdout.includes("LEAKED")) return; // this host (Yama ptrace_scope, a seccomp profile) already blocks same-uid reads
+      const r = fenced(inside, `perl ${reader} ${holder.pid} ${needle}`);
+      expect(r.stdout).not.toContain("LEAKED");
+      expect(r.stdout).toContain("REFUSED");
+    } finally {
+      holder.kill();
+    }
+  });
+
   it("lets the agent commit and branch in its worktree, but not touch the shared repo's config or hooks", () => {
     const r = repoWithWorktree();
     const repo = repoGrant(r.bare, r.ticket);
@@ -275,3 +369,67 @@ describe("applyCheckSlots (BOSSMAN_CHECK_SLOTS)", () => {
     expect(existsSync(proofOf(d))).toBe(true);
   });
 });
+
+// BOS-633: both pnpm stores are pruned on a schedule. The test runs a stand-in pnpm (a small script written to a
+// temp folder) so it never downloads a package or touches the network, and proves the prune runs twice safely,
+// does nothing without a store, and keeps going for the gate store when the shared one fails.
+describe("pruneStores (BOS-633)", () => {
+  const fakePnpm = (dir: string) => {
+    const bin = path.join(dir, "pnpm");
+    writeFileSync(bin, '#!/bin/sh\n[ "$1" = "store" ] && [ "$2" = "prune" ] || exit 2\nfor a in "$@"; do dir="$a"; done\n[ -d "$dir" ] || { echo "no store at $dir" >&2; exit 1; }\necho "$dir" >> "$PRUNE_LOG"\necho "Pruned 0 packages"\n');
+    execFileSync("chmod", ["+x", bin]);
+    return bin;
+  };
+  it("prunes the shared and gate stores, twice in a row, and leaves them in place", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = fakePnpm(d);
+    const shared = path.join(d, "store");
+    mkdirSync(shared);
+    mkdirSync(`${shared}-gate`);
+    process.env.PRUNE_LOG = log;
+    try {
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      expect(await pruneStores(shared, () => {}, bin)).toEqual({ shared: { pruned: true }, gate: { pruned: true } });
+      const lines = readFileSync(log, "utf8").trim().split("\n");
+      expect(lines).toEqual([shared, `${shared}-gate`, shared, `${shared}-gate`]);
+      expect(existsSync(shared) && existsSync(`${shared}-gate`)).toBe(true);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+  it("skips a store that does not exist yet, without running pnpm for it", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = fakePnpm(d);
+    process.env.PRUNE_LOG = log;
+    try {
+      expect(await pruneStore(path.join(d, "absent"), () => {}, bin)).toEqual({ pruned: false, why: "no store yet" });
+      expect(existsSync(log)).toBe(false);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+  it("prunes the gate store even when the shared store's prune fails", async () => {
+    const d = mkdtempSync(path.join(tmpdir(), "prune-"));
+    const log = path.join(d, "prune.log");
+    const bin = path.join(d, "pnpm");
+    writeFileSync(bin, `#!/bin/sh\nfor a in "$@"; do dir="$a"; done\ncase "$dir" in */failing) echo "boom" >&2; exit 1 ;; esac\necho "$dir" >> "$PRUNE_LOG"\n`);
+    execFileSync("chmod", ["+x", bin]);
+    const shared = path.join(d, "failing");
+    mkdirSync(shared);
+    mkdirSync(`${shared}-gate`);
+    process.env.PRUNE_LOG = log;
+    const said: string[] = [];
+    try {
+      const r = await pruneStores(shared, (m) => said.push(m), bin);
+      expect(r.shared.pruned).toBe(false);
+      expect(r.gate.pruned).toBe(true);
+      expect(readFileSync(log, "utf8")).toContain(`${shared}-gate`);
+      expect(said.join("\n")).toMatch(/failed/);
+    } finally {
+      delete process.env.PRUNE_LOG;
+    }
+  });
+});
+

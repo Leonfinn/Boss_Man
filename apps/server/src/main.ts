@@ -4,7 +4,11 @@ import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
+import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
+import { checkLimitReconciler } from "./services/check-limit.js";
+import { checkQueue } from "./services/check-queue.js";
+import { getHold } from "./services/maintenance.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
@@ -23,7 +27,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
+const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -44,6 +48,13 @@ const { app, memory, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, no
   },
 });
 
+const checkQueueSvc = checkQueue(db);
+const checkLimit = checkLimitReconciler({
+  slots: () => checkQueueSvc.slots(),
+  launch: launcher,
+  holdActive: async () => !!(await getHold(db)),
+  startDrain: () => maintenance.start({ kind: "settings" }),
+});
 const bg = createBackground(
   [
     // Scheduling passes; run ends and new wakes also prompt one.
@@ -61,12 +72,16 @@ const bg = createBackground(
     } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
+    // Deploy tag moves (DR-033) that a restart or a leader change cut off: picked up again; the runner's lease makes a repeat harmless. // leader-only
+    { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
-    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: () => notes.markAnsweredRead() },
+    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
     { name: "retro", everyMs: Number(env.BOSSMAN_RETRO_MS ?? 15 * 60_000), run: () => retro.sweep() },
+    // Server health (BOS-640): rss against the memory the server may use, and freezes in the last 10 minutes; raises the memory card (CEO) and the freeze card (owner). // leader-only
+    { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
@@ -79,18 +94,31 @@ const bg = createBackground(
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
+    // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
+    { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
+    // Every company's runner stays connected: tells that company's CEO and the owner when one does not, and checks a deploy brought them all back (BOS-467). // leader-only
+    { name: "runner watch", everyMs: Number(env.BOSSMAN_RUNNER_WATCH_MS ?? 30_000), run: () => runnerWatch.step() },
+    // The server-owned check queue (DR-003): starts due jobs and marks silent ones stuck, each with a recorded reason. Does nothing while check_queue_mode is legacy.
+    { name: "check queue", everyMs: Number(env.BOSSMAN_CHECK_QUEUE_MS ?? 15_000), run: async () => { await checks.sweep(); } },
     // Synthetic's quota, cached and read at most every 5 minutes; warns the owner once per period at 80% and 100% (BOS-239).
     { name: "synthetic quota", everyMs: Number(env.BOSSMAN_SYNTHETIC_QUOTA_MS ?? 5 * 60_000), run: () => refreshSyntheticQuota() },
+    // Housekeeping (BOS-416): deletes runner events older than BOSSMAN_RUNNER_EVENTS_DAYS (default 60), in small batches. // leader-only
+    // First pass 15 min after start (clear of the start-up memory burst), then daily: this server restarts several times a day.
+    { name: "runner events prune", everyMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneRunnerEvents(db, { days: runnerEventsDays(env.BOSSMAN_RUNNER_EVENTS_DAYS), stop: () => leader.role() !== "leader" }) },
+    // Failure signatures are only read over the two-hour loop-guard window (loop-guards.ts, BOS-611); the rest go daily, in small batches. // leader-only
+    { name: "failure signatures prune", everyMs: Number(env.BOSSMAN_FAILURE_SIGNATURES_PRUNE_MS ?? 24 * 3_600_000), firstAfterMs: Number(env.BOSSMAN_RUNNER_EVENTS_PRUNE_FIRST_MS ?? 15 * 60_000), run: () => pruneFailureSignatures(db, { days: failureSignaturesDays(env.BOSSMAN_FAILURE_SIGNATURES_DAYS), stop: () => leader.role() !== "leader" }) },
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),
 );
 // Background work follows leadership; runner sockets are closed by buildApp on demotion.
 // A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
+// shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
 leader.onPromote(() => {
   resumeMergesSince = new Date();
   bg.startBackground();
+  void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });
 leader.onDemote(() => bg.stopBackground());
 // Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.

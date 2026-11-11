@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandProblem, parseStep, sh, step, whereFence } from "../src/services/steps.js";
+import { commandProblem, lintOwnerSteps, NOT_OVERRIDABLE, parseStep, sh, step, whereFence, type HostFacts } from "../src/services/steps.js";
 
 describe("copy-safe owner steps (BOS-269)", () => {
   it("puts each command in its own block under the sentence", () => {
@@ -59,5 +59,52 @@ describe("where a command runs (BOS-427)", () => {
 
   it("a fence line that isn't the expected form carries no host (so R6 refuses it rather than guessing)", () => {
     expect(parseStep("```sh host=nas01\nls\n```")).toEqual([{ type: "command", text: "ls" }]);
+  });
+});
+
+describe("the lint and the card read fences the same way (BOS-550)", () => {
+  const hosts: HostFacts[] = [{ name: "app01", login: "owner", ownership: [] }];
+
+  it("a labelled fence the lint accepts is a command block, never sentence text", () => {
+    const steps = ['Go to the install folder. This prints nothing:\n```sh host="app01" as="root"\ncd /srv/app\n```', '1. List it:\n   ```sh host="app01" as="root"\n   ls -l /srv/app\n   ```'];
+    expect(lintOwnerSteps(steps, hosts).refuse).toEqual([]);
+    for (const s of steps) {
+      const p = parseStep(s);
+      expect(p.filter((x) => x.type === "command")).toHaveLength(1);
+      expect(p.filter((x) => x.type === "text").map((x) => x.text).join("\n")).not.toContain("```");
+    }
+  });
+
+  it("checks the command inside an indented fence, as the card will show it", () => {
+    const r = lintOwnerSteps(['1. Check:\n   ```sh host="app01" as="root"\n   $ ls\n   ```'], hosts).refuse;
+    expect(r.map((f) => f.rule)).toContain("R3");
+    expect(r.find((f) => f.rule === "R3")!.problem).toMatch(/prompt character/);
+  });
+
+  it("refuses a ``` the card would show as raw text, and the CEO can't override it", () => {
+    for (const bad of ["Run this: ```sh\nls\n```", 'Run:\n```sh host="app01" as="root"\nls', "Run:\n```sh\nls\n``` then Enter"]) {
+      const r = lintOwnerSteps([bad], hosts).refuse;
+      expect(r.some((f) => f.rule === "R3" && /raw text/.test(f.problem))).toBe(true);
+    }
+    expect(NOT_OVERRIDABLE.has("R3")).toBe(true);
+  });
+});
+
+describe("R15: no runner recreate that skips the drain (BOS-594)", () => {
+  const block = (cmd: string) => `Do it.\n\n\`\`\`sh host="boss-man" as="root"\n${cmd}\n\`\`\``;
+  it("refuses the 6 Nov 16:00 card's recreate-all step, --now and a direct container restart", () => {
+    const steps = [
+      block(`docker exec "$(docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher)" node dist/main.js recreate-all`),
+      block("scripts/update-runner.sh --settings --now"),
+      block("docker restart boss-man-runner-app-co"),
+    ];
+    const r = lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R15");
+    expect(r.map((f) => f.step)).toEqual([1, 2, 3]);
+    expect(r[0]!.problem).toContain("scripts/update-runner.sh --settings");
+  });
+
+  it("lets the draining paths through", () => {
+    const steps = [block("scripts/update-runner.sh --settings"), block("scripts/update-runner.sh"), block("docker compose up -d --no-deps launcher")];
+    expect(lintOwnerSteps(steps).refuse.filter((f) => f.rule === "R15")).toEqual([]);
   });
 });

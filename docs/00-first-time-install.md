@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`; see "Memory limits" below for the server, database and tool servers) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 16 GB of memory with one check slot (less on a smaller host), and the limit grows with "Checks at once" in Settings (an optional `BOSSMAN_RUNNER_MEMORY` caps it; see "Memory limits" below for the server, database and tool servers) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
 - **An AI provider for at least one agent program.** The runner supports three:
@@ -204,7 +204,7 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page), the launcher and netguard. The launcher starts netguard beside every runner, so it must be built too:
+Build the server (it includes the web page), the launcher and netguard. The network guard (netguard) is not a service of its own: the launcher starts one small guard container beside every runner, so its image must be built too (name it, as below). Your Docker dashboard may show "update check failed" on the runner and guard containers; that is expected and harmless (the images are built here, not pulled), and you update them with Build and update runners:
 
 ```sh
 docker compose build server launcher netguard
@@ -367,7 +367,7 @@ Add `--dry-run` to see the steps without running them. It stops if the checkout 
 cd $B/src && scripts/update-runner.sh
 ```
 
-Follow it under **Settings > Server and runner**, in **Runner update**, which also has **Cancel the update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow it under **Settings > Server and runner > Updates**, in **Runner update** (just under the update buttons), which also has **Cancel the update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)**. To undo, run `scripts/update-runner.sh --rollback`.
 
 **Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Install the deployer's copy in `<install-dir>/deployer`: it uses the folder it sits in, and finds the code in `<install-dir>/src` beside it. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
 
@@ -381,17 +381,23 @@ On 3 Nov 2026 a headless browser with no memory limit used up the whole host's m
 
 | Setting in `.env` | What it limits | Default |
 | --- | --- | --- |
-| `BOSSMAN_RUNNER_MEMORY` | each runner, including the browsers and test runs inside it (no swap on top) | `4g` |
+| `BOSSMAN_RUNNER_MEMORY` | optional upper bound on each runner's memory (no swap on top). Leave it empty: Settings → Server and runner → Checks → "Checks at once" sizes the runner (13 GB for the agents plus 3 GB per check slot, so 16 GB for one, 19 GB for two) and keeps it within the host's memory less 2 GB for the server. Each company has its own runner and each is sized from the whole host's memory, not a share, so with several companies on one host the runners together can be promised more than the host has: keep "Checks at once" low there (the Checks panel warns). A line here only lowers the limit. The Checks panel shows the limit in force and says if this line is what holds it down. (The compose-run `runner` service, used without the launcher, still uses `4g` when this is empty) | empty (no cap) |
 | `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
 | `BOSSMAN_RUNNER_CPU_SHARES` | CPU priority of each runner against the server, database and proxy (1024 each, proxy 2048). Not a cap: only matters when the host is busy, and an idle host still lets runners use every core | `512` |
 | `BOSSMAN_RUNNER_CPUS` | optional hard CPU cap per runner (e.g. `4`). Leave empty unless the host is shared with other workloads: one runner hosts all of a company's agents and the merge check, so a low cap slows them all even when the host is idle | none |
-| `BOSSMAN_CHECK_SLOTS` | how many full checks (the merge gate's and agents' `check-quick`) a runner may run at once; the rest wait in line. Each extra one peaks at about 3 GB, so raise `BOSSMAN_RUNNER_MEMORY` with it (for 2 slots, `8g` or more) and keep the host's free memory above that. Takes effect when the runner container is recreated (it is read at runner start) | `1` |
+| `BOSSMAN_RESERVED_THREADS` | threads kept back for the server, database and proxy: runners are confined to all the other threads. Off unless you turn it on (see "Reserved threads" below for when it helps). `auto` reserves 2 (one core, hyperthread siblings together) when the host has 6 or more threads, and stays off below that (a small host can't spare a core); `off` or `0` switches it off; a number keeps that many back (refused if it would leave the runners fewer than 2). The launcher works the threads out at start from what the host lets containers use (so an LXC cpuset is respected). Server status (`cpuReserve`) shows whether it is on and which threads. Takes effect when the launcher is recreated and each runner is next restarted (Build and update runners lets runs in progress finish first) | `off` |
+| `BOSSMAN_CHECK_SLOTS` | optional upper bound on how many full checks a runner may run at once. Leave it empty: set "Checks at once" in Settings → Server and runner → Checks instead. Saving a new number recreates the runners with that many slots and the memory to match, each as its company goes idle (agents are woken afterwards); no `.env` edit and no host step. The panel shows the limit in force and why it is lower than the setting if the host's memory (or a value here) holds it down | empty (no cap) |
+| `BOSSMAN_OPENCODE_SESSION_DAYS` | disk, not memory: how many days an OpenCode session may sit untouched before the runner's hourly clean-up deletes it from OpenCode's session database (the runner's own and each fenced agent's). OpenCode never deletes sessions itself, and its database grows by about 1 GB a day on a busy runner. `0` turns the clean-up off. Before its first delete in each database the runner makes and checks a backup copy in its data folder (kept 7 days), and it needs that file's size plus 1 GB free. Once per database it then compacts the file (VACUUM) while no OpenCode run is live; new OpenCode runs wait meanwhile, at most 30 minutes, after which the compaction is stopped (SQLite undoes it, nothing is lost), the CEO gets one alert and it is tried again a day later. Read at runner start | `14` |
+| `PNPM_STORE_DIR` | where agents' package installs share one pnpm store. Must be a folder under `/home/node/workspaces` (the runner's only writable volume), not its root; a value outside, or the root itself, is refused at start-up. Change it only to move the store to a folder on the same volume | `/home/node/workspaces/.pnpm-store` |
 | `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
+| `BOSSMAN_SERVER_HEAP_MB` | the server's JavaScript heap, in MiB (`--max-old-space-size`). Measured use is about 100 MiB; the memory log's `heapUsed` shows yours. If you set `BOSSMAN_SERVER_MEMORY`, keep this well below it | `1536` |
 | `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
 | `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
 
 - **Priority.** If the host runs out anyway, Linux stops runners and tool servers first (`oom_score_adj` 500) and the database, server and proxy last (-500, -500 and -900). A runaway browser hits its own limit first and only that container is stopped and restarted.
 - **CPU.** On a Proxmox LXC (or any VM or container host) the container's own CPU limit applies on top of these settings. The weights only decide who wins when the CPUs are all busy.
+- **Reserved threads (BOS-586), off by default.** This keeps a core free of agent work so the server, database and proxy never wait for a thread. It only helps if the UI is slow *because the CPU is full*. On the worked-example host it wasn't: the server froze for about 2 s just as often on an idle machine (CPUs 85-97% idle) as under full load, so the freezes come from the server itself (BOS-602), and a reserved core would only have taken threads away from the agents. Turn it on only if you measure the opposite: the UI is fine when the host is idle and slow only when every thread is busy (`top` shows little idle time and a load average above the thread count). Nothing else is pinned: the server, database and proxy may use any thread, runners just never use the reserved ones. Tool servers (crawl4ai, scrapling, headless browsers) are not confined either, so they can still use the reserved threads. Turning it on: set `BOSSMAN_RESERVED_THREADS=auto` (or a number) in `.env`, run `docker compose up -d launcher` (only the launcher restarts), then Settings → Server and runner → Updates → **Build and update runners** (runs in progress finish first; each runner is swapped when it is idle). With the default left off there is nothing to do after an update. Check it: ask for server status and read `cpuReserve`, or run `docker inspect --format '{{.HostConfig.CpusetCpus}}' boss-man-runner-<company>`. Undo: set `BOSSMAN_RESERVED_THREADS=off` in `.env`, recreate the launcher and the runners.
+- **Per-host notes (worked example only).** Minisforum on Proxmox, a VM with 12 threads: left off (see above); if turned on, `auto` reserves 2 and runners get the other 10. A VM or LXC with fewer than 6 threads stays off; give the guest more threads in Proxmox rather than lowering the limit. Other hosts need no change.
 - **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
 - **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
 - **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).
@@ -422,7 +428,7 @@ docker logs --tail 50 boss-man-runner-<slug>
 - If the runner image was never built, or the canary failed in step 5, run `scripts/update-runner.sh` again, then choose **Start runner**.
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
 - Choose **Reconnect runner** to give it a fresh token and container.
-- A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner retries by itself every 30 seconds.
+- A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner keeps retrying by itself, waiting longer each time, up to 30 seconds between tries.
 - Running without the launcher? An empty token file makes the runner stop with "Set BOSSMAN_RUNNER_TOKEN_FILE...". Follow [docs/06, step 7](06-install-truenas.md#7-the-runner-token).
 
 **The port is already in use.**
@@ -450,7 +456,7 @@ grep BOSSMAN_INSECURE_COOKIES $B/src/.env
 After changing it, run `docker compose up -d` from `$B/src`. Open the page with the same address each time, so the cookie keeps working.
 
 **`docker compose` says something is not set or a file is missing.**
-Messages like "Set POSTGRES_PASSWORD in .env" or "Set BOSSMAN_DATA in .env" mean `.env` is missing, or you're not in `$B/src`. A missing secret file means step 3 wasn't finished. Check:
+A message like "Set POSTGRES_PASSWORD in .env" means `.env` is missing, or you're not in `$B/src`. (A missing `BOSSMAN_DATA` gives no message: Compose quietly uses `/srv/boss-man/data`, so check it is set.) A missing secret file means step 3 wasn't finished. Check:
 
 ```sh
 cd $B/src && ls -a . secrets
@@ -527,6 +533,7 @@ docker system df
 
 ## Next steps
 
+- [docs/21-move-to-new-host.md](21-move-to-new-host.md): moving Boss Man to another Docker host (host-neutral, with TrueNAS and Proxmox notes).
 - [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, the host deployer, blue/green, phone notifications and the feedback portal.
 - [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.

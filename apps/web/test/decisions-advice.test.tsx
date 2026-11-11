@@ -25,13 +25,14 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   score: 10,
   parts: { blocking: 0, urgency: 0, age: 10, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   ...over,
 });
 
 describe("ask the CEO for advice", () => {
   it("sends the optional note and refreshes", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const onAnswered = vi.fn();
     render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
@@ -39,21 +40,45 @@ describe("ask the CEO for advice", () => {
     fireEvent.change(screen.getByLabelText(/What's unclear/), { target: { value: "What is A?" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask the CEO for advice" }));
     await waitFor(() => expect(onAnswered).toHaveBeenCalled());
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const [url, init] = (fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/ask-advice") as unknown as [string, RequestInit]);
     expect(url).toBe("/api/decisions/d1/ask-advice");
     expect(JSON.parse(init.body as string)).toEqual({ note: "What is A?" });
   });
 
   it("shows the ask button on a permission request and posts it", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const onAnswered = vi.fn();
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission" } })]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
     fireEvent.click(screen.getByText("Not enough detail?"));
     fireEvent.click(screen.getByRole("button", { name: "Ask the CEO for advice" }));
     await waitFor(() => expect(onAnswered).toHaveBeenCalled());
-    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const [url] = (fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/ask-advice") as unknown as [string, RequestInit]);
     expect(url).toBe("/api/decisions/d1/ask-advice");
+  });
+
+  it("follows the CEO's Allow over the rule's Deny: one headline, Allow is the primary button, and the card says why (BOS-328)", () => {
+    render(
+      <Decisions
+        decisions={[
+          decision({
+            kind: "permission",
+            options: ["Allow once", "Deny"],
+            recommendedOption: "Deny",
+            context: { type: "permission", advice: { state: "advised", what: "Runs a benchmark.", needed: "Yes.", recommendation: "allow", why: "Everything stays in the checkout." } },
+          }),
+        ]}
+        companies={[company]}
+        loaded
+        agentsWorking={0}
+        onAnswered={() => {}}
+      />,
+    );
+    expect(document.querySelector(".rec")?.textContent).toContain("Allow once");
+    expect(document.querySelector(".rec")?.textContent).not.toContain("Deny");
+    expect(screen.getByRole("button", { name: "Allow once" }).className).toContain("primary");
+    expect(screen.getByRole("button", { name: "Deny" }).className).not.toContain("primary");
+    expect(screen.getByText(/automatic check suggested Deny, but the CEO/)).toBeTruthy();
   });
 
   it("shows the CEO's advice on a permission card", () => {

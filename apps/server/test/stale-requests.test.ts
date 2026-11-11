@@ -162,7 +162,11 @@ describe("stale requests (BOS-123)", () => {
     const note = { stateNote: "Waiting on the owner.", stateNoteAt: new Date("2026-10-27T10:00:00Z"), lastActivityAt: new Date("2026-10-27T09:00:00Z") };
     expect(stateNoteLine(note, now)).not.toContain("(may be out of date)");
     expect(stateNoteLine({ ...note, lastActivityAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
-    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
+    // An owner action says what it was and when, never a bare "check before repeating" (BOS-1192).
+    const byOwner = stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z"), stateNoteStaleReason: 'the owner answered "Approve BOS-1095?"' }, now);
+    expect(byOwner).toContain('after this was written, the owner answered "Approve BOS-1095?", 1h ago');
+    expect(byOwner).not.toContain("check before repeating");
+    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("the owner acted on this ticket 1h ago");
     // A flag from before the note was rewritten doesn't make the fresh note stale.
     expect(stateNoteLine({ ...note, stateNoteAt: new Date("2026-10-27T11:30:00Z"), stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).not.toContain("(may be out of date)");
   });
@@ -176,6 +180,7 @@ describe("stale requests (BOS-123)", () => {
 
     let [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+    expect(row!.stateNoteStaleReason).toContain('the owner answered "Which colour?"');
 
     await c.work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
     [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
@@ -367,5 +372,76 @@ describe("stale requests (BOS-123)", () => {
     // Rod is not woken about a card an owner answer never made out of date.
     const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON)));
     expect(stale).toHaveLength(0);
+  });
+});
+
+describe("submit_plan (BOS-531)", () => {
+  it("saves the plan on a plan-first ticket and approving the card sets planApprovedAt", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plan me", c.worker.id);
+    await c.db.update(tickets).set({ planFirst: true }).where(eq(tickets.id, t.id));
+    const client = await c.mcp(c.worker.id);
+    const r = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1: do the thing." } });
+    expect(isError(r), textOf(r)).toBe(false);
+    const [mid] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(mid!.plan).toBe("Step 1: do the thing.");
+    expect(mid!.planApprovedAt).toBeNull();
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toContain("Step 1: do the thing.");
+    await c.decisions.answer(card!.id, "Keep planning");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.planApprovedAt).toBeNull();
+    const again = await client.callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "Step 1 revised." } });
+    expect(isError(again), textOf(again)).toBe(false);
+    const [card2] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    await c.decisions.answer(card2!.id, "Approve plan");
+    const [after] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(after!.planApprovedAt).not.toBeNull();
+    expect(after!.plan).toBe("Step 1 revised.");
+  });
+  it("refuses a ticket that is not plan-first", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Plain", c.worker.id);
+    const r = await (await c.mcp(c.worker.id)).callTool({ name: "submit_plan", arguments: { ticketId: t.id, plan: "x" } });
+    expect(isError(r)).toBe(true);
+  });
+});
+
+describe("alert answers wake on the alert's ticket (BOS-1120)", () => {
+  const alertCard = async (c: Awaited<ReturnType<typeof setup>>, ticketId: string) =>
+    (
+      await c.db
+        .insert(decisions)
+        .values({
+          companyId: c.company.id,
+          kind: "question",
+          question: "Engineer looks stuck.",
+          options: ["Got it"],
+          recommendedOption: "Got it",
+          tier: "owner",
+          dedupeKey: `alert:${randomUUID()}`,
+          raisedByAgentId: c.worker.id,
+          context: { type: "question", ladder: { rung: "owner", since: new Date().toISOString(), ticketId, about: [c.worker.id], hops: [] } },
+        })
+        .returning()
+    )[0]!;
+
+  it("wakes the asker on the ticket the alert is about", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Live work", c.worker.id);
+    const d = await alertCard(c, t.id);
+    await c.decisions.answer(d.id, "Got it");
+    const rows = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ticketId).toBe(t.id);
+  });
+
+  it("starts no run when the alert's ticket is already done", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Finished work", c.worker.id);
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
+    const d = await alertCard(c, t.id);
+    await c.decisions.answer(d.id, "Got it");
+    const rows = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "decision answered")));
+    expect(rows).toHaveLength(0);
   });
 });

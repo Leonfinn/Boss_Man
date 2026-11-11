@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
+import { signedInOwner } from "./helpers/owner-session.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, notifications, runners, skillProposals, tickets, wakes } from "../src/db/schema.js";
 import { and, eq as eqq } from "drizzle-orm";
@@ -23,8 +24,7 @@ async function setup(wikiBatchMs = 0) {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, wikiBatchMs }, workspaceRoot: "/ws" });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
@@ -107,6 +107,24 @@ describe("wiki and ticket outputs (R69)", () => {
     expect((await c.req("PUT", `${base}/release-log`, { title: "Release log", body: "## Releases\n\n- v30", replace: true })).statusCode).toBe(200);
     expect((await c.req("DELETE", `${base}/how-we-deploy`)).statusCode).toBe(204);
     expect((await c.req("GET", `${base}/how-we-deploy`)).statusCode).toBe(404);
+  });
+
+  it("keeps the wiki routes owner-only: no session gets 401 (BOS-903 moved them to routes/wiki.ts)", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/wiki`;
+    expect((await c.req("POST", base, { title: "Secret plan", body: "Only the owner." })).statusCode).toBe(201);
+    const anon = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: object) => c.app.inject({ method, url, ...(payload ? { payload } : {}) });
+    const tries = [
+      await anon("GET", base),
+      await anon("POST", base, { title: "x", body: "y" }),
+      await anon("GET", `${base}/secret-plan`),
+      await anon("PUT", `${base}/secret-plan`, { title: "x", body: "y" }),
+      await anon("DELETE", `${base}/secret-plan`),
+      await anon("GET", `/api/companies/${c.company.id}/wiki-semantic`),
+      await anon("GET", `/api/tickets/${c.company.id}/artifacts`),
+    ];
+    expect(tries.map((r) => r.statusCode)).toEqual(tries.map(() => 401));
+    expect((await c.req("GET", `${base}/secret-plan`)).json()).toMatchObject({ body: "Only the owner." });
   });
   it("files pages in nested folders, and moves them", async () => {
     const c = (ctx = await setup());
@@ -427,6 +445,24 @@ describe("wiki append, history and restore (BOS-430)", () => {
     await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 09:00: x", agentId: other.id, runId: null });
     const back = await c.wiki.restore(c.company.id, { slug: "release-log", revisionId: full!.id, agentId: other.id, runId: null });
     expect(back.page.body).toBe(log);
+  });
+
+  it("a non-creator last writer can only undo their own latest change, not restore any old version (BOS-499)", async () => {
+    const c = (ctx = await setup());
+    await c.wiki.write(c.company.id, { title: "Release log", body: log, agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { slug: "release-log", title: "Release log", body: `${log}\n- 10:00: a`, agentId: c.worker.id, runId: null });
+    const revs = (await c.wiki.history(c.company.id, "release-log")).revisions;
+    const oldest = revs.at(-1)!;
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Sneaky" })).json() as { id: string };
+    await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 11:00: b", agentId: other.id, runId: null });
+    // Not the version just before their change: refused by the creator check.
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: oldest.id, agentId: other.id, runId: null })).rejects.toThrow(/another agent created/);
+    // The version just before their own change: allowed.
+    const justBefore = (await c.wiki.history(c.company.id, "release-log")).revisions[1]!;
+    const back = await c.wiki.restore(c.company.id, { slug: "release-log", revisionId: justBefore.id, agentId: other.id, runId: null });
+    expect(back.page.body).toBe(`${log}\n- 10:00: a`);
+    // After that restore, going further back is still refused.
+    await expect(c.wiki.restore(c.company.id, { slug: "release-log", revisionId: oldest.id, agentId: other.id, runId: null })).rejects.toThrow(/another agent created/);
   });
 
   it("the wiki tool exposes append, history and restore, and restore is the CEO's or the last writer's", async () => {

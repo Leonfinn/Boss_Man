@@ -1,7 +1,9 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
 import { api, type Company, type RunRow } from "../api";
+import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { RunLabelLink } from "./Runs";
 
@@ -17,20 +19,16 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; /** inReview split (BOS-667); missing from an older server. */ awaitingReview?: number; approvedToMerge?: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
   recentActivity: Array<{ id: string; title: string; link: string; level: string; agent: string | null; createdAt: string }>;
 };
 
-/** "just now", "5m ago", "3h ago", "2d ago". */
+/** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
 export function ago(iso: string, now = Date.now()) {
-  const s = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86_400)}d ago`;
+  return raisedAgo(iso, now);
 }
 
 const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
@@ -42,7 +40,12 @@ const RESULT: Record<Result, { icon: string; label: string; tone: string }> = {
 };
 const STATE_TONE: Record<string, string> = { backlog: "grey", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
-function Chart({ title, days, series }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }> }) {
+/** Words in the middle of a chart with nothing to draw, so it isn't just bare axes (BOS-1125). */
+function NoData({ children }: { children: string }) {
+  return <span className="chart-empty muted">{children}</span>;
+}
+
+function Chart({ title, days, series, emptyText }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string }) {
   const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
   const max = Math.max(1, ...totals);
   const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
@@ -62,6 +65,7 @@ function Chart({ title, days, series }: { title: string; days: Day[]; series: Ar
             {totals[i] === 0 && <span className="seg empty" />}
           </div>
         ))}
+        {totals.every((n) => n === 0) && <NoData>{emptyText}</NoData>}
       </div>
       <div className="axis">
         <span>{label(String(days[0]?.day ?? ""))}</span>
@@ -97,6 +101,7 @@ function SuccessChart({ days }: { days: Day[] }) {
             {r.rate === null ? <span className="seg empty" /> : <span className={`seg ${r.rate >= 0.8 ? "green" : r.rate >= 0.5 ? "amber" : "red"}`} style={{ height: `${Math.max(4, r.rate * 100)}%` }} />}
           </div>
         ))}
+        {rates.every((r) => r.rate === null) && <NoData>No runs in the last 14 days</NoData>}
       </div>
       <div className="axis">
         <span>{label(String(rates[0]?.day ?? ""))}</span>
@@ -110,7 +115,7 @@ function SuccessChart({ days }: { days: Day[] }) {
 export function Dashboard({ company }: { company: Company | undefined }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
   if (!company) return <p>Create a company on the Kanban first.</p>;
-  if (data.error) return <p className="error" role="alert">{data.error.message}</p>;
+  if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const s = d.stats;
@@ -174,7 +179,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           <strong>{s.inProgress}</strong>
           <span>Tasks in progress</span>
           <small className="muted">
-            {s.inReview} in review, {s.open} open, {s.blocked} blocked
+            {s.awaitingReview != null && s.approvedToMerge != null ? `${s.awaitingReview} awaiting review, ${s.approvedToMerge} approved, waiting to merge` : `${s.inReview} in review`}, {s.open} open, {s.blocked} blocked
           </small>
         </a>
         <a className="card stat" href="#/funding">
@@ -211,6 +216,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
       <section className="dash-charts" aria-label="Last 14 days">
         <Chart
           title="Run activity"
+          emptyText="No runs in the last 14 days"
           days={d.runsByDay}
           series={[
             { key: "succeeded", label: "Finished", tone: "green" },
@@ -220,6 +226,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
         />
         <Chart
           title="New tasks by status"
+          emptyText="No new tasks in the last 14 days"
           days={d.ticketsByDay}
           series={[
             { key: "backlog", label: "Backlog", tone: "grey" },

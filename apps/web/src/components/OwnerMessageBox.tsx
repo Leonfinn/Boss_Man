@@ -5,6 +5,7 @@
 // instead, which agents can open. Shared so all four boxes behave the same (BOS-502).
 import { useEffect, useRef, type ClipboardEvent, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { OWNER_MESSAGE_COUNT_FROM, OWNER_MESSAGE_MAX } from "@boss-man/shared";
+import { DraftTextarea } from "./DraftTextarea";
 
 const count = (n: number) => n.toLocaleString();
 
@@ -67,7 +68,9 @@ export function OwnerMessageBox({
       <label htmlFor={id} className="sr-only">
         {label}
       </label>
-      <textarea
+      <DraftTextarea
+        draftKey={null}
+        noDraft="every screen that uses this shared box keeps the draft itself (useDraft or useFormDraft), so the box only displays it"
         id={id}
         ref={ref}
         rows={rows}
@@ -79,7 +82,7 @@ export function OwnerMessageBox({
         placeholder={placeholder}
         value={value}
         autoFocus={autoFocus}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         style={{ maxHeight: MAX_HEIGHT, overflowY: "auto", ...textareaStyle }}

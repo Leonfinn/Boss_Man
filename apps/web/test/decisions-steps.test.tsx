@@ -29,6 +29,7 @@ const card = (steps: string[]): Decision => ({
   score: 10,
   parts: { blocking: 0, urgency: 0, age: 10, liveRun: 0 },
   reasons: [],
+  ageReason: "",
   dueDate: null,
   context: { steps },
 });
@@ -64,5 +65,30 @@ describe("command blocks say where and as whom (BOS-427)", () => {
     // A host with a space is not one the server can name, so the app must not read it as one either.
     render(<Decisions decisions={[card(['Check it:\n\n```sh host="nas 01" as="root"\nid\n```'])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
     expect(screen.queryByText((_, el) => el?.tagName === "DIV" && /^On \S/.test(el.textContent ?? ""))).toBeNull();
+  });
+});
+
+describe("labelled fences render as command blocks, wherever they sit (BOS-550)", () => {
+  it("shows a labelled fence inside a numbered list item as a command with its Copy button, and no raw fence text", async () => {
+    setSecure(true);
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const step = "1. Read the deployer folder from your settings file:\n   ```sh host=\"app01\" as=\"root\"\n   D=$(sed -n 's/^DEPLOYER=//p' .env)\n   ```";
+    const { container } = render(<Decisions decisions={[card([step])]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(line(/^On app01, as root\.$/)).toBeTruthy();
+    expect(container.querySelector("[data-steps]")!.textContent).not.toMatch(/```|host=|as="/);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("D=$(sed -n 's/^DEPLOYER=//p' .env)"));
+  });
+
+  it("a 'Ready to use' card shows no raw fence anywhere: its question's copy of the steps is not shown as text", () => {
+    // raiseOwnerSetup writes the steps into the question as "1. <step>" lines as well as into context.steps.
+    const steps = ["Turn it on:\n```sh host=\"app01\" as=\"root\"\nsystemctl start thing\n```", "Settings → Thing → Save"];
+    const d: Decision = { ...card(steps), question: `"Thing" is live. To start using it:\n\n${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`, options: ["Done"], context: { type: "owner_setup", steps } };
+    const { container } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={vi.fn()} />);
+    expect(container.textContent).not.toMatch(/```|host=|as="/);
+    expect(screen.getByText(/"Thing" is live\. To start using it:/)).toBeTruthy();
+    expect(line(/^On app01, as root\.$/)).toBeTruthy();
+    expect(screen.getAllByText("systemctl start thing")).toHaveLength(1);
   });
 });

@@ -9,8 +9,17 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices, opencodeEnv, stderrTail, withoutGitCredentials } from "./session-manager.js";
+import { INFINITE_MODEL_CHOICE, isInfiniteModel } from "@boss-man/shared";
 
 export type ProbedModels = Array<{ value: string; name: string; description: string | null }>;
+
+/**
+ * Synthetic's Infinite mode (BOS-279) isn't in a stock OpenCode's model list, and this probe has no
+ * Synthetic key to ask the provider, so it is offered for OpenCode under the name the server stores. A
+ * run on it works because the runner adds the provider (session-manager.ts, opencodeEnv).
+ */
+const addInfiniteChoice = (agentKind: string, choices: ProbedModels): ProbedModels =>
+  agentKind === "opencode" && !choices.some((c) => isInfiniteModel(c.value)) ? [...choices, { ...INFINITE_MODEL_CHOICE, description: INFINITE_MODEL_CHOICE.description }] : choices;
 
 /** What a probe's Claude Code may see of the runner's environment: enough to start and get out through a proxy. */
 const CLAUDE_PASSED_ON = ["PATH", "LANG", "TZ", "CLAUDE_CODE_EXECUTABLE", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"];
@@ -29,6 +38,11 @@ export async function probeModels(
     for (const k of CLAUDE_PASSED_ON) if (base[k] !== undefined) env[k] = base[k];
     env.HOME = home;
     env.CLAUDE_CONFIG_DIR = path.join(home, ".claude");
+    // In a fenced check job /tmp is refused and Claude Code's own /tmp/claude-<uid> ends the probe with "Internal error" (BOS-1067).
+    if (opts.baseEnv !== undefined) {
+      const t = process.env.CLAUDE_CODE_TMPDIR ?? process.env.TMPDIR;
+      if (t !== undefined) env.CLAUDE_CODE_TMPDIR = t;
+    }
   } else {
     // Codex keeps its login in CODEX_HOME, so the runner's own settings are kept.
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
@@ -66,7 +80,8 @@ export async function probeModels(
       await new Promise((r) => setTimeout(r, 2000));
       throw err;
     });
-    return await Promise.race([reported, exited, timeout]);
+    const choices = await Promise.race([reported, exited, timeout]);
+    return addInfiniteChoice(agentKind, choices);
   } finally {
     clearTimeout(timer);
     child.removeAllListeners("close");

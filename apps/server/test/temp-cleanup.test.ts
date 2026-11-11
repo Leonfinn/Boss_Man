@@ -91,7 +91,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     expect((await ctx.decisions.withTeam()).map((q) => q.id)).toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3 });
+    expect(w).toMatchObject({ reason: "ceo reply", priority: 4 });
     expect(w!.note).toContain(CLEANUP);
     expect(w!.note).toMatch(/git worktree add writes into the project.s repository/);
     // A worktree writes the repository's .git, so the card never promises the repository is untouched.
@@ -134,7 +134,11 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
 
     const { d: d2 } = await ctx.ask("rm -rf /tmp/other-agents-cache");
     const ceo = await client(ctx.ceo.id);
-    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    // A permission card now needs the CEO's advice before it reaches the owner (BOS-233): what it's for and
+    // what a Deny stops.
+    const noAdvice = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." } });
+    expect(isError(noAdvice)).toBe(true);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "escalate", id: d2!.id, triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it.", adviceNeeded: "It is needed to clear the old cache before the next build.", adviceDeny: "The cache stays, so the next build may fail or run out of space." } });
     expect(isError(r)).toBe(false);
     expect(await reload(d2!.id)).toMatchObject({ tier: "owner", status: "open" });
     expect((await reload(d2!.id)).context).toMatchObject({ triedFirst: "The folder isn't this agent's own scratch checkout, so I can't vouch for deleting it." });
@@ -190,7 +194,7 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3, ticketId: ctx.ticket.id });
+    expect(w).toMatchObject({ reason: "ceo reply", priority: 4, ticketId: ctx.ticket.id });
     expect(w!.note).toContain("symlink");
     // BOS-159: the shell keeps its folder between commands, so the note can't vouch for where it sits.
     expect(w!.note).toContain("can't vouch for where it sits now");

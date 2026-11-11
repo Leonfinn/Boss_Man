@@ -1,24 +1,34 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import { BUILT_IN_RULES, type RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
-import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { signedInOwner } from "./helpers/owner-session.js";
+import { appCache, sharedDatabase } from "./helpers/shared-server.js";
+import { decisions, fundingSources, notifications, quotaSamples, runners, runTokens, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
-afterEach(async () => {
-  await ctx.app.close();
-  await ctx.close();
+
+// One database for the file, emptied before each test, and one app per set of limits (BOS-686). Every test
+// makes its own company, owner, runner and agents; nothing a test made is left for the next one.
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+const apps = appCache<Awaited<ReturnType<typeof buildApp>>>();
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
+afterEach(() => ctx?.release());
+afterAll(async () => {
+  await apps.closeAll();
+  await shared.close();
 });
 
 async function setup(limits: Partial<Limits> = {}) {
-  const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...limits }, workspaceRoot: "/ws" });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  await shared.reset();
+  const { db } = shared;
+  const built = await apps.get(JSON.stringify(limits), () => buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...limits }, workspaceRoot: "/ws" }));
+  const cookie = await signedInOwner(db);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
@@ -26,9 +36,12 @@ async function setup(limits: Partial<Limits> = {}) {
   const [runnerRow] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   // A fake connected runner that records commands.
   const commands: Extract<RunnerCommand, { type: "run.start" }>[] = [];
+  // Every command of any kind, for tests that check nothing was cancelled.
+  const sent: RunnerCommand[] = [];
   let online = true;
-  built.runners.connect(reg.runnerId, (c) => {
+  const release = built.runners.connect(reg.runnerId, (c) => {
     if (!online) return false;
+    sent.push(c);
     if (c.type === "run.start") commands.push(c);
     return true;
   });
@@ -40,7 +53,7 @@ async function setup(limits: Partial<Limits> = {}) {
     await built.scheduler.slow();
     return built.scheduler.tick();
   };
-  return { ...built, db, close, cookie, req, company, ceo, project, commands, endRun, setOnline, tick };
+  return { ...built, db, release, cookie, req, company, ceo, project, commands, sent, endRun, setOnline, tick };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 50));
@@ -62,6 +75,10 @@ describe("scheduler", () => {
     expect(cmd.prompt).toContain("expected_version");
     expect(cmd.prompt).toContain("Every ticket_reply starts with 1 to 3 plain sentences");
     expect(cmd.prompt).toContain("Details:");
+    // The built-in safety rules, though the company set no standing rules, and outside the untrusted brief (BOS-754).
+    const rules = BUILT_IN_RULES.join("\n");
+    expect(cmd.prompt).toContain(rules);
+    expect(cmd.prompt.indexOf(rules)).toBeLessThan(cmd.prompt.indexOf("<untrusted"));
     const [tok] = await ctx.db.select().from(runTokens).where(eq(runTokens.tokenHash, hashToken(cmd.mcpToken)));
     expect(tok).toMatchObject({ runId: cmd.runId, agentId: ctx.ceo.id });
     // The ticket being worked on leaves the backlog; the one still waiting stays put.
@@ -99,13 +116,44 @@ describe("scheduler", () => {
   it("respects the global and company kill switches", async () => {
     ctx = await setup();
     await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    // The owner's Settings switch and banner read the real hold (BOS-836): off before anyone set it, owner-only.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    expect((await ctx.app.inject({ method: "GET", url: "/api/kill-switch" })).statusCode).toBe(401);
     await ctx.req("POST", "/api/kill-switch", { paused: true });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: true });
     expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
     await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
     expect(await ctx.tick()).toMatchObject({ launched: 0, waiting: 1 });
     await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
     expect(await ctx.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("Stop all work (BOS-836): a fresh server starts work as today; the hold keeps a wake waiting without cancelling a run already going; Resume launches it", async () => {
+    ctx = await setup();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json() as { id: string };
+    // A fresh database: no hold row at all, so no banner, and a wake launches.
+    expect((await ctx.req("GET", "/api/kill-switch")).json()).toEqual({ paused: false });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    const going = ctx.commands[0]!.runId;
+    // The press: the same POST the Settings button sends.
+    await ctx.req("POST", "/api/kill-switch", { paused: true });
+    await ctx.req("POST", `/api/agents/${worker.id}/wake`, {});
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(await ctx.tick()).toMatchObject({ paused: true, launched: 0 });
+    expect(ctx.commands).toHaveLength(1);
+    const [waiting] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, worker.id));
+    expect(waiting!.status).toBe("queued");
+    // The run already going is left alone: still open, and no cancel was sent.
+    const [run] = await ctx.db.select().from(runs).where(eq(runs.id, going));
+    expect(run!.endedAt).toBeNull();
+    expect(ctx.sent.filter((c) => c.type === "run.cancel")).toEqual([]);
+    // Resume: the banner's POST. The waiting wake launches on the next tick.
+    await ctx.req("POST", "/api/kill-switch", { paused: false });
+    expect(await ctx.tick()).toMatchObject({ paused: false, launched: 1 });
+    expect(ctx.commands.map((c) => c.agentId)).toEqual([ctx.ceo.id, worker.id]);
   });
 
   it("waits while the runner is offline", async () => {
@@ -344,6 +392,116 @@ describe("scheduler", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
   });
 
+  it("drops a wake that outlived its ticket, so a long hold can't replay an old nudge (BOS-256)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Finished long ago", assigneeAgentId: worker.id })).json();
+    // It closed an hour ago; both wakes were queued before then, as a hold would leave them.
+    const closedAt = new Date(Date.now() - 3_600_000);
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
+    // What a hold leaves behind: the ticket's own wake, a colleague's nudge on it, and a later one for another ticket.
+    await ctx.db.delete(wakes);
+    // Backdated, as a wake held overnight would be: the ticket was done after it was queued.
+    const wokeAt = new Date(closedAt.getTime() - 20 * 3_600_000);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "woken by owner", priority: 3, note: "The owner moved this ticket to Ready.", createdAt: wokeAt });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "nudge", priority: 2, note: "A day-old nudge.", createdAt: wokeAt });
+    const later = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Still wanted", assigneeAgentId: worker.id })).json();
+    await ctx.db.delete(wakes).where(eq(wakes.ticketId, later.id));
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: later.id, reason: "woken by owner", priority: 3, note: "Carry on with this." });
+
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 2 });
+    const rows = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(rows.every((w) => w.status === "dropped")).toBe(true);
+    expect([...new Set(rows.map((w) => w.statusReason))]).toEqual(["the ticket was already finished, so there was nothing to do"]);
+    // Only the live ticket's run started: the finished one's agent wasn't woken for a replay.
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("Still wanted");
+  });
+
+  it("drops a ticketless nudge that waited over two hours, but starts a fresh one (BOS-1136)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: "Carry on with the thing.", createdAt: new Date(Date.now() - 16 * 3_600_000) });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    const [old] = await ctx.db.select().from(wakes);
+    expect(old!.status).toBe("dropped");
+    expect(old!.statusReason).toContain("out of date");
+    expect(ctx.commands).toHaveLength(0);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: "Carry on with the thing." });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("drops a ticketless nudge whose named tickets are all finished, by BOS-ref (BOS-1136)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const a = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Done one" })).json();
+    const b = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Open one" })).json();
+    await ctx.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+    await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { ticketPrefix: "TST" });
+    const ref = (t: { number: number }) => `TST-${t.number}`;
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)}` });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, dropped: 1 });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 2, note: `carry on with ${ref(a)} then ${ref(b)}` });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
+  it("holds a ticketless nudge while the agent's own ticket waits to start (BOS-1136)", async () => {
+    ctx = await setup({ agent: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Assigned work", assigneeAgentId: worker.id })).json();
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, reason: "nudge", priority: 3, note: "Look at something." });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: t.id, reason: "woken by owner", priority: 2, note: "Start." });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("Assigned work");
+  });
+
+  it("drops a replay for a closed ticket, but still starts a nudge sent after it closed (BOS-256)", async () => {
+    ctx = await setup({ agent: 5 });
+    // A ticket the owner reopened after it closed, then closed once more: it is done, and the reopen
+    // moved its state clock past its later activity, so a wake held through the hold is a replay again.
+    const reopened = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Reopened then closed", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${reopened.id}`, { state: "done" });
+    // A ticket that is done but was nudged after it closed: that nudge is something new, so its wake
+    // has real work to do and must start even though the ticket is closed.
+    const nudgedAfter = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "A nudge came in", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${nudgedAfter.id}`, { state: "done" });
+    await ctx.db.delete(wakes);
+    const closedAt = new Date(Date.now() - 3_600_000);
+    // Both closed an hour ago, and the state clock says so.
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, reopened.id));
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, nudgedAfter.id));
+    // The first wake was queued before the close (a replay); the second was queued a minute after it.
+    const beforeClose = new Date(closedAt.getTime() - 60_000);
+    const afterClose = new Date(closedAt.getTime() + 60_000);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: reopened.id, reason: "woken by owner", priority: 3, note: "Old replay.", createdAt: beforeClose });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: nudgedAfter.id, reason: "nudge", priority: 2, note: "A nudge sent after it closed.", createdAt: afterClose });
+
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 1 });
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("A nudge came in");
+    const [reopenedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, reopened.id));
+    expect(reopenedRow!.status).toBe("dropped");
+    const [nudgedRow] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, nudgedAfter.id));
+    expect(nudgedRow!.status).not.toBe("dropped");
+  });
+
+  it("still starts a watch wake for a ticket just closed, so the watcher gives its final update (BOS-256)", async () => {
+    ctx = await setup({ agent: 5 });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Watch then done", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await ctx.db.delete(wakes);
+    const closedAt = new Date(Date.now() - 3_600_000);
+    await ctx.db.update(tickets).set({ stateChangedAt: closedAt }).where(eq(tickets.id, t.id));
+    // Not a replay: a watch wake on a closed ticket is how the watcher reports the finish, so it goes ahead.
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: t.id, reason: "ticket watch", priority: 1, note: "Watch it once more.", createdAt: new Date(closedAt.getTime() - 60_000) });
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 0 });
+  });
+
   it("marks a ticket urgent only through the owner path and the managers' tool", async () => {
     ctx = await setup();
     const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent later" })).json();
@@ -424,6 +582,163 @@ describe("scheduler", () => {
     const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json();
     const tlsCard = board.columns.flatMap((c: { tickets: Array<{ id: string; systemState: string }> }) => c.tickets).find((c: { id: string }) => c.id === tls.id);
     expect(tlsCard.systemState).toBe("ready");
+  });
+
+  describe("backlog tickets waiting on others (BOS-603)", () => {
+    const mk = async (title: string, extra: Record<string, unknown> = {}) => (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title, ...extra })).json();
+    const stateOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!.systemState;
+    const unblockedWakes = async (ticketId: string) => (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === ticketId && w.reason === "unblocked");
+
+    it("wakes a backlog ticket when its blocker is done", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      expect(await stateOf(waiting.id)).toBe("backlog");
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("ready");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("waits for both blockers", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const a = await mk("A");
+      const b = await mk("B");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      for (const x of [a, b]) await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("backlog");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(0);
+      await ctx.req("PATCH", `/api/tickets/${b.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("ready");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("raises one notice, not a wake, when nobody is assigned", async () => {
+      ctx = await setup();
+      const x = await mk("X");
+      const waiting = await mk("Orphan");
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      const notices = () => ctx.db.select().from(decisions).then((rows) => rows.filter((d) => d.dedupeKey === `unblocked-unassigned:${waiting.id}`));
+      expect(await notices()).toHaveLength(1);
+      // The CEO can assign it, so it is the CEO's first (BOS-1015).
+      expect((await notices())[0]!.tier).toBe("ceo");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(0);
+      await ctx.req("POST", "/api/sweep");
+      expect(await notices()).toHaveLength(1);
+    });
+
+    it("the sweep releases an already-stuck ticket exactly once", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const stuck = await mk("Stuck", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${stuck.id}/dependencies`, { ticketId: x.id });
+      // The blocker finished while the old code ignored backlog tickets: set it done directly.
+      await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, x.id));
+      await ctx.db.delete(wakes);
+      expect(((await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number } }).releasedUnblocked.released).toBe(1);
+      expect(await stateOf(stuck.id)).toBe("ready");
+      expect(await unblockedWakes(stuck.id)).toHaveLength(1);
+      expect(((await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number } }).releasedUnblocked.released).toBe(0);
+      expect(await unblockedWakes(stuck.id)).toHaveLength(1);
+      const summaries = (await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`);
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]!.question).toContain("Stuck");
+      expect(summaries[0]!.tier).toBe("ceo"); // BOS-1015: the summary is for the CEO, not the owner
+    });
+
+    it("does not release again a ticket moved back to backlog on purpose", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("ready");
+      await ctx.req("PATCH", `/api/tickets/${held.id}`, { state: "backlog" });
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
+    it("leaves a plain backlog ticket and one waiting on an open decision alone", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const plain = await mk("Plain", { assigneeAgentId: worker.id });
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      const [card] = await ctx.db
+        .insert(decisions)
+        .values({ companyId: ctx.company.id, kind: "question", question: "Which way?", options: ["A", "B"], recommendedOption: "A", context: { type: "question" } })
+        .returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: held.id, blockerDecisionId: card!.id });
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(plain.id)).toBe("backlog");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(0);
+    });
+
+    it("a backlog ticket parked with a 'blocked until' time ahead is not started; its assignee is told once (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const waiting = await mk("Waiting", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: x.id });
+      // Parked on purpose, then left blocked until a date still ahead: a blocked ticket waiting on a blocker is right there.
+      await ctx.db.update(tickets).set({ systemState: "blocked", blockedUntil: new Date(Date.now() + 86_400_000), blockedUntilReason: "after the release" }).where(eq(tickets.id, waiting.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      const told = await unblockedWakes(waiting.id);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.note).toContain("parked on purpose");
+      // Sweeps leave it alone and don't tell the assignee a second time for the same blocker.
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(waiting.id)).toBe("blocked");
+      expect(await unblockedWakes(waiting.id)).toHaveLength(1);
+    });
+
+    it("a backlog ticket whose note says parked is not started; its assignee is told the blocker finished (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ stateNote: "Parked until the pricing change lands; do not start." }).where(eq(tickets.id, held.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("PATCH", `/api/tickets/${x.id}`, { state: "done" });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      await ctx.req("POST", "/api/sweep");
+      await ctx.req("POST", "/api/sweep");
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+    });
+
+    it("the catch-up sweep counts a parked ticket it told the assignee about, and does not start it (BOS-742)", async () => {
+      ctx = await setup();
+      const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+      const x = await mk("X");
+      const held = await mk("Held", { assigneeAgentId: worker.id });
+      await ctx.req("POST", `/api/tickets/${held.id}/dependencies`, { ticketId: x.id });
+      await ctx.db.update(tickets).set({ blockedUntil: new Date(Date.now() + 86_400_000), stateNote: "Parked: wait for the release." }).where(eq(tickets.id, held.id));
+      // The blocker finished while the sweep was not looking: set it done directly.
+      await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, x.id));
+      await ctx.db.delete(wakes);
+      const pass = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(pass.releasedUnblocked).toMatchObject({ released: 0, parked: 1 });
+      expect(await stateOf(held.id)).toBe("backlog");
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      const again = (await ctx.req("POST", "/api/sweep")).json() as { releasedUnblocked: { released: number; parked: number } };
+      expect(again.releasedUnblocked).toMatchObject({ released: 0, parked: 0 });
+      expect(await unblockedWakes(held.id)).toHaveLength(1);
+      expect((await ctx.db.select().from(decisions)).filter((d) => d.dedupeKey === `unblocked-catchup:${ctx.company.id}`)).toHaveLength(0);
+    });
   });
 
   it("ignores an unknown agent", async () => {

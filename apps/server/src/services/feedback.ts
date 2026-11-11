@@ -3,8 +3,8 @@
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -18,8 +18,8 @@ export class FeedbackError extends Error {
   }
 }
 
-export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; hasLogo: boolean };
-const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false };
+export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean };
+const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, portalBackUrl: null, portalBackText: null, hasLogo: false };
 
 type FeaturePatch = {
   title?: string;
@@ -34,7 +34,10 @@ type FeaturePatch = {
   milestoneId?: string | null;
   objectiveId?: string | null;
   portalVisible?: boolean;
+  keepOffPortal?: boolean;
   publicSummary?: string | null;
+  /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
+  publicTitle?: string | null;
   showPublicly?: boolean;
 };
 
@@ -64,7 +67,7 @@ export function feedbackService(
   const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(eq(feedbackNotes.id, id)), companyId, "note");
 
   async function settings(companyId: string): Promise<FeedbackSettings> {
-    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, portalBackUrl: feedbackSettings.portalBackUrl, portalBackText: feedbackSettings.portalBackText, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
     return row ?? { ...DEFAULTS };
   }
 
@@ -97,11 +100,32 @@ export function feedbackService(
     }
   }
 
+  /** The names the portal rule reads alongside a feature's own title and description: its area and the criteria it is scored on. */
+  async function portalFacts(companyId: string, areaId: string | null | undefined, driverScores: Record<string, number | null> | undefined) {
+    const area = areaId ? ((await db.select({ name: featureAreas.name }).from(featureAreas).where(eq(featureAreas.id, areaId)))[0]?.name ?? null) : null;
+    const ids = Object.keys(driverScores ?? {});
+    const criteria = ids.length ? (await db.select({ name: featureDrivers.name }).from(featureDrivers).where(and(eq(featureDrivers.companyId, companyId), inArray(featureDrivers.id, ids)))).map((d) => d.name) : [];
+    return { area, criteria };
+  }
+
+  /** The features that actually reach visitors: ticked on, not marked keep-off, and with a public summary (that summary
+   * replaces the internal description and title, so internal text never reaches visitors). */
+  async function livePortalFeatures(companyId: string) {
+    const rows = await db
+      .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
+      .from(features)
+      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+      .orderBy(asc(features.title));
+    return rows.filter((f) => !!f.publicSummary?.trim());
+  }
+
   /** Every feature of a company with its demand, priority and delivery, in one pass. */
   async function scored(companyId: string) {
     const s = await settings(companyId);
     const fs = await db.select().from(features).where(eq(features.companyId, companyId)).orderBy(asc(features.createdAt));
     const drivers = await db.select().from(featureDrivers).where(eq(featureDrivers.companyId, companyId)).orderBy(asc(featureDrivers.position), asc(featureDrivers.name));
+    const areas = fs.some((f) => f.areaId) ? await db.select({ id: featureAreas.id, name: featureAreas.name }).from(featureAreas).where(eq(featureAreas.companyId, companyId)) : [];
+    const areaName = new Map(areas.map((a) => [a.id, a.name]));
     const links = fs.length
       ? await db
           .select({ featureId: insights.featureId, importance: insights.importance, customerId: feedbackNotes.customerId, noteId: insights.noteId })
@@ -138,7 +162,10 @@ export function feedbackService(
         const scores = f.driverScores as Record<string, number | null>;
         const p = priorityScore({ demand: d.demand, maxDemand, demandWeight: s.demandWeight, drivers: drivers.map((x) => ({ weight: x.weight, value: scores[x.id] ?? null })), effort: f.effort });
         const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
-        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
+        const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
+        const portal = portalVerdict({ title: f.title, description: f.description, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
+        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }
@@ -180,7 +207,7 @@ export function feedbackService(
 
   return {
     settings,
-    async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro">>) {
+    async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro" | "portalBackUrl" | "portalBackText">>) {
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...patch }).onConflictDoUpdate({ target: feedbackSettings.companyId, set: patch });
       return settings(companyId);
     },
@@ -222,10 +249,20 @@ export function feedbackService(
 
     // ---- Features ----
     scored,
+    /** One feature in the company; the MCP tool reads it to check what the portal rule says before publishing (BOS-991). */
+    feature,
+    portalFacts,
     async createFeature(companyId: string, input: FeaturePatch & { title: string; createdByAgentId?: string | null }) {
       await checkLinks(companyId, input);
       const publicSummary = input.publicSummary?.trim() || null;
+      const publicTitle = input.publicTitle?.trim() || null;
       if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
+      const keepOffPortal = input.keepOffPortal ?? false;
+      // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
+      // The public-summary gate only holds it back from visitors; the tick stays on, so writing a summary later shows it.
+      const facts = await portalFacts(companyId, input.areaId, input.driverScores);
+      const verdict = portalVerdict({ title: input.title, description: input.description, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
+      const mayGoOn = !(verdict.reason === "sensitive" || verdict.reason === "security");
       const [f] = await db
         .insert(features)
         .values({
@@ -241,8 +278,10 @@ export function feedbackService(
           driverScores: input.driverScores ?? {},
           milestoneId: input.milestoneId ?? null,
           objectiveId: input.objectiveId ?? null,
-          portalVisible: input.portalVisible ?? false,
+          portalVisible: input.portalVisible ?? mayGoOn,
+          keepOffPortal,
           publicSummary,
+          publicTitle,
           showPublicly: input.showPublicly ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
           releasedAt: input.status === "released" ? now() : null,
@@ -258,11 +297,15 @@ export function feedbackService(
       if ((patch.showPublicly ?? f.showPublicly) && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const driverScores = patch.driverScores ? { ...(f.driverScores as Record<string, number | null>), ...patch.driverScores } : undefined;
       if (driverScores) for (const [k, v] of Object.entries(driverScores)) if (v === null) delete driverScores[k];
+      // Marking a feature "keep off the portal (sensitive)" takes it off at once; clearing the mark leaves the tick alone.
+      const portalVisible = patch.keepOffPortal ? false : patch.portalVisible;
       const [u] = await db
         .update(features)
         .set({
           ...patch,
+          ...(portalVisible !== undefined ? { portalVisible } : {}),
           ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
+          ...(patch.publicTitle !== undefined ? { publicTitle: patch.publicTitle?.trim() || null } : {}),
           ...(driverScores ? { driverScores } : {}),
           ...(patch.status === "released" && f.status !== "released" ? { releasedAt: now() } : patch.status && patch.status !== "released" ? { releasedAt: null } : {}),
           updatedAt: now(),
@@ -345,6 +388,33 @@ export function feedbackService(
           milestones,
         };
       });
+    },
+
+    /**
+     * A feature the roadmap commits to — Now, Next or In progress, declined excluded — with no open
+     * ticket of its own, so the work the owner expects isn't actually being done (BOS-595). Called by
+     * the sweep so a feature can't sit there until the owner asks. `raise` puts one CEO card up, which
+     * closes by itself once a ticket is linked (DR-016, BOS-470). Returns how many cards it raised.
+     */
+    async raiseFeatureNoTicket(companyId: string, raise: (feature: { id: string; title: string; status: FeatureStatus; horizon: Horizon | null }) => Promise<unknown>) {
+      const fs = await db.select({ id: features.id, title: features.title, status: features.status, horizon: features.horizon }).from(features).where(eq(features.companyId, companyId));
+      let raised = 0;
+      for (const f of fs) {
+        if (f.status === "declined") continue;
+        const column = featureHorizon(f);
+        if (column !== "now" && column !== "next") continue;
+        // The ticket counts when it is the work of the feature itself: a sub-task's own ticket is done
+        // under its parent's, which is already counted here.
+        const [open] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, f.id), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        if (open) continue;
+        await raise(f);
+        raised++;
+      }
+      return raised;
     },
 
     // ---- Customers ----
@@ -518,13 +588,15 @@ export function feedbackService(
     // ---- The portal: a page outsiders reach by a secret link ----
 
     /** Turns the portal on or off and sets its words. Turning it on the first time makes its link. */
-    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null }) {
+    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null; backUrl?: string | null; backText?: string | null }) {
       const current = await settings(companyId);
       const token = patch.enabled && !current.portalToken ? randomBytes(24).toString("base64url") : current.portalToken;
       const set = {
         ...(patch.enabled !== undefined ? { portalEnabled: patch.enabled } : {}),
         ...(patch.title !== undefined ? { portalTitle: patch.title } : {}),
         ...(patch.intro !== undefined ? { portalIntro: patch.intro } : {}),
+        ...(patch.backUrl !== undefined ? { portalBackUrl: patch.backUrl, portalBackText: patch.backUrl === null ? null : patch.backText ?? current.portalBackText } : {}),
+        ...(patch.backUrl === undefined && patch.backText !== undefined ? { portalBackText: patch.backText } : {}),
         portalToken: token,
       };
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...set }).onConflictDoUpdate({ target: feedbackSettings.companyId, set });
@@ -549,7 +621,7 @@ export function feedbackService(
     async portalFor(token: string) {
       if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
       const [row] = await db
-        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
+        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, backUrl: feedbackSettings.portalBackUrl, backText: feedbackSettings.portalBackText, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
         .from(feedbackSettings)
         .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
         .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));
@@ -558,11 +630,7 @@ export function feedbackService(
     /** What a visitor sees: features shown on the portal, by stage, with their own votes. */
     async portalView(companyId: string, voter: string | null) {
       const cutoff = new Date(now().getTime() - 180 * 86_400_000);
-      const fs = await db
-        .select({ id: features.id, title: features.title, description: features.description, status: features.status, releasedAt: features.releasedAt })
-        .from(features)
-        .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
-        .orderBy(asc(features.title));
+      const fs = await livePortalFeatures(companyId);
       const mine = voter && fs.length
         ? await db
             .select({ featureId: insights.featureId, importance: insights.importance, comment: feedbackNotes.text, hasComment: sql<boolean>`${feedbackNotes.title} like 'Portal comment:%'` })
@@ -576,8 +644,10 @@ export function feedbackService(
           const v = mine.find((m) => m.featureId === f.id);
           return {
             id: f.id,
-            title: f.title,
-            description: f.description?.slice(0, 1000) ?? null,
+            // The public title (or the summary's first line) stands in for the internal title, as the summary does for
+            // the description: anonymous visitors never see internal text (BOS-991).
+            title: portalTitle(f.publicTitle, f.publicSummary),
+            description: f.publicSummary!.trim().slice(0, 1000),
             stage: f.status === "released" ? "released" : f.status === "planned" || f.status === "in_progress" ? "planned" : "considering",
             myVote: v ? { importance: v.importance, comment: v.hasComment ? v.comment : null } : null,
           };
@@ -587,6 +657,8 @@ export function feedbackService(
     async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null }) {
       const [f] = await db.select().from(features).where(and(eq(features.id, input.featureId), eq(features.companyId, companyId), eq(features.portalVisible, true)));
       if (!f || f.status === "declined") throw new FeedbackError(404, "No such feature.");
+      // A feature kept off by the portal rule isn't public, so it can't be voted on even if someone has its id.
+      if (!(await livePortalFeatures(companyId)).some((x) => x.id === f.id)) throw new FeedbackError(404, "No such feature.");
       const comment = input.comment?.trim() || null;
       const [existing] = await db
         .select({ noteId: feedbackNotes.id })

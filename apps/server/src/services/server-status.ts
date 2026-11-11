@@ -10,9 +10,13 @@ import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { AddonFacts } from "./addons.js";
+import type { HostFactsRecord } from "./host-facts.js";
 import type { BlueGreen } from "./bluegreen.js";
+import { checkQueue } from "./check-queue.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
+import type { NetguardAllowReport } from "./netguard-allow.js";
+import { lastRestart } from "./runner-restarts.js";
 import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
@@ -33,14 +37,22 @@ export type ServerStatusDeps = {
   errors: ErrorBuffer;
   /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
   stalls?: () => StallSummary;
+  /** Whether runners keep a core back for the server, database and proxy, and which threads (launcher GET /cpu, BOS-586). Absent or null: no launcher. */
+  cpuReserve?: () => Promise<unknown>;
+  /** The owner's network-guard allow entries from .env and which ones Boss Man already allows (netguard-allow.ts, BOS-770). Absent or null: nothing to report. */
+  netguardAllow?: () => Promise<NetguardAllowReport | null>;
   /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
   permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
   /** Which add-ons are running (addons.ts, DR-023): server-wide, like commit. Absent: null. */
   addons?: () => Promise<AddonFacts>;
+  /** The host's settings record (host-facts.ts, BOS-419): each fact's value, source and any conflict. Absent: null. */
+  hostFacts?: () => Promise<HostFactsRecord>;
   /** Where this process's memory sits, server-wide like commit (memory-sampler.ts, BOS-410). */
   memory?: Pick<MemorySampler, "status">;
+  /** The run limits in force and the work runs going, across all companies and in this one (scheduler.runLimits, BOS-582). Absent: null. */
+  runLimits?: (companyId: string) => Promise<unknown>;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -132,7 +144,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     /** The read-only server status, filtered to one company wherever it could name another's work. */
     async status(companyId: string) {
       const at = now();
-      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, imageCommit: runners.imageCommit, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
       // swapping: an update hold is on and the runner is away (mid-swap). It clears the moment the runner connects (BOS-382).
       // settling: the runner only just came back and is starting its queued runs; "never started" alerts wait while this is true.
       const connected = runner ? deps.isConnected(runner.id) : false;
@@ -202,6 +214,10 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         },
         // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
         stalls: deps.stalls?.() ?? null,
+        // Reserved CPU threads (BOS-586): on or off, which threads, and why.
+        cpuReserve: (await deps.cpuReserve?.()) ?? null,
+        // The owner's BOSSMAN_NETGUARD_ALLOW entries (BOS-770): what the launcher uses, what .env holds, which ones Boss Man covers anyway.
+        netguardAllow: deps.netguardAllow ? await deps.netguardAllow().catch(() => null) : null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
@@ -212,7 +228,12 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           mainTip: short(available?.tip),
           checkedAt: available?.checkedAt ?? null,
         },
+        // The all-companies and per-company run limits and how many work runs each has going (BOS-582).
+        // A wake held "at a concurrency limit: all companies" waits for the first; "this company" for the second.
+        runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
+        // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
+        checks: await checkQueue(db).status(companyId, at),
         migration: await latestMigration(db),
         runner: runner
           ? {
@@ -220,7 +241,9 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
               settling,
-              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, imageCommit: runner.imageCommit, harnessVersions: runner.harnessVersions ?? null,
+              // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
+              lastRestart: await lastRestart(db, runner.id),
             }
           : null,
         wakes: {
@@ -244,6 +267,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // ntfy, Tailscale and Penpot: state (not_set_up, stopped, needs_login, running, unknown), since and source (DR-023).
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,
+        hostFacts: deps.hostFacts ? await deps.hostFacts().catch(() => null) : null,
       };
     },
   };

@@ -61,6 +61,16 @@ describe("opencode agent kind", () => {
     expect(events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
   });
 
+  it("keeps the loop going after a refused tool call, and keeps the owner's other experimental keys (BOS-870)", async () => {
+    const plain = await run({ model: "b/two" });
+    expect(plain.dump.config.experimental).toEqual({ continue_loop_on_deny: true });
+    const kept = await run({ model: "b/two", secrets: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { foo: 1 } }) } });
+    expect(kept.dump.config.experimental).toEqual({ foo: 1, continue_loop_on_deny: true });
+    const chat = await run({ model: "b/two", boardToolsOnly: true });
+    expect(chat.dump.config.experimental.continue_loop_on_deny).toBe(true);
+    expect(chat.dump.config.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny", external_directory: "deny" });
+  });
+
   it("ends the run without quoting a malformed config secret", async () => {
     const events: RunnerEvent[] = [];
     let done!: () => void;
@@ -78,6 +88,62 @@ describe("opencode agent kind", () => {
     const { dump } = await run({ model: "a/one", boardToolsOnly: true });
     expect(dump.config.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny" });
     expect(dump.model).toBeNull();
+  });
+
+  it("holds a new OpenCode run while the database is vacuumed, then starts it (BOS-616)", async () => {
+    const dump = path.join(mkdtempSync(path.join(tmpdir(), "bm-oc-")), "dump.json");
+    const order: string[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:9/mcp",
+      baseEnv: { PATH: process.env.PATH },
+      adapterBins: { opencode: fake },
+      resolveEnv: async () => ({ DUMP: dump }),
+      emit: (e) => {
+        if (e.type === "run.started") order.push("started");
+        if (e.type === "runner.log" && e.message.includes("database is compacted")) order.push("waiting");
+        if (e.type === "run.ended") done();
+      },
+    });
+    const vacuum = manager.whileOpencodeIdle(async () => {
+      manager.handle({ type: "run.start", runId: "r3", agentId: "a1", agentKind: "opencode", model: null, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t" } as never);
+      expect(await manager.whileOpencodeIdle(async () => "second")).toBeNull(); // one hold at a time
+      await new Promise((r) => setTimeout(r, 500));
+      order.push("vacuumed");
+      return "first";
+    });
+    expect(await vacuum).toBe("first");
+    await ended;
+    manager.shutdown();
+    expect(order).toEqual(["waiting", "vacuumed", "started"]);
+    // Idle again: the next hold runs.
+    expect(await manager.whileOpencodeIdle(async () => "again")).toBe("again");
+  });
+
+  it("lets a held OpenCode run go at the hold's backstop, even if the job never settles (BOS-622)", async () => {
+    const dump = path.join(mkdtempSync(path.join(tmpdir(), "bm-oc-")), "dump.json");
+    const order: string[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:9/mcp",
+      baseEnv: { PATH: process.env.PATH },
+      adapterBins: { opencode: fake },
+      resolveEnv: async () => ({ DUMP: dump }),
+      emit: (e) => {
+        if (e.type === "run.started") order.push("started");
+        if (e.type === "run.ended") done();
+      },
+    });
+    let finish!: () => void;
+    const stuck = manager.whileOpencodeIdle(() => new Promise<string>((r) => (finish = () => r("late"))), 300);
+    manager.handle({ type: "run.start", runId: "r4", agentId: "a1", agentKind: "opencode", model: null, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t" } as never);
+    await ended; // started and finished while the job was still stuck
+    expect(order).toEqual(["started"]);
+    finish();
+    expect(await stuck).toBe("late");
+    manager.shutdown();
   });
 });
 

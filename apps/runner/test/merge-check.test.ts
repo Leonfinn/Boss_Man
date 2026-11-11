@@ -1,19 +1,29 @@
 // BOS-313 (F6): the merge gate checks the merge commit it pushes, not the branch on its own.
 // Against a real bare origin: a.txt and b.txt are each fine alone but must not exist together.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
 
+const dirs: string[] = [];
+const tmp = (prefix: string) => {
+  const d = mkdtempSync(path.join(tmpdir(), prefix));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 function origin() {
-  const bare = mkdtempSync(path.join(tmpdir(), "bm-mc-origin-"));
+  const bare = tmp("bm-mc-origin-");
   git(bare, "init", "-q", "--bare", "-b", "main");
-  const seed = mkdtempSync(path.join(tmpdir(), "bm-mc-seed-"));
+  const seed = tmp("bm-mc-seed-");
   git(seed, "clone", "-q", bare, ".");
   writeFileSync(path.join(seed, "app.txt"), "line 1\n");
   git(seed, "add", ".");
@@ -32,7 +42,7 @@ function origin() {
 const ids = { project: "11111111-1111-4111-8111-111111111111", t: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
 
 async function ticketWithCommit(o: ReturnType<typeof origin>, file: string, content: string) {
-  const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-mc-root-")));
+  const ws = new Workspaces(tmp("bm-mc-root-"));
   const spec = { projectId: ids.project, ticketId: ids.t, repoUrl: o.url, baseRef: "main" };
   const w = await ws.ensure(spec);
   writeFileSync(path.join(w.path, file), content);
@@ -92,9 +102,12 @@ describe("two branches that each pass alone (F6)", () => {
   it("keeps the earlier check when main moves but the merged tree is the same", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "b.txt", "b\n");
-    const counter = path.join(mkdtempSync(path.join(tmpdir(), "bm-mc-count-")), "runs");
-    const promise = ws.merge(spec, "main", "Merge B", {}, { commands: [`echo x >> ${counter}; sleep 1`] });
-    await new Promise((r) => setTimeout(r, 700));
+    const counter = path.join(tmp("bm-mc-count-"), "runs");
+    const promise = ws.merge(spec, "main", "Merge B", {}, { commands: [`echo x >> ${counter}; sleep 2`] });
+    // Move main only once the check is running: a fixed delay lost the race on a busy runner
+    // (the merge's own git calls ran past it, so the check ran on the moved main).
+    for (let i = 0; i < 300 && !existsSync(counter); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(existsSync(counter)).toBe(true);
     // An empty commit changes main's sha but not its tree.
     const noop = git(o.url, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", "main^{tree}", "-p", "main", "-m", "noop");
     git(o.url, "update-ref", "refs/heads/main", noop);
@@ -137,7 +150,7 @@ describe("migration journal on the checked path (BOS-360)", () => {
 
   it("refuses a new migration older than main's newest, and pushes nothing", async () => {
     const o = origin();
-    const seed = mkdtempSync(path.join(tmpdir(), "bm-mc-seed-"));
+    const seed = tmp("bm-mc-seed-");
     git(seed, "clone", "-q", o.url, ".");
     put(seed, [2000]);
     git(seed, "add", ".");
@@ -152,5 +165,25 @@ describe("migration journal on the checked path (BOS-360)", () => {
     const r = await ws.merge(spec, "main", "Merge B", {}, { commands: ["true"] });
     expect(r.status).toBe("migration_journal");
     expect(o.mainSha()).toBe(before);
+  });
+});
+
+describe("the merge gate's pnpm store (BOS-568 review)", () => {
+  // The gate runs unfenced as the runner's user, so it must install from its own store, never the shared one
+  // agents can write. This pins the wiring in main.ts: the 4th Workspaces argument is the gate's store.
+  it("installs from its own store, not the agents' shared one", async () => {
+    const o = origin();
+    const shared = tmp("bm-mc-shared-");
+    const gate = `${shared}-gate`;
+    const ws = new Workspaces(tmp("bm-mc-root-"), process.env, undefined, gate);
+    const spec = { projectId: ids.project, ticketId: ids.t, repoUrl: o.url, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "b.txt"), "b\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "ticket work");
+    const out = path.join(tmp("bm-mc-seen-"), "store");
+    const r = await ws.merge(spec, "main", "Merge B", {}, { commands: [`echo "$npm_config_store_dir" > ${out}`] });
+    expect(r.status).toBe("merged");
+    expect(existsSync(out) ? execFileSync("cat", [out], { encoding: "utf8" }).trim() : "").toBe(gate);
   });
 });

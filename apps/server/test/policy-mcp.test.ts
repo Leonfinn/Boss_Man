@@ -181,7 +181,7 @@ describe("permission requests through the policy engine", () => {
     await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "No crawl4ai JS", trigger: "permission", condition: { titlePattern: "^mcp__crawl4ai__execute_js$" }, outcome: "deny", position: 0 });
     ask("r1", "mcp__crawl4ai__md");
     const [d] = await open(1);
-    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Always allow every crawl4ai tool", "Deny"]);
+    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Deny"]);
     expect(d!.question).toMatch(/^CEO wants to use a tool/);
     const ans = await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Always allow crawl4ai's md tool" } });
     expect(ans.json()).toMatchObject({ delivered: true });
@@ -190,8 +190,8 @@ describe("permission requests through the policy engine", () => {
     const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id)).orderBy(policyRules.position);
     expect(rules).toHaveLength(2);
     expect(rules[0]).toMatchObject({ name: "No crawl4ai JS", position: 0 });
-    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
-    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
+    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true, agentIds: [ctx.homelab.ceo.id] } });
+    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool for CEO \(from a request on \d+ \w+\)$/);
 
     ask("r2", "mcp__crawl4ai__md");
     await waitFor(() => commands.length, (n) => n === 2);
@@ -240,7 +240,7 @@ describe("Boss Man MCP server", () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
     // This company has no Product Manager, so its CEO runs the workflow retro and has that retro's three tools (retro.test.ts).
-    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "propose_workflow_change", "raise_decision", "rename_agent", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "save_retro", "schedule_check", "server_status", "set_agent_picture", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision", "workflow_scorecard"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "devices", "engagement", "feedback", "handoff", "list_my_work", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "propose_workflow_change", "raise_decision", "rename_agent", "report_key_result", "request_check", "request_engagement", "request_note", "review", "roadmap", "runs", "save_retro", "schedule_check", "server_status", "set_agent_picture", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "standing_rules", "submit_plan", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision", "workflow_scorecard"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
     expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");

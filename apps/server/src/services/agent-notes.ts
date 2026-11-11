@@ -9,7 +9,7 @@
 // ask, and only the CEO's explicit accept turns a request into a note; every note keeps its
 // source; and the owner is told in the chat and can edit or delete any note on the Agents page.
 import { and, asc, count, desc, eq, gt, notExists } from "drizzle-orm";
-import { ticketRef, untrusted } from "@boss-man/shared";
+import { sinceHours, ticketRef, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -23,7 +23,6 @@ export const MIN_QUOTE = 20;
 const QUOTE_LOOKBACK = 50;
 /** How many of the owner's latest ticket messages, across the company, a ticket run's quote is looked for in. */
 const TICKET_QUOTE_LOOKBACK = 200;
-const HOUR = 3_600_000;
 
 export class NoteError extends Error {
   constructor(
@@ -37,6 +36,38 @@ export class NoteError extends Error {
 export type Note = typeof agentNotes.$inferSelect;
 export type NoteRequest = typeof noteRequests.$inferSelect;
 type Fields = { title: string; text: string; why: string };
+/** `reviewBy` is optional: a YYYY-MM-DD day, or null to clear it. */
+type ReviewBy = { reviewBy?: string | null };
+/** A note untouched this many days shows "review due" (BOS-1170). */
+export const STALE_NOTE_DAYS = 30;
+const DAY_MS = 86_400_000;
+
+/** Throws unless `d` is a real calendar day written YYYY-MM-DD. */
+export function checkReviewBy(d: string | null | undefined) {
+  if (d == null) return;
+  const t = /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(`${d}T00:00:00Z`) : null;
+  if (!t || Number.isNaN(t.getTime()) || t.toISOString().slice(0, 10) !== d) throw new NoteError(400, "reviewBy must be a real day written YYYY-MM-DD.");
+}
+
+/** How old a note is and whether it is due for review: past its reviewBy day, or untouched for STALE_NOTE_DAYS. */
+export function noteReview(n: { updatedAt: Date; reviewBy?: string | null }, at: Date) {
+  const ageDays = Math.max(0, Math.floor((at.getTime() - n.updatedAt.getTime()) / DAY_MS));
+  const today = at.toISOString().slice(0, 10);
+  const reviewDue = n.reviewBy ? n.reviewBy < today || ageDays >= STALE_NOTE_DAYS : ageDays >= STALE_NOTE_DAYS;
+  const reason = n.reviewBy && n.reviewBy < today ? "past its review-by date" : ageDays >= STALE_NOTE_DAYS ? `untouched for ${STALE_NOTE_DAYS} days` : null;
+  return { ageDays, reviewDue, reviewReason: reviewDue ? reason : null };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "set 9 Nov, 6 d ago", plus "review by 20 Nov" and "review due" where they apply. */
+export function ageText(n: { updatedAt: Date; reviewBy?: string | null }, at: Date) {
+  const r = noteReview(n, at);
+  const d = n.updatedAt;
+  const parts = [`set ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}, ${r.ageDays === 0 ? "today" : `${r.ageDays} d ago`}`];
+  if (n.reviewBy) parts.push(`review by ${Number(n.reviewBy.slice(8))} ${MONTHS[Number(n.reviewBy.slice(5, 7)) - 1]}`);
+  if (r.reviewDue) parts.push(`review due: ${r.reviewReason}`);
+  return parts.join("; ");
+}
 type Origin = { source: "chat" | "ticket" | "owner" | "request"; runId?: string | null; requestedByAgentId?: string | null; ticketId?: string | null };
 /** Who made a change: the agent itself or the owner, for the activity log. */
 type By = { owner: boolean; runId?: string | null };
@@ -72,15 +103,16 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
 
   const list = (companyId: string, agentId: string) => db.select().from(agentNotes).where(and(eq(agentNotes.companyId, companyId), eq(agentNotes.agentId, agentId))).orderBy(asc(agentNotes.createdAt));
 
-  async function save(companyId: string, agentId: string, f: Fields, origin: Origin) {
+  async function save(companyId: string, agentId: string, f: Fields & ReviewBy, origin: Origin) {
     check(f);
+    checkReviewBy(f.reviewBy);
     const mine = await list(companyId, agentId);
     if (mine.length >= NOTE_LIMITS.count) throw new NoteError(409, FULL);
     const same = mine.find((n) => plain(n.title) === plain(f.title));
     if (same) throw new NoteError(409, `There's already a note called "${same.title}" (id ${same.id}). Update it instead of adding another.`);
     const [n] = await db
       .insert(agentNotes)
-      .values({ companyId, agentId, title: f.title.trim(), text: f.text.trim(), why: f.why.trim(), source: origin.source, runId: origin.runId ?? null, requestedByAgentId: origin.requestedByAgentId ?? null, ticketId: origin.ticketId ?? null })
+      .values({ companyId, agentId, title: f.title.trim(), text: f.text.trim(), why: f.why.trim(), reviewBy: f.reviewBy ?? null, source: origin.source, runId: origin.runId ?? null, requestedByAgentId: origin.requestedByAgentId ?? null, ticketId: origin.ticketId ?? null })
       .returning();
     await record(db, { companyId, agentId: origin.source === "owner" ? null : agentId, ticketId: origin.ticketId ?? null, kind: "note_saved", summary: `saved a note: ${n!.title}` });
     return n!;
@@ -115,7 +147,7 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
         .leftJoin(tickets, eq(tickets.id, agentNotes.ticketId))
         .where(and(eq(agentNotes.companyId, companyId), eq(agentNotes.agentId, agentId)))
         .orderBy(asc(agentNotes.createdAt));
-      return rows.map(({ n, from, number, prefix }) => ({ ...n, requestedBy: from, ticketRef: ticketRef(prefix, number) }));
+      return rows.map(({ n, from, number, prefix }) => ({ ...n, requestedBy: from, ticketRef: ticketRef(prefix, number), ...noteReview(n, now()) }));
     },
 
     /**
@@ -163,14 +195,20 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
     },
 
     /** `origin` is where the new why came from, when the CEO changes a note on a fresh owner quote; owner edits keep the old source. */
-    async update(companyId: string, id: string, f: Partial<Fields>, by: By, origin?: { source: "chat" | "ticket"; ticketId: string | null }) {
+    async update(companyId: string, id: string, f: Partial<Fields> & ReviewBy, by: By, origin?: { source: "chat" | "ticket"; ticketId: string | null }) {
       check(f);
+      checkReviewBy(f.reviewBy);
       const before = await get(companyId, id);
       if (f.title !== undefined) {
         const same = (await list(companyId, before.agentId)).find((n) => n.id !== id && plain(n.title) === plain(f.title!));
         if (same) throw new NoteError(409, `There's already a note called "${same.title}" (id ${same.id}).`);
       }
-      const patch = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== undefined).map(([k, v]) => [k, v!.trim()]));
+      const { reviewBy, ...fields } = f;
+      const patch = {
+        ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined).map(([k, v]) => [k, v!.trim()])),
+        // undefined leaves the date alone; null clears it.
+        ...(reviewBy !== undefined ? { reviewBy } : {}),
+      };
       // A re-quoted note now rests on that quote, so its source follows it; the activity log says who changed it.
       const [n] = await db
         .update(agentNotes)
@@ -202,10 +240,10 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
       if (requesterId === ceo.id) throw new NoteError(400, "You're the CEO: notes you keep are saved from the owner chat.");
       const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, companyId)));
       if (!t) throw new NoteError(404, "No ticket with that ID in your company.");
-      const since = async (ms: number) =>
-        (await db.select({ n: count() }).from(noteRequests).where(and(eq(noteRequests.requestedByAgentId, requesterId), gt(noteRequests.createdAt, new Date(now().getTime() - ms)))))[0]!.n;
-      if ((await since(HOUR)) >= REQUEST_LIMITS.perHour) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perHour} note requests in the last hour, the most allowed. Wait for the CEO's answers before asking again.`);
-      if ((await since(24 * HOUR)) >= REQUEST_LIMITS.perDay) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perDay} note requests in the last day, the most allowed. Try again tomorrow.`);
+      const since = async (hours: number) =>
+        (await db.select({ n: count() }).from(noteRequests).where(and(eq(noteRequests.requestedByAgentId, requesterId), gt(noteRequests.createdAt, sinceHours(now(), hours)))))[0]!.n;
+      if ((await since(1)) >= REQUEST_LIMITS.perHour) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perHour} note requests in the last hour, the most allowed. Wait for the CEO's answers before asking again.`);
+      if ((await since(24)) >= REQUEST_LIMITS.perDay) throw new NoteError(429, `You've sent ${REQUEST_LIMITS.perDay} note requests in the last day, the most allowed. Try again tomorrow.`);
       const pending = await db.select({ title: noteRequests.title, by: noteRequests.requestedByAgentId }).from(noteRequests).where(and(eq(noteRequests.agentId, ceo.id), eq(noteRequests.status, "pending")));
       if (pending.length >= REQUEST_LIMITS.pending) throw new NoteError(429, `The CEO already has ${REQUEST_LIMITS.pending} note requests waiting, the most allowed. Try again once some are answered.`);
       if (pending.some((p) => p.by === requesterId && plain(p.title) === plain(input.title))) throw new NoteError(409, `You already asked for a note called "${input.title.trim()}", and it's still waiting for the CEO.`);
@@ -256,18 +294,22 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
   };
 }
 
-type WithOrigin = Pick<Note, "id" | "title" | "text" | "why" | "source"> & { requestedBy?: string | null; ticketRef?: string | null };
+type WithOrigin = Pick<Note, "id" | "title" | "text" | "why" | "source"> & { requestedBy?: string | null; ticketRef?: string | null; updatedAt?: Date; reviewBy?: string | null };
+
+/** ", set 9 Nov, 6 d ago; review due: ..." for a note that carries its dates; nothing otherwise. */
+const ageSuffix = (n: WithOrigin, at: Date) => (n.updatedAt ? `; ${ageText({ updatedAt: n.updatedAt, reviewBy: n.reviewBy }, at)}` : "");
 
 /** Where a note came from, in a few words. */
 export const originOf = (n: WithOrigin) => (n.source === "request" ? `asked by ${n.requestedBy ?? "a former agent"}${n.ticketRef ? ` on ${n.ticketRef}` : ""}, accepted by you` : n.source === "owner" ? "written by the owner" : n.source === "ticket" ? `saved from the owner's message on ${n.ticketRef ?? "a ticket"}` : "saved from the owner chat");
 
 /** The notes as prompt lines; none when there are no notes. */
-export function notesLines(notes: WithOrigin[]): string[] {
+export function notesLines(notes: WithOrigin[], at: Date = new Date()): string[] {
   if (!notes.length) return [];
   return [
     "",
     `Your notes, kept from what the owner told you and from requests you accepted (the owner can see and change them; ${notes.length} of ${NOTE_LIMITS.count}). Follow them unless the owner tells you otherwise now:`,
-    ...notes.map((n) => `- [${n.id}] ${n.title}: ${n.text} (${n.source === "request" ? `why: "${n.why}"; ${originOf(n)}` : `owner said: "${n.why}"`})`),
+    ...notes.map((n) => `- [${n.id}] ${n.title}: ${n.text} (${n.source === "request" ? `why: "${n.why}"; ${originOf(n)}` : `owner said: "${n.why}"`}${ageSuffix(n, at)})`),
+    ...(notes.some((n) => n.updatedAt && noteReview({ updatedAt: n.updatedAt, reviewBy: n.reviewBy }, at).reviewDue) ? ["A note marked review due may be out of date: check it against what you can see now, then ask the owner whether to keep, update or remove it."] : []),
   ];
 }
 
@@ -284,7 +326,7 @@ export function requestLines(reqs: Array<Pick<NoteRequest, "id" | "title" | "tex
 /** What a CEO's chat or run prompt carries: its notes, then the requests waiting for it. */
 export async function ceoNotesLines(db: Db, companyId: string, ceoId: string) {
   const svc = notesService(db);
-  return [...notesLines(await svc.withOrigin(companyId, ceoId)), ...requestLines(await svc.pending(companyId, ceoId))];
+  return [...notesLines(await svc.withOrigin(companyId, ceoId), new Date()), ...requestLines(await svc.pending(companyId, ceoId))];
 }
 
 export const describeNote =(n: Pick<Note, "title" | "text" | "why">) => `"${n.title}": ${n.text} (why: "${n.why}")`;

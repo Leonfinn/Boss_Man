@@ -9,8 +9,10 @@ import { Journal, RunnerConnection } from "@boss-man/runner";
 import type { RunnerCommand } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import { buildApp } from "../src/app.js";
+import { runnerIngestWaiting } from "../src/routes/runner-socket.js";
+import { PROTOCOL_VERSION } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
-import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { agents, costEvents, runnerEvents, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 
 const HEARTBEAT = 100;
 
@@ -70,6 +72,33 @@ describe("runner protocol (R31)", () => {
     const status = await waitFor(() => ctx.built.serverStatus.status(ctx.companyId), (s) => !!s.runner?.harnessVersions);
     expect(status.runner?.harnessVersions).toEqual(harnessVersions);
     conn.stop();
+  });
+
+  it("stores the image commit from hello, and a later hello without one clears it (BOS-764)", async () => {
+    const commit = "ABCDEF0123456789abcdef0123456789ABCDEF01";
+    const journal = new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl"));
+    const stored = async () => (await ctx.db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.id, ctx.reg.runnerId)))[0]!.c;
+    const first = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: commit, onCommand: () => {} });
+    first.start();
+    await waitFor(async () => first.isLive, Boolean);
+    expect(await waitFor(stored, (c) => c !== null)).toBe(commit.toLowerCase());
+    first.stop();
+    // The image is replaced by one built outside a checkout: the old commit must not vouch for it.
+    const second = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, onCommand: () => {} });
+    second.start();
+    await waitFor(async () => second.isLive, Boolean);
+    expect(await waitFor(stored, (c) => c === null)).toBeNull();
+    second.stop();
+  });
+
+  it("refuses a hello whose image commit is not a 40-character hex sha (BOS-764)", async () => {
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "test", imageVersion: null, imageCommit: "not-a-sha" }));
+    await new Promise((r) => setTimeout(r, 300));
+    const [row] = await ctx.db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.id, ctx.reg.runnerId));
+    expect(row!.c).toBeNull();
+    ws.close();
   });
 
   it("delivers every event exactly once across a dropped connection", async () => {
@@ -192,6 +221,18 @@ describe("runner protocol (R31)", () => {
     await waitFor(async () => conn.isLive, Boolean, 5000);
     conn.stop();
   });
+
+  it("counts an event as no longer waiting when the hello ahead of it failed (BOS-410, Jane on BOS-472)", async () => {
+    const before = runnerIngestWaiting();
+    ctx.built.runners.touch = async () => { throw new Error("database gone"); };
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    await new Promise((r) => ws.once("open", r));
+    const closed = new Promise<number>((r) => ws.once("close", (code) => r(code)));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "test", imageVersion: null }));
+    ws.send(JSON.stringify({ type: "event", entry: { seq: 1, at: new Date().toISOString(), event: { type: "run.ended", runId: randomUUID(), stopReason: "end_turn", error: null } } }));
+    expect(await closed).toBe(1011);
+    await waitFor(async () => runnerIngestWaiting(), (n) => n === before);
+  });
 });
 
 describe("runner env endpoint", () => {
@@ -217,6 +258,8 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
   const monitorAtOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
   async function parked(n = 1) {
     const ceo = (await ctx.db.select().from(agents).where(eq(agents.companyId, ctx.companyId)))[0]!;
+    // These tests are about parked checks, not the per-agent WIP limit (BOS-1029): "No limit" lets one agent hold all of them in progress.
+    await ctx.db.insert(settings).values({ key: "wip_limits", value: { agent: null, company: null } }).onConflictDoUpdate({ target: settings.key, set: { value: { agent: null, company: null } } });
     const p = await ctx.built.work.createProject(ctx.companyId, "App");
     const out: string[] = [];
     for (let i = 0; i < n; i++) {

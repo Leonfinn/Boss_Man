@@ -1,6 +1,7 @@
 // Model lists for the picker (R60): what each agent kind offers, as the runner last saw it in
 // an ACP session's model option, and what an API key can use, from the provider's model list.
 import { and, eq, like } from "drizzle-orm";
+import { INFINITE_MODEL_CHOICE, isInfiniteModel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { fundingSources, secretGrants, settings } from "../db/schema.js";
 
@@ -70,6 +71,11 @@ export function modelsService(db: Db, deps: { reveal: (secretId: string) => Prom
     async forCompany(companyId: string, opts: { refresh?: boolean } = {}) {
       const rows = await db.select().from(settings).where(like(settings.key, `models:${companyId}:%`));
       const runner = Object.fromEntries(rows.map((r) => [r.key.slice(`models:${companyId}:`.length), r.value as { models: ModelChoice[]; observedAt: string }]));
+      // A stock OpenCode doesn't list Synthetic's Infinite mode (BOS-279); the runner adds its provider, so
+      // offer the model here, under the name the server stores, for the picker to group and label free/slow.
+      if (runner.opencode && !runner.opencode.models.some((m) => isInfiniteModel(m.value))) {
+        runner.opencode = { ...runner.opencode, models: [...runner.opencode.models, INFINITE_MODEL_CHOICE] };
+      }
       // Anthropic, OpenAI and gateways have a model-list API; Bedrock's and Foundry's models come from the runner's own list.
       const sources = (await db.select().from(fundingSources)).filter((s) => s.kind !== "subscription" && s.secretId && (s.provider === "anthropic" || s.provider === "openai" || s.provider === "gateway"));
       const api: ApiList[] = [];
@@ -80,7 +86,10 @@ export function modelsService(db: Db, deps: { reveal: (secretId: string) => Prom
         apiCache.set(s.id, fresh);
         api.push(fresh);
       }
-      return { runner, api };
+      // The company's Synthetic plans: each gets Infinite mode as its own group in the picker (BOS-279).
+      const plans = (await db.select().from(fundingSources)).filter((s) => s.kind === "subscription" && s.provider === "synthetic");
+      const infinite = plans.map((s) => ({ fundingSourceId: s.id, name: s.name, model: INFINITE_MODEL_CHOICE }));
+      return { runner, api, infinite };
     },
 
     /** Drops a funding source's cached list, e.g. after its key changes. */

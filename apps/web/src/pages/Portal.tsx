@@ -1,6 +1,8 @@
 // The public feedback portal (portal.html#<token>). It shares nothing with the owner's app
 // but the styles; the token after "#" never reaches the server in a URL.
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Importance = "nice_to_have" | "important" | "critical";
 const LEVELS: Array<{ id: Importance; label: string }> = [
@@ -15,7 +17,7 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "released", label: "Released", help: "Done recently." },
 ];
 type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
-type Portal = { title: string; intro: string | null; hasLogo: boolean; features: PortalFeature[] };
+type Portal = { title: string; intro: string | null; hasLogo: boolean; back: { url: string; text: string } | null; features: PortalFeature[] };
 
 const token = () => decodeURIComponent(window.location.hash.replace(/^#/, ""));
 
@@ -49,15 +51,17 @@ function Who({ name, email, onChange, idPrefix }: { name: string; email: string;
 
 function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void }) {
   const [comment, setComment] = useState(f.myVote?.comment ?? "");
+  // A visitor's comment is kept in their browser as they type (DR-045); it goes once it is sent.
+  const commentKey = `portal-comment/${f.id}`;
   const [who, setWho] = useState({ name: "", email: "" });
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const vote = (importance: Importance, withComment = false) =>
     void call(`/api/portal/votes`, { method: "POST", body: { featureId: f.id, importance, ...(withComment ? { comment: comment.trim() || null, name: who.name.trim() || null, email: who.email.trim() || null } : {}) } }).then(
-      () => (setNote({ ok: true, text: withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), onChanged()),
+      () => (setNote({ ok: true, text: withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), withComment && clearDraft(commentKey), onChanged()),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
-  const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
+  const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), clearDraft(commentKey), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
   const canVote = f.stage !== "released";
   return (
     <li className="card portal-card">
@@ -95,7 +99,7 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
             >
               <div className="field">
                 <label htmlFor={`c-${f.id}`}>What would it let you do?</label>
-                <textarea id={`c-${f.id}`} rows={3} maxLength={2000} value={comment} onChange={(e) => setComment(e.target.value)} />
+                <DraftTextarea draftKey={commentKey} id={`c-${f.id}`} rows={3} maxLength={2000} value={comment} onChange={setComment} />
               </div>
               <Who name={who.name} email={who.email} onChange={setWho} idPrefix={`w-${f.id}`} />
               <div style={{ display: "flex", gap: 8 }}>
@@ -121,11 +125,13 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
 
 function Idea() {
   const [form, setForm] = useState({ title: "", text: "", name: "", email: "", website: "" });
+  // A visitor's idea is kept in their browser as they type (DR-045); it goes once it is sent.
+  const textKey = "portal-idea";
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void call(`/api/portal/ideas`, { method: "POST", body: { title: form.title.trim(), text: form.text.trim(), name: form.name.trim() || null, email: form.email.trim() || null, website: form.website } }).then(
-      () => (setForm({ title: "", text: "", name: "", email: "", website: "" }), setNote({ ok: true, text: "Thank you! We read every idea." })),
+      () => (setForm({ title: "", text: "", name: "", email: "", website: "" }), clearDraft(textKey), setNote({ ok: true, text: "Thank you! We read every idea." })),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
   };
@@ -140,7 +146,7 @@ function Idea() {
       </div>
       <div className="field">
         <label htmlFor="idea-text">What problem would it solve for you?</label>
-        <textarea id="idea-text" required rows={4} maxLength={5000} value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} />
+        <DraftTextarea draftKey={textKey} id="idea-text" required rows={4} maxLength={5000} value={form.text} onChange={(text) => setForm({ ...form, text })} />
       </div>
       <Who name={form.name} email={form.email} onChange={(w) => setForm({ ...form, ...w })} idPrefix="idea" />
       {/* People never see this; bots tend to fill it in. */}
@@ -209,41 +215,60 @@ export function PortalApp() {
     );
   if (!data) return null;
   const shown = data.features.filter((f) => f.stage === stage);
+  // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the
+  // bottom so a visitor can get back to the site. Both are plain links in the same tab.
+  const back = data.back ? (
+    <a className="portal-back" href={data.back.url}>
+      <span aria-hidden="true">←</span> Back to {data.back.text}
+    </a>
+  ) : null;
   return (
-    <main className="portal">
-      <header className="page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
-          {logo && <img src={logo} alt="" style={{ maxHeight: 112, maxWidth: "40vw", width: "auto" }} />}
-          <div>
-            <h1>{data.title}</h1>
-            {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
-          </div>
+    <>
+      {back && (
+        <div className="portal-back-bar">
+          <div className="portal-back-wrap">{back}</div>
         </div>
-      </header>
-      <div className="tabs" role="tablist" aria-label="Stages">
-        {STAGES.map((s) => (
-          <button key={s.id} type="button" role="tab" aria-selected={stage === s.id} onClick={() => setStage(s.id)}>
-            {s.label}
-            <span className="tab-count">{data.features.filter((f) => f.stage === s.id).length}</span>
-          </button>
-        ))}
-      </div>
-      <p className="muted" style={{ fontSize: 14 }}>
-        {STAGES.find((s) => s.id === stage)!.help}
-      </p>
-      {shown.length ? (
-        <ul className="portal-list">
-          {shown.map((f) => (
-            <FeatureCard key={f.id} f={f} onChanged={load} />
-          ))}
-        </ul>
-      ) : (
-        <p className="muted">Nothing here yet.</p>
       )}
-      <Idea />
-      <p className="muted" style={{ fontSize: 12 }}>
-        Votes are remembered in this browser, so you can change them later. What you send goes to the team as feedback.
-      </p>
-    </main>
+      <main className="portal">
+        <header className="page-head">
+          <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+            {logo && <img src={logo} alt="" style={{ maxHeight: 112, maxWidth: "40vw", width: "auto" }} />}
+            <div>
+              <h1>{data.title}</h1>
+              {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
+            </div>
+          </div>
+        </header>
+        <div className="tabs" role="tablist" aria-label="Stages">
+          {STAGES.map((s) => (
+            <button key={s.id} type="button" role="tab" aria-selected={stage === s.id} onClick={() => setStage(s.id)}>
+              {s.label}
+              <span className="tab-count">{data.features.filter((f) => f.stage === s.id).length}</span>
+            </button>
+          ))}
+        </div>
+        <p className="muted" style={{ fontSize: 14 }}>
+          {STAGES.find((s) => s.id === stage)!.help}
+        </p>
+        {shown.length ? (
+          <ul className="portal-list">
+            {shown.map((f) => (
+              <FeatureCard key={f.id} f={f} onChanged={load} />
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">Nothing here yet.</p>
+        )}
+        <Idea />
+        <p className="muted" style={{ fontSize: 12 }}>
+          Votes are remembered in this browser, so you can change them later. What you send goes to the team as feedback.
+        </p>
+        {back && (
+          <div className="portal-back-foot">
+            <p>{back}</p>
+          </div>
+        )}
+      </main>
+    </>
   );
 }

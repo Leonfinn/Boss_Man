@@ -1,14 +1,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkResults, decisions, reviewRequests, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
+import { requestReviews } from "../src/services/review-kinds.js";
 import { MERGE_ACTIVITY_MS, setInfraRetryBase } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
@@ -43,12 +45,12 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean; verifyFail: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false, verifyFail: false };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
-    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
+    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : faults.verifyFail ? { ok: false, exitCode: 1, timedOut: false, output: "FAIL  migration lint", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
     if (c.type === "workspace.carried") ok({ carried: [] });
@@ -178,7 +180,7 @@ describe("an approval whose merge fails", () => {
     expect((await c.row(t.id)).systemState).toBe("review");
     expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
-    expect(d).toMatchObject({ status: "open", tier: "owner", options: ["Run the check again", "Send it back to the agent"] });
+    expect(d).toMatchObject({ status: "open", tier: "ceo", options: ["Run the check again", "Send it back to the agent"] });
     // It holds up the approved ticket, so it ranks above a question that blocks nothing.
     const queued = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string; blocks: Array<{ ticketId: string }>; score: number }>;
     expect(queued.find((x) => x.id === d!.id)).toMatchObject({ blocks: [expect.objectContaining({ ticketId: t.id })], score: expect.any(Number) });
@@ -275,8 +277,25 @@ describe("a merge check that runs long", () => {
     await approved;
     await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
     const commands = c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command);
-    expect(commands).toEqual(["pnpm test", "pnpm test:e2e"]);
+    // The project check is told the deep check follows, so it can skip what that repeats (BOS-665).
+    expect(commands).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
     expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  });
+
+  it("names the project's own command when the project check before the deep one fails (BOS-665)", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "critical" });
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", deepVerifyCommand: "pnpm test:e2e" });
+    await c.setPolicy((p) => (p.critical.ownerSignoff = false));
+    c.faults.verifyFail = true;
+    await (await c.mcp(c.senior.id)).callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } });
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("in_progress"));
+    // The deep check never starts once the cheap one failed, and the agent is told about `pnpm test`, not the wrapper.
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test"]);
+    const notes = (await c.db.select().from(wakes).where(eq(wakes.ticketId, t.id))).map((w) => JSON.stringify(w));
+    expect(notes.some((n) => n.includes("the check `pnpm test` exited with code 1"))).toBe(true);
+    expect(notes.some((n) => n.includes("BOSSMAN_FULL_CHECK_NEXT"))).toBe(false);
+    expect(await c.db.select().from(checkResults).where(eq(checkResults.ticketId, t.id))).toEqual([expect.objectContaining({ kind: "verify", passed: false })]);
   });
 });
 
@@ -287,8 +306,17 @@ describe("the review tool", () => {
     const call = async (agentId: string) => textOf(await (await c.mcp(agentId)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
     expect(await call(c.senior.id)).toContain("Base ");
     expect(await call(c.ceo.id)).toContain("Base ");
-    expect(await call(c.other.id)).toBe("Only your company's CEO or this ticket's reviewer reviews it.");
+    // The refusal names who holds the review, so the agent can nudge them (BOS-298 step 12).
+    expect(await call(c.other.id)).toBe("This ticket's code review is with Sam. Nudge them, or ask the CEO to add you.");
     expect(await call(c.worker.id)).toBe("You can't review a ticket assigned to you.");
+  });
+
+  it("names every open review's reviewer in the refusal (BOS-900)", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "high" });
+    await requestReviews(c.db, await c.row(t.id));
+    const out = textOf(await (await c.mcp(c.other.id)).callTool({ name: "review", arguments: { action: "diff", ticketId: t.id } }));
+    expect(out).toBe("This ticket's code review is with Sam and its security review is with CEO. Nudge them, or ask the CEO to add you.");
   });
 
   it("labels the reviewer with name and title, and sign-off decides between an owner decision and a merge", async () => {
@@ -369,6 +397,33 @@ describe("review policy API", () => {
     expect((await c.req("PUT", `/api/projects/${c.project.id}/review-policy`, p)).statusCode).toBe(400);
     expect((await c.req("PUT", `/api/companies/${c.company.id}/review-policy`, { low: {} })).statusCode).toBe(400);
     expect((await c.req("GET", `/api/companies/${c.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
+  });
+
+  it("gives a new company a security review on high and critical work, and leaves existing companies alone (BOS-824)", async () => {
+    const c = await setup();
+    // The column default, not just the constant: a company row made without a policy gets it.
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Bare Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    const [row] = res.rows;
+    expect(row!.p.high.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.critical.kinds).toEqual({ security: "ceo" });
+    expect(row!.p.medium.kinds).toBeUndefined();
+    // The migration only changes the default for new rows; stored policies are not rewritten (DR-041).
+    const migration = readFileSync(new URL("../drizzle/0127_default_security_review.sql", import.meta.url), "utf8");
+    expect(migration).toMatch(/^ALTER TABLE "companies" ALTER COLUMN "review_policy" SET DEFAULT /);
+    expect(migration).not.toMatch(/\bUPDATE\b/i);
+    // A high-risk ticket in a new company asks for the security review beside the code review.
+    const t = await c.ticket({ risk: "high" });
+    const rows = await requestReviews(c.db, await c.row(t.id));
+    expect(rows.map((r) => [r.kind, r.reviewerAgentId]).sort()).toEqual([["code", c.senior.id], ["security", c.ceo.id]]);
+  });
+
+  // QA (BOS-848): the SQL default in migration 0127 is a hand-copied string; it must say exactly what the shared constant says.
+  it("keeps the column default equal to DEFAULT_REVIEW_POLICY, and a new company's policy through the API too (BOS-824)", async () => {
+    const c = await setup();
+    const res = (await c.db.execute(sql`insert into companies (name) values ('Drift Co') returning review_policy as p`)) as unknown as { rows: { p: ReviewPolicy }[] };
+    expect(res.rows[0]!.p).toEqual(DEFAULT_REVIEW_POLICY);
+    const made = (await c.req("POST", "/api/companies", { name: "Fresh Co" })).json() as { company: { id: string } };
+    expect((await c.req("GET", `/api/companies/${made.company.id}/review-policy`)).json()).toEqual(DEFAULT_REVIEW_POLICY);
   });
 
   it("makes the risk-tier help follow the company's policy", async () => {

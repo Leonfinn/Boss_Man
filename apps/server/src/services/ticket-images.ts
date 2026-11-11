@@ -18,11 +18,20 @@ export const imageMarkdown = (name: string, id: string) => `![${name}](/api/tick
 /** How any other file appears: a link that downloads it. */
 export const fileMarkdown = (name: string, id: string) => `[📎 ${name}](/api/ticket-images/${id})`;
 
+/**
+ * Finds an attachment link in what the owner wrote (an answer in their own words, BOS-759): a picture
+ * or a file, whichever image or file link it is. Never global, so a lastIndex from one text can't
+ * carry into the next.
+ */
+export const ATTACHMENT_LINK = /!?\[[^\]]*\]\(\/api\/ticket-images\/[0-9a-fA-F-]{36}\)/;
+
 /** The type of an attached file, from its bytes: a picture, a PDF, UTF-8 text, or anything else. */
 export function fileType(bytes: Buffer): string {
   const picture = pictureType(bytes);
   if (picture) return picture;
   if (bytes.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
+  // A zip (BOS-228): its entries are read by attachment-zip.ts, never stored as one big opaque blob.
+  if (bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return "application/zip";
   const sample = bytes.subarray(0, 64 * 1024);
   if (!sample.includes(0) && Buffer.from(sample.toString("utf8"), "utf8").equals(sample)) return "text/plain";
   return "application/octet-stream";

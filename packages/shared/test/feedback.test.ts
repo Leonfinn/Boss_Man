@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { demandScore, keywords, priorityScore, suggestFeatures } from "../src/index.js";
+import { demandScore, keywords, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures } from "../src/index.js";
 
 describe("demandScore", () => {
   it("counts each customer once, at their most important level", () => {
@@ -43,5 +43,55 @@ describe("suggestFeatures", () => {
   });
   it("stems simple endings", () => {
     expect([...keywords("Exports exporting exported")]).toEqual(["export"]);
+  });
+});
+
+describe("portalVerdict", () => {
+  it("puts an ordinary feature with a public summary on the portal", () => {
+    expect(portalVerdict({ title: "Dark mode", description: "A dark theme.", hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+  });
+  it("keeps a security-titled or security-described feature off, and says why", () => {
+    expect(portalVerdict({ title: "Rotate API keys", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Settings page", description: "Manage credentials for connected apps.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Permissions", area: "Security", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Lock it down", criteria: ["Keeps the agent fence sound"], hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+  });
+  it("does not trip on ordinary words that merely look close", () => {
+    expect(looksLikeSecurity("Keyboard shortcut keys and sorting keys")).toBe(false);
+    expect(portalVerdict({ title: "Keyboard shortcuts", hasPublicSummary: true })).toMatchObject({ onPortal: true });
+  });
+  it("splits hyphenated and possessive words, matching the migration's SQL rule", () => {
+    expect(looksLikeSecurity("Token-based login")).toBe(true);
+    expect(looksLikeSecurity("password-reset flow")).toBe(true);
+    expect(looksLikeSecurity("Fix the token's expiry")).toBe(true);
+    expect(portalVerdict({ title: "Token-based login", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Password-reset page", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+  });
+  it("lets the manual keep-off mark win, even over an ordinary feature", () => {
+    expect(portalVerdict({ title: "Dark mode", keepOffPortal: true, hasPublicSummary: true })).toEqual({ onPortal: false, reason: "sensitive" });
+    expect(portalVerdict({ title: "Dark mode", keepOffPortal: false, hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+  });
+  it("holds a feature without a public summary off until one is written", () => {
+    expect(portalVerdict({ title: "Dark mode", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "needs public summary" });
+    // Security still wins over a missing summary: the reason it is off is the security work.
+    expect(portalVerdict({ title: "Secrets manager", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "security" });
+  });
+});
+
+describe("portalTitle", () => {
+  it("prefers the public title, then the public summary's first line, and nothing when neither is written", () => {
+    expect(portalTitle("Settings, tidied", "A summary.")).toBe("Settings, tidied");
+    expect(portalTitle("  ", "A dark theme you can switch on.\nTeam-only detail.")).toBe("A dark theme you can switch on.");
+    expect(portalTitle(null, null)).toBeNull();
+    expect(portalTitle("  ", "   \n")).toBeNull();
+  });
+});
+
+describe("QA: portalTitle never falls back to anything internal (BOS-991)", () => {
+  it("takes only the first line, handles CRLF, trims and caps it at 200 characters", () => {
+    expect(portalTitle(undefined, "First line.\r\nSecond line with internal detail.")).toBe("First line.");
+    expect(portalTitle("", "  \n  Real line after a blank one.")).toBe("Real line after a blank one.");
+    expect(portalTitle(null, "x".repeat(500))).toBe("x".repeat(200));
+    expect(portalTitle("  Padded  ", null)).toBe("Padded");
   });
 });

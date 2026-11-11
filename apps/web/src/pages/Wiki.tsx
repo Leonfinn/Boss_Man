@@ -3,10 +3,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Menu as MenuIcon } from "lucide-react";
 import { api, type Company } from "../api";
+import { useFormDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 import { Markdown, headingId } from "../components/Markdown";
 import { useMediaQuery, usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
+import { NotFoundBlock } from "../components/NotFoundBlock";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -16,19 +20,33 @@ type OldVersion = { id: string; title: string; body: string; createdAt: string; 
 
 type Draft = { title: string; body: string; folder: string };
 
-function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Draft; folders: string[]; onSave: (v: Draft) => Promise<void>; onCancel: () => void; saveLabel: string }) {
-  const [title, setTitle] = useState(initial.title);
-  const [folder, setFolder] = useState(initial.folder);
-  const [body, setBody] = useState(initial.body);
+function Editor({ draftKey, initial, folders, onSave, onCancel, saveLabel }: { draftKey: string; initial: Draft; folders: string[]; onSave: (v: Draft) => Promise<void>; onCancel: () => void; saveLabel: string }) {
+  // The page being written is kept in this browser (BOS-773), so a reload or an update swap doesn't
+  // take it; it goes once the page is saved or the owner cancels on purpose.
+  const [fields, setFields, resetDraft, restored] = useFormDraft<Draft>(draftKey, initial);
+  const { title, folder, body } = fields;
+  const setTitle = (v: string) => setFields({ ...fields, title: v });
+  const setFolder = (v: string) => setFields({ ...fields, folder: v });
+  const setBody = (v: string) => setFields({ ...fields, body: v });
   const [preview, setPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    onSave({ title: title.trim(), body, folder }).catch((err: Error) => setError(err.message));
+    onSave({ title: title.trim(), body, folder })
+      .then(() => resetDraft())
+      .catch((err: Error) => setError(err.message));
   };
   return (
     <form className="card wiki-editor" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {restored && (
+        <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+          Draft restored. It stays in this browser until you save the page or discard it.{" "}
+          <button type="button" className="link" style={{ padding: 0 }} onClick={resetDraft}>
+            Discard draft
+          </button>
+        </p>
+      )}
       <div className="field">
         <label htmlFor="wiki-title">Title</label>
         <input id="wiki-title" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
@@ -57,7 +75,9 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
           <label htmlFor="wiki-body" className="sr-only">
             Page text, in Markdown
           </label>
-          <textarea id="wiki-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
+          {/* The whole page (title, folder and body) is kept by the form draft above, so this box must not
+              write a second, clashing entry under the same key: it only displays the form's body. */}
+          <DraftTextarea draftKey={null} noDraft="the editor keeps the whole page, body included, with useFormDraft under the same key" id="wiki-body" value={body} onChange={setBody} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
         </>
       )}
       <div style={{ display: "flex", gap: 8 }}>
@@ -78,7 +98,7 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
 }
 
 /** An address whose page doesn't exist: say so plainly and offer a search, rather than an empty wiki (BOS-356). */
-function NotFound({ companyId, slug, go }: { companyId: string; slug: string; go: (to: string) => void }) {
+function NotFound({ companyId, slug }: { companyId: string; slug: string }) {
   const [q, setQ] = useState("");
   const hits = usePoll(
     (signal) => (q.trim() ? api<PageRow[]>(`/api/companies/${companyId}/wiki?q=${encodeURIComponent(q.trim())}`, { signal }) : Promise.resolve([])),
@@ -88,35 +108,33 @@ function NotFound({ companyId, slug, go }: { companyId: string; slug: string; go
   const found = hits.data ?? [];
   const name = decodeURIComponent(slug) || slug;
   return (
-    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Page not found</h2>
-      <p className="muted">
-        There's no wiki page at <code>{name}</code>. It may have been deleted or renamed, or the link may be from another company.
-      </p>
-      <div className="field">
-        <label htmlFor="wiki-missing-q">Search the wiki</label>
-        <input id="wiki-missing-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
-      </div>
-      {q.trim() ? (
-        found.length ? (
-          <ul>
-            {found.map((p) => (
-              <li key={p.id} style={{ fontSize: 14 }}>
-                <a href={`#/wiki/${companyId}/${p.slug}`}>{p.title}</a> <small className="muted">{p.slug}</small>
-              </li>
+    <NotFoundBlock
+      title="Page not found"
+      backHref={`#/wiki/${companyId}`}
+      backLabel="Back to Wiki"
+      extra={
+        <>
+          <div className="field" style={{ alignSelf: "stretch" }}>
+            <label htmlFor="wiki-missing-q">Search the wiki</label>
+            <input id="wiki-missing-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
+          </div>
+          {q.trim() &&
+            (found.length ? (
+              <ul>
+                {found.map((p) => (
+                  <li key={p.id} style={{ fontSize: 14 }}>
+                    <a href={`#/wiki/${companyId}/${p.slug}`}>{p.title}</a> <small className="muted">{p.slug}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No page matches "{q.trim()}".</p>
             ))}
-          </ul>
-        ) : (
-          <p className="muted">No page matches "{q.trim()}".</p>
-        )
-      ) : (
-        <p>
-          <a href={`#/wiki/${companyId}`} onClick={() => go(`wiki/${companyId}`)}>
-            See all pages
-          </a>
-        </p>
-      )}
-    </article>
+        </>
+      }
+    >
+      There's no wiki page at <code>{name}</code>. It may have been deleted or renamed, or the link may be from another company.
+    </NotFoundBlock>
   );
 }
 
@@ -195,9 +213,9 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
     }
   };
 
-  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} go={go} /> : <p className="error" role="alert">{page.error.message}</p>;
+  if (page.error) return page.error.status === 404 ? <NotFound companyId={companyId} slug={slug} /> : away(page.error) ? null : <p className="error" role="alert">{page.error.message}</p>;
   if (!p) return null;
-  if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
+  if (editing) return <Editor draftKey={`wiki/${companyId}/${slug}`} initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <header style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-start", justifyContent: "space-between" }}>
@@ -388,7 +406,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
 
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
-  if (brief.error) return <p className="error" role="alert">{brief.error.message}</p>;
+  if (brief.error && !away(brief.error)) return <p className="error" role="alert">{brief.error.message}</p>;
   if (!brief.data) return null;
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -530,7 +548,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
       {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (
         <p className="banner" role="status">
           <span>
-            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start in <a href={`#/settings/${company.id}`}>Settings</a>.
+            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start on the <a href="#/agents">Agents</a> page.
           </span>
         </p>
       )}
@@ -567,14 +585,14 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             {!q.trim() && (
               <ul>
                 <li>
-                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={pageSlug === BRIEF && creating === null ? "page" : undefined} onClick={() => (setCreating(null), closeDrawer())}>
+                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={(pageSlug === BRIEF || !pageSlug) && creating === null ? "page" : undefined} onClick={() => (setCreating(null), closeDrawer())}>
                     Company brief
                     <small>read-only, as of now</small>
                   </a>
                 </li>
               </ul>
             )}
-            {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "No pages yet."}</p>}
+            {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "Only the company brief so far."}</p>}
             <SemanticSettings companyId={company.id} />
             <TreeList
               folder={tree(pages)}
@@ -589,13 +607,12 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           </nav>
           <div>
             {creating !== null ? (
-              <Editor key={creating} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
-            ) : pageSlug === BRIEF ? (
+              <Editor key={creating} draftKey={`wiki-new/${company.id}/${creating}`} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
+            ) : pageSlug === BRIEF || !pageSlug ? (
+              // With no page chosen, the brief is the default: it is always there, so a new install isn't an empty pane.
               <BriefView companyId={company.id} />
-            ) : pageSlug ? (
-              <PageView companyId={company.id} slug={pageSlug} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             ) : (
-              <p className="muted card">{pages.length ? "Pick a page on the left." : "Start a page with New page, or ask an agent to write one."}</p>
+              <PageView companyId={company.id} slug={pageSlug} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             )}
           </div>
         </div>

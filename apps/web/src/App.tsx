@@ -1,20 +1,25 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type DecisionTally, type NoticeFeed, type TeamAlert, type AdvisedDecision, type ClosedNoticeCard } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
-import { usePoll, useRoute } from "./hooks";
+import { useMediaQuery, usePoll, useRoute } from "./hooks";
+import { useNewBuild } from "./new-build";
+import { DRAFT_CHANGED, hasAnyDraft } from "./drafts";
+import { setHold, useHold } from "./hold";
+import { checkNow, serverDown, subscribeServer } from "./server-watch";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
 import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
-import { ProjectsPage, Settings } from "./pages/Settings";
+import { MergeQueue } from "./pages/MergeQueue";
+import { Settings, settingsRedirect } from "./pages/Settings";
+import { ProjectsPage } from "./pages/settings/Projects";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
-import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { ScrumMaster } from "./pages/ScrumMaster";
 import { Workflow } from "./pages/Workflow";
@@ -61,8 +66,9 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "workflow", "chat", "wiki", "features", "feedback", "plan", "merge-queue", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
+const SIDE_COLLAPSED = "bm-side-collapsed";
 function remember(id: string, set: (id: string) => void) {
   set(id);
   try {
@@ -71,32 +77,159 @@ function remember(id: string, set: (id: string) => void) {
     // Storage may be blocked; the choice lasts until the page reloads.
   }
 }
+/** Whether the side menu is an icon-only strip (BOS-290): the owner's saved choice, else collapsed on a tablet or foldable and expanded on a desktop. */
+export function collapsedByDefault(): boolean {
+  try {
+    const saved = localStorage.getItem(SIDE_COLLAPSED);
+    if (saved === "1") return true;
+    if (saved === "0") return false;
+  } catch {
+    // Storage may be blocked; use the default for this width.
+  }
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 1180px)").matches : false;
+}
+function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
+  set(off);
+  try {
+    localStorage.setItem(SIDE_COLLAPSED, off ? "1" : "0");
+  } catch {
+    // Storage may be blocked; the choice lasts until the page reloads.
+  }
+}
 
-type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "wrapup")
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
+      </p>
+    );
   const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done.
+      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
+    </p>
+  );
+}
+
+/** On every page once the server serves newer screens than this tab is running (BOS-550): the owner reloads when ready. */
+export function NewBuildBanner({ newer }: { newer: boolean }) {
+  // BOS-773: if this browser holds any kept text, say plainly that reloading won't lose it, so the
+  // owner isn't warned off by the reload prompt. Kept live: it changes as drafts are typed and cleared.
+  const [kept, setKept] = useState(() => hasAnyDraft());
+  useEffect(() => {
+    if (!newer) return;
+    const update = () => setKept(hasAnyDraft());
+    update();
+    window.addEventListener(DRAFT_CHANGED, update);
+    window.addEventListener("storage", update);
+    return () => {
+      window.removeEventListener(DRAFT_CHANGED, update);
+      window.removeEventListener("storage", update);
+    };
+  }, [newer]);
+  if (!newer) return null;
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        Boss Man has been updated since this page was opened. Reload to see the latest screens; until then some cards may not show properly.
+        {kept ? " What you've typed is kept: it comes back when the page reloads." : " Nothing you've typed is lost by reloading: every text box keeps a draft."}
+      </span>
+      <button className="btn" type="button" onClick={() => window.location.reload()}>
+        Reload
+      </button>
+    </p>
+  );
+}
+
+/** On every page while the owner's "Stop all work" hold is on (BOS-836), with the one button that lifts it. */
+export function HoldBanner() {
+  const hold = useHold();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (hold.data?.paused !== true) return null;
+  const resume = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setHold(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>
+        <strong>All work is stopped.</strong> No new agent runs start in any company until you resume; runs already going finish by themselves.
+      </span>
+      <button className="btn" type="button" disabled={busy} onClick={() => void resume()}>
+        Resume
+      </button>
+      {error && <span role="alert" className="error">{error}</span>}
+    </p>
+  );
+}
+
+function useServerDown(): boolean {
+  const [down, setDown] = useState(serverDown);
+  useEffect(() => {
+    const update = () => setDown(serverDown());
+    const off = subscribeServer(update);
+    update();
+    // A check when the app is opened and whenever the tab comes back: a freeze may have missed the last probe.
+    if (!down) void checkNow();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void checkNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return down;
+}
+
+/**
+ * The server is restarting, stalled or unreachable: a small banner over the page, never in place of
+ * it (BOS-637). The page keeps what it had and catches up on its own once the server answers again.
+ */
+export function ServerBanner() {
+  const down = useServerDown();
+  if (!down) return null;
+  return (
+    <p className="banner server-banner" role="status" aria-live="polite">
+      Boss Man is restarting or switching versions for a moment. This page stays as it is and what you have typed is kept; it will catch up on its own when the server answers.
     </p>
   );
 }
 
 function Signed({ onLogout }: { onLogout: () => void }) {
-  const [route, go] = useRoute();
-  const page = route[0] ?? "dashboard";
+  const [rawRoute, go] = useRoute();
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
+  // The old Settings addresses keep working (BOS-1019): the redirect runs before anything renders, so an old
+  // link lands on the new page and a bookmarked #/rules/a1 opens Permissions for that company.
+  const route = rawRoute;
+  const page = route[0] ?? "dashboard";
+  const routeCompany = route[1] && route[1] !== "all" ? companies.data?.find((c) => c.id === route[1]) : undefined;
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
+  // Cards Boss Man closed by itself in the last couple of hours, shown where they were (BOS-739).
+  const closedNotices = usePoll((signal) => api<ClosedNoticeCard[]>("/api/decisions/closed-notices", { signal }), 30_000, "decisions-closed");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
   const maintenance = usePoll((signal) => api<Maintenance>("/api/maintenance", { signal }), 5_000, "maintenance");
   const unprocessed = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "unprocessed");
+  const newer = useNewBuild();
   useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
   const reloadCompanies = companies.reload;
@@ -105,6 +238,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   useEffect(() => reloadUnprocessed(), [route.join("/"), reloadUnprocessed]);
 
   const lost = [companies.error, decisions.error].find((e) => e && e.status === 0);
+  // An away server is the banner's to say, and it goes away by itself: this page keeps its place
+  // and catches up, rather than being swapped for an error (BOS-637).
+  useEffect(() => {
+    if (!lost) return;
+    const timer = setTimeout(() => {
+      companies.reload();
+      decisions.reload();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [lost, companies.reload, decisions.reload]);
   const expired = [companies.error, decisions.error].some((e) => e?.status === 401);
   useEffect(() => {
     if (expired) onLogout();
@@ -120,11 +263,40 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       return null;
     }
   });
+  // Tablet and foldable widths start collapsed so the page gets the room (BOS-290); a desktop starts
+  // expanded. A saved choice wins. The menu is a bar on a phone, so that width has no strip.
+  const narrow = useMediaQuery("(max-width: 1180px)");
+  const [collapsed, setCollapsed] = useState<boolean>(collapsedByDefault);
   const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
   const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  // An old bare address such as #/funding carries no company, so the redirect uses the company already
+  // selected (BOS-1044), not only the one in the address. It waits for the company list, or it would send
+  // a bare #/funding to the menu before it knows which company to use.
+  const redirect = page && companies.data ? settingsRedirect(route, routeCompany?.id ?? current?.id) : null;
+  useEffect(() => {
+    if (redirect) go(redirect);
+  }, [redirect, go]);
+  // The merge queue badge (BOS-587): approved work waiting to merge, from the same read the screen uses, so
+  // the badge and the page share one request. A failure just leaves the badge off. Its stuck count (BOS-767)
+  // turns the badge to the warning colour when a jam is there to see.
+  const mergeQueue = usePoll(
+    (signal) => (current ? api<{ waitingCount: number; stuckCount?: number }>(`/api/companies/${current.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)),
+    20_000,
+    `merge-badge-${current?.id}`,
+  );
   useEffect(() => {
     if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
   }, [inRoute, chosen]);
+  // The Decisions menu badge (BOS-969): what needs the owner now, from the server's one count (the
+  // Decisions page heading asks the same function), so the two can't drift. It follows the chosen
+  // company and refreshes on the same poll as the queue, and on every answer.
+  const decisionsTally = usePoll(
+    (signal) =>
+      current ? api<DecisionTally>(`/api/decisions/tally?companyId=${current.id}`, { signal }).catch(() => null) : Promise.resolve(null),
+    10_000,
+    `decisions-tally-${current?.id}`,
+  );
+  useEffect(() => decisionsTally.reload(), [current?.id]);
   const pick = (id: string) => {
     remember(id, setChosen);
     if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
@@ -149,8 +321,11 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     }, () => {});
   }, [companies.data, page, go]);
   return (
-    <div className="app">
+    <div className={`app${collapsed ? " side-collapsed" : ""}`}>
       <Sidebar
+        collapsed={collapsed}
+        onToggleCollapsed={() => rememberCollapsed(!collapsed, setCollapsed)}
+        narrow={narrow}
         active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
@@ -159,23 +334,25 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onPickCompany={pick}
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
+        decisionsTally={decisionsTally.data}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
+        mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
+        mergeStuck={mergeQueue.data?.stuckCount ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <HoldBanner />
+        <ServerBanner />
+        <NewBuildBanner newer={newer} />
         <PageGuard key={route.join("/")}>
-        {lost ? (
-          <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
-            <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
-          </State>
-        ) : page === "board" ? (
+        {redirect ? null : page === "board" ? (
           <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} onChanged={companies.reload} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} maintenance={maintenance.data} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "agents" ? (
@@ -192,6 +369,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "merge-queue" ? (
+          <MergeQueue companies={list} companyId={companyId} />
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "scrum-master" ? (
@@ -200,20 +379,18 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Workflow company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
-        ) : page === "funding" || page === "rules" || page === "secrets" ? (
-          <Settings companies={list} companyId={companyId} tab={page} go={go} onChanged={companies.reload}>
-            {page === "funding" ? <Funding companies={list} /> : page === "rules" ? <Rules companies={list} companyId={companyId} go={go} /> : <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />}
-          </Settings>
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
-          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload} />
+          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload}>
+            {route[2] === "secrets" ? <Secrets companies={list} companyId={companyId} onChanged={companies.reload} /> : route[2] === "permissions" ? <Rules companies={list} companyId={companyId} go={go} /> : null}
+          </Settings>
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}
@@ -236,6 +413,13 @@ export function App() {
     }
   }, []);
   useEffect(() => void check(), [check]);
+  // Can't reach the server when the page opens: keep trying quietly, and show it once it answers
+  // (BOS-637). A freeze at startup should cost a few seconds, not the "Try again" click.
+  useEffect(() => {
+    if (session.state !== "offline") return;
+    const timer = setInterval(() => void check(), 4000);
+    return () => clearInterval(timer);
+  }, [session.state, check]);
   const loggedOut = useCallback(() => setSession({ state: "login" }), []);
 
   switch (session.state) {
@@ -244,7 +428,9 @@ export function App() {
     case "offline":
       return (
         <main className="auth">
+          <ServerBanner />
           <State img={art.stuck} alt="Can't reach the server" title="Can't reach the Boss Man server">
+            <p>Trying again every few seconds; this page will open on its own as soon as the server answers.</p>
             <button className="btn primary" type="button" onClick={() => void check()}>
               Try again
             </button>

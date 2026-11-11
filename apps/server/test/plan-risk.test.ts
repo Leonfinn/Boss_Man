@@ -74,7 +74,7 @@ describe("plan-first tickets (R40)", () => {
     expect(d).toMatchObject({ tier: "ceo", question: `Engineer's plan for "Add rate limiting": approve it to start building?`, options: ["Approve plan", "Keep planning"] });
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.plan).toBe(PLAN);
     // The CEO is woken to answer it.
-    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, reason: "decision" })]);
+    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, reason: "ceo reply" })]);
 
     c.sent.length = 0;
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Keep planning", note: "Cover the burst case too." });
@@ -209,7 +209,7 @@ describe("risk tiers (R48)", () => {
     expect(d!.question).toBe(`CEO approved "Add rate limiting", which is rated high risk. Merge it, or send it back?`);
 
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve and merge" });
-    expect(commands).toEqual(["pnpm test", "pnpm test:e2e"]);
+    expect(commands).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
   });
 

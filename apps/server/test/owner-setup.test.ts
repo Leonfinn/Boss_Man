@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, tickets } from "../src/db/schema.js";
+import { activity, agents, decisions, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 const EMPTY: WorkspaceDiff = { baseCommit: "a".repeat(40), head: "a".repeat(40), commits: [], files: [], diff: "", truncated: false };
@@ -61,9 +61,9 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     const c = await agentFor(ctx.dev.id);
     const tool = (await c.listTools()).tools.find((x) => x.name === "create_ticket")!;
     expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toContain("ownerSetup");
-    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Second account", ownerSetup: "Settings → Funding → Add account" } }));
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Second account", ownerSetup: "Settings → Funding → Add funding source" } }));
     const id = /([0-9a-f-]{36})/.exec(out)![1]!;
-    expect((await row(id)).ownerSetup).toBe("Settings → Funding → Add account");
+    expect((await row(id)).ownerSetup).toBe("Settings → Funding → Add funding source");
   });
 
   it("the ticket's own author sets it with set_ticket_state, and the move-to-review reply reminds them when it's missing", async () => {
@@ -74,22 +74,22 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     expect((await row(t.id)).ownerSetup).toBeNull();
     // Another move can carry the steps; the field is theirs to write.
     await ctx.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, t.id));
-    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it.", ownerSetup: "Settings → Funding → Add account\nSign in to the second plan" } }));
-    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account\nSign in to the second plan");
+    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it.", ownerSetup: "Settings → Funding → Add funding source\nSign in to the second plan" } }));
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source\nSign in to the second plan");
   });
 
   it("the ticket read shows the steps to a reviewer, and the diff looks at them", async () => {
-    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add account" });
+    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add funding source" });
     const c = await agentFor(ctx.dev.id);
     const read = textOf(await c.callTool({ name: "tickets", arguments: { action: "read", ticketId: t.id } }));
     expect(read).toContain("After it goes live, the owner will need to");
-    expect(read).toContain("Settings → Funding → Add account");
+    expect(read).toContain("Settings → Funding → Add funding source");
   });
 
   it("the owner's web form saves and clears the steps", async () => {
     const t = await ctx.ticket();
-    expect((await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "Settings → Funding → Add account" })).statusCode).toBe(200);
-    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account");
+    expect((await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "Settings → Funding → Add funding source" })).statusCode).toBe(200);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source");
     await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "" });
     expect((await row(t.id)).ownerSetup).toBeNull();
   });
@@ -107,7 +107,104 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
     const t = await ctx.ticket();
     const c = await agentFor(ctx.dev.id);
-    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add account", reason: "Steps for the owner." } }));
-    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add account");
+    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add funding source", reason: "Steps for the owner." } }));
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source");
+  });
+
+  it("once merged, an agent can't change the steps with update_ticket; the owner can", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add funding source", mergeCommit: "c".repeat(40) });
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Delete the account", reason: "Better steps." } }));
+    expect(out).toMatch(/merged, so its setup steps are frozen/);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source");
+    // The owner's own web edit still works.
+    expect((await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "Settings → Funding → Delete the account" })).statusCode).toBe(200);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Delete the account");
+  });
+
+  it("once merged, set_ticket_state can't change the steps either", async () => {
+    const t = await ctx.ticket({ ownerSetup: "Settings → Funding → Add funding source", mergeCommit: "c".repeat(40) });
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Reopened.", ownerSetup: "Settings → Funding → Add funding source\nAnd more" } }));
+    expect(out).toMatch(/merged, so its setup steps are frozen/);
+    expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source");
+  });
+
+  it("a manager's setup-step change before the merge is named in the activity log", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    const t = await ctx.ticket();
+    const c = await agentFor(ctx.dev.id);
+    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add funding source", reason: "Steps for the owner." } }));
+    const log = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((e) => e.summary).join("\n");
+    expect(log).toContain("reorganised it (owner setup steps changed): Steps for the owner.");
+    // The owner's edit is logged too.
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { ownerSetup: "" });
+    const after = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((e) => e.summary).join("\n");
+    expect(after).toContain("The owner changed the owner's setup steps");
+  });
+});
+
+describe("setup steps are checked like an owner card when they are written (DR-052)", () => {
+  const VAGUE = "Delete BOSSMAN_CHECK_SLOTS from .env\nRestart the notifications add-on";
+  const GOOD = "Delete the BOSSMAN_CHECK_SLOTS line from {{host.env.file}}: `sed -i '/^BOSSMAN_CHECK_SLOTS=/d' {{host.env.file}}`. This prints nothing.";
+  /** The company's own CEO (every company has one). */
+  const ceoAgent = async () => agentFor((await ctx.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, ctx.co.company.id), eq(agents.role, "ceo"))))[0]!.id);
+
+  it("create_ticket refuses vague steps, naming the step and the token to use, and takes good ones", async () => {
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: VAGUE } }));
+    expect(out).toMatch(/Step 1: names \.env without saying where it is/);
+    expect(out).toMatch(/Step 2: says "Restart the notifications add-on"/);
+    expect(out).toContain("{{host.env.file}}");
+    expect(await ctx.db.select().from(tickets).where(eq(tickets.title, "Fewer check slots"))).toHaveLength(0);
+    const ok = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 2, project: "Customer app", title: "Fewer check slots", ownerSetup: GOOD } }));
+    expect((await row(/([0-9a-f-]{36})/.exec(ok)![1]!)).ownerSetup).toBe(GOOD);
+  });
+
+  it("set_ticket_state ownerSetup refuses vague steps and stores nothing", async () => {
+    const c = await agentFor(ctx.dev.id);
+    const t = await ctx.ticket();
+    const out = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Working.", ownerSetup: VAGUE } }));
+    expect(out).toMatch(/can't go to the owner as written/);
+    expect((await row(t.id)).ownerSetup).toBeNull();
+  });
+
+  it("update_ticket refuses vague steps", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    const t = await ctx.ticket();
+    const c = await agentFor(ctx.dev.id);
+    const out = textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: VAGUE, reason: "Steps for the owner." } }));
+    expect(out).toMatch(/can't go to the owner as written/);
+    expect((await row(t.id)).ownerSetup).toBeNull();
+  });
+
+  it("the move to review checks the steps already stored (written before this check existed)", async () => {
+    const c = await agentFor(ctx.dev.id);
+    const t = await ctx.ticket({ ownerSetup: VAGUE });
+    const out = textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it." } }));
+    expect(out).toMatch(/Step 1: names \.env/);
+    expect(out).toMatch(/Fix them with set_ticket_state ownerSetup/);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("lintOverride: a worker can't pass it; the CEO's is stored with the steps and cleared when they change without one", async () => {
+    const t = await ctx.ticket();
+    const worker = await agentFor(ctx.dev.id);
+    expect(textOf(await worker.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "x", ownerSetup: "Restart the notifications add-on", lintOverride: "It restarts by itself after the update." } }))).toMatch(/Only the CEO can pass lintOverride/);
+    const ceo = await ceoAgent();
+    await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Restart the notifications add-on", lintOverride: "It restarts by itself after the update.", reason: "Steps for the owner." } });
+    expect(await row(t.id)).toMatchObject({ ownerSetup: "Restart the notifications add-on", ownerSetupOverride: "It restarts by itself after the update." });
+    await ceo.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: "Settings → Funding → Add funding source", reason: "Plainer steps." } });
+    expect(await row(t.id)).toMatchObject({ ownerSetup: "Settings → Funding → Add funding source", ownerSetupOverride: null });
+  });
+
+  it("a merged ticket's steps stay frozen, except for the CEO while Boss Man's card to fix them is open", async () => {
+    const t = await ctx.ticket({ ownerSetup: VAGUE, mergeCommit: "c".repeat(40), systemState: "done" });
+    const c = await ceoAgent();
+    expect(textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: GOOD, reason: "Fix the steps." } }))).toMatch(/merged, so its setup steps are frozen/);
+    await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "question", question: "is live, but the setup steps can't go to the owner", options: ["Got it"], recommendedOption: "Got it", tier: "ceo", dedupeKey: `owner-setup-fix:${t.id}`, context: { type: "question", ticketId: t.id } });
+    textOf(await c.callTool({ name: "update_ticket", arguments: { ticketId: t.id, ownerSetup: GOOD, reason: "Fix the steps." } }));
+    expect((await row(t.id)).ownerSetup).toBe(GOOD);
   });
 });

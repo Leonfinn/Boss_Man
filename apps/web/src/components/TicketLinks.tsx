@@ -80,6 +80,7 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
                 <span className={`tag ${w.open ? "red" : "green"}`}>{w.open ? "Open" : "Done"}</span>
                 <span className="muted">{w.kind}</span>
                 <a href={w.link}>{w.title}</a>
+                {w.kind === "ticket" && w.until && <span className="muted">(until {w.until})</span>}
                 {w.kind === "decision" ? (
                   <span className="muted">Answer it to release this task.</span>
                 ) : (

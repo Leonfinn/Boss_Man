@@ -2,10 +2,12 @@ import { useState, type FormEvent } from "react";
 import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { clearDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
-type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
+type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
+type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
@@ -22,11 +24,16 @@ const outcomeTag = (o: Outcome) => {
 
 function describeMatch(m: Match) {
   const parts: string[] = [];
+  if (m.agentIds?.length) parts.unshift(`the request is from one named agent`);
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
   if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
+  if (m.destructive) parts.push("the command deletes or destroys data (Boss Man reads what each part runs, however it's written)");
+  if (m.tempCleanupOnly) parts.push("its only deletes are of entries directly in /tmp");
   if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
+  if (m.safeOnly) parts.push("it is not a destructive or pushing command");
+  if (m.pushing) parts.push("the command pushes or publishes");
   return parts.join(" and ");
 }
 
@@ -42,6 +49,11 @@ function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match)}
             </p>
+            {r.createdBy && (
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
+              </p>
+            )}
             {shadowed.includes(r.id) && <p className="muted" style={{ fontSize: 12.5 }}>Built-in rules already allow these requests, so this rule no longer asks about them. It still applies to delete, push and other guarded requests.</p>}
           </div>
           <select aria-label={`Outcome of ${r.name}`} value={r.outcome} onChange={(e) => onChange(r, e.target.value as Outcome)}>
@@ -75,6 +87,8 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
   const [ask, setAsk] = useState("");
+  // The "what should this rule do?" text is kept in this browser as it is typed (DR-045).
+  const askDraftKey = `rule-ask/${scopeId ?? "all"}`;
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
@@ -113,6 +127,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
       const r = await api<{ ceo: { name: string } }>(`/api/companies/${scopeId}/rule-requests`, { method: "POST", body: { text: ask } });
       setSentTo(r.ceo.name);
       setAsk("");
+      clearDraft(askDraftKey);
     });
   };
   const test = (e: FormEvent) => {
@@ -184,7 +199,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           <form onSubmit={askCeo} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div className="field">
               <label htmlFor="rule-ask">What should this rule do?</label>
-              <textarea id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={(e) => setAsk(e.target.value)} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+              <DraftTextarea draftKey={askDraftKey} id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={setAsk} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
             </div>
             <div className="actions">
               <button className="btn primary" type="submit" disabled={!ask.trim()}>
@@ -268,7 +283,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           Built-in defaults
         </h2>
         <p className="muted" style={{ fontSize: 14 }}>
-          Checked last, and can't be changed. A request nothing matches goes to you.
+          Checked last, and can't be changed. A request nothing matches goes to the CEO first, and to you if the CEO does not settle it. Deletes, moves and requests that name a path come straight to you.
         </p>
         <ol className="rules">
           {list.data?.defaults.map((r, i) => (

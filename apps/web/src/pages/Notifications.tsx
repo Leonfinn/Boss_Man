@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type Company, type Notice, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { usePoll } from "../hooks";
+import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -11,6 +12,53 @@ const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> 
   page: { label: "Page", tone: "red", help: "Also the phone: something urgent" },
   ask: { label: "Ask", tone: "amber", help: "Needs an answer" },
 };
+
+type PhonePush = { id: string; title: string; body: string | null; link: string; company: string | null; pushedAt: string; reason: string | null; state: "open" | "with_ceo" | "settled" | "notice"; clearedAt: string | null; clearNote: string | null };
+const PUSH_STATE: Record<PhonePush["state"], string> = { open: "Still open", with_ceo: "Back with the CEO", settled: "Settled", notice: "A notice" };
+
+/** The last 20 phone pushes: when, which card, why it counted as urgent, and whether it is still open (BOS-1097). */
+function RecentPhonePushes() {
+  const pushes = usePoll((signal) => api<{ items: PhonePush[] }>("/api/notifications/pushes", { signal }), 30_000, "phone-pushes");
+  const items = pushes.data?.items ?? [];
+  const tooOld = items.some((p) => p.clearNote?.startsWith("unsupported"));
+  return (
+    <section aria-labelledby="recent-pushes-h" style={{ marginBottom: 24 }}>
+      <h2 id="recent-pushes-h" style={{ fontSize: 17, fontWeight: 600 }}>
+        Recent phone pushes
+      </h2>
+      <p className="muted" style={{ fontSize: 13 }}>
+        The last 20 messages sent to your phone, and why each counted as urgent. Plans, sign-offs and after-merge checks only push if the CEO marks them urgent.
+      </p>
+      {tooOld && (
+        <p className="muted" role="note" style={{ fontSize: 13 }}>
+          Your ntfy server is too old to take a settled card's message off your phone (it needs version 2.14 or newer), so those stay there until you swipe them away.
+        </p>
+      )}
+      {pushes.data && !items.length && <p className="muted">Nothing has been sent to your phone yet.</p>}
+      {items.length > 0 && (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((p) => (
+            <li key={p.id} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <strong style={{ fontWeight: 600 }}>{p.body ?? p.title}</strong>
+                <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>
+                  {p.company ? `${p.company} · ` : ""}
+                  {when(p.pushedAt)}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 13 }}>
+                <span className={`tag ${p.state === "open" ? "amber" : ""}`}>{PUSH_STATE[p.state]}</span>
+                {p.clearedAt && <span className="muted">Cleared from your phone</span>}
+                <span className="muted">Why: {p.reason ?? "not recorded"}</span>
+                <a href={p.link}>See the evidence</a>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
   return (
@@ -58,7 +106,9 @@ type Form = {
   token: string;
   clearToken: boolean;
   pushLevels: NotifyLevel[];
+  phonePush: "urgent" | "all";
   publicUrl: string;
+  approveButtons: boolean;
 };
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -75,8 +125,10 @@ function toForm(s: NotifySettings): Form {
     topic: s.ntfy?.topic ?? "",
     token: "",
     clearToken: false,
-    pushLevels: s.pushLevels,
+    pushLevels: s.pushLevels ?? [],
+    phonePush: s.phonePush === "all" ? "all" : "urgent",
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
+    approveButtons: s.approveButtons !== false,
   };
 }
 
@@ -89,6 +141,19 @@ function SettingsForm() {
   useEffect(() => {
     void api<NotifySettings>("/api/notification-settings").then((s) => (setSaved(s), setForm(toForm(s))), (err: Error) => setNote({ ok: false, text: err.message }));
   }, []);
+  // After a test send, look for the phone's "Got it" tap every 5 seconds, for up to 15 minutes.
+  const [watching, setWatching] = useState(false);
+  useEffect(() => {
+    if (!watching) return;
+    const stop = setTimeout(() => setWatching(false), 15 * 60_000);
+    const every = setInterval(() => {
+      void api<NotifySettings>("/api/notification-settings").then((s) => {
+        setSaved((prev) => (prev ? { ...prev, phoneTest: s.phoneTest } : prev));
+        if (s.phoneTest?.confirmedAt) setWatching(false);
+      }, () => {});
+    }, 5000);
+    return () => (clearTimeout(stop), clearInterval(every));
+  }, [watching]);
   if (!form) return note ? <p className="error">{note.text}</p> : null;
   const set = (patch: Partial<Form>) => setForm({ ...form, ...patch });
   const act = async (fn: () => Promise<string>) => {
@@ -111,7 +176,9 @@ function SettingsForm() {
           agentHourlyCap: form.cap,
           ntfy: form.phone ? { url: form.url.trim(), topic: form.topic.trim(), ...(form.token ? { token: form.token } : form.clearToken ? { token: null } : {}) } : null,
           pushLevels: form.pushLevels,
+          phonePush: form.phonePush,
           publicUrl: form.publicUrl.trim() || null,
+          approveButtons: form.approveButtons,
         },
       });
       setSaved(s);
@@ -120,7 +187,22 @@ function SettingsForm() {
       return "Saved.";
     });
   };
-  const test = () => act(async () => (await api("/api/notification-settings/test", { method: "POST" }), "Test sent. Check your phone."));
+  const phoneAddress = saved?.phoneAddress ? saved.phoneAddress.replace(/\/+$/, "") : null;
+  const test = () =>
+    act(async () => {
+      await api("/api/notification-settings/test", { method: "POST" });
+      const s = await api<NotifySettings>("/api/notification-settings");
+      setSaved((prev) => (prev ? { ...prev, phoneTest: s.phoneTest } : prev));
+      setWatching(true);
+      return `Your ntfy server accepted it. If it doesn't appear on the phone within a few seconds, check the phone app is subscribed at ${phoneAddress ?? "the ntfy address (the NTFY_BASE_URL line in your .env file)"}.`;
+    });
+  const copyAddress = () => {
+    if (!phoneAddress) return;
+    const failed = () => setNote({ ok: false, text: "Couldn't copy. Select the address and copy it by hand." });
+    // navigator.clipboard is missing on plain http and in some browsers.
+    if (!navigator.clipboard) return failed();
+    void navigator.clipboard.writeText(phoneAddress).then(() => setNote({ ok: true, text: "Address copied." }), failed);
+  };
   const row = { display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" } as const;
   const check = { display: "flex", gap: 6, alignItems: "center", minHeight: 32, fontSize: 14 } as const;
 
@@ -190,24 +272,83 @@ function SettingsForm() {
                 </label>
               )}
             </div>
-            <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }} role="group" aria-label="Levels sent to the phone">
-              <span className="label" style={{ alignSelf: "center" }}>
-                To the phone
-              </span>
-              {(["flag", "page", "ask"] as const).map((l) => (
-                <label key={l} style={check}>
-                  <input type="checkbox" checked={form.pushLevels.includes(l)} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, l] : form.pushLevels.filter((x) => x !== l) })} />
-                  {LEVEL[l].label}s
-                </label>
-              ))}
+            <div className="field" style={{ maxWidth: 360 }}>
+              <label htmlFor="phone-push">Send to my phone</label>
+              <select id="phone-push" value={form.phonePush} onChange={(e) => set({ phonePush: e.target.value === "all" ? "all" : "urgent" })}>
+                <option value="urgent">Urgent only (default)</option>
+                <option value="all">All decisions</option>
+              </select>
             </div>
+            <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+              Urgent means a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO marked urgent because you must act now, or the test button. A card that only holds up a ticket does not push, and a settled card is cleared from your phone if your ntfy server is 2.14 or newer. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
+            </p>
+            <label style={check}>
+              <input type="checkbox" checked={form.pushLevels.includes("flag")} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, "flag"] : form.pushLevels.filter((x) => x !== "flag") })} />
+              Also send flags (normal priority)
+            </label>
             <div className="field">
               <label htmlFor="public-url">Boss Man's address on your phone, so a tap opens the evidence</label>
               <input id="public-url" type="url" placeholder="https://bossman.your-tailnet.ts.net" value={form.publicUrl} onChange={(e) => set({ publicUrl: e.target.value })} spellCheck={false} />
             </div>
+            <label style={check}>
+              <input type="checkbox" checked={form.approveButtons} onChange={(e) => set({ approveButtons: e.target.checked })} />
+              Offer an Approve button on simple agent questions
+            </label>
+            {saved?.approve && (
+              <p className="muted" style={{ fontSize: 14 }} aria-live="polite">
+                {saved.approve.on ? "Phone Approve: on. Simple agent questions get an Approve button that answers with the agent's recommendation." : `Phone Approve: off because ${saved.approve.why}. Every push still gets an Open in Boss Man button.`}
+              </p>
+            )}
           </>
         )}
       </fieldset>
+
+      {saved?.ntfy && (
+        <section aria-labelledby="phone-setup-h" style={{ border: "1px solid var(--border, #8884)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <h3 id="phone-setup-h" style={{ fontSize: 15, fontWeight: 600 }}>
+            Set up your phone
+          </h3>
+          {phoneAddress ? (
+            <>
+              <p style={{ fontSize: 14 }}>In the ntfy app on your phone, the server address must be exactly:</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <code data-testid="phone-address" style={{ fontSize: 14, wordBreak: "break-all" }}>
+                  {phoneAddress}
+                </code>
+                <button className="btn" type="button" onClick={copyAddress}>
+                  Copy address
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="error" style={{ fontSize: 14 }}>
+              Boss Man can't work out the address your phone needs. Look for the NTFY_BASE_URL line in the .env file on your host: that https address is the one to use. (This page shows it once the host reports it, which can take a minute after the add-on is set up.)
+            </p>
+          )}
+          <ol style={{ fontSize: 14, margin: 0, paddingLeft: 20 }}>
+            <li>Tick "Use another server" in the ntfy app, and enter the address above. It is not Boss Man's own address: leaving off the port reaches Boss Man, not ntfy.</li>
+            <li>Subscribe to the topic shown above: {form.topic ? <code>{form.topic}</code> : "the Topic"}.</li>
+            <li>In the ntfy app, Settings → Users → Add user: Service URL is the address above, Username and Password are the phone's read-only ntfy user (not the publish access token Boss Man uses).</li>
+            <li>
+              No phone login yet? Run these on the host that runs ntfy, in a terminal. They are fine as your normal user if it may use Docker; otherwise put <code>sudo</code> in front of each (on TrueNAS, Proxmox and most Linux hosts that means root).
+              {!saved?.phoneContainer && <> Boss Man can't see the ntfy container's name, so replace <code>NTFY_CONTAINER</code> with the name that <code>docker ps</code> shows for ntfy.</>}
+              <pre data-testid="phone-login-commands" style={{ fontSize: 13, overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0" }}>{
+`docker exec -it ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy user add phone-read
+docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read ${form.topic || "YOUR_TOPIC"} read-only`}</pre>
+              The first command asks you to type a password for the phone: use a long one, and use it in the ntfy app. To reset it later: <code>{`docker exec -it ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy user change-pass phone-read`}</code>
+            </li>
+          </ol>
+          {phoneAddress && (
+            <p style={{ fontSize: 14 }}>
+              To check the phone can reach ntfy, open{" "}
+              <a href={`${phoneAddress}/v1/health`} target="_blank" rel="noreferrer">
+                {phoneAddress}/v1/health
+              </a>{" "}
+              in the phone's browser. It should show <code>{`{"healthy":true}`}</code>. If it doesn't load, the phone isn't on your tailnet.
+            </p>
+          )}
+        </section>
+      )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <SaveButton {...sv} busy={busy} />
@@ -217,6 +358,13 @@ function SettingsForm() {
           </button>
         )}
       </div>
+      {saved?.ntfy && saved.phoneTest && (
+        <p role="status" data-testid="phone-test-status" style={{ fontSize: 14 }}>
+          {saved.phoneTest.confirmedAt
+            ? `Phone confirmed at ${new Date(saved.phoneTest.confirmedAt).toLocaleString()}.`
+            : `Last test: sent at ${new Date(saved.phoneTest.sentAt).toLocaleString()}, not confirmed on a phone. Tap "Got it" on the test notification to confirm.`}
+        </p>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}
@@ -359,6 +507,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} set={setFilters} />}
       {active && (
@@ -369,7 +518,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
           </button>
         </div>
       )}
-      {active && filtered.error && (
+      {active && filtered.error && !away(filtered.error) && (
         <p className="error" role="alert">
           Couldn't load notifications: {filtered.error.message}. Your filters are kept.{" "}
           <button type="button" className="btn small" onClick={filtered.reload}>

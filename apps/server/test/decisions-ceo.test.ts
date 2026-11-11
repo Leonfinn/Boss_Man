@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, decisions, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, decisions, ticketDependencies, tickets, wakes as wakesTable } from "../src/db/schema.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, ceoAnswerRefusal, isSystemCard, raiseMergeStuck } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -583,6 +583,29 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
     expect((await row(d.id)).status).toBe("open");
   });
 
+  it("lists every card Boss Man closed by itself, with its reason (BOS-740)", async () => {
+    const c = (ctx = await setup());
+    const now = new Date();
+    const insert = (over: Record<string, unknown>) => c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "A card", options: ["Done"], recommendedOption: "Done", status: "withdrawn", answeredAt: now, context: { type: "owner_setup", steps: ["Settings → Funding → Add account"] } as never, ...over } as never).returning();
+    // A setup card switched back by Boss Man, a hand-apply card closed as live, an old one past 30 days, and one the CEO cleared.
+    const [switchedBack] = await insert({ question: "Switch-back setup", context: { type: "owner_setup", steps: ["Settings → Funding → Add account"], withdrawn: { by: "system", note: "Switched back: not running any more.", at: now.toISOString() }, closedNotice: { why: "switched-back", text: "Switched back.", at: now.toISOString(), until: now.toISOString() } } });
+    const [live] = await insert({ question: "Hand-apply card", context: { type: "self_deploy", commit: "b".repeat(40), handSteps: ["Apply it."], withdrawn: { by: "system", note: "The update is live already.", at: now.toISOString() }, closedNotice: { why: "live", text: "It's live.", at: now.toISOString(), until: now.toISOString() } } });
+    await insert({ question: "Long gone", context: { type: "owner_setup", withdrawn: { by: "system", note: "Old.", at: new Date(now.getTime() - 40 * 24 * 3_600_000).toISOString() } } });
+    const [byCeo] = await insert({ question: "Ceo cleared", context: { type: "owner_setup", withdrawn: { by: "ceo", name: "CEO", note: "Stale.", at: now.toISOString() } } });
+    const advised = (await c.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; withdrawn?: { by: string; note: string } }>;
+    const ids = advised.map((a) => a.id);
+    expect(ids).toContain(switchedBack!.id);
+    expect(ids).toContain(live!.id);
+    expect(ids).toContain(byCeo!.id);
+    expect(ids).not.toContain(await c.db.select({ id: decisions.id }).from(decisions).where(eq(decisions.question, "Long gone")).then((r) => r[0]!.id));
+    expect(advised.find((a) => a.id === switchedBack!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "Switched back: not running any more." });
+    expect(advised.find((a) => a.id === live!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "The update is live already." });
+    // The closed-card notice rides along, so the owner reads why it closed and what is left (QA, BOS-800); a CEO withdrawal has none.
+    expect(advised.find((a) => a.id === switchedBack!.id)!.withdrawn).toMatchObject({ notice: "Switched back." });
+    expect(advised.find((a) => a.id === live!.id)!.withdrawn).toMatchObject({ notice: "It's live." });
+    expect(advised.find((a) => a.id === byCeo!.id)!.withdrawn).not.toHaveProperty("notice");
+  });
+
   it("does not merge a ticket whose owner sign-off is still open", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Waiting for sign-off");
@@ -591,5 +614,38 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
       .values({ companyId: c.company.id, kind: "approval", question: "Sign off the release", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } });
     await expect(c.review.land(t.id, "the owner")).rejects.toThrow(/sign-off/i);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("done");
+  });
+});
+
+describe("an answer in the owner's own words carries attachments (BOS-759)", () => {
+  it("uploads a picture to the card's ticket and tells the agent to open it", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Paste a screenshot");
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which screen is wrong?", options: ["The list", "The detail"], recommended: "The list", blocksTicketId: t.id });
+    // The page's own upload endpoint, on the ticket the card blocks.
+    const up = await c.req("POST", `/api/companies/${c.company.id}/images`, { data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), name: "wrong.png", ticketId: t.id });
+    expect(up.statusCode).toBe(201);
+    const { markdown } = up.json() as { markdown: string };
+    expect(markdown).toMatch(/^!\[wrong\.png\]\(\/api\/ticket-images\/[0-9a-f-]{36}\)$/);
+    expect((await c.req("GET", `/api/tickets/${t.id}/images`)).json()).toHaveLength(1);
+
+    const answer = `It's the detail screen. Here:\n${markdown}\n`;
+    expect((await c.req("POST", `/api/decisions/${d.id}/answer`, { answer, custom: true })).statusCode).toBe(200);
+    const after = await row(d.id);
+    expect(after.answer).toContain(markdown);
+    // The asking agent is woken with the links and told how to open them.
+    const [w] = await c.db.select().from(wakesTable).where(and(eq(wakesTable.agentId, c.worker.id), eq(wakesTable.reason, "decision answered")));
+    expect(w!.note).toContain(markdown);
+    expect(w!.note).toContain("open_attachment");
+  });
+
+  it("says nothing about attachments when an ordinary answer has none", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("No screenshot");
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which one?", options: ["A", "B"], recommended: "A", blocksTicketId: t.id });
+    expect((await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "B, because it is simpler.", custom: true })).statusCode).toBe(200);
+    const [w] = await c.db.select().from(wakesTable).where(and(eq(wakesTable.agentId, c.worker.id), eq(wakesTable.reason, "decision answered")));
+    expect(w!.note).toContain("B, because it is simpler.");
+    expect(w!.note).not.toContain("open_attachment");
   });
 });

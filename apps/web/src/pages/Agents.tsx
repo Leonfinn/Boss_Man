@@ -2,12 +2,14 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
-import { describeRoles, HARNESSES, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
+import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { clearDraft, saveDraft } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
 
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 type AgentRow = {
@@ -31,13 +33,21 @@ type AgentRow = {
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
   openTickets: number;
+  /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 / 2" (BOS-1029). */
+  wipCount?: number;
+  wipLimit?: number | null;
   pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
 type Change = { c: { id: string; field: string; before: unknown; after: unknown; undoneAt: string | null; createdAt: string; byAgentId: string | null }; by: string | null };
 
 type ModelChoice = { value: string; name: string; description?: string | null };
-type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
+type ModelLists = {
+  runner: Record<string, { models: ModelChoice[]; observedAt: string }>;
+  api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }>;
+  /** Synthetic's Infinite mode (free, slow) for this funding source (BOS-279); empty for other providers. */
+  infinite?: Array<{ fundingSourceId: string; name: string; model: ModelChoice }>;
+};
 const OTHER = "__other__";
 const KINDS: Array<[string, string]> = HARNESSES.map((h) => [h.value, h.label]);
 function KindSelect({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
@@ -80,13 +90,16 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
   // The adapter's own "default" is the same as leaving the model blank.
   const fromRunner = (lists?.runner[agentKind]?.models ?? []).filter((m) => m.value !== "default");
   const fromApi = lists?.api.find((a) => a.fundingSourceId === fundingSourceId);
-  const known = [...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === value);
+  // Infinite mode is its own group, labelled free and slow, so it's never mistaken for a normal model (BOS-279).
+  const infinite = agentKind === "opencode" ? lists?.infinite?.find((i) => i.fundingSourceId === fundingSourceId)?.model : undefined;
+  const known = [...fromRunner, ...(fromApi?.models ?? []), ...(infinite ? [infinite] : [])].some((m) => m.value === value);
   const [typing, setTyping] = useState(false);
   const [q, setQ] = useState("");
   const match = (m: { value: string; name: string }) => `${m.name} ${m.value}`.toLowerCase().includes(q.trim().toLowerCase());
   const runnerShown = fromRunner.filter(match);
   const apiShown = (fromApi?.models ?? []).filter(match);
-  const offered = fromRunner.length + (fromApi?.models.length ?? 0) > 0;
+  const infiniteShown = infinite && match(infinite) && ![...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === infinite.value) ? [infinite] : [];
+  const offered = fromRunner.length + (fromApi?.models.length ?? 0) + (infinite ? 1 : 0) > 0;
   if (!offered || typing)
     return (
       <>
@@ -130,10 +143,19 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
             ))}
           </optgroup>
         )}
+        {infiniteShown.length > 0 && (
+          <optgroup label="Synthetic Infinite mode (free, slow, background runs)">
+            {infiniteShown.map((m) => (
+              <option key={`i-${m.value}`} value={m.value}>
+                {m.name}
+              </option>
+            ))}
+          </optgroup>
+        )}
         <option value={OTHER}>Other…</option>
       </select>
       <small className="muted">
-        {q.trim() && `${runnerShown.length + apiShown.length} of ${fromRunner.length + (fromApi?.models.length ?? 0)} models match.`}
+        {q.trim() && `${runnerShown.length + apiShown.length + infiniteShown.length} of ${fromRunner.length + (fromApi?.models.length ?? 0) + (infinite ? 1 : 0)} models match.`}
         {refreshButton}
       </small>
       {fromApi?.error && <small className="error">{fromApi.error}</small>}
@@ -182,10 +204,14 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
   const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", thinking: "", fundingSourceId: "", agentKind: "claude" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The instructions box is kept in this browser as it is typed (DR-045); it goes once the hire goes
+  // through, and Cancel/the sheet closing keeps it on purpose.
+  const instructionsKey = `hire-instructions/${companyId}`;
   const choose = (t: Template | null) => {
     setTpl(t);
     // Swap the name along with the template unless the owner typed their own.
     setForm({ ...form, name: form.name === (tpl?.title ?? "") ? (t?.title ?? "") : form.name, title: t?.title ?? "", instructions: t?.instructions ?? "" });
+    saveDraft(instructionsKey, t?.instructions ?? "");
   };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -205,6 +231,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           agentKind: form.agentKind,
         },
       });
+      clearDraft(instructionsKey);
       onDone(form.name.trim());
     } catch (err) {
       setError((err as Error).message);
@@ -270,11 +297,11 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
       </div>
       <div className="field">
         <label htmlFor="hire-instructions">Instructions</label>
-        <textarea id="hire-instructions" rows={7} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+        <DraftTextarea draftKey={instructionsKey} id="hire-instructions" rows={7} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
         <small className="muted">Given to the agent at the start of every run. Tailor them to your company.</small>
       </div>
       <small className="muted">
-        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/workflow`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
+        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/reviews`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
       </small>
       {error && (
         <p className="error" role="alert">
@@ -317,6 +344,8 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
 
 function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string }; policy?: { rules: ReviewPolicy; companyId: string } | null }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
+  // The instructions box is kept in this browser as it is typed (DR-045); it goes once saved.
+  const instructionsKey = `agent-instructions/${a.id}`;
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
@@ -339,7 +368,10 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
-    if (ok) sv.markSaved();
+    if (ok) {
+      sv.markSaved();
+      clearDraft(instructionsKey);
+    }
   };
   const retired = !!a.retiredAt;
   return (
@@ -362,7 +394,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
               <div className="field">
                 <span className="label">Reviews</span>
                 <p style={{ margin: 0 }}>
-                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/workflow`}>Change in Settings › Reviews</a>
+                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/reviews`}>Change in Settings › Reviews</a>
                 </p>
               </div>
             )}
@@ -389,14 +421,14 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
           </div>
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
-            <textarea id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+            <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
             <small className="muted">{a.role === "ceo"
-                ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
+                ? "The CEO picks up new instructions in its next chapter (Settings › Team and CEO › CEO chapters)."
                 : a.duty === "wiki"
                   ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
                   : "Used from the agent's next run."}</small>
             {template && form.instructions.trim() !== template.instructions.trim() && (
-              <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => setForm({ ...form, instructions: template.instructions })}>
+              <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => { setForm({ ...form, instructions: template.instructions }); saveDraft(instructionsKey, template.instructions); }}>
                 {form.instructions.trim() ? `Replace with the current ${template.title} template` : `Fill in from the ${template.title} template`}
               </button>
             )}
@@ -451,7 +483,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   );
 }
 
-type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
+type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string; reviewBy: string | null; ageDays: number; reviewDue: boolean; reviewReason: string | null };
 type NoteRequest = { id: string; title: string; text: string; why: string; from: string; ticketId: string; ticketRef: string | null; status: "pending" | "accepted" | "declined"; declineReason: string | null; createdAt: string };
 
 /** Where a note came from, for the owner. */
@@ -480,14 +512,20 @@ function NoteOrigin({ n }: { n: AgentNote }) {
 type NoteLimits = { count: number; title: number; text: number; why: number };
 
 /** One note's fields, for adding or editing. */
-function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string }) => Promise<boolean>; onCancel?: () => void }) {
-  const [f, setF] = useState(start);
+function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string; reviewBy: string | null }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string; reviewBy: string | null }) => Promise<boolean>; onCancel?: () => void }) {
+  const [f, setF] = useState({ title: start.title, text: start.text, why: start.why, reviewBy: start.reviewBy });
+  // The note text is kept in this browser as it is typed (DR-045); it goes once the note is saved.
+  const textKey = `agent-note/${id}`;
   return (
     <form
       style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
       onSubmit={(e) => {
         e.preventDefault();
-        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => ok && !onCancel && setF({ title: "", text: "", why: "" }));
+        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim(), reviewBy: f.reviewBy || null }).then((ok) => {
+          if (!ok) return;
+          clearDraft(textKey);
+          if (!onCancel) setF({ title: "", text: "", why: "", reviewBy: null });
+        });
       }}
     >
       <div className="field">
@@ -496,11 +534,15 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       </div>
       <div className="field">
         <label htmlFor={`${id}-text`}>Note</label>
-        <textarea id={`${id}-text`} rows={2} maxLength={limits.text} value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} required />
+        <DraftTextarea draftKey={textKey} id={`${id}-text`} rows={2} maxLength={limits.text} value={f.text} onChange={(text) => setF({ ...f, text })} required />
       </div>
       <div className="field">
         <label htmlFor={`${id}-why`}>Why (what you said)</label>
         <input id={`${id}-why`} maxLength={limits.why} value={f.why} onChange={(e) => setF({ ...f, why: e.target.value })} required />
+      </div>
+      <div className="field">
+        <label htmlFor={`${id}-review`}>Review by (optional)</label>
+        <input id={`${id}-review`} type="date" value={f.reviewBy ?? ""} onChange={(e) => setF({ ...f, reviewBy: e.target.value || null })} />
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <button type="submit" className="btn primary">
@@ -573,7 +615,10 @@ function CeoNotes({ agentId }: { agentId: string }) {
                 </div>
                 <div>{n.text}</div>
                 <div className="muted" style={{ fontSize: 13 }}>
-                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)}
+                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)} ({n.ageDays === 0 ? "today" : `${n.ageDays} d ago`}){n.reviewBy ? ` · review by ${n.reviewBy}` : ""}
+                  {n.reviewDue && (
+                    <strong className="error"> · Review due: {n.reviewReason}</strong>
+                  )}
                 </div>
               </li>
             ),
@@ -600,7 +645,7 @@ function CeoNotes({ agentId }: { agentId: string }) {
           </ul>
         </>
       )}
-      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "" }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
+      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "", reviewBy: null }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
     </details>
   );
 }
@@ -699,8 +744,24 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               ) : (
                 "No open tasks"
               )}
+              {a.wipLimit != null && a.wipCount !== undefined && (
+                <>
+                  {" · "}
+                  <span title="Tickets in progress, against the limit per agent set in Settings" style={a.wipCount > a.wipLimit ? { color: "var(--danger, #b3261e)" } : undefined}>
+                    {a.wipCount} / {a.wipLimit} in progress
+                  </span>
+                </>
+              )}
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+              {isInfiniteModel(a.model) && (
+                <>
+                  {" "}
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Agents at once.">
+                    Infinite mode · free, slow
+                  </span>
+                </>
+              )}
             </div>
             {a.pa && (
               <div className="muted" style={{ fontSize: 13 }}>

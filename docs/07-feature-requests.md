@@ -38,6 +38,16 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 3. Agents and tickets: the `feedback` MCP tool (anyone logs and reads; the CEO links, creates features and marks notes), optional CEO triage wakes, the chat's `log_feedback` and `features`, tickets made from a feature (described from its feedback, with outside words marked untrusted), and features following their tickets to in progress and released. **Built.**
 4. The portal: an opt-in page behind a secret link, with an optional listener of its own. **Built.**
 
+## What goes on the portal
+
+New features go on the portal by default, so the owner doesn't have to open each one to add it. The rule is a plain keyword check, not a model call:
+
+- **Kept off as security work** when the feature's area, criteria, title or description mention security, permissions, credentials, secrets, tokens, passwords, vulnerabilities, the agent fence/sandbox or the network guard (whole words and a few phrases such as "API key"). A feature kept off this way shows "kept off: security" on its list row.
+- **Marked sensitive by hand.** The feature page has a "Keep off the portal (sensitive)" tick that the owner, CEO or PM can set; the default never overrides it, and its row says "kept off: sensitive".
+- **Needs a public summary.** Visitors see the feature's public summary (in place of the internal description), so a feature is held off until someone writes a public summary on its feature page; its row says "needs public summary".
+
+Each row on the Features list has an "On portal" tick that saves at once and matches the tick on the feature page. The owner can tick a held feature on by hand if they disagree with the rule (writing a public summary first, if that's what held it off).
+
 ## The portal and security
 
 The portal is the only part of Boss Man meant for people other than you.

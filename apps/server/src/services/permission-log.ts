@@ -3,6 +3,7 @@
 // tool calls an agent reported as refused. Each entry is one log line carrying the run, ticket and
 // agent ids so it can be searched, and the last hour is kept in memory for server_status.
 // Nothing is stored in the database: the summary starts again when the server restarts.
+import { sinceHours } from "@boss-man/shared";
 
 export type PermissionLogEntry = {
   at: Date;
@@ -26,7 +27,6 @@ export type PermissionLogEntry = {
 export type RefusedCall = { at: Date; companyId: string; runId: string; agentId: string | null; ticketId: string | null; title: string | null };
 type Answer = { at: Date; companyId: string; answeredBy: string };
 
-const HOUR_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 
 const quote = (s: string | null | undefined) => JSON.stringify((s ?? "").slice(0, 200));
@@ -37,11 +37,13 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
   let decided: PermissionLogEntry[] = [];
   let refused: RefusedCall[] = [];
   let answers: Answer[] = [];
+  let fenced: RefusedCall[] = [];
 
   function trim() {
-    const cutoff = now().getTime() - HOUR_MS;
+    const cutoff = sinceHours(now()).getTime();
     decided = decided.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
     refused = refused.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
+    fenced = fenced.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
     answers = answers.filter((e) => e.at.getTime() >= cutoff).slice(-MAX_ENTRIES);
   }
 
@@ -66,6 +68,12 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
       trim();
       log(`permission refused tool call run=${e.runId} agent=${e.agentId ?? "-"} ticket=${e.ticketId ?? "-"} tool=${quote(e.title)}`);
     },
+    /** A fenced agent's tool call got a kernel refusal (EACCES or EPERM): the fence's watch log (BOS-325). */
+    fenceDenied(e: Omit<RefusedCall, "at">) {
+      fenced.push({ ...e, at: now() });
+      trim();
+      log(`fence refused tool call run=${e.runId} agent=${e.agentId ?? "-"} ticket=${e.ticketId ?? "-"} tool=${quote(e.title)}`);
+    },
     /** The last hour for one company: each rule's matches by outcome, the cards that reached the CEO and the owner, and refused calls. */
     summary(companyId: string) {
       trim();
@@ -83,11 +91,13 @@ export function createPermissionLog(opts: { log?: (line: string) => void; now?: 
       const answered = { ceo: 0, owner: 0 };
       for (const a of answers) if (a.companyId === companyId && (a.answeredBy === "ceo" || a.answeredBy === "owner")) answered[a.answeredBy]++;
       const mine = refused.filter((r) => r.companyId === companyId);
+      const theirs = fenced.filter((r) => r.companyId === companyId);
       return {
         windowMinutes: 60,
         rules: [...rules.values()].sort((a, b) => b.matches - a.matches),
         cardsReached: cards,
         cardsAnswered: answered,
+        fenceRefusals: { count: theirs.length, recent: theirs.slice(-10).map((r) => ({ at: r.at.toISOString(), runId: r.runId, ticketId: r.ticketId, agentId: r.agentId, tool: r.title })) },
         refusedCalls: { count: mine.length, recent: mine.slice(-10).map((r) => ({ at: r.at.toISOString(), runId: r.runId, ticketId: r.ticketId, agentId: r.agentId, tool: r.title })) },
       };
     },

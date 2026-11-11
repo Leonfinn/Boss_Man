@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, UNMATCHED_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -48,7 +48,7 @@ describe("evaluatePermission defaults", () => {
       expect(isBossmanTool(title), title).toBe(false);
       expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("ceo");
     }
-    const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.68.1" } };
+    const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.1.1" } };
     expect(evaluatePermission(lookalike, [{ name: "Allow every bossman tool", match: { titlePattern: "^mcp__bossman" }, outcome: "allow" }]).outcome).toBe("deny");
     for (const title of ["mcp__bossman__wiki", "mcp.bossman.wiki", "bossman_wiki", "Tool: bossman/wiki"]) expect(isBossmanTool(title), title).toBe(true);
   });
@@ -62,6 +62,20 @@ describe("evaluatePermission defaults", () => {
   it("sends pushing and publishing to the owner", () => {
     expect(evaluatePermission(exec("npm publish"), []).outcome).toBe("owner");
     expect(evaluatePermission(exec("git push origin feature"), []).outcome).toBe("owner");
+  });
+
+  it("pins today's routing for a read-only dd read and an unrecognised command (BOS-233)", () => {
+    // The owner's recorded decision: a plain `dd if=` read (no `of=`) stays with the owner, with a Deny
+    // recommendation, because it matches the destructive list. Unrecognised commands are allowed by the
+    // "Other shell commands" default, as on main. Item 1 (which would send both to the CEO) is frozen, so
+    // this pins the current behaviour so a later change can't move it silently.
+    for (const c of ["dd if=/dev/zero of=/dev/null bs=1M count=1", "dd if=/dev/zero"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "owner", rule: "Destructive commands go to the owner" });
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    for (const c of ["frobnicate --do-thing", "mytool --frob"]) {
+      expect(evaluatePermission(exec(c), []), c).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
+    }
   });
 
   it("allows ordinary work and workspace edits", () => {
@@ -109,8 +123,11 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
   });
 
-  it("falls through to the owner for unknown kinds", () => {
+  it("falls through to the CEO first for a command no rule covers, and to the owner for delete/move (BOS-752)", () => {
     expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
+    // A command arriving under a kind that is not "execute" and is not a built-in allow.
+    const info = { title: "bash", kind: "delete", rawInput: { command: `agent-browser --session $A get text "heading Hello"` } };
+    expect(decidePermission(info, [])).toMatchObject({ outcome: "ceo", rule: UNMATCHED_RULE, row: 8 });
   });
 
   it("company rules win over defaults, first match first", () => {
@@ -125,6 +142,43 @@ describe("evaluatePermission defaults", () => {
   it("ignores a rule with a broken pattern instead of crashing", () => {
     const rules = [{ name: "broken", match: { commandPattern: "(" }, outcome: "deny" as const }];
     expect(evaluatePermission(exec("echo hi"), rules).outcome).toBe("allow");
+  });
+});
+
+describe("a script run in the working folder (BOS-328)", () => {
+  it("recommends Allow for node on a file, and for removing the throwaway copy the command made", () => {
+    for (const c of [
+      "node bench.js",
+      "cp /tmp/bench.js bench-tmp.js && node bench-tmp.js; rm -f bench-tmp.js",
+      "cp /tmp/bench.js bench-tmp.js && node bench-tmp.js && rm -f bench-tmp.js",
+      "cat /tmp/b.js > copy.js; node copy.js; rm -f copy.js",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+  });
+  it("still recommends Deny when the rm is of something the command did not make, or reaches out", () => {
+    for (const c of [
+      "cp /tmp/b.js copy.js; node copy.js; rm -f other.js",
+      "node b.js; rm -f copy.js",
+      "cp /tmp/b.js copy.js; rm -rf copy.js",
+      "cp /tmp/b.js copy.js; rm -f copy.js ../x",
+      "cp /tmp/b.js copy.js; rm -f copy.js /etc/passwd",
+      "cp /tmp/b.js copy.js; rm -f *",
+      "cp /tmp/b.js copy.js; rm -f $HOME/copy.js",
+      "cp /tmp/b.js .env; rm -f .env",
+      "cp /tmp/b.js src/a.js; rm -f src/a.js",
+      "cp /tmp/b.js copy.js; cd .. && rm -f copy.js",
+      "cp /tmp/b.js copy.js; rm -f copy.js; shred x",
+      // Review round: a leading "-" passes as a flag (Rod 2, Jane F1)
+      "cp /tmp/b.js -r; cp /tmp/b.js apps; rm -r apps",
+      "cp /tmp/b.js -rf; cp /tmp/b.js src; rm -f -rf src",
+      "cp /tmp/b.js -r; cp /tmp/b.js apps; rm -f -r apps",
+      "cp /tmp/x -r; cp /tmp/x dir; rm -f -r dir",
+      // Review round: mv and in-folder sources do not make a file (Rod 1, Jane F2)
+      "mv README.md r; rm -f r",
+      "mv README.md x.js; rm -f x.js",
+      "mv package.json x; node x; rm -f x",
+      "cp README.md r; rm -f r",
+      "cp -t /tmp/x name; rm -f name",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });
 
@@ -144,8 +198,8 @@ describe("helpers", () => {
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
     expect(recommendedVerdict(exec(`git status && git push origin bossman/${ticket}`))).toBe("deny");
-    // rm -rf inside a sed script is text being edited, not run; inside bash -c it runs.
-    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("allow");
+    // rm -rf inside a sed script may run (sed '1e rm -rf x'), so only a data-only program's quotes are skipped (BOS-116 review).
+    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("deny");
     expect(recommendedVerdict(exec("git commit -m 'stop rm -rf in scripts'"))).toBe("allow");
     expect(recommendedVerdict(exec("bash -c 'rm -rf /'"))).toBe("deny");
     expect(recommendedVerdict(exec("eval \"rm -rf $d\""))).toBe("deny");
@@ -157,19 +211,46 @@ describe("home-network guard", () => {
   const allowAll = [{ name: "Allow every crawl4ai tool", match: { titlePattern: "^mcp__crawl4ai__" }, outcome: "allow" as const }];
 
   it("denies tool-server and fetch calls aimed at private addresses, before any rule", () => {
-    for (const url of ["http://192.168.68.1/", "http://192.168.68.67:3101/api", "https://10.0.0.5", "http://127.0.0.1:8080", "http://localhost", "http://truenas/", "http://nas.local", "http://172.20.1.1", "http://169.254.169.254/latest", "http://[::1]/", "http://[fd00::1]/", "http://[::ffff:192.168.68.1]/", "http://3232252929/", "http://0xC0A84401/", "http://100.64.0.1"]) {
+    for (const url of ["http://192.168.1.1/", "http://192.168.1.50:3101/api", "https://10.0.0.5", "http://127.0.0.1:8080", "http://localhost", "http://truenas/", "http://nas.local", "http://172.20.1.1", "http://169.254.169.254/latest", "http://[::1]/", "http://[fd00::1]/", "http://[::ffff:192.168.1.1]/", "http://3232235777/", "http://0xC0A80101/", "http://100.64.0.1"]) {
       expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
     }
-    expect(evaluatePermission(tool("mcp__crawl4ai__crawl", { urls: ["https://example.com", "http://192.168.68.1"] }), allowAll).outcome).toBe("deny");
-    expect(evaluatePermission(tool("WebFetch", { url: "http://192.168.68.1" }, "fetch"), []).outcome).toBe("deny");
+    expect(evaluatePermission(tool("mcp__crawl4ai__crawl", { urls: ["https://example.com", "http://192.168.1.1"] }), allowAll).outcome).toBe("deny");
+    expect(evaluatePermission(tool("WebFetch", { url: "http://192.168.1.1" }, "fetch"), []).outcome).toBe("deny");
     expect(evaluatePermission(tool("mcp__scrapling__get", { url: "not a url http://" }), allowAll).outcome).not.toBe("deny");
+  });
+
+  it("refuses the ranges the skill fetcher already refuses, from the one shared table (BOS-886)", () => {
+    // Multicast, 192.0.0.0/24 and the 198.18.0.0/15 benchmark range were refused by the skill fetcher alone, so the permission check let them through.
+    for (const url of ["http://224.0.0.251/", "http://239.255.255.250:1900/", "http://[ff02::1]/", "http://192.0.0.8/", "http://198.18.0.1/", "http://198.19.255.255/", "http://[::ffff:224.0.0.251]/", "http://[::ffff:e000:fb]/", "http://[::ffff:10.0.0.5]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://224.0.0.251/" }, "fetch"), []).outcome).toBe("deny");
+    // The next ranges over are public and stay allowed.
+    for (const url of ["http://223.255.255.255/", "http://198.20.0.1/", "http://192.0.2.1/"]) expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
   });
 
   it("leaves public addresses and Boss Man's own tools to the rules", () => {
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "https://docs.truenas.com/scale/" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "http://172.32.0.1" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__bossman__wiki_read", { url: "http://localhost" }), []).outcome).toBe("allow");
-    expect(evaluatePermission(exec("curl http://192.168.68.1"), []).outcome).toBe("allow");
+    expect(evaluatePermission(exec("curl http://192.168.1.1"), []).outcome).toBe("allow");
+  });
+
+  it("doesn't read an ordinary host name as a private IPv6 address (BOS-896)", () => {
+    // feed.com starts like fec0::/10 and fcbarcelona.com like fc00::/7; before BOS-896 the IPv6 table was applied to any
+    // host name, so these ordinary sites were refused as privateNet. The IPv6 rows apply only to a real IPv6 literal.
+    for (const url of ["http://feed.com/", "http://fcbarcelona.com/", "http://fe80.example.com/", "https://fdic.gov/", "https://ffmpeg.org/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "allow" });
+    }
+    expect(evaluatePermission(tool("WebFetch", { url: "http://feed.com/" }, "fetch"), []).outcome).not.toBe("deny");
+    // The same names in a shell command (an ssh/scp host or an http URL) are not private either.
+    for (const c of ["curl http://feed.com/", "ssh user@fcbarcelona.com", "scp x user@fe80.example.com:y"]) {
+      expect(evaluatePermission(exec(c), []), c).not.toMatchObject({ outcome: "deny", rule: "Fetching from your home network or this machine is blocked" });
+    }
+    // Real IPv6 literals, with and without brackets, still count, including the site-local range the names resemble.
+    for (const url of ["http://[fec0::1]/", "http://[fc00::1]/", "http://[fe80::1]/", "http://[fd12:3456::1]/"]) {
+      expect(evaluatePermission(tool("mcp__crawl4ai__md", { url }), allowAll), url).toMatchObject({ outcome: "deny" });
+    }
   });
 });
 
@@ -415,6 +496,13 @@ describe("working-copy cleanup (BOS-120)", () => {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(cleanupScope(c), c).toBeNull();
     }
+  });
+
+  it("sends a working-copy delete spelled to dodge the text patterns to the owner (BOS-116)", () => {
+    for (const c of [
+      "r\\m -rf dist", "\\rm -rf dist", "rm \\\n -rf dist", "command rm -rf dist", '"rm" -rf dist',
+      "rm -rf dist; truncate -s0 x", "rm -f x; python3 -c 'import shutil; shutil.rmtree(\"/x\")'",
+    ]) expect(route(c), c).toEqual({ outcome: "owner", rule: "Destructive commands go to the owner", position: 3 });
   });
 
   it("only reads a command written as one string: an argv array runs without a shell", () => {

@@ -34,10 +34,14 @@ describe("side menu height", () => {
     expect(side().at).toBe("min-width: 641px");
   });
 
-  it("fills the window with dynamic viewport height, falling back to 100vh", () => {
+  it("fills the whole window with 100vh, not the shorter dynamic viewport", () => {
+    // BOS-599: on a phone browser whose toolbar is showing, 100dvh is shorter than the window, so
+    // a menu sized with it ends above the bottom edge and leaves a blank strip. 100vh follows the
+    // window itself, so the column always reaches the bottom; its contents scroll inside it.
     const decls = side().body.split(";").map((d) => d.trim()).filter(Boolean);
     const heights = decls.filter((d) => d.startsWith("height:")).map((d) => d.slice("height:".length).trim());
-    expect(heights).toEqual(["100vh", "100dvh"]);
+    expect(heights).toEqual(["100vh"]);
+    expect(side().body).not.toContain("dvh");
   });
 
   it("stays in view while the page scrolls and scrolls its own overflow", () => {
@@ -60,6 +64,15 @@ describe("side menu height", () => {
     const main = rules(".app > main", true).find((r) => r.at === "min-width: 641px");
     expect(main?.at).toBe("min-width: 641px");
     expect(main?.body).toContain("flex: 1 1 0");
+  });
+
+  it("narrows the menu to an icon strip when collapsed, inside the same beside-the-page layout (BOS-290)", () => {
+    const [strip] = rules(".app.side-collapsed > nav.side");
+    if (!strip) throw new Error("collapsed sidebar width rule missing from styles.css");
+    expect(strip.at).toBe("min-width: 641px");
+    expect(strip.body).toContain("flex: 0 0 64px");
+    // The expanded menu keeps its 232px column, so the strip only swaps the width.
+    expect(side().body).toContain("flex: 0 0 232px");
   });
 
   it("leaves the phone bar above the page alone", () => {

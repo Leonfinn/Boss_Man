@@ -82,6 +82,7 @@ function webpClaimedSize(bytes: Uint8Array): { width: number; height: number } |
 
 const decodeFor: Record<PictureType, (b: ArrayBuffer) => Promise<Pixels>> = { "image/png": pngDecode, "image/jpeg": jpegDecode, "image/webp": webpDecode };
 
+// lost on restart, harmless because the wasm programs are loaded again on the first use after a restart; a second server loads its own.
 let ready: Promise<void> | undefined;
 /** Loads every wasm program once; concurrent calls share the one promise. */
 function init(): Promise<void> {
@@ -102,7 +103,11 @@ function init(): Promise<void> {
   return ready;
 }
 
-/** Encodes in the picture's own format, since the stored type has to keep matching the bytes. */
+/**
+ * Encodes in the picture's own format, since the stored type has to keep matching the bytes. There is no
+ * PNG-to-WebP fallback: a PNG that won't fit at any size is refused, not quietly re-typed (BOS-374 notes
+ * that an early BOS-320 commit message described a fallback the final code never did).
+ */
 async function encode(type: PictureType, image: Pixels, quality: number): Promise<Buffer> {
   const bytes =
     type === "image/png" ? await pngEncode(image as Parameters<typeof pngEncode>[0])

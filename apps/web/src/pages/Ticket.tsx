@@ -8,11 +8,16 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
-import { criterionText, criteriaText, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
+import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdicts, type Criterion } from "@boss-man/shared";
 import { usePoll } from "../hooks";
+import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
+import { DraftTextarea } from "../components/DraftTextarea";
+import { NotFoundBlock } from "../components/NotFoundBlock";
+import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
@@ -69,7 +74,7 @@ function Fold({ title, hint, open, className, children }: { title: string; hint?
 }
 
 /** The ticket's acceptance criteria with how the author reported each, plus the owner's editor. */
-function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (field: "body" | "acceptanceCriteria", body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
   return (
@@ -78,7 +83,7 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
           {rows.map((r, i) => (
             <li key={r.criterion} data-testid="criterion" data-verdict={r.verdict ?? "none"} data-after={isAfterMerge(criteria[i]!) ? "merge" : undefined}>
-              <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
+              <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{!r.verdict && t.goLiveWait && isAfterMerge(criteria[i]!) ? goLiveWaitWords(t.goLiveWait) : VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
               {isAfterMerge(criteria[i]!) && <small className="muted"> · on a real host, checked after merge</small>}
             </li>
           ))}
@@ -88,22 +93,31 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
         <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion to check before merge has the author's pass or fail; the reviewer has been told that. The "on a real host" ones are checked after merge and don't hold up the review.</p>
       )}
       <CriteriaEdit
+        draftKey={`ticket-criteria/${t.id}`}
         key={criteria.map((c) => `${criterionText(c)}|${isAfterMerge(c) ? 1 : 0}`).join("\n")}
         initial={criteria}
         busy={busy}
-        save={(next) => patch({ acceptanceCriteria: next })}
+        save={(next) => {
+          // Clear only once the server has taken it; a failed save keeps the lines (and a change since load is refused, BOS-905).
+          void patchLoaded("acceptanceCriteria", { acceptanceCriteria: next }).then((ok) => ok && clearDraft(`ticket-criteria/${t.id}`));
+        }}
       />
     </Fold>
   );
 }
 
-/** One non-empty line per criterion; saving nothing clears them. */
-function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (next: Criterion[]) => void; busy: boolean }) {
-  const [text, setText] = useState(criteriaText(initial).join("\n"));
+/** One non-empty line per criterion; saving nothing clears them. The typing is kept in this browser (DR-045). */
+function CriteriaEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: Criterion[]; save: (next: Criterion[]) => void; busy: boolean }) {
+  const [text, setText] = useState(() => readDraft(draftKey) || criteriaText(initial).join("\n"));
   // Which lines are only checked once the work is live, by their position in the list.
   const [after, setAfter] = useState<Set<number>>(() => new Set(initial.flatMap((c, i) => (isAfterMerge(c) ? [i] : []))));
   const [open, setOpen] = useState(initial.length === 0);
-  const next = () => setText((p) => (p ? `${p}\n` : ""));
+  const next = () =>
+    setText((p) => {
+      const v = p ? `${p}\n` : "";
+      keepDraftText(draftKey, v);
+      return v;
+    });
   // Built from the current lines in order, so a tick on line 2 follows line 2 even as lines are edited.
   const built = (): Criterion[] =>
     text
@@ -118,13 +132,14 @@ function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (ne
       <label htmlFor="t-criteria" style={{ fontWeight: 600 }}>
         Acceptance criteria, one per line
       </label>
-      <textarea
+      <DraftTextarea
+        draftKey={draftKey}
         id="t-criteria"
         rows={4}
         maxLength={2_000}
         placeholder={"Health check returns 200\nMigration is expand-only"}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
       />
       <small className="muted">Up to 10; leave empty to set none. The agent must report pass or fail for each before merge when it asks for review.</small>
@@ -165,36 +180,47 @@ function CriteriaEdit({ initial, save, busy }: { initial: Criterion[]; save: (ne
 }
 
 /** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
-function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const steps = (t.ownerSetup ?? "").trim();
   return (
     <Fold title="After it goes live, you'll need to" hint={steps ? steps.split("\n").filter(Boolean).length + " step" + (steps.split("\n").filter(Boolean).length === 1 ? "" : "s") : undefined}>
-      <OwnerSetupEdit key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v })} />
+      <OwnerSetupEdit draftKey={`ticket-owner-setup/${t.id}`} key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v }).then((ok) => ok ?? false)} />
     </Fold>
   );
 }
 
-/** One step per line; saving nothing clears them. */
-function OwnerSetupEdit({ initial, save, busy }: { initial: string; save: (v: string) => void; busy: boolean }) {
-  const [text, setText] = useState(initial);
-  const [open, setOpen] = useState(!initial);
+/** One step per line; saving nothing clears them. The typing is kept in this browser (DR-045). */
+function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; initial: string; save: (v: string) => Promise<boolean>; busy: boolean }) {
+  const [text, setText] = useState(() => readDraft(draftKey) || initial);
+  // What Save should send: the box's text, unless it still shows a kept draft from before this edit.
+  const shown = readDraft(draftKey);
+  const [open, setOpen] = useState(!initial && !shown);
   return open ? (
     <div className="field">
       <label htmlFor="t-owner-setup" style={{ fontWeight: 600 }}>
         What you have to do, one step per line
       </label>
-      <textarea
+      <DraftTextarea
+        draftKey={draftKey}
         id="t-owner-setup"
         rows={3}
         maxLength={4_000}
-        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        placeholder={"Settings → Funding → Add funding source, then sign in to the second plan"}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
       />
       <small className="muted">In plain words, by the buttons you'd click, one step per line. Boss Man shows this as a card only once the change is actually running. Leave empty if there's nothing for you to do.</small>
       <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-        <button type="button" className="btn primary" disabled={busy || text === initial} onClick={() => save(text.trim())}>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={busy || text === initial}
+          onClick={() => {
+            // Clear only once the server has taken the steps; a failed save keeps them.
+            void save(text.trim()).then((ok) => ok && clearDraft(draftKey));
+          }}
+        >
           Save steps
         </button>
         {initial && (
@@ -286,12 +312,24 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
+  // The send-back box is kept in this browser as it is typed (DR-045), and cleared once the server takes it.
+  const reviewSummaryKey = `ticket-review-summary/${id}`;
   const [lesson, setLesson] = useState("");
   const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // A text field someone else changed since this page loaded it (BOS-905): the save was refused and the owner's draft is kept.
+  const [conflict, setConflict] = useState<{ field: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraftRaw] = useState<string | null>(null);
+  // Kept in this browser as it is typed (BOS-773), so a reload doesn't lose an edited description.
+  const editDraftKey = `ticket-edit/${id}/body`;
+  const setDraft = (text: string | null) => {
+    setDraftRaw(text);
+    if (text === null) return;
+    keepDraftText(editDraftKey, text);
+  };
+  const startEdit = () => setDraft(readDraft(editDraftKey) || (t?.body ?? ""));
   const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
@@ -307,11 +345,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const patch = async (body: Record<string, unknown>) => {
     try {
       await api(`/api/tickets/${id}`, { method: "PATCH", body });
+      setConflict(null);
       ticket.reload();
+      return true;
     } catch (err) {
-      setNote({ ok: false, text: (err as Error).message });
+      // Someone else changed the field that was being saved: keep the owner's draft and offer a reload (BOS-905).
+      if (err instanceof ApiError && err.status === 409 && err.field) setConflict({ field: err.field, text: err.message });
+      else setNote({ ok: false, text: (err as Error).message });
+      return false;
     }
   };
+  /** Send the text field now, with the value this page loaded, so a change since is refused rather than overwritten (BOS-905). */
+  const patchLoaded = (field: "body" | "acceptanceCriteria", body: Record<string, unknown>) =>
+    patch({ ...body, ...(field === "body" ? { bodyLoaded: t?.body ?? null } : { acceptanceCriteriaLoaded: t?.acceptanceCriteria ?? [] }) });
   const [blocking, setBlocking] = useState<{ until: string; reason: string } | null>(null);
   const block = async () => {
     if (!blocking) return;
@@ -356,17 +402,20 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
   const saveDraft = async () => {
     if (draft === null) return;
-    await patch({ body: withAttachments(draft, img.attached).trim() || null });
+    // A refused save keeps the draft: a change to the description since this page loaded it is reported, not lost (BOS-905).
+    if (!(await patchLoaded("body", { body: withAttachments(draft, img.attached).trim() || null }))) return;
     img.clear();
-    setDraft(null);
+    clearDraft(editDraftKey);
+    setDraftRaw(null);
   };
   // Too long for a description: put the text in a .txt file, link it in the description, so the agent can open it.
   const saveDraftAsFile = async (long: string) => {
     try {
       const markdown = await img.uploadText(long, "description.txt");
-      await patch({ body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() });
+      if (!(await patchLoaded("body", { body: withAttachments("The text was too long for the description box, so it's in this file:\n\n", [markdown]).trim() }))) return;
       img.clear();
-      setDraft(null);
+      clearDraft(editDraftKey);
+      setDraftRaw(null);
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     }
@@ -434,6 +483,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     try {
       const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim(), ...(lesson.trim() ? { lesson: lesson.trim() } : {}) } : {}) } });
       setSummary("");
+      clearDraft(reviewSummaryKey);
       setLesson("");
       setSendingBack(false);
       if (r.landing) {
@@ -487,11 +537,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         text:
           r.landing?.state === "running"
             ? `${r.signoffAnswered ? "Signed off. " : ""}Checking and merging now.`
-            : // The sign-off's own answer ran and finished the merge before it returned, so there is no
-              // landing to show: say it settled, and the reload below shows the merged state (BOS-471).
-              r.signoffAnswered
-              ? "Signed off and merged."
-              : "Approved.",
+            : // The background merge (BOS-559) finished before the page read it back, so say so here;
+              // the reload below shows the merged state.
+              r.landing?.outcome === "merged"
+              ? `${r.signoffAnswered ? "Signed off and merged. " : "Merged."}`
+              : // No landing to show: a ticket with nothing to merge was finished in the same press (BOS-471).
+                r.signoffAnswered
+                ? "Signed off."
+                : "Approved.",
       });
       ticket.reload();
     } catch (err) {
@@ -519,7 +572,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
+  if (ticket.error && !away(ticket.error)) return ticket.error.status === 404 ? <NotFoundBlock title="Ticket not found" backHref="#/board" backLabel="Back to Tickets">This ticket doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.
@@ -538,23 +591,36 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
   // One hold notice, computed once, so the headline and detail always agree.
   const hold = holdBanner(t);
+  // A reviewer's hold on the merge (BOS-808): the owner can let it go on (the normal approval and merge follow) or withdraw the reviewer's pass.
+  const endReviewHold = async (how: "release" | "cancel") => {
+    setBusy(true);
+    try {
+      const r = await api<{ delivered?: string | null }>(`/api/tickets/${id}/hold/${how}`, { method: "POST" });
+      setNote({ ok: true, text: how === "release" ? `Hold released${r.delivered ? `: ${r.delivered}` : ""}.` : "Hold cancelled; the work is reviewed again." });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
   const approveLabel = !t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge";
   const decide = (
     <>
       {/* One press (BOS-471): with a sign-off card open, this button is that card's answer too. */}
       <p className="muted" style={{ fontSize: 14 }}>
         {approves}
-        {t.signoffWaiting ? " This is also your sign-off: one press approves, signs off and merges." : ""}
+        {t.signoffWaiting || t.signoff === "missing" ? " This is also your sign-off: one press approves, signs off and merges." : ""}
       </p>
       {sendingBack ? (
                 <>
                   <div className="field">
                     <label htmlFor="review-summary">What should the agent change?</label>
-                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
+                    <DraftTextarea draftKey={reviewSummaryKey} id="review-summary" rows={3} autoFocus value={summary} onChange={setSummary} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
                   </div>
                   <div className="field">
-                    {/* A lesson learned goes to a decision, so it only reaches the brief if the owner approves it. */}
-                    <label htmlFor="review-lesson">Lesson learned (optional) — you'll be asked whether to add it to the project brief</label>
+                    {/* A lesson learned goes to a CEO decision (BOS-105), so it only reaches the brief if the CEO approves it; the owner is told the outcome. */}
+                    <label htmlFor="review-lesson">Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome</label>
                     <input id="review-lesson" value={lesson} onChange={(e) => setLesson(e.target.value)} maxLength={240} placeholder={'One line, e.g. "Check the migration is expand-only before approving."'} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -589,6 +655,25 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
+      {t.hold && t.systemState === "review" && (
+        <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: "1 1 320px" }}>
+            <strong>Held: {t.hold.label}</strong> <span className="muted">· by {t.hold.reviewer ?? "a reviewer"}</span>
+            <br />
+            <span className="muted">
+              {t.hold.reason} The review passed; the merge starts only after the hold is released.
+              {t.hold.ready ? " What it waited for is done, so the reviewer has been asked to re-check it." : ""}
+            </span>
+          </span>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void endReviewHold("release")}>
+            Release hold
+          </button>
+          <button type="button" className="btn" disabled={busy} onClick={() => void endReviewHold("cancel")}>
+            Cancel hold and review again
+          </button>
+        </div>
+      )}
+
       {/* Only when the ticket's next step really needs its agent to run (BOS-471): in review, waiting on the
           owner, or done, the hold changes nothing for this ticket, so it is not shown. */}
       {t.quotaHeldUntil && (t.systemState === "ready" || t.systemState === "in_progress") && (
@@ -610,6 +695,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
       <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
+          <TicketOpenCards ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -622,7 +708,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 )}
               </h2>
               {draft === null && (
-                <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={() => setDraft(t.body ?? "")}>
+                <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={startEdit}>
                   Edit
                 </button>
               )}
@@ -637,6 +723,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )
             ) : (
               <>
+                {readDraft(editDraftKey) && (
+                  <p className="muted" role="status" style={{ margin: 0, fontSize: 13 }}>
+                    Draft restored. It stays in this browser until you save or discard it.{" "}
+                    <button type="button" className="link" style={{ padding: 0 }} onClick={() => { clearDraft(editDraftKey); setDraftRaw(t?.body ?? ""); }}>
+                      Discard draft
+                    </button>
+                  </p>
+                )}
                 <OwnerMessageBox
                   id="t-body"
                   label="Description, in Markdown"
@@ -658,7 +752,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   <button type="button" className="btn primary" disabled={(draft === (t.body ?? "") && !img.attached.length) || tooLongToSend(draft, img.attached)} onClick={() => void saveDraft()}>
                     Save description
                   </button>
-                  <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>
+                  <button type="button" className="btn" onClick={() => { img.clear(); setDraftRaw(null); }}>
                     Cancel
                   </button>
                 </div>
@@ -682,7 +776,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </span>
           </label>
 
-          <DoneWhen t={t} patch={patch} busy={busy} />
+          <DoneWhen t={t} patchLoaded={patchLoaded} busy={busy} />
+          {t.fixesLive?.trim() && (
+            // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
+            <p className="fixes-live" style={{ margin: 0 }}>
+              <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
+            </p>
+          )}
           <OwnerSetup t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
@@ -785,6 +885,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 staleCheck ? "the merge check looks stuck; you can try again" :
                 t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" :
                 open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` :
+                // Said from the decisions themselves (BOS-503), not guessed from the policy.
+                t.signoff === "waiting" || t.signoff === "missing" ? "waiting for your sign-off" :
+                t.signoff === "signed_off" ? "you signed it off; it merges next" :
                 "waiting for you"
               }
             >
@@ -838,6 +941,22 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 decide
               )}
             </Fold>
+          )}
+          {conflict && (
+            <div className="card" role="alert" data-testid="edit-conflict" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ flex: "1 1 320px" }}>{conflict.text}</span>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  // The draft is kept; reloading brings in the latest so the owner can compare and save again.
+                  setConflict(null);
+                  ticket.reload();
+                }}
+              >
+                Reload the latest
+              </button>
+            </div>
           )}
           {note && (
             <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>

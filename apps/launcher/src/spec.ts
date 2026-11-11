@@ -4,10 +4,6 @@
 import path from "node:path";
 
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
-/** The runner image. The launcher never pulls: scripts/update-runner.sh builds and tags it. */
-export const IMAGE = "boss-man-runner:current";
-/** The image the runner ran before the last update (scripts/update-runner.sh keeps it): what a failed swap goes back to (BOS-382). */
-export const PREVIOUS_IMAGE = "boss-man-runner:previous";
 export const LABEL = "boss-man.launcher";
 export const COMPANY_LABEL = "boss-man.company";
 /** The network guard (BOS-324): a sidecar in each runner's network namespace that blocks private networks. */
@@ -27,6 +23,8 @@ export const DEFAULT_CPU_SHARES = 512;
 export type LauncherConfig = {
   /** BOSSMAN_DATA: the host folder, mounted at the same path in the launcher, so binds name real host paths. */
   dataRoot: string;
+  /** BOSSMAN_STACK: names a second stack on this host (BOS-69). Unset = today's names, labels and images. */
+  stack?: string;
   /** The compose network the server is on, e.g. boss-man_default. Never host. */
   network: string;
   /** Where runners dial the server. */
@@ -38,12 +36,28 @@ export type LauncherConfig = {
   cpuShares?: number;
   /** BOSSMAN_RUNNER_CPUS: optional hard cap in CPUs (e.g. 4 or 1.5), shared by everything in the runner. Unset = no cap. */
   cpus?: number;
+  /** The threads runners are confined to (CpusetCpus, e.g. "0-9"), worked out at start by cpu-layout.ts. Unset = all threads. */
+  cpuset?: string;
+  /** What the CPU reserve decided, for the status call (cpu-layout.ts planReserve). */
+  cpuPlan?: import("./cpu-layout.js").CpuPlan;
   /** BOSSMAN_NETGUARD: "auto" (default) guards every runner, and lets a host that can't run the guard go without; "enforce" refuses runners there; "off" never guards. */
   guardMode?: GuardMode;
   /** BOSSMAN_NETGUARD_ALLOW: extra host:port entries every runner may reach on the private networks. */
   guardAllow?: string[];
   /** BOSSMAN_CHECK_SLOTS: full checks (merge gate and hand runs) a runner may run at once, 1 to 16. Unset = 1; the runner needs about 3 GB of its memory limit per extra slot. */
   checkSlots?: number;
+  /** BOS-993: the "Checks at once" the owner set in Settings, pushed by the server (PUT /checks). Unset = nothing pushed yet, so `checkSlots` and `memoryBytes` (from .env) apply as before. */
+  requestedSlots?: number;
+  /** BOS-993: BOSSMAN_CHECK_SLOTS as an upper bound, only when .env sets it. */
+  envSlotsCap?: number;
+  /** BOS-993: BOSSMAN_RUNNER_MEMORY as an upper bound, only when .env sets it. */
+  envMemoryCap?: number;
+  /** BOS-993: the host's total memory in bytes (from /proc/meminfo), when known. */
+  hostMemoryBytes?: number;
+  /** BOSSMAN_OPENCODE_SESSION_DAYS: the runner deletes OpenCode sessions untouched this many days (BOS-616). Unset = the runner's default (14); 0 = never. */
+  opencodeSessionDays?: number;
+  /** PNPM_STORE_DIR: the shared pnpm store inside the runner, a folder under the workspaces volume (default: its .pnpm-store). */
+  pnpmStoreDir?: string;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
   /** DR-007: how long a paused runner waits for its guard before it's reported frozen (default 2 min). For tests. */
@@ -70,23 +84,105 @@ export function parseAllow(v: string | string[] | undefined): string[] {
   return [...new Set(list)];
 }
 
-export const containerName = (slug: string) => `boss-man-runner-${slug}`;
-export const netguardName = (slug: string) => `boss-man-netguard-${slug}`;
+/**
+ * The host:ports the owner trusted for private addresses (BOS-708): each is checked as an allow entry.
+ * The guard keeps their private addresses, and drops any other entry's.
+ */
+export function parseTrusted(v: string[] | undefined): Set<string> {
+  const list = parseAllow(v ?? []);
+  return new Set(list);
+}
+
+/** BOSSMAN_STACK (BOS-69): a short name for a second Boss Man on the same Docker host, e.g. "staging". Empty = the one and only stack. */
+export const STACK_LABEL = "boss-man.stack";
+const STACK = /^[a-z0-9][a-z0-9]{0,15}$/;
+export function parseStack(v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!STACK.test(s)) throw new Error(`BOSSMAN_STACK should be 1 to 16 lowercase letters or digits, like staging, not ${v}`);
+  // "runner" and "netguard" would make names that clash with the default stack's (boss-man-runner-runner-x).
+  if (s === "runner" || s === "netguard") throw new Error(`BOSSMAN_STACK can't be ${s}; pick another name, like staging`);
+  return s;
+}
+/** The prefix of everything this launcher makes: "boss-man" for the one stack, "boss-man-<stack>" for another, so two never share a name. */
+const prefix = (stack?: string) => (stack ? `boss-man-${stack}` : "boss-man");
+export const containerName = (slug: string, stack?: string) => `${prefix(stack)}-runner-${slug}`;
+export const netguardName = (slug: string, stack?: string) => `${prefix(stack)}-netguard-${slug}`;
+export const runnerImage = (stack?: string) => `${prefix(stack)}-runner:current`;
+/** The image the runner ran before the last update (scripts/update-runner.sh keeps it): what a failed swap goes back to (BOS-382). */
+export const previousRunnerImage = (stack?: string) => `${prefix(stack)}-runner:previous`;
+export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current`;
+/** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
+export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
+const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STACK_LABEL]: stack } : {});
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
 /** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
 export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
+const GIB = 1024 ** 3;
+/**
+ * A runner's memory: this much for everything the company's agents run at once (they all live in the one runner; the live runner
+ * needed 16 GB with one check slot), plus one allowance per check slot (a full check peaks at about 3 GB).
+ * So 1 slot = 16 GB, 2 = 19 GB, 3 = 22 GB (13 GB plus 3 GB a slot). It is always cut down to what the host has (see HOST_RESERVE_BYTES).
+ */
+export const RUNNER_BASE_BYTES = 13 * GIB;
+export const RUNNER_PER_SLOT_BYTES = 3 * GIB;
+/** The least a runner is given, even on a small host (the old default). */
+export const RUNNER_MIN_BYTES = 4 * GIB;
+/** Memory kept back on the host for the server, database and proxy when sizing a runner from the host's total. */
+export const HOST_RESERVE_BYTES = 2 * GIB;
+
+export type ChecksPlan = {
+  /** What the owner set in Settings (null before the server has sent it). */
+  requested: number | null;
+  /** The slots a runner made now gets. */
+  slots: number;
+  memoryBytes: number;
+  /** Why `slots` is lower than `requested`; null when it isn't. */
+  reason: string | null;
+};
+
+const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
+
+/**
+ * The runner's check slots and memory (BOS-993). The setting drives both; .env values are upper bounds and the host's
+ * memory limits what fits. With no setting pushed yet the .env values apply as before.
+ */
+export function planChecks(cfg: LauncherConfig): ChecksPlan {
+  if (cfg.requestedSlots === undefined) return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null };
+  const want = cfg.requestedSlots;
+  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_MIN_BYTES) : Infinity;
+  const ceiling = Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
+  const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - RUNNER_BASE_BYTES) / RUNNER_PER_SLOT_BYTES)) : Infinity;
+  const slots = Math.min(want, cfg.envSlotsCap ?? Infinity, fits);
+  const memoryBytes = Math.min(RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES * slots, ceiling);
+  let reason: string | null = null;
+  if (slots < want) {
+    if (cfg.envSlotsCap !== undefined && slots === cfg.envSlotsCap) reason = `The host's .env caps it at ${slots} (BOSSMAN_CHECK_SLOTS).`;
+    else if (cfg.envMemoryCap !== undefined && slots === fits && cfg.envMemoryCap <= hostCeiling) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
+    else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
+  }
+  return { requested: want, slots, memoryBytes, reason };
+}
+
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string, image: string = IMAGE) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image?: string) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
+  const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = companyDir(cfg, slug);
   return {
-    Image: image,
+    Image: image ?? runnerImage(cfg.stack),
     User: "1000:1000",
-    Env: [`BOSSMAN_URL=${cfg.serverUrl}`, `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`, ...(cfg.checkSlots && cfg.checkSlots > 1 ? [`BOSSMAN_CHECK_SLOTS=${cfg.checkSlots}`] : [])],
-    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug },
+    Env: [
+      `BOSSMAN_URL=${cfg.serverUrl}`,
+      `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
+      ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
+      ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
+      ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
+    ],
+    Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
       Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
       NetworkMode: cfg.network,
@@ -101,12 +197,14 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image: string =
       PidsLimit: cfg.pidsLimit,
       // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
       Init: true,
-      Memory: cfg.memoryBytes,
+      Memory: plan.memoryBytes,
       // No swap on top of the limit, and the first to be killed if the host itself runs out (BOS-395).
-      MemorySwap: cfg.memoryBytes,
+      MemorySwap: plan.memoryBytes,
       OomScoreAdj: 500,
       // Priority, not a cap (BOS-412): when the host is busy the server and database win; when idle, runners use every core.
       CpuShares: cfg.cpuShares ?? DEFAULT_CPU_SHARES,
+      // A core kept back for the server, database and proxy (BOS-586): runners never run on the reserved threads.
+      ...(cfg.cpuset ? { CpusetCpus: cfg.cpuset } : {}),
       ...(cfg.cpus ? { NanoCpus: Math.round(cfg.cpus * 1e9) } : {}),
       RestartPolicy: { Name: "unless-stopped" },
     },
@@ -134,6 +232,32 @@ export function parseCheckSlots(v: string | undefined): number {
   if (!v || v.trim() === "") return 1;
   if (!/^\d{1,2}$/.test(v.trim()) || Number(v) < 1 || Number(v) > 16) throw new Error(`BOSSMAN_CHECK_SLOTS should be a whole number from 1 to 16, not ${v}`);
   return Number(v);
+}
+
+/** Days an OpenCode session is kept on a runner: a whole number from 0 (never delete) to 3650; unset = the runner's default. */
+export function parseOpencodeSessionDays(v: string | undefined): number | undefined {
+  if (!v || v.trim() === "") return undefined;
+  if (!/^\d{1,4}$/.test(v.trim()) || Number(v) > 3650) throw new Error(`BOSSMAN_OPENCODE_SESSION_DAYS should be a whole number of days from 0 to 3650, not ${v}`);
+  return Number(v);
+}
+
+/** The only writable volume a runner keeps between restarts, where the shared pnpm store must live. */
+const WORKSPACES_MOUNT = MOUNTS.find(([sub]) => sub === "workspaces")![1];
+
+/**
+ * The shared pnpm store's path inside the runner (BOS-568). Empty means the workspaces volume's .pnpm-store,
+ * which every host has. A set value must be a folder under the workspaces volume: the volume's root itself is
+ * refused, because the fence would then grant agents the whole volume (other agents' copies, the merge gate's
+ * results) and the merge gate's store (<dir>-gate) would land on the runner's root disk (BOS-633).
+ */
+export function parsePnpmStoreDir(v: string | undefined): string | undefined {
+  const p = (v ?? "").trim();
+  if (!p) return undefined;
+  if (!p.startsWith("/") || p.includes("\0") || p.split("/").includes("..")) throw new Error(`PNPM_STORE_DIR should be an absolute path inside the runner, like ${WORKSPACES_MOUNT}/.pnpm-store, not ${v}`);
+  const resolved = path.posix.normalize(p).replace(/\/+$/, "") || "/";
+  if (resolved === WORKSPACES_MOUNT) throw new Error(`PNPM_STORE_DIR must be a folder under ${WORKSPACES_MOUNT}, not the volume's root itself (the fence would grant the whole volume), like ${WORKSPACES_MOUNT}/.pnpm-store`);
+  if (!resolved.startsWith(`${WORKSPACES_MOUNT}/`)) throw new Error(`PNPM_STORE_DIR must be under ${WORKSPACES_MOUNT} (the runner's only writable volume), not ${v}`);
+  return resolved;
 }
 
 /** A CPU weight from 2 to 262144, as in compose's cpu_shares. */
@@ -167,11 +291,11 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
   if (!SLUG.test(slug)) throw new Error("bad slug");
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(runnerId)) throw new Error("bad runner id");
   return {
-    Image: NETGUARD_IMAGE,
+    Image: guardImage(cfg.stack),
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
-    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
       Binds: [`${netguardDir(cfg, slug)}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,

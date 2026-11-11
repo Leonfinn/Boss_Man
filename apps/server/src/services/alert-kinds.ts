@@ -18,16 +18,27 @@ export type ClearWhen =
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
   | { kind: "limitReset"; fundingSourceId: string }
   /**
-   * Auth and credit-failure cards: a run on that account has finished cleanly since the card was raised.
-   * A revoked key or an empty credit balance leaves the quota windows untouched, so "room again" is true
-   * at once (BOS-469, security review): only a clean run proves the credential is fixed.
+   * An auth and credit-failure card's closer (BOS-469): a clean run on that account. A revoked key or an
+   * empty credit balance leaves the quota windows untouched, so "room again" is true at once; only a
+   * clean run proves the credential is fixed.
    */
-  | { kind: "accountRanOk"; fundingSourceId: string };
+  | { kind: "accountRanOk"; fundingSourceId: string }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string }
+  /** A roadmap feature that had no open ticket now has one (BOS-595, closer in alert-clearing.ts). */
+  | { kind: "featureHasTicket"; featureId: string }
+  /** Server-health cards (BOS-640): the rule has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 export type AlertRung = "scrum_master" | "ceo" | "owner";
 
 /** What a raise says about itself, when it doesn't bring its own condition or cause key. */
 export type AlertCause = {
+  /**
+   * The company the alert is about. The ladder sets it from the raise (BOS-498); a key built here that is
+   * unique across companies must carry it.
+   */
+  companyId?: string;
   /**
    * The funding source the alert is about, for account outages (one card per account, DR-017 B).
    * `auth` is set for a credential/credit failure, which closes only on a clean run (not on "room again").
@@ -70,6 +81,20 @@ export const ALERT_KINDS = {
     topRung: "ceo",
     clearWhen: (c) => (c.runId ? [{ kind: "runActive", runId: c.runId }] : []),
   },
+  // run-time-limit.ts (BOS-846): a run was stopped for passing the owner's per-run time limit. The limit is the
+  // owner's own setting, so the card starts with them. One card per stopped run; it doesn't clear by itself.
+  run_time_limit: {
+    topRung: "owner",
+  },
+  // sweeps.ts missedWork (BOS-1015): a ticket woken again and again with nothing running on it. The Scrum Master
+  // settles it first, then the CEO; it reaches the owner only if the CEO escalates it.
+  looks_stuck: {
+    topRung: "ceo",
+  },
+  // app.ts, the watchdog's trip notice (BOS-1015): the Scrum Master paused itself. It starts at the CEO.
+  watchdog_trip: {
+    topRung: "ceo",
+  },
   // sweeps.ts longTicketlessRuns: a run with no ticket going for a long time.
   ticketless_run: {
     topRung: "ceo",
@@ -105,7 +130,9 @@ export const ALERT_KINDS = {
   // owner, one card per account, naming the agents instead of one card per run.
   account_limit: {
     topRung: "owner",
-    groupBy: (c) => (c.account ? `account:${c.account.fundingSourceId}:account_limit` : null),
+    // The key names the company too (BOS-498): the dedupe key is unique across companies, so without it one
+    // company's open card on a shared funding source would swallow another company's raise.
+    groupBy: (c) => (c.companyId && c.account ? `account:${c.companyId}:${c.account.fundingSourceId}:account_limit` : null),
     title: (c, n) =>
       `${c.account?.name ?? "An account"}: ${n} run${n === 1 ? "" : "s"} failed on ${c.account?.window ?? "a usage limit or auth error"}${c.agents?.length ? ` (${c.agents.length} agent${c.agents.length === 1 ? "" : "s"})` : ""}`,
     // A usage limit lifts when the account has room again; an auth or credit failure does not, because
@@ -144,10 +171,60 @@ export const ALERT_KINDS = {
     groupBy: (c) => (c.runnerId && c.bootId ? `runner-boot:${c.runnerId}:${c.bootId}` : null),
     title: (_c, n) => `${n} run${n === 1 ? "" : "s"} didn't start after a runner restart`,
   },
+  // watchdog.ts quotaHeldAlerts (BOS-450): a wake held by the subscription usage limit for too long. One card per held wake.
+  // It closes once the account has room again, by the same test the scheduler uses.
+  quota_held: {
+    topRung: "ceo",
+    clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
+  },
+  // deploys.ts finishTag / runTag (DR-033): a deploy tag that couldn't be moved after a successful deploy,
+  // or a runner offline for 30 minutes with the move waiting. The deploy stands; the CEO fixes the host settings
+  // or tells the owner. One card per deploy.
+  deploy_tag: {
+    topRung: "ceo",
+  },
+  // no-progress.ts (BOS-593, N4): a company with work waiting and no clean run for an hour, or one error
+  // hitting several agents. One card per company. It may reach the owner: a stopped company usually can't
+  // run its own CEO either (HolidayHours went two days unseen that way). Closes on the company's next clean run.
+  no_progress: {
+    topRung: "owner",
+  },
+  // opencode-vacuum.ts (BOS-622): the runner killed the OpenCode prune's one-off VACUUM at its cap. One card per runner per day.
+  opencode_vacuum_cut: {
+    topRung: "ceo",
+  },
+  // watchdog.ts spareCapacity (BOS-659): the company is under-used while work waits, and picking the
+  // next ticket is a judgement call. Stops at the CEO; one card per company folds the stretches together.
+  spare_capacity: {
+    topRung: "ceo",
+    groupBy: (c) => (c.companyId ? `spare-capacity:${c.companyId}` : null),
+    title: (_c, n) => `Spare capacity: ${n} checks found the company under-used while work waits`,
+  },
+  // server-health.ts (BOS-640): the server's rss passed 60% of the memory it may use, or rose more than
+  // 1 GiB an hour for two hours. The CEO can ask for the update or the restart; it never reaches the owner
+  // by itself. Closes once memory has been under the level for 30 minutes (serverCalm).
+  server_memory: {
+    topRung: "ceo",
+    clearWhen: () => [{ kind: "serverCalm", rule: "memory" }],
+  },
+  // server-health.ts (BOS-640): more than 10 freezes over a second in 10 minutes. Only the owner can
+  // approve the update or restart the server, so it starts with them. Closes after 30 calm minutes.
+  server_freezes: {
+    topRung: "owner",
+    clearWhen: () => [{ kind: "serverCalm", rule: "freezes" }],
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",
     title: (_c, n) => `Boss Man has ${n} alert${n === 1 ? "" : "s"} of the same kind`,
+  },
+  /**
+   * feedback.ts raiseFeatureNoTicket, run by the sweep (BOS-595): a feature on the roadmap's Now, Next or
+   * In progress with no open ticket, so the work the owner expects is not actually being done. The CEO
+   * creates the ticket; the card closes by itself once one is linked (DR-016, BOS-470).
+   */
+  feature_no_ticket: {
+    topRung: "ceo",
   },
   // An alert only the owner can settle (a secret, a sign-off, host access).
   owner: {

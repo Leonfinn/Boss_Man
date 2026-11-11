@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { api, usd, type ActiveRun, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
-import { art } from "../brand";
-import { State } from "../components/State";
+import { api, usd, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { usePoll } from "../hooks";
 import { windowLabel } from "@boss-man/shared";
+import { ageLabel } from "../age";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
 /** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
@@ -15,11 +14,18 @@ const dayAndTime = (iso: string) => {
 
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
+/** A rate in % an hour: one decimal under 10% (0.3% and 1.5% must not read as 0% and 2%). */
+const rateText = (perHour: number) => {
+  const p = perHour * 100;
+  return `about ${p >= 10 ? Math.round(p) : Number(p.toFixed(1))}% an hour`;
+};
+
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
 function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
   if (!f || f.perHour === null) return null;
-  const rate = `about ${pct(f.perHour)} an hour`;
-  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} at the recent rate (${rate})`] : [false, `Won't run out before it resets, at the recent rate (${rate})`];
+  // The rate the date was worked out from, so the two always agree (BOS-1012).
+  const rate = `at ${rateText(f.runsOutPerHour ?? f.perHour)}`;
+  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} ${rate}, if the week so far keeps on as it has`] : [false, `Won't run out before it resets ${rate}, at the week's pace so far`];
   return (
     <span className={warn ? undefined : "muted"} style={{ fontSize: 12, color: warn ? "var(--amber-ink)" : undefined }}>
       {text}
@@ -82,14 +88,8 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
-/** "3m ago", "2h ago", "4d ago": how old a cached reading is, in plain words. */
-const ago = (seconds: number | null) => {
-  if (seconds === null) return "";
-  if (seconds < 60) return "just now";
-  if (seconds < 3_600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h ago`;
-  return `${Math.round(seconds / 86_400)}d ago`;
-};
+/** "3 min ago", "2h ago", "4d ago": how old a cached reading is, in age.ts's words. */
+const ago = (seconds: number | null) => (seconds === null ? "" : ageLabel(seconds * 1000));
 
 /** "in 3 days", "in 5 hours": how long until the plan renews. */
 const until = (iso: string) => {
@@ -122,6 +122,7 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   const [overage, setOverage] = useState<"pause" | "urgent" | "all">(s.source.quotaOverage ?? "pause");
   const [off, setOff] = useState<string[]>(s.source.quotaDisabledWindows ?? []);
   const claude = s.source.provider === "anthropic";
+  const synthetic = s.source.provider === "synthetic";
   const [rank, setRank] = useState<string>(s.source.fallbackRank ? String(s.source.fallbackRank) : "");
   const [secretId, setSecretId] = useState<string>(s.source.secretId ?? "");
   const tokens = usePoll((signal) => (claude ? api<Array<{ id: string; name: string; kind: string }>>("/api/secrets", { signal }) : Promise.resolve([])), 60_000, "secrets-for-funding");
@@ -150,18 +151,26 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
           <span>%</span>
         </span>
       </label>
+      {/* The same setting as Claude's extra usage (BOS-227): Synthetic spends paid top-up credit once the weekly allowance is used (BOS-934). */}
       <label className="field-stack">
-        <span>I have extra usage</span>
-        <select aria-label="Extra usage" className="fill" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
+        <span>{synthetic ? "I have top-up credit" : "I have extra usage"}</span>
+        <select aria-label={synthetic ? "Top-up credit" : "Extra usage"} className="fill" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
           <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
-          <option value="urgent">Keep urgent work running past the limit</option>
-          <option value="all">Keep all work running</option>
+          <option value="urgent">{synthetic ? "Keep urgent work running on top-up credit" : "Keep urgent work running past the limit"}</option>
+          <option value="all">{synthetic ? "Keep all work running on top-up credit" : "Keep all work running"}</option>
         </select>
       </label>
-      {overage !== "pause" && (
-        <span className="muted" style={{ fontSize: 12 }}>
-          Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account.
-        </span>
+      {(synthetic || overage !== "pause") && (
+      <span className="muted" style={{ fontSize: 12 }}>
+        {synthetic
+          ? overage === "pause"
+            ? `Routine work is held at ${holdAt}% of the weekly allowance and nothing spends top-up credit, except chats and reviews, which always run. Use this if the account has no top-up credit.`
+            : overage === "urgent"
+              ? `Routine work is held at ${holdAt}%. Urgent tickets, chats and reviews carry on past the weekly allowance, paid from your Synthetic top-up credit.`
+              : "Nothing is held: once the weekly allowance is used, Synthetic pays for all work from your top-up credit. You get one note a week when that starts."
+          : "Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account."}
+        {synthetic && overage !== "pause" ? " Synthetic doesn't report the balance, so Boss Man can't stop before it runs out; check it at synthetic.new." : null}
+      </span>
       )}
       {windows.length > 0 && (
         <fieldset style={{ border: 0, margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -181,7 +190,9 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
             );
           })}
           <span className="muted" style={{ fontSize: 12 }}>
-            These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means.
+            {s.source.provider === "synthetic"
+              ? "These come from Synthetic's own usage reading, checked every 5 minutes. Infinite-mode agents are never held."
+              : "These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means."}
           </span>
         </fieldset>
       )}
@@ -255,6 +266,10 @@ function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota
         </>
       )}
       <Trend q={q} />
+      {/* api.synthetic.new has no balance field or route (checked 9 Nov 2026, BOS-934), so this can only say so. */}
+      <span className="muted" style={{ fontSize: 12 }}>
+        Top-up credit: not shown. Synthetic's API doesn't report the balance; see it at synthetic.new. Whether work uses it is your choice under "I have top-up credit" below.
+      </span>
       <span className="muted" style={{ fontSize: 12 }}>
         Checked {ago(q.ageSeconds)}{q.warned.length ? ` · you've been warned at ${q.warned.join("% and ")}%` : ""}
       </span>
@@ -343,7 +358,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
   );
 }
 
-export function Funding({ companies }: { companies: Company[] }) {
+/** One status card per funding source (usage, resets, forecast, quota holds, spend), shown on Settings → Funding. */
+export function FundingCards() {
   const sources = usePoll(
     async (signal) => {
       const list = await api<FundingSource[]>("/api/funding-sources", { signal });
@@ -351,33 +367,22 @@ export function Funding({ companies }: { companies: Company[] }) {
       return Promise.all(list.map((s) => api<FundingStatus>(`/api/funding-sources/${s.id}/status?tz=${tz}`, { signal })));
     },
     30_000,
-    "sources",
+    "sources-status",
   );
+  return <div className="grid-cards">{sources.data?.map((s) => <SourceCard key={s.source.id} s={s} />)}</div>;
+}
+
+/** The budget policies (scope, window, used, what happens at the limit), shown on Settings → Funding. */
+export function BudgetLimits({ companies }: { companies: Company[] }) {
   const budgets = usePoll((signal) => api<BudgetRow[]>("/api/budgets", { signal }), 30_000, "budgets");
-  const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 10_000, "runs");
   const scopeName = (b: BudgetRow) => (b.policy.scopeKind === "instance" ? "All companies" : b.policy.scopeKind === "company" ? (companies.find((c) => c.id === b.policy.scopeId)?.name ?? "A company") : `A ${b.policy.scopeKind}`);
-  const agentName = (id: string | null) => companies.flatMap((c) => c.agents).find((a) => a.id === id)?.name ?? "An agent";
 
   return (
     <>
-      <header className="page-head">
-        <div>
-          <h1>Funding</h1>
-          <p className="sub">Where agent work is paid from, and how much is left this cycle.</p>
-        </div>
-      </header>
-      {sources.data && sources.data.length === 0 ? (
-        <State img={art.setup} alt="No funding sources yet" title="No funding sources yet">
-          <p>Add a Claude subscription (with a setup-token) or an API key so agents have something to run on.</p>
-        </State>
-      ) : (
-        <div className="grid-cards">{sources.data?.map((s) => <SourceCard key={s.source.id} s={s} />)}</div>
-      )}
-
       {(budgets.data?.length ?? 0) > 0 && (
-        <section aria-labelledby="budgets-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h2 id="budgets-h" style={{ fontSize: 18, fontWeight: 600 }}>
-            Budgets
+        <section aria-labelledby="budget-limits-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <h2 id="budget-limits-h" style={{ fontSize: 18, fontWeight: 600 }}>
+            Spending limits
           </h2>
           <div className="table-wrap">
             <table>
@@ -407,38 +412,6 @@ export function Funding({ companies }: { companies: Company[] }) {
           </div>
         </section>
       )}
-
-      <section aria-labelledby="runs-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <h2 id="runs-h" style={{ fontSize: 18, fontWeight: 600 }}>
-          Running now
-        </h2>
-        {runs.data?.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Started</th>
-                  <th scope="col">Company</th>
-                  <th scope="col">Agent</th>
-                  <th scope="col">Model</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.data.map((r) => (
-                  <tr key={r.id}>
-                    <td className="mono muted">{when(r.startedAt)}</td>
-                    <td>{companies.find((c) => c.id === r.companyId)?.name}</td>
-                    <td>{agentName(r.agentId)}</td>
-                    <td className="mono">{r.model ?? "default"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="muted">No agents are running.</p>
-        )}
-      </section>
     </>
   );
 }

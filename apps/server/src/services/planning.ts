@@ -6,6 +6,7 @@ import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon,
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -13,6 +14,8 @@ type NodeKind = "ticket" | "engagement" | "decision";
 export type PlanNodeView = {
   id: string;
   kind: NodeKind;
+  /** The ticket's reference, e.g. BOS-458; null for engagements and decisions. */
+  ref: string | null;
   title: string;
   state: string;
   open: boolean;
@@ -133,9 +136,10 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       for (const e of edges) (ticketIds.add(e.to), e.ticket && ticketIds.add(e.ticket));
       const ts = ticketIds.size
         ? await db
-            .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, assignee: agents.name, project: projects.name })
+            .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title, state: tickets.systemState, assignee: agents.name, project: projects.name })
             .from(tickets)
             .innerJoin(projects, eq(projects.id, tickets.projectId))
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
             .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
             .where(inArray(tickets.id, [...ticketIds]))
         : [];
@@ -145,9 +149,9 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const ds = decIds.length ? await db.select({ id: decisions.id, question: decisions.question, status: decisions.status }).from(decisions).where(inArray(decisions.id, decIds)) : [];
 
       const base: Array<Omit<PlanNodeView, "layer" | "blocked" | "causes" | "holdingUp">> = [
-        ...ts.map((t) => ({ id: t.id, kind: "ticket" as const, title: t.title, state: t.state, open: t.state !== "done", link: `#/tickets/${t.id}`, assignee: t.assignee, project: t.project })),
-        ...es.map((e) => ({ id: e.id, kind: "engagement" as const, title: e.title, state: e.status, open: e.status !== "signed_off", link: `#/engagements/${e.id}`, assignee: null, project: null })),
-        ...ds.map((d) => ({ id: d.id, kind: "decision" as const, title: d.question, state: d.status, open: d.status === "open", link: "#/decisions", assignee: null, project: null })),
+        ...ts.map((t) => ({ id: t.id, kind: "ticket" as const, ref: ticketRef(t.prefix, t.number), title: t.title, state: t.state, open: t.state !== "done", link: `#/tickets/${t.id}`, assignee: t.assignee, project: t.project })),
+        ...es.map((e) => ({ id: e.id, kind: "engagement" as const, ref: null, title: e.title, state: e.status, open: e.status !== "signed_off", link: `#/engagements/${e.id}`, assignee: null, project: null })),
+        ...ds.map((d) => ({ id: d.id, kind: "decision" as const, ref: null, title: d.question, state: d.status, open: d.status === "open", link: "#/decisions", assignee: null, project: null })),
       ];
       const links = edges.map((e) => ({ id: e.id, from: (e.ticket ?? e.engagement ?? e.decision)!, to: e.to }));
       const layout = layoutPlan(base, links);
@@ -164,11 +168,12 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
           blockerTicketId: ticketDependencies.blockerTicketId,
           blockerEngagementId: ticketDependencies.blockerEngagementId,
           blockerDecisionId: ticketDependencies.blockerDecisionId,
+          until: ticketDependencies.until,
         })
         .from(ticketDependencies)
         .where(or(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, ticketId)));
       const tIds = [...new Set(rows.flatMap((r) => [r.blockedTicketId, r.blockerTicketId]).filter((x): x is string => !!x && x !== ticketId))];
-      const ts = tIds.length ? await db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState }).from(tickets).where(inArray(tickets.id, tIds)) : [];
+      const ts = tIds.length ? await db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, mergeCommit: tickets.mergeCommit }).from(tickets).where(inArray(tickets.id, tIds)) : [];
       const eIds = rows.flatMap((r) => (r.blockerEngagementId ? [r.blockerEngagementId] : []));
       const es = eIds.length ? await db.select({ id: engagements.id, title: engagements.title, status: engagements.status }).from(engagements).where(inArray(engagements.id, eIds)) : [];
       const dIds = rows.flatMap((r) => (r.blockerDecisionId ? [r.blockerDecisionId] : []));
@@ -180,14 +185,14 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
           .map((r) => {
             if (r.blockerTicketId) {
               const b = t(r.blockerTicketId);
-              return { dependencyId: r.id, kind: "ticket" as const, id: r.blockerTicketId, title: b?.title ?? "", state: b?.state ?? "", open: b?.state !== "done", link: `#/tickets/${r.blockerTicketId}` };
+              return { dependencyId: r.id, kind: "ticket" as const, id: r.blockerTicketId, title: b?.title ?? "", state: b?.state ?? "", open: !ticketBlockerFinished({ ticketState: b?.state ?? null, mergeCommit: b?.mergeCommit ?? null, until: r.until }), until: r.until, link: `#/tickets/${r.blockerTicketId}` };
             }
             if (r.blockerEngagementId) {
               const e = es.find((x) => x.id === r.blockerEngagementId);
               return { dependencyId: r.id, kind: "engagement" as const, id: r.blockerEngagementId, title: e?.title ?? "", state: e?.status ?? "", open: e?.status !== "signed_off", link: `#/engagements/${r.blockerEngagementId}` };
             }
             const d = ds.find((x) => x.id === r.blockerDecisionId);
-            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open", link: "#/decisions" };
+            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open", link: `#/decisions/${r.blockerDecisionId}` };
           }),
         blocks: rows
           .filter((r) => r.blockerTicketId === ticketId)
@@ -227,7 +232,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const peers = [...new Map(siblings.map((r) => [r.id, r])).values()].filter((r) => !childIds.has(r.id) && r.id !== me.parentId);
 
       const edges = await db
-        .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId })
+        .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, until: ticketDependencies.until })
         .from(ticketDependencies)
         .where(or(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, ticketId)));
       const waitIds = edges.filter((e) => e.blocked === ticketId && e.blocker).map((e) => e.blocker!);
@@ -249,7 +254,8 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
         parent: parent ? view(parent) : null,
         subtasks: others(children),
         peers: others(peers),
-        waitsOn: others(await byIds(waitIds)),
+        // "Until merged" or "until done" shows beside each ticket it waits on (BOS-989).
+        waitsOn: others(await byIds(waitIds)).map((r) => ({ ...r, until: edges.find((e) => e.blocked === ticketId && e.blocker === r.id)?.until ?? "done" })),
         blocks: others(await byIds(blockIds)),
         mentioned: others(mentioned.filter((r) => !shown.has(r.id))),
       };

@@ -1,14 +1,19 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { isInfiniteModel } from "@boss-man/shared";
 import { api, type Company } from "../api";
+import { away } from "../server-watch";
+import { useDraft } from "../drafts";
 import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { outcomeTag, usage, when } from "./Runs";
+import { NotFoundBlock } from "../components/NotFoundBlock";
 
 /** Steering (R37): a message after the current turn, or one that interrupts it, and stop. */
 function Steer({ runId, companyId, ticketId }: { runId: string; companyId: string; ticketId?: string | null }) {
-  const [text, setText] = useState("");
+  // A message being typed to a run survives a freeze or a reload (BOS-637).
+  const [text, setText, clearText] = useDraft(`run/${runId}/message`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const img = useImageAttach(companyId, ticketId ?? undefined);
@@ -18,7 +23,8 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
     setBusy(true);
     try {
       await api(`/api/runs/${runId}/message`, { method: "POST", body: { text: outgoing, interrupt } });
-      setText("");
+      // Sent: the draft goes. A failed send keeps it, so Send can be pressed again (BOS-637).
+      clearText();
       img.clear();
       setNote({ ok: true, text: interrupt ? "Sent. The current turn stops first." : "Sent. It goes in after the current turn." });
     } catch (err) {
@@ -35,7 +41,7 @@ function Steer({ runId, companyId, ticketId }: { runId: string; companyId: strin
       const markdown = await img.uploadText(long, "message.txt");
       const outgoing = withAttachments("I've sent the text as a file (below); please read it before answering.", [markdown]);
       await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing } });
-      setText("");
+      clearText();
       img.clear();
       setNote({ ok: true, text: "Sent as a .txt file on the ticket; the agent is woken to read it." });
     } catch (err) {
@@ -110,7 +116,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
     return () => cancelAnimationFrame(frame);
   }, [items.length, rows]);
 
-  if (error && !run) return <p className="error" role="alert">{error.status === 404 ? "There's no such run." : error.message}</p>;
+  if (error && !run && !away(error)) return error.status === 404 ? <NotFoundBlock title="Run not found" backHref="#/runs" backLabel="Back to Runs">This run doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{error.message}</p>;
   const company = companies.find((c) => c.id === run?.companyId);
   return (
     <>
@@ -126,6 +132,11 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
               <span className="mono">{run.model ?? "default model"}</span>
+              {isInfiniteModel(run.model) && (
+                <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow, in a background run slot.">
+                  Infinite mode · free, slow
+                </span>
+              )}
               <span className="mono" title={usage(run).title}>
                 {usage(run).text}
               </span>
@@ -159,7 +170,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
       >
         {items.length === 0 ? (
           <p className="muted" style={{ padding: 16 }}>
-            {run ? "Nothing recorded yet." : "Loading…"}
+            {!run ? "Loading…" : run.endedAt ? "No events are kept for this run: runner events older than the retention period (60 days unless the owner changed it) are deleted." : "Nothing recorded yet."}
           </p>
         ) : (
           <div style={{ height: rows.getTotalSize(), position: "relative" }}>

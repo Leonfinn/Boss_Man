@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
-import { Credentials } from "./Settings";
+import { Credentials } from "./settings/Credentials";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 

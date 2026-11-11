@@ -1,36 +1,50 @@
 // Workflow retros (docs/19-workflow-retros.md parts 2 and 3): when one starts, what the retro agent can call,
 // and what each approved change writes.
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, ne } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
-import { agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
+import { signedInOwner } from "./helpers/owner-session.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
+import { activity, agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
 import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
+
+// One database and one app (listening) for the file, the database emptied before each test (BOS-686). Every
+// test makes its own company, agents and project and reads only those.
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let app: ReturnType<typeof boot> | undefined;
+async function boot() {
+  const built = await buildApp({ db: shared.db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  return { built, base: `127.0.0.1:${(built.app.server.address() as { port: number }).port}` };
+}
+beforeAll(async () => {
+  shared = await sharedDatabase();
+});
 afterEach(async () => {
   await Promise.all((ctx?.clients ?? []).map((c) => c.close()));
-  await ctx?.app.close();
-  await ctx?.close();
   ctx = undefined;
+});
+afterAll(async () => {
+  await (await app)?.built.app.close();
+  await shared.close();
 });
 
 const D = 86_400_000;
 const ago = (ms: number) => new Date(Date.now() - ms);
 
 async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
-  const { db: pg, close } = await openPglite();
-  const built = await buildApp({ db: pg, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
-  await built.app.listen({ host: "127.0.0.1", port: 0 });
-  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  await shared.reset();
+  const pg = shared.db;
+  const { built, base } = await (app ??= boot());
+  const cookie = await signedInOwner(pg);
   const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "Retro Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const db = pg;
@@ -59,7 +73,7 @@ async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   };
   const priorRetro = (age: number) => db.insert(retros).values({ companyId: company.id, agentId: pm?.id ?? ceo.id, startedAt: ago(age), since: ago(age + 7 * D), until: ago(age), doneCount: 5 }).returning().then((r) => r[0]!);
   const wakeFor = async (reason = "retro") => db.select().from(wakes).where(and(eq(wakes.companyId, company.id), eq(wakes.reason, reason)));
-  return { ...built, db, close, clients, req, company, ceo, project, pm, eng, eng2, reviewer, mcp, done, priorRetro, wakeFor };
+  return { ...built, db, clients, req, company, ceo, project, pm, eng, eng2, reviewer, mcp, done, priorRetro, wakeFor };
 }
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 /** A tool call whose refusal may come back as an error result or a thrown protocol error. */
@@ -453,7 +467,7 @@ describe("proposing a change", () => {
     expect(d!.question).toMatch(/Replayed over the last 14 days: the current limits would have raised \d+ flags? \(\d+ cleared within 30 minutes on their own\); the new limits would have raised \d+/);
     expect((await answer(c, id, "Apply")).statusCode).toBe(200);
     const [co] = await c.db.select({ w: companies.watchdog }).from(companies).where(eq(companies.id, c.company.id));
-    expect(co!.w).toMatchObject({ reviewHours: 6, inProgressHours: 4, enabled: false });
+    expect(co!.w).toMatchObject({ reviewHours: 6, inProgressHours: 4, enabled: true });
   });
 
   it("the CEO never approves its own proposal: with no Product Manager, playbooks go to the owner", async () => {
@@ -509,7 +523,12 @@ describe("proposing a change", () => {
       linkedAtPropose = (seen!.after as { proposalId?: string }).proposalId;
       return original(input);
     }) as typeof c.skillProposals.propose;
-    expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    try {
+      expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    } finally {
+      // The service is shared by every test in this file (BOS-686): put the real one back.
+      c.skillProposals.propose = original;
+    }
     const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
     expect(linkedAtPropose).toBe(proposal!.id);
   });
@@ -536,7 +555,28 @@ describe("proposing a change", () => {
     expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
     expect(await c.db.select().from(agentSkills)).toHaveLength(0);
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("rejected");
-    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("applied");
+    // The change never reached anyone, so it no longer reads as applied (and part 4 will not ask Keep/Revert).
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", checkDueAt: null });
+  });
+
+  it("a change is not left skipped with a live proposal when linking fails after the proposal was stored", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" }, scope: { role: "engineer" } });
+    const { id, ch } = await decisionOf(c, "playbook");
+    const original = c.skillProposals.propose.bind(c.skillProposals);
+    c.skillProposals.propose = (async (input: Parameters<typeof original>[0]) => {
+      await original(input);
+      throw new Error("lost the connection after the proposal was stored");
+    }) as typeof c.skillProposals.propose;
+    try {
+      expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    } finally {
+      c.skillProposals.propose = original;
+    }
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
+    // The stored proposal can no longer be reviewed and installed.
+    const proposals = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    expect(proposals.map((x) => x.status)).toEqual(["rejected"]);
   });
 
   it("a lesson raises the existing lesson decision for the CEO, and counts as applied once it is added", async () => {
@@ -560,6 +600,28 @@ describe("proposing a change", () => {
     const { id, ch } = await decisionOf(c, "lesson");
     expect((await answer(c, id, LESSON_DROP)).statusCode).toBe(200);
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
+  });
+
+  it("a lesson with a live card still holds the project's slot, but one whose card is gone does not", async () => {
+    const { c, p } = await ready();
+    const lesson = (text: string) => p({ lever: "lesson", target: "notes", change: { lesson: text }, metric: "meanRework", scope: { role: "engineer" } });
+    await lesson("Always cover the null case in importers.");
+    expect(isError(await lesson("List every place the change must apply."))).toBe(true);
+    const { ch, id } = await decisionOf(c, "lesson");
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(isError(await lesson("List every place the change must apply."))).toBe(false);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", decidedBy: "ceo" });
+  });
+
+  it("explaining an orphaned lesson closes it as skipped; one with a live card is left alone", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "lesson", target: "notes", change: { lesson: "Always cover the null case in importers." }, metric: "meanRework", scope: { role: "engineer" } });
+    const { ch, id } = await decisionOf(c, "lesson");
+    const retro = c.retro;
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([]);
+    await c.db.delete(decisions).where(eq(decisions.id, id));
+    expect(await retro.skipOrphanLessons(c.company.id, { changeId: ch.id, reason: "Overlaps an existing lesson." })).toEqual([ch.id]);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "skipped", reason: "Overlaps an existing lesson." });
   });
 
   it("measures a handoff pair and the whole company", async () => {
@@ -677,8 +739,6 @@ describe("checking a change's result (part 4)", () => {
       expect(d.question).toMatch(k.say);
       expect(d.recommendedOption).toBe(k.pick);
       await Promise.all(c.clients.map((x) => x.close()));
-      await c.app.close();
-      await c.close();
       ctx = undefined;
     }
   });
@@ -773,6 +833,18 @@ describe("checking a change's result (part 4)", () => {
     // The engineer who had it keeps it; the one who only gained it from the update loses it.
     expect((await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, existing!.id))).map((r) => r.agentId)).toEqual([c.eng.id]);
     expect((await changeRow(c, id)).status).toBe("reverted");
+    // BOS-181: both the update and the Revert leave an old/new trace, like an owner edit (BOS-178).
+    const [updated] = await c.db.select().from(activity).where(eq(activity.kind, "skill.updated"));
+    expect(updated!.summary).toMatch(/update to the skill null-checks from [0-9a-f]{12} to [0-9a-f]{12}\. Old: "Old.*OLD" New: "New.*NEW"\./);
+    expect(updated!.detail).toMatchObject({ skillId: existing!.id, description: { before: "Old", after: "New" } });
+    expect((updated!.detail as { skillMd: { before: string; after: string } }).skillMd.after).toContain("NEW");
+    const [reverted] = await c.db.select().from(activity).where(eq(activity.kind, "skill.reverted_by_retro"));
+    expect(reverted!.summary).toMatch(/Revert put the playbook null-checks back from [0-9a-f]{12} to [0-9a-f]{12}\. Old: "New.*NEW" New: "Old.*OLD"\./);
+    const rd = reverted!.detail as { skillId: string; skillMd: { before: string; after: string }; description: { before: string; after: string } };
+    expect(rd.skillId).toBe(existing!.id);
+    expect(rd.description).toEqual({ before: "New", after: "Old" });
+    expect(rd.skillMd.before).toContain("NEW");
+    expect(rd.skillMd.after).toContain("OLD");
   });
 
   it("Revert drops a lesson from the brief, and refuses when it is no longer there", async () => {
@@ -832,7 +904,7 @@ describe("checking a change's result (part 4)", () => {
     const [now] = await c.db.select().from(skills).where(eq(skills.id, existing!.id));
     expect(Buffer.from(now!.files[0]!.content, "base64").toString("utf8")).toContain("OWNER EDIT");
     expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("stale");
-    expect((await changeRow(c, ch!.id)).status).toBe("applied");
+    expect((await changeRow(c, ch!.id)).status).toBe("skipped");
   });
 
   it("a playbook's check while the nomination is pending offers a Revert that cancels it, and the card can be closed", async () => {

@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, projects, ticketDependencies, tickets, workflowColumns } from "../src/db/schema.js";
+import { agents, decisions, projects, ticketDependencies, tickets, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -72,6 +72,45 @@ describe("ticket versions (R81)", () => {
     // The version the agent had is now stale.
     expect((await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "done", expected_version: 1, summary: "Finished." } })).isError).toBe(true);
     await c.close();
+  });
+
+  // BOS-897: assign_ticket and update_ticket checked the version on a read, then wrote with no version
+  // in the UPDATE, so a change landing in between was overwritten. The race is staged by renaming the
+  // ticket just before the tool's write reaches the work service.
+  function raceBeforeWrite() {
+    const real = ctx.work.updateTicket.bind(ctx.work);
+    ctx.work.updateTicket = async (id, patch) => {
+      await ctx.db.update(tickets).set({ title: "Renamed by someone else" }).where(eq(tickets.id, id));
+      return real(id, patch);
+    };
+  }
+  const ceoName = async () => (await ctx.db.select({ name: agents.name }).from(agents).where(eq(agents.id, ctx.co.ceo.id)))[0]!.name;
+
+  it("assign_ticket refuses a change that lands between its read and its write", async () => {
+    const c = await agent();
+    raceBeforeWrite();
+    const res = await c.callTool({ name: "assign_ticket", arguments: { ticketId: ctx.ticketId, agent: await ceoName(), note: "Yours.", expected_version: 1 } });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/Nothing changed: the ticket changed since you last saw it \(you had version 1\)\. It is now in_progress, assigned to nobody, version 2/);
+    // Still unassigned, so nobody was woken (onAssigned only fires after a write).
+    expect(await row()).toMatchObject({ assigneeAgentId: null, title: "Renamed by someone else", version: 2 });
+    await c.close();
+  });
+
+  it("update_ticket refuses a change that lands between its read and its write", async () => {
+    const c = await agent();
+    raceBeforeWrite();
+    const res = await c.callTool({ name: "update_ticket", arguments: { ticketId: ctx.ticketId, body: "New body", reason: "Clearer.", expected_version: 1 } });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/Nothing changed: the ticket changed since you last saw it \(you had version 1\)/);
+    expect(await row()).toMatchObject({ body: null, title: "Renamed by someone else", version: 2 });
+    await c.close();
+  });
+
+  it("updateTicket writes with a matching version, and without one as before", async () => {
+    expect(await ctx.work.updateTicket(ctx.ticketId, { title: "A", expectedVersion: 1 })).toMatchObject({ title: "A", version: 2 });
+    await expect(ctx.work.updateTicket(ctx.ticketId, { title: "B", expectedVersion: 1 })).rejects.toThrow(/Nothing changed/);
+    expect(await ctx.work.updateTicket(ctx.ticketId, { title: "C" })).toMatchObject({ title: "C", version: 3 });
   });
 
   it("refuses blocked with nothing open holding the ticket, and points to raise_decision", async () => {

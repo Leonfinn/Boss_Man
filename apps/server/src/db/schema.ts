@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -62,6 +62,8 @@ export const companies = pgTable("companies", {
   goalCheckDays: integer("goal_check_days").notNull().default(14),
   /** Most nudges the company's agents may send each other in an hour (BOS-73); past it they write on the ticket instead. */
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
+  /** Most minutes one run may go before the server stops it (BOS-846); null means no limit. */
+  maxRunMinutes: integer("max_run_minutes"),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
@@ -71,6 +73,17 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /**
+   * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
+   * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
+   */
+  fenceMode: text("fence_mode", { enum: FENCE_MODES }).notNull().default("watch"),
+  /**
+   * When the owner last chose the fence mode (Settings or the fence card, BOS-940); null while the mode is
+   * only the default. Only an unchosen mode is ever changed by Boss Man (fence-default.ts), and only an
+   * unchosen Off gets the card.
+   */
+  fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -78,6 +91,10 @@ export const companies = pgTable("companies", {
   watchdogTrippedReason: text("watchdog_tripped_reason"),
   /** Written by the sweep only, so it never overwrites the owner's settings. */
   watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
+  /** Spare-capacity rules (BOS-659): when the sweep first found the company under-used while work waits; null once it is busy again. */
+  watchdogSpareAt: timestamp("watchdog_spare_at", { withTimezone: true }),
+  /** ...and when it last told the CEO about it, so it says so once per quiet stretch. */
+  watchdogSpareAlertedAt: timestamp("watchdog_spare_alerted_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),
@@ -158,6 +175,8 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** The git commit the runner image was built from (BOS-764), from its last hello; null for an image built before it was recorded. */
+  imageCommit: text("image_commit"),
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -195,6 +214,22 @@ export const runnerEvents = pgTable(
   ],
 );
 
+/**
+ * How many times applying one event of a runner has failed transiently (BOS-606), kept apart from the
+ * event row because a retry rolls that row back and the count must survive it. An event that keeps
+ * failing with no code is stored, marked and acked after a few tries so it can't stall the stream.
+ * The row is removed once the event lands or is skipped.
+ */
+export const runnerEventAttempts = pgTable(
+  "runner_event_attempts",
+  {
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    tries: integer("tries").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.runnerId, t.seq] })],
+);
+
 // ---------- Work structure ----------
 
 export const systemState = pgEnum("system_state", ["backlog", "ready", "in_progress", "blocked", "review", "done"]);
@@ -212,10 +247,17 @@ export const projects = pgTable("projects", {
   /** The git host ("github" or "gitea") and its API base, detected from the repo address (R59). */
   gitHost: text("git_host"),
   gitApiBase: text("git_api_base"),
+  /** The owner (or an import they ticked) let this project's git host reach a private address, so the network guard keeps it (BOS-708). */
+  allowPrivate: boolean("allow_private").notNull().default(false),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
   deepVerifyCommand: text("deep_verify_command"),
+  /** Whether the default branch passes its check: green, red or unknown. Set by the merge gate (BOS-316). While red, only fixes for main are checked. */
+  mainState: text("main_state").notNull().default("unknown"),
+  mainStateSince: timestamp("main_state_since", { withTimezone: true }),
+  /** The commit on the default branch that the gate last found red (or green). */
+  mainStateCommit: text("main_state_commit"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   /** Starred projects show under Projects in the sidebar. */
@@ -300,6 +342,12 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
+    mergedAt: timestamp("merged_at", { withTimezone: true }),
+    touchesRunner: boolean("touches_runner"),
+    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    goLiveWait: text("go_live_wait"),
+    goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -349,10 +397,19 @@ export const tickets = pgTable(
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
     ownerSetup: text("owner_setup"),
+    /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
+     * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
+    ownerSetupOverride: text("owner_setup_override"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /**
+     * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
+     * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
+     * A deploy card whose range carries a marked merge leads with it and pages the owner once.
+     */
+    fixesLive: text("fixes_live"),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -362,6 +419,8 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
+    stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -369,6 +428,14 @@ export const tickets = pgTable(
     /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
     blockedUntil: timestamp("blocked_until", { withTimezone: true }),
     blockedUntilReason: text("blocked_until_reason"),
+    /** The branch head the missed-work sweep last saw, and when it changed (BOS-612): a new commit is progress, a run start is not. */
+    progressHead: text("progress_head"),
+    progressAt: timestamp("progress_at", { withTimezone: true }),
+    /** The CEO's plan for this ticket and its deadline (BOS-612): the stuck alert stays quiet until the deadline plus a grace, then raises one card. */
+    ceoPlan: text("ceo_plan"),
+    ceoPlanDeadline: timestamp("ceo_plan_deadline", { withTimezone: true }),
+    /** When the "plan deadline passed" card was raised, so it comes once per plan. */
+    ceoPlanAlertedAt: timestamp("ceo_plan_alerted_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -413,7 +480,8 @@ export const decisions = pgTable("decisions", {
   staleReason: text("stale_reason"),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
-  (t) => [index("decisions_status").on(t.status)],
+  // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
+  (t) => [index("decisions_status").on(t.status), index("decisions_company_status").on(t.companyId, t.status)],
 );
 
 export const engagementStatus = pgEnum("engagement_status", [
@@ -466,6 +534,8 @@ export const ticketDependencies = pgTable(
     blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     blockerEngagementId: uuid("blocker_engagement_id").references(() => engagements.id, { onDelete: "cascade" }),
     blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+    /** When a ticket blocker counts as finished: its merge commit on main ("merged") or its done state ("done", BOS-989). */
+    until: text("until", { enum: ["merged", "done"] }).notNull().default("done"),
   },
   (t) => [
     check(
@@ -568,6 +638,8 @@ export const runs = pgTable("runs", {
   outcome: text("outcome"),
   /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  /** Why Boss Man itself stopped the run, e.g. "run time limit (90 min)" (BOS-846); becomes the outcome "stopped: <reason>". */
+  stopReason: text("stop_reason"),
   /** When the run last posted on its ticket (a reply or a state note); silence is measured from it (BOS-314). */
   lastPostAt: timestamp("last_post_at", { withTimezone: true }),
   /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
@@ -753,6 +825,15 @@ export const deploys = pgTable("deploys", {
   /** The run that carries the deploy out; only it receives the target's secrets. */
   runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
   outcome: text("outcome"),
+  /** The full sha `ref` resolved to when the deploy was asked for (DR-033); null when it isn't a git ref or couldn't be read. */
+  commit: text("commit"),
+  /** The deploy tag (DR-033): the target's tag name, the remote's sha before and after the move, when, and how it went. */
+  tagName: text("tag_name"),
+  tagFrom: text("tag_from"),
+  tagTo: text("tag_to"),
+  tagAt: timestamp("tag_at", { withTimezone: true }),
+  /** "pending", "moved", "unchanged", or "skipped: <why>" / "failed: <git's text>". Null: the target has no tag, or the deploy hasn't finished. */
+  tagResult: text("tag_result"),
   createdAt: createdAt(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
@@ -802,6 +883,10 @@ export const policyRules = pgTable("policy_rules", {
   condition: jsonb("condition").notNull().default({}),
   outcome: policyOutcome("outcome").notNull(),
   position: integer("position").notNull().default(0),
+  /** Who made the rule, when and from which card (BOS-294). Null on rules made before these were recorded. */
+  createdAt: timestamp("created_at", { withTimezone: true }),
+  createdBy: text("created_by"),
+  sourceDecisionId: uuid("source_decision_id").references(() => decisions.id, { onDelete: "set null" }),
 });
 
 // ---------- Loop guards (R49, R50) ----------
@@ -845,6 +930,45 @@ export const reviewRequests = pgTable(
 );
 
 /**
+ * A reviewer's "passed, but hold the merge" (BOS-808). The review itself stays approved; nothing merges while a hold
+ * is open. Kept apart from ticket_dependencies so a held ticket is never shown as "Blocked by" nor released by the
+ * blocker sweep. One open hold per ticket.
+ */
+export const reviewHolds = pgTable(
+  "review_holds",
+  {
+    id: id(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** The reviewer's slot that carried the pass, so a cancel can put it back to pending. */
+    reviewRequestId: uuid("review_request_id").references(() => reviewRequests.id, { onDelete: "set null" }),
+    reviewerAgentId: uuid("reviewer_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    /** The date the hold ends, if it has one. */
+    releaseAt: timestamp("release_at", { withTimezone: true }),
+    /** open, released (merge went on) or cancelled (the pass was withdrawn). */
+    status: text("status").notNull().default("open"),
+    closedBy: text("closed_by"),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    /** When the reviewer was woken to re-check, once every wait had closed. */
+    wokenAt: timestamp("woken_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("review_holds_one_open").on(t.ticketId).where(sql`${t.status} = 'open'`), index("review_holds_ticket").on(t.ticketId)],
+);
+
+/** What a hold waits on: one ticket or one decision per row. */
+export const reviewHoldWaits = pgTable(
+  "review_hold_waits",
+  {
+    id: id(),
+    holdId: uuid("hold_id").notNull().references(() => reviewHolds.id, { onDelete: "cascade" }),
+    blockerTicketId: uuid("blocker_ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    blockerDecisionId: uuid("blocker_decision_id").references(() => decisions.id, { onDelete: "cascade" }),
+  },
+  (t) => [check("review_hold_waits_one_blocker", sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerDecisionId}) = 1`), index("review_hold_waits_hold").on(t.holdId)],
+);
+
+/**
  * One row per ticket state change, written by the same database trigger that keeps state_changed_at,
  * so every write path counts (docs/19-workflow-retros.md).
  */
@@ -877,7 +1001,49 @@ export const checkResults = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     detail: text("detail"),
   },
-  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at), index("check_results_company_at").on(t.companyId, t.at)],
+);
+
+/**
+ * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
+ * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
+ * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
+ */
+export const checkJobs = pgTable(
+  "check_jobs",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    /** quick or full: how wide the check is. A passed full check satisfies a quick request on the same tree. */
+    scope: text("scope").notNull().default("full"),
+    commit: text("commit").notNull(),
+    tree: text("tree").notNull(),
+    state: text("state").notNull().default("queued"),
+    /** 0 urgent, 1 normal (see check-gate.ts checkPriority); lower goes first within a kind. */
+    priority: integer("priority").notNull().default(1),
+    /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
+    fixesMain: boolean("fixes_main").notNull().default(false),
+    /** The agent to wake with the result. */
+    requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
+    runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    command: text("command"),
+    exitCode: integer("exit_code"),
+    /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
+    reason: text("reason"),
+    logTail: text("log_tail"),
+    queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    lastOutputAt: timestamp("last_output_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("check_jobs_state_queued").on(t.state, t.queuedAt),
+    index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
+    index("check_jobs_project_tree").on(t.projectId, t.tree),
+  ],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
@@ -950,7 +1116,10 @@ export const failureSignatures = pgTable(
     sample: text("sample").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+  (t) => [
+    index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt),
+    index("failure_signatures_company_recent").on(t.companyId, t.createdAt),
+  ],
 );
 
 /** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */
@@ -997,6 +1166,12 @@ export const notifications = pgTable(
     decisionId: uuid("decision_id").unique().references(() => decisions.id, { onDelete: "cascade" }),
     pushedAt: timestamp("pushed_at", { withTimezone: true }),
     pushError: text("push_error"),
+    /** Why this one counted as urgent enough for the phone (BOS-1097); null when it never pushed. */
+    pushReason: text("push_reason"),
+    /** When the push was cleared from the phone after its card settled (BOS-1097). */
+    pushClearedAt: timestamp("push_cleared_at", { withTimezone: true }),
+    /** Why a clear did not happen, e.g. the ntfy server is too old to clear (BOS-1097). */
+    pushClearNote: text("push_clear_note"),
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
@@ -1006,6 +1181,42 @@ export const notifications = pgTable(
     // Every /api/notifications GET marks the unread ones for settled decisions (BOS-407).
     index("notifications_unread_decision").on(t.decisionId).where(sql`${t.readAt} is null`),
   ],
+);
+
+/**
+ * Single-use links behind a phone push's Approve button (BOS-243). Only the SHA-256 of the token is
+ * kept; the token itself lives only in the push. `decisionRev` pins the card as it was when the push
+ * went out, so a rewritten card refuses the tap. At most one live token per decision.
+ */
+export const approveTokens = pgTable(
+  "approve_tokens",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    decisionId: uuid("decision_id").notNull().references(() => decisions.id, { onDelete: "cascade" }),
+    /** The option a tap submits: the card's recommended option when the push went out, never anything else. */
+    answer: text("answer").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    decisionRev: text("decision_rev").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("approve_tokens_live").on(t.decisionId).where(sql`${t.usedAt} is null and ${t.revokedAt} is null`), index("approve_tokens_company_expires").on(t.companyId, t.expiresAt)],
+);
+
+/** Taps on the phone Approve endpoint, for its rate limit (BOS-243). Kept a day. */
+export const phoneActionHits = pgTable(
+  "phone_action_hits",
+  {
+    id: id(),
+    ip: text("ip").notNull(),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("phone_action_hits_ip_at").on(t.ip, t.at), index("phone_action_hits_company_at").on(t.companyId, t.at)],
 );
 
 /**
@@ -1084,6 +1295,8 @@ export const agentNotes = pgTable(
     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Optional day (YYYY-MM-DD) after which the note shows "review due" (BOS-1170). */
+    reviewBy: date("review_by", { mode: "string" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1209,6 +1422,10 @@ export const feedbackSettings = pgTable("feedback_settings", {
   portalToken: text("portal_token").unique(),
   portalTitle: text("portal_title"),
   portalIntro: text("portal_intro"),
+  /** Where the portal's "← Back to …" links go: an https address on the owner's own site (BOS-967). */
+  portalBackUrl: text("portal_back_url"),
+  /** The words after "← Back to "; empty means the portal's heading. */
+  portalBackText: text("portal_back_text"),
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
@@ -1253,8 +1470,12 @@ export const features = pgTable(
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
+    keepOffPortal: boolean("keep_off_portal").notNull().default(false),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
+    /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */
+    publicTitle: text("public_title"),
     /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
     showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
@@ -1436,7 +1657,11 @@ export const activity = pgTable(
      */
     detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
-  (t) => [index("activity_company_at").on(t.companyId, t.at)],
+  (t) => [
+    index("activity_company_at").on(t.companyId, t.at),
+    // A ticket's merge-line timeline (BOS-769): each event reads the ticket's last row to close an open hold.
+    index("activity_merge_line").on(t.ticketId, t.at).where(sql`${t.kind} = 'merge_line'`),
+  ],
 );
 
 // ---------- Scrum Master watchdog (BOS-58) ----------
@@ -1618,6 +1843,8 @@ export const mcpServers = pgTable(
     /** {secret} is replaced by the runner with the value of secret_env. */
     headerValue: text("header_value").notNull().default("Bearer {secret}"),
     secretEnv: text("secret_env"),
+    /** The owner let this entry resolve to a private address on purpose (an import tick, or a host they added that lives on the LAN), so the network guard keeps it (BOS-708). */
+    allowPrivate: boolean("allow_private").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],
@@ -1651,3 +1878,27 @@ export const agentAvatars = pgTable("agent_avatars", {
   /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
   imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });
+
+// ---------- Device profiles (BOS-641) ----------
+
+/**
+ * The owner's own browsers measure their screens (width, height, the real 100vh/100dvh/100svh/lvh,
+ * visual viewport, pixel ratio, touch, standalone mode) and report them here, so a layout ticket is
+ * checked at the real device, not a guessed emulated size. One row per signed-in browser, replaced
+ * on each report through its fingerprint. Only screen facts are kept: no personal data.
+ */
+export const deviceProfiles = pgTable(
+  "device_profiles",
+  {
+    id: id(),
+    ownerId: uuid("owner_id").notNull().references(() => owners.id, { onDelete: "cascade" }),
+    /** Kept by the browser in local storage, so a second report replaces its row. */
+    fingerprint: text("fingerprint").notNull(),
+    label: text("label").notNull(),
+    browser: text("browser").notNull(),
+    /** Each reading's measured units, load and after the first scroll, in report order. */
+    readings: jsonb("readings").$type<DeviceMeasures[]>().notNull(),
+    reportedAt: timestamp("reported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("device_profiles_owner_fingerprint").on(t.ownerId, t.fingerprint), index("device_profiles_owner").on(t.ownerId)],
+);

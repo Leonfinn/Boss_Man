@@ -1,20 +1,20 @@
-import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { randomBytes, randomUUID } from "node:crypto";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, getTableName, inArray, ne, sql } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite, type Db } from "../src/db/client.js";
+import { signedInOwner } from "./helpers/owner-session.js";
+import type { Db } from "../src/db/client.js";
+import { sharedDatabase } from "./helpers/shared-server.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
+import { HELD_AGENT } from "../src/services/fair-share.js";
 import { effectiveDueDate, rankDecision, ticketRef, type BlockedTicket } from "@boss-man/shared";
-import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, keyResults, milestones, notifications, objectives, runs, runners, skillProposals, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
-afterEach(async () => {
-  await ctx.app.close();
-  await ctx.close();
-});
+afterEach(() => ctx?.offline());
 
 type Row = { id: string; kind: string; question: string; recommendedOption: string; score: number; reasons: string[]; blocks: Array<{ ticketId: string; depth: number }>; dueDate: string | null };
 
@@ -47,14 +47,30 @@ function countReads(inner: Db) {
   return { db, reads };
 }
 
+// One database and one app for the file, the database emptied before each test (BOS-686). Every test makes
+// its own company, owner, runner and agents, and reads only within them. The app's clock is `offset`, which
+// each test sets back to 0.
+let offset = 0;
+const clock = () => new Date(Date.now() + offset);
+let shared: Awaited<ReturnType<typeof sharedDatabase>>;
+let counted: { db: Db; rawDb: Db; reads: ReturnType<typeof countReads>["reads"] };
+let app: ReturnType<typeof buildApp> | undefined;
+beforeAll(async () => {
+  shared = await sharedDatabase();
+  counted = { rawDb: shared.db, ...countReads(shared.db) };
+});
+afterAll(async () => {
+  await (await app)?.app.close();
+  await shared.close();
+});
+
 async function setup() {
-  const { db: rawDb, close } = await openPglite();
-  const { db, reads } = countReads(rawDb);
-  let offset = 0;
-  const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
-  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
-  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  await shared.reset();
+  const { db, rawDb, reads } = counted;
+  Object.assign(reads, { on: false, queries: 0, rows: 0, byTable: {} });
+  offset = 0;
+  const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock }));
+  const cookie = await signedInOwner(rawDb);
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Customer app" })).json() as { id: string };
@@ -75,7 +91,7 @@ async function setup() {
   const alerts = async () => (await built.decisions.queue({ includeAll: true, companyId: company.id })) as unknown as Row[];
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; neverStartedRuns: number; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, req, company, ceo, worker, project, commands, emit, ticket, queue, alerts, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -110,6 +126,280 @@ describe("ranked decision queue (R20)", () => {
     const q = await ctx.queue();
     expect(q.map((r) => r.id)).toEqual([idle.id, urgent.id]);
     expect(q[0]!.score).toBeLessThan(q[1]!.score);
+  });
+
+  // BOS-804: the card read "Raised just now" for a card 8 minutes old, and every card carried "Score 0: 0 for waiting".
+  // Both were the app's, not the design note's seed scripts: the age words came from the rank reasons, which use
+  // whole hours, and the age part is under 1 for anything raised within a day, so it rounded to 0 on every new card.
+  it("a normal card 8 minutes old scores 0 but still ranks its age as 'Raised just now'", async () => {
+    ctx = await setup();
+    const fresh = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+    // A new card blocks nothing and is due nothing, so only the age scores. One point a day rounded to a whole
+    // point leaves the age part at 0 for anything under ~2.4 hours (8 min => 0.006 => 0.0), which is why every
+    // new card showed "Score 0: 0 for waiting". The reason itself is still "Raised just now" under an hour, so
+    // the card needed its own age label (BOS-804).
+    ctx.advance(8 * 60 * 1000);
+    const [after] = (await ctx.queue()) as unknown as Array<Row & { parts: { age: number } }>;
+    expect(after!.id).toBe(fresh.id);
+    expect(after!.parts.age).toBe(0);
+    expect(Math.round(after!.score)).toBe(0);
+    expect(after!.reasons).toContain("Raised just now");
+  });
+
+  describe("do-this-next ordering and the waiting group (BOS-551)", () => {
+    type Ordered = Row & { step?: number | null; waiting?: string | null; doAfter?: string[]; doBefore?: string[] };
+    const ordered = async () => (await ctx.queue()) as unknown as Ordered[];
+
+    it("numbers hands-on cards and puts them in do-this-next order, respecting do after / do before", async () => {
+      ctx = await setup();
+      const q = (await ctx.queue()) as unknown as Ordered[];
+      expect(q).toEqual([]);
+      // Three cards that all need the owner's hands, raised newest-first: update, measure, setup.
+      const setupCard = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Turn on ntfy", options: ["Done", "Skip"], recommended: "Done", steps: ["Open Settings → Add-ons → ntfy."] });
+      ctx.advance(HOUR);
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      ctx.advance(HOUR);
+      // The update must happen after the measurement (a restart resets the reading), expressed as doAfter on the update.
+      const update = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Update to ad845180", options: ["Done", "Skip"], recommended: "Done", steps: ["Apply the update."], doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      ctx.advance(HOUR);
+      // The setup must happen before the measurement.
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doBefore":[{"decisionId":"${sql.raw(measure.id)}","label":"Read the memory figure"}]}'::jsonb` }).where(eq(decisions.id, setupCard.id));
+
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(new Set(rows.map((r) => r.id))).toEqual(new Set([setupCard.id, measure.id, update.id]));
+      // Measurement and update: the measure (step before update) plus an independent setup.
+      const step = (id: string) => rows.find((r) => r.id === id)!.step!;
+      expect(step(measure.id)).toBeLessThan(step(update.id));
+      expect(step(setupCard.id)).toBeLessThan(step(measure.id));
+      expect(rows).toEqual([...rows].sort((a, b) => a.step! - b.step!));
+      // Labels show on the card that has the link.
+      expect(rows.find((r) => r.id === update.id)!.doAfter).toEqual(["Read the memory figure"]);
+    });
+
+    it("keeps today's newest-first order for cards with no ordering info, and never numbers cards that need no hands-on work", async () => {
+      ctx = await setup();
+      const older = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+      ctx.advance(HOUR);
+      const newer = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Which domain?", options: ["A", "B"], recommended: "A" });
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(rows.map((r) => r.id)).toEqual([newer.id, older.id]);
+      expect(rows.every((r) => r.step == null)).toBe(true);
+    });
+
+    it("puts a card the owner already acted on into the waiting group at the bottom, with a reason", async () => {
+      ctx = await setup();
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+
+      const rows = await ordered();
+      // The waiting card is last, is marked, and the hands-on card is numbered.
+      expect(rows[rows.length - 1]!.id).toBe(stale.id);
+      expect(rows[rows.length - 1]!.waiting).toMatch(/checking whether this is still needed/i);
+      expect(rows[0]!.id).toBe(hands.id);
+      expect(rows[0]!.step).toBe(1);
+    });
+
+    it("keeps a flagged card that holds up a live ticket answerable, and the Board links to that exact card (BOS-1159)", async () => {
+      ctx = await setup();
+      const ticket = await ctx.ticket({ title: "Close the loop", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const asked = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.worker.id, question: "Press Build and update runners?", options: ["Done", "Not yet"], recommended: "Done", blocksTicketId: ticket.id });
+      // The owner acted on the ticket, so the card is flagged "may be out of date" (as ownerActed does).
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you replied" }).where(eq(decisions.id, asked.id));
+
+      const row = (await ordered()).find((r) => r.id === asked.id)!;
+      expect(row.waiting).toBeUndefined();
+      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
+
+      // The Board's button names the card, not just the page.
+      const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ id: string; ownerQuestionId: string | null }>;
+      expect(board.find((x) => x.id === ticket.id)!.ownerQuestionId).toBe(asked.id);
+    });
+
+    it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
+      ctx = await setup();
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      // A merge card whose check failed: the ticket went back to the agent (in progress).
+      const ticket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: ticket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const w = rows.find((r) => r.id === sentBack!.id)!;
+      expect(w.waiting).toMatch(/merge check failed/i);
+      expect(w.waiting).toMatch(/Engineer/);
+      // It is last, and the hands-on card keeps its step.
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+      expect(rows.find((r) => r.id === hands.id)!.step).toBe(1);
+    });
+
+    it("never folds a hands-on card into the waiting group just because its ticket is in progress (BOS-551 follow-up)", async () => {
+      ctx = await setup();
+      // A memory reading the owner must take before a server update that resets it. Its ticket is in
+      // progress (an agent may hold it while the owner's card is open: starting a ticket ignores decision
+      // blockers), so a naive "in progress means waiting" rule would hide it behind the update.
+      const ticket = await ctx.ticket({ title: "Take the memory reading", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."], blocksTicketId: ticket.id });
+      // The question above blocks its ticket; the reading must still keep its buttons.
+      await ctx.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, ticket.id));
+      ctx.advance(HOUR);
+      const update = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Update to ad845180", options: ["Done", "Skip"], recommended: "Done", steps: ["Apply the update."], doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      // A separate merge card whose ticket genuinely went back to an agent (in progress).
+      const mergeTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: mergeTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+
+      const rows = await ordered();
+      const reading = rows.find((r) => r.id === measure.id)!;
+      const upd = rows.find((r) => r.id === update.id)!;
+      // The reading has answer buttons: it is not in the waiting group, and it is numbered before the update.
+      expect(reading.waiting).toBeUndefined();
+      expect(reading.step).toBe(1);
+      expect(upd.waiting).toBeUndefined();
+      expect(upd.doAfter).toEqual(["Read the memory figure"]);
+      expect(reading.step!).toBeLessThan(upd.step!);
+      // The merge card still waits: it is the only one folded, and it is last.
+      expect(rows.find((r) => r.id === sentBack!.id)!.waiting).toMatch(/merge check failed/i);
+      expect(rows[rows.length - 1]!.id).toBe(sentBack!.id);
+    });
+
+    it("orders a card that carries a do-after link even when it needs no hands-on work, but never numbers it", async () => {
+      ctx = await setup();
+      const measure = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      ctx.advance(HOUR);
+      // An approval that needs no steps, but must come after the measurement.
+      const approve = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve", doAfter: [{ decisionId: measure.id, label: "Read the memory figure" }] });
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      // The measurement (hands-on) is numbered and comes before the linked approval.
+      expect(rows.find((r) => r.id === measure.id)!.step).toBe(1);
+      expect(rows.find((r) => r.id === approve.id)!.step).toBeUndefined();
+      expect(rows.findIndex((r) => r.id === measure.id)).toBeLessThan(rows.findIndex((r) => r.id === approve.id));
+      expect(rows.find((r) => r.id === approve.id)!.doAfter).toEqual(["Read the memory figure"]);
+    });
+
+    it("breaks a cycle rather than looping, still ordering every card once", async () => {
+      ctx = await setup();
+      const a = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "A", options: ["Done", "Skip"], recommended: "Done", steps: ["Step A."] });
+      const b = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "B", options: ["Done", "Skip"], recommended: "Done", steps: ["Step B."] });
+      // A after B, and B after A: a cycle.
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doAfter":[{"decisionId":"${sql.raw(b.id)}","label":"B"}]}'::jsonb` }).where(eq(decisions.id, a.id));
+      await ctx.db.update(decisions).set({ context: sql`${decisions.context} || '{"doAfter":[{"decisionId":"${sql.raw(a.id)}","label":"A"}]}'::jsonb` }).where(eq(decisions.id, b.id));
+      const rows = (await ordered()).filter((r) => !r.waiting);
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((r) => r.step))).toEqual(new Set([1, 2]));
+    });
+
+    it("drops do after / do before links to another company's open card (BOS-625)", async () => {
+      ctx = await setup();
+      const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+      const foreign = await ctx.decisions.raise({ companyId: other.company.id, agentId: other.ceo.id, question: "Elsewhere's card", options: ["Yes", "No"], recommended: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "My card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: foreign.id, label: "Elsewhere's card" }], doBefore: [{ decisionId: foreign.id, label: "Elsewhere's card" }] });
+      // The raiser is told which links weren't stored, and why.
+      expect(mine.droppedLinks).toEqual([
+        { decisionId: foreign.id, link: "doAfter", reason: "another company" },
+        { decisionId: foreign.id, link: "doBefore", reason: "another company" },
+      ]);
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      const c = row!.context as { doAfter?: unknown[]; doBefore?: unknown[] };
+      expect(c.doAfter ?? []).toEqual([]);
+      expect(c.doBefore ?? []).toEqual([]);
+      // A clean card of my own is still stored and shown, and nothing is reported dropped.
+      const keeps = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Second card", options: ["Done", "Skip"], recommended: "Done", steps: ["Do it."], doAfter: [{ decisionId: mine.id, label: "My card" }] });
+      expect(keeps.droppedLinks).toEqual([]);
+      const [kept] = await ctx.db.select().from(decisions).where(eq(decisions.id, keeps.id));
+      expect((kept!.context as { doAfter?: unknown[] }).doAfter).toEqual([{ decisionId: mine.id, label: "My card" }]);
+    });
+
+    it("drops do after / do before links to an answered card in the same company (BOS-625)", async () => {
+      ctx = await setup();
+      const done = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Answered", options: ["Yes", "No"], recommended: "Yes" });
+      await ctx.req("POST", `/api/decisions/${done.id}/answer`, { answer: "Yes" });
+      const mine = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Late card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: done.id, label: "Answered" }] });
+      // The raiser is told which link wasn't stored, and why; an unknown id is reported too.
+      expect(mine.droppedLinks).toEqual([{ decisionId: done.id, link: "doAfter", reason: "not open" }]);
+      const ghost = randomUUID();
+      const nobody = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Ghost card", options: ["Done", "Skip"], recommended: "Done", doAfter: [{ decisionId: ghost, label: "Ghost" }] });
+      expect(nobody.droppedLinks).toEqual([{ decisionId: ghost, link: "doAfter", reason: "unknown" }]);
+      const [row] = await ctx.db.select().from(decisions).where(eq(decisions.id, mine.id));
+      expect((row!.context as { doAfter?: unknown[] }).doAfter ?? []).toEqual([]);
+    });
+
+    it("the menu badge's count is the queue's actionable cards only: not waiting, superseded, CEO-tier or lesson ones (BOS-969)", async () => {
+      ctx = await setup();
+      // Two cards the owner can act on now.
+      const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
+      const plain = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      // One the owner already acted on: the agent is checking it (superseded → waiting group).
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the other budget?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      // One whose ticket went back to an agent (a merge card in the waiting group).
+      const sentBackTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
+      // One on the CEO tier, still on the ladder: not the owner's to answer yet.
+      const [ceoTier] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "ceo", question: "Merge retry for the CEO", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed", ladder: { rung: "ceo" } } as never }).returning();
+      // One of Boss Man's lesson cards, which are never the owner's in the queue.
+      const [lesson] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "question", tier: "owner", question: "Lesson for the brief?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never }).returning();
+
+      const rows = (await ordered()).map((r) => r.id);
+      expect(new Set(rows)).toEqual(new Set([hands.id, plain.id, stale.id, sentBack!.id]));
+      expect(rows).not.toContain(ceoTier!.id);
+      expect(rows).not.toContain(lesson!.id);
+      // The one shared count: the menu badge and the page heading come from it.
+      const tally = async (query = "") => (await ctx.req("GET", `/api/decisions/tally${query}`)).json() as { open: number; waiting: number };
+      expect(await tally()).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?companyId=${ctx.company.id}`)).toEqual({ open: 2, waiting: 2 });
+      // A company with no cards of its own reads zero, whatever this one holds.
+      const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+      expect(await tally(`?companyId=${other.company.id}`)).toEqual({ open: 0, waiting: 0 });
+      // (BOS-996) The page no longer sends its own figures, and if a stale tab still does, the server
+      // ignores them: the tally is the server's alone.
+      expect(await tally(`?open=1&waiting=1`)).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?open=99&waiting=99`)).toEqual({ open: 2, waiting: 2 });
+      expect(await tally(`?open=0&waiting=0`)).toEqual({ open: 2, waiting: 2 });
+
+      // A card moving between groups changes the count on the next read, the way the live badge follows it.
+      // These writes go straight to the table (as another process might), so step past the few-seconds
+      // kept tally first (BOS-996).
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: null, staleReason: null }).where(eq(decisions.id, stale.id));
+      expect(await tally()).toEqual({ open: 3, waiting: 1 });
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, plain.id));
+      expect(await tally()).toEqual({ open: 2, waiting: 2 });
+      // Answering the hands-on card drops it out of both figures at once: an answer clears the kept tally.
+      await ctx.req("POST", `/api/decisions/${hands.id}/answer`, { answer: "Done" });
+      expect(await tally()).toEqual({ open: 1, waiting: 2 });
+    });
+
+    it("the badge, the heading and the dashboard share one read of the queue for a few seconds (BOS-996)", async () => {
+      ctx = await setup();
+      await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
+      // Count the reads of the decisions table, the queue walk's own first select: the tally keeps the
+      // figures, not the rows. An answer or a new card clears the kept tally first.
+      const measure = async (url: string) => {
+        ctx.reads.queries = 0;
+        ctx.reads.rows = 0;
+        ctx.reads.byTable = {};
+        ctx.reads.on = true;
+        const r = await ctx.req("GET", url);
+        ctx.reads.on = false;
+        return { body: r.json() as { open: number; waiting: number; stats?: { decisionsWaiting: number } }, queueRows: ctx.reads.byTable.decisions ?? 0 };
+      };
+      const first = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(first.body).toEqual({ open: 1, waiting: 0 });
+      expect(first.queueRows).toBeGreaterThan(0);
+      // The page heading, the menu badge and the dashboard all read one company's view, polling
+      // together a moment later: they share the kept tally, so the queue is not walked again.
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      expect((await measure(`/api/decisions/tally?companyId=${ctx.company.id}`)).queueRows).toBe(0);
+      const dash = await measure(`/api/companies/${ctx.company.id}/dashboard`);
+      expect((dash.body as unknown as { stats: { decisionsWaiting: number } }).stats.decisionsWaiting).toBe(1);
+      expect(dash.queueRows).toBe(0);
+      // Past the few seconds the queue is walked again, so a card moving between groups shows at once.
+      ctx.advance(6_000);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
+      const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
+      expect(later.body).toEqual({ open: 0, waiting: 1 });
+      expect(later.queueRows).toBeGreaterThan(0);
+    });
   });
 
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
@@ -178,6 +468,15 @@ describe("stale blockers (R21)", () => {
     return { domain, tls };
   }
 
+  /** Makes `ticketId` the open security-review task of a skill proposal (BOS-176). */
+  async function reviewTaskFor(ticketId: string) {
+    const [p] = await ctx.db
+      .insert(skillProposals)
+      .values({ companyId: ctx.company.id, name: "tidy", source: "draft", files: [{ path: "SKILL.md", content: "" }], fileHashes: {}, bundleHash: "b".repeat(64), why: "x", hasScripts: false, reviewRequired: true })
+      .returning({ id: skillProposals.id });
+    await ctx.db.update(skillProposals).set({ status: "in_review", reviewTicketId: ticketId }).where(eq(skillProposals.id, p!.id));
+  }
+
   it("flags a blocker idle past the threshold once, and chasing wakes its assignee and restarts the clock", async () => {
     ctx = await setup();
     const { domain } = await blockedPair(ctx.ceo.id);
@@ -214,7 +513,10 @@ describe("stale blockers (R21)", () => {
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
-    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+    // The sweep also asked the CEO to hand out work, as the worker had nothing to do (BOS-615). That wake
+    // then waits 25 hours with no run finishing, so the no-progress alert (BOS-593) rightly wakes the CEO
+    // with a "decision" card too; neither is what this test is about.
+    expect(await ctx.db.select().from(wakes).where(and(ne(wakes.reason, "idle agents"), ne(wakes.reason, "decision"), ne(wakes.reason, "ceo reply")))).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
   });
 
   it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
@@ -251,6 +553,38 @@ describe("stale blockers (R21)", () => {
     const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: other.ceo.id });
     expect(r.statusCode).toBe(422);
     expect(r.body).toContain("Pick someone from the list");
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
+  it("refuses a Reassign that would move an open skill-review task (BOS-176)", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    await reviewTaskFor(domain.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    // The owner hands the card to the CEO, who then tries to reassign the review task.
+    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" })).statusCode).toBe(200);
+    const svc = decisionsService(ctx.db, () => true, ctx.clock);
+    const before = await ctx.db.select().from(wakes);
+    await expect(svc.answer(row!.id, "Reassign", { assigneeAgentId: ctx.worker.id, settledBy: { agentId: ctx.ceo.id } })).rejects.toThrow("only the Security Reviewer and the owner");
+    // The refusal changed nothing: the review task keeps its assignee and nobody was woken.
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+    expect(await ctx.db.select().from(wakes)).toEqual(before);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(after!.status).toBe("open");
+  });
+
+  it("lets the owner reassign an open skill-review task from the card, as the guard does", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(null);
+    await reviewTaskFor(domain.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
   });
@@ -308,6 +642,7 @@ describe("stale blockers (R21)", () => {
     const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
     expect(open).toHaveLength(1);
     expect(open[0]!.question).toContain("Get certs");
+    expect(open[0]!.tier).toBe("ceo"); // BOS-1015: the CEO chases or reassigns first
   });
 
   it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
@@ -329,6 +664,9 @@ describe("stale blockers (R21)", () => {
     };
     await pair("a");
     await pair("b");
+    // The worker is paused so the idle-agents ask to the CEO (BOS-615), whose reads depend on whether the
+    // worker is idle (the done tickets below queue wakes for it), stays out of the count.
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.worker.id));
     ctx.advance(25 * HOUR);
     await ctx.sweep(); // raises both cards, so the measured passes are steady-state
     const two = await measure();
@@ -340,7 +678,9 @@ describe("stale blockers (R21)", () => {
       await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
       loose = waiting;
     }
-    const at = ctx.clock();
+    // Ended over an hour ago: a run that ended cleanly within the hour is the company making progress,
+    // which rightly changes what the no-progress sweep (BOS-593) reads; these are only meant to be unrelated.
+    const at = new Date(ctx.clock().getTime() - 2 * HOUR);
     for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
     expect(await measure()).toEqual(two);
 
@@ -777,6 +1117,53 @@ describe("the server ends runs it can't reach", () => {
     expect(res.lostRuns).toBe(1);
     expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
     expect((await ctx.alerts()).filter((d) => !/could not start/.test(d.question))).toEqual([]);
+  });
+
+  it("closes a run its runner restarted under, after the replay window, so it stops holding its agent (BOS-579)", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    // A reconnect of the same process changes nothing: its runs are still going.
+    // (The restart time is the server's real clock, so this test moves the sweep's clock only after the restart.)
+    await ctx.runners.bootSeen(runner!, "boot-1");
+    expect(ctx.runners.restartedAt(runner!.id)).toBeNull();
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+
+    // The runner restarts, and never reports this run (its record of live runs was lost, say).
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    const held = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "engagement", note: "Engagement: the server is back." });
+    await ctx.scheduler.tick();
+    expect((await ctx.db.select().from(wakes).where(eq(wakes.id, held.id)))[0]!.statusReason).toBe(HELD_AGENT);
+    // Inside the replay window the runner's own "interrupted" reports get their chance first.
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
+
+    const starts = ctx.commands.filter((c) => c.type === "run.start").length;
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).lostRuns).toBe(1);
+    expect(await row(runId)).toMatchObject({ outcome: "lost: runner restarted", endedAt: expect.any(Date) });
+    // The agent's one run slot is free again: the cut-off work is picked up (BOS-574), then the held wake goes next.
+    await ctx.scheduler.tick();
+    const next = ctx.commands.filter((c) => c.type === "run.start") as Extract<RunnerCommand, { type: "run.start" }>[];
+    expect(next).toHaveLength(starts + 1);
+    expect(next.at(-1)!.agentId).toBe(ctx.ceo.id);
+    const [resume] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "resume"));
+    expect(resume).toMatchObject({ status: "launched", resumeRunId: runId });
+  });
+
+  it("leaves a run that started after the runner restarted alone (BOS-579)", async () => {
+    ctx = await setup();
+    const [before] = await ctx.db.select().from(runners).where(eq(runners.companyId, ctx.company.id));
+    await ctx.db.update(runners).set({ bootId: "boot-1" }).where(eq(runners.id, before!.id));
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, before!.id));
+    await ctx.runners.bootSeen(runner!, "boot-2");
+    ctx.advance(1_000);
+    const { runId } = await launched();
+    ctx.advance(3 * HOUR);
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
   });
 
   it("never reaps a run on a connected runner that has sent events", async () => {

@@ -4,10 +4,13 @@
 // its own card, not overruling a person. Agent-raised questions have no conditions and are left to
 // a person, except an add-on's setup card (raise_decision with setsUp, DR-023 D, BOS-522), which goes
 // once that add-on is seen working.
-import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { mergeContext } from "./decision-context.js";
 import type { Db } from "../db/client.js";
-import { decisions, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
+import { signoffClearedReason } from "./signoff.js";
+import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
@@ -16,6 +19,21 @@ export type ClearWhen =
   | { kind: "agentRanOk"; agentId: string }
   | { kind: "ticketDone"; ticketId: string }
   | { kind: "ticketLeft"; ticketId: string; state: string }
+  /** An agent's question names the ticket whose merge settles it (BOS-1161): merged (a merge commit is recorded) or done. */
+  | { kind: "ticketMerged"; ticketId: string }
+  /**
+   * An agent's question waits on a runner rebuild (BOS-1161): the company's runner image is no longer the one it
+   * was when the card was raised (`from`, null when no commit was recorded then), and a commit is now recorded.
+   */
+  | { kind: "runnerRebuilt"; companyId: string; from: string | null }
+  /** An agent's question waits on a deploy containing a commit (BOS-1161): the running server was built from it or from a later merge. `commit` is the full sha. */
+  | { kind: "serverHasCommit"; commit: string }
+  /**
+   * A roadmap feature that had no open ticket now has one (BOS-595): the work for it is underway, so
+   * the CEO's card has done its job. A sub-task alone doesn't count: it belongs to a parent already
+   * counted, so this looks at top-level tickets only.
+   */
+  | { kind: "featureHasTicket"; featureId: string }
   /** Start-failure cards name the wake that failed: the runner must be connected and that wake must have started (BOS-475 E). */
   | { kind: "runnerConnected"; companyId: string; wakeId?: string }
   /** Usage-limit cards: the account has room again (the same test as the scheduler's account pick). */
@@ -27,12 +45,21 @@ export type ClearWhen =
    */
   | { kind: "accountRanOk"; fundingSourceId: string }
   /**
+   * The owner's sign-off card (DR-021): the ticket no longer waits on the sign-off. It was signed off, merged,
+   * cancelled or moved out of review, a new review round started, or its risk no longer needs the owner.
+   */
+  | { kind: "signoffNotWaiting"; ticketId: string }
+  /**
    * An add-on's setup card (DR-023 D): the add-on reads running, seen working after the card was raised.
    * "Running" alone isn't enough: Tailscale stays running for a day after its last request and ntfy until
    * the next push fails, so a card raised to fix one that has just broken would close at once on the old
    * reading (the BOS-469 lesson). A request through the edge or a push that went through since then proves it.
    */
-  | { kind: "addonRunning"; addon: Addon };
+  | { kind: "addonRunning"; addon: Addon }
+  /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
+  | { kind: "companyRanOk"; companyId: string }
+  /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
+  | { kind: "serverCalm"; rule: "memory" | "freezes" };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -57,6 +84,18 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "ticketLeft":
         if (typeof c.ticketId === "string" && typeof c.state === "string") out.push({ kind: "ticketLeft", ticketId: c.ticketId, state: c.state });
         break;
+      case "ticketMerged":
+        if (typeof c.ticketId === "string") out.push({ kind: "ticketMerged", ticketId: c.ticketId });
+        break;
+      case "runnerRebuilt":
+        if (typeof c.companyId === "string" && (c.from === null || typeof c.from === "string")) out.push({ kind: "runnerRebuilt", companyId: c.companyId, from: c.from });
+        break;
+      case "serverHasCommit":
+        if (typeof c.commit === "string" && /^[0-9a-f]{40}$/i.test(c.commit)) out.push({ kind: "serverHasCommit", commit: c.commit.toLowerCase() });
+        break;
+      case "featureHasTicket":
+        if (typeof c.featureId === "string") out.push({ kind: "featureHasTicket", featureId: c.featureId });
+        break;
       case "runnerConnected":
         if (typeof c.companyId === "string") out.push({ kind: "runnerConnected", companyId: c.companyId, ...(typeof c.wakeId === "string" ? { wakeId: c.wakeId } : {}) });
         break;
@@ -66,14 +105,50 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "accountRanOk":
         if (typeof c.fundingSourceId === "string") out.push({ kind: "accountRanOk", fundingSourceId: c.fundingSourceId });
         break;
+      case "companyRanOk":
+        if (typeof c.companyId === "string") out.push({ kind: "companyRanOk", companyId: c.companyId });
+        break;
+      case "signoffNotWaiting":
+        if (typeof c.ticketId === "string") out.push({ kind: "signoffNotWaiting", ticketId: c.ticketId });
+        break;
       case "addonRunning":
         if ((ADDONS as readonly unknown[]).includes(c.addon)) out.push({ kind: "addonRunning", addon: c.addon as Addon });
+        break;
+      case "serverCalm":
+        if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
         break;
       default:
         break;
     }
   }
   return out;
+}
+
+/** What an agent may name in raise_decision's `clearsWhen` (BOS-1161): only conditions Boss Man can check. Each is an alternative. */
+export type ClearsWhenInput = { ticketMerged?: string; ticketDone?: string; runnerRebuilt?: boolean; serverHasCommit?: string };
+
+/**
+ * Turns an agent's `clearsWhen` into stored conditions, or says why it can't. A ticket must be in the company, and a
+ * commit must be one Boss Man can place in merge order (the server has no git), so a condition that could never be
+ * checked is refused now rather than leaving a card that never closes.
+ */
+export async function clearsWhenToConditions(db: Db, companyId: string, input: ClearsWhenInput): Promise<{ error: string } | { clearWhen: ClearWhen[] }> {
+  const out: ClearWhen[] = [];
+  for (const [key, ticketId] of [["ticketMerged", input.ticketMerged], ["ticketDone", input.ticketDone]] as const) {
+    if (!ticketId) continue;
+    const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+    if (!t) return { error: `clearsWhen.${key}: no ticket with that ID in your company.` };
+    out.push(key === "ticketMerged" ? { kind: "ticketMerged", ticketId } : { kind: "ticketDone", ticketId });
+  }
+  if (input.runnerRebuilt) out.push({ kind: "runnerRebuilt", companyId, from: await runnerImageCommit(db, companyId) });
+  if (input.serverHasCommit) {
+    const want = input.serverHasCommit.toLowerCase();
+    const hits = (await mergeCommitOrder(db, companyId)).filter((c) => c.startsWith(want));
+    if (hits.length !== 1) return { error: `clearsWhen.serverHasCommit: ${hits.length ? "that prefix matches more than one merge" : "Boss Man can't place that commit"}; give the full or a longer sha of a commit that a ticket merged as.` };
+    out.push({ kind: "serverHasCommit", commit: hits[0]! });
+  }
+  if (!out.length) return { error: "clearsWhen names no condition. Give ticketMerged, ticketDone, runnerRebuilt or serverHasCommit, or leave clearsWhen out." };
+  return { clearWhen: out };
 }
 
 export type AlertClearingDeps = {
@@ -85,11 +160,14 @@ export type AlertClearingDeps = {
   addons?: () => Promise<AddonFacts>;
   /** Moves a ticket that waited on a closed card back to ready once nothing else holds it, and wakes its assignee. */
   release?: (ticketId: string) => Promise<unknown>;
+  /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
+  serverCalm?: (rule: "memory" | "freezes") => string | null;
+  /** The commit this server was built from (BOSSMAN_COMMIT); without it a "server has commit" condition never clears. */
+  liveCommit?: () => string | null;
   now?: () => Date;
 };
 
 const hhmm = (d: Date) => d.toISOString().slice(11, 16);
-const ago = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 
 export function alertClearing(db: Db, deps: AlertClearingDeps) {
   const now = deps.now ?? (() => new Date());
@@ -126,6 +204,30 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!t) return "the ticket is no longer on record";
         return t.state !== c.state ? `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}` : null;
       }
+      case "ticketMerged": {
+        const [t] = await db.select({ state: tickets.systemState, title: tickets.title, mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, c.ticketId));
+        if (!t) return "the ticket is no longer on record";
+        return t.state === "done" || t.mergeCommit ? `the ticket "${t.title}" is merged` : null;
+      }
+      case "runnerRebuilt": {
+        const image = await runnerImageCommit(db, c.companyId);
+        return image && image !== c.from ? "the runners were rebuilt" : null;
+      }
+      case "serverHasCommit": {
+        const live = deps.liveCommit?.()?.toLowerCase() ?? null;
+        if (!live || !/^[0-9a-f]{40}$/.test(live)) return null;
+        return imageContains(live, c.commit, await mergeCommitOrder(db, card.companyId)) ? "the server running now contains that change" : null;
+      }
+      case "featureHasTicket": {
+        const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        const [t] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(and(eq(tickets.featureId, c.featureId), isNull(tickets.parentTicketId), ne(tickets.systemState, "done")))
+          .limit(1);
+        return t ? `"${f.title}" now has an open ticket` : null;
+      }
       case "runnerConnected": {
         const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, c.companyId));
         if (!runner || !deps.isConnected(runner.id)) return null;
@@ -149,6 +251,20 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
           .limit(1);
         return clean?.endedAt ? `a run on the account succeeded at ${hhmm(clean.endedAt)}` : null;
       }
+      case "companyRanOk": {
+        // Ended after the card, not started after it: a long run that was going all along and then finishes
+        // cleanly is the company moving again. Chat runs, stopped or cancelled runs, and the CEO run that
+        // only read the card (origin "decision") are not progress: the last would close the card at once.
+        const [clean] = await db
+          .select({ endedAt: runs.endedAt })
+          .from(runs)
+          .where(and(eq(runs.companyId, c.companyId), gt(runs.endedAt, card.createdAt), sql`${runs.purpose} is distinct from 'chat'`, sql`${runs.origin} is distinct from 'decision'`, sql`coalesce(${runs.outcome}, '') not like 'error:%'`, sql`coalesce(${runs.outcome}, '') not like 'lost:%'`, sql`coalesce(${runs.outcome}, '') not in ('interrupted', 'cancelled')`, sql`coalesce(${runs.outcome}, '') not like 'stopped%'`))
+          .orderBy(runs.endedAt)
+          .limit(1);
+        return clean?.endedAt ? `a run there finished cleanly at ${hhmm(clean.endedAt)}` : null;
+      }
+      case "signoffNotWaiting":
+        return signoffClearedReason(db, c.ticketId);
       case "addonRunning": {
         const f = (await addonFacts())?.[c.addon];
         if (f?.state !== "running" || !f.since) return null;
@@ -156,6 +272,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         if (!(since.getTime() > card.createdAt.getTime())) return null;
         return `${ADDON_LABELS[c.addon]} is running (${f.source}, at ${hhmm(since)})`;
       }
+      case "serverCalm":
+        return deps.serverCalm?.(c.rule) ?? null;
       default:
         return null;
     }
@@ -194,10 +312,12 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       const note = [...new Set(reasons)].join(", and ");
       const [done] = await db
         .update(decisions)
-        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: { ...(row.context as object), withdrawn: { by: "system", note, at: t.toISOString() } } })
+        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note, at: t.toISOString() } }) })
         .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id, question: decisions.question });
       if (!done) continue;
+      // A sign-off card holds its ticket: the hold goes with it, or the ticket would stay blocked on a closed card.
+      if ((row.context as { type?: string } | null)?.type === "risk_review") await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, row.id));
       closed++;
       // A ticket that waited on the card (a setup card raised with blocksTicketId) waits no longer, the
       // same as when its raiser withdraws it; its assignee is woken with the news.

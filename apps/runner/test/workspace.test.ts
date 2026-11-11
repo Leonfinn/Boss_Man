@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
+import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
+import { branchFor, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -69,6 +70,37 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("recovers by itself when the ticket's branch is checked out in another ticket's folder, or a half-made folder is in the way (BOS-634)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const specB = { projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" };
+    const a = await ws.ensure(specA);
+    const b = await ws.ensure(specB);
+    git(a.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work on A");
+    await ws.release(specA);
+    // An agent working on B switches B's folder onto A's branch, so A's branch is taken. A clone
+    // (BOS-323) has no other ticket's branch to switch to, so only the half-made folder applies.
+    const worktrees = !isClone(b.path);
+    if (worktrees) {
+      git(b.path, "switch", "-q", branchFor(ids.a));
+      writeFileSync(path.join(b.path, "b-note.txt"), "uncommitted\n");
+    }
+    // A half-made folder for A is in the way as well.
+    mkdirSync(ws.ticketDir(ids.a), { recursive: true });
+    writeFileSync(path.join(ws.ticketDir(ids.a), "junk"), "x");
+
+    const back = await ws.ensure(specA);
+    expect(back.created).toBe(true);
+    expect(git(back.path, "log", "-1", "--format=%s")).toBe("work on A");
+    expect(git(back.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    // B's folder keeps its files and uncommitted work, now on a detached HEAD.
+    if (worktrees) {
+      expect(git(b.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
+      expect(readFileSync(path.join(b.path, "b-note.txt"), "utf8")).toBe("uncommitted\n");
+    }
+  });
+
   it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
@@ -99,7 +131,8 @@ describe("git workspaces (R38)", () => {
       ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" }),
     ]);
     expect(a.created && b.created).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
+    if (isClone(a.path)) expect([a.path, b.path].map((p) => git(p, "rev-parse", "--abbrev-ref", "HEAD"))).toEqual([branchFor(ids.a), branchFor(ids.b)]);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
   it("lets seven runs start at once on one repo and all get a workspace", async () => {
@@ -108,7 +141,8 @@ describe("git workspaces (R38)", () => {
     const tickets = Array.from({ length: 7 }, (_, i) => `${i}0000000-0000-4000-8000-000000000000`);
     const made = await Promise.all(tickets.map((ticketId) => ws.ensure({ projectId: ids.project, ticketId, repoUrl: r.dir, baseRef: "main" })));
     expect(made.every((m) => m.created)).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
+    if (isClone(made[0]!.path)) expect(made.every((m) => isClone(m.path))).toBe(true);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
   });
 
   it("passes a git token through the environment only", () => {
@@ -121,16 +155,21 @@ describe("git workspaces (R38)", () => {
   it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
     const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
     expect(env).toMatchObject({
-      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_COUNT: "5",
       GIT_CONFIG_KEY_0: "core.hooksPath",
       GIT_CONFIG_VALUE_0: "/dev/null",
       GIT_CONFIG_KEY_1: "core.fsmonitor",
       GIT_CONFIG_VALUE_1: "false",
-      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_CONFIG_KEY_2: "credential.helper",
+      GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: "commit.gpgSign",
+      GIT_CONFIG_VALUE_3: "false",
+      GIT_CONFIG_KEY_4: "http.extraHeader",
+      GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
     });
-    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
-    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
+    expect(env.GIT_CONFIG_VALUE_4).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "4" });
   });
 
   it("reports a clone that fails", async () => {
@@ -161,6 +200,79 @@ describe("git workspaces (R38)", () => {
     // The agent's own staging area is exactly as it was.
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
+
+  it("measures a review diff from the merge-base with current main, so a branch that merged main shows only its own changes (BOS-694)", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The ticket's own commit.
+    writeFileSync(path.join(w.path, "ticket.txt"), "ours\n");
+    git(w.path, "add", "ticket.txt");
+    git(w.path, "commit", "-qm", "Ticket work");
+    // Main moves on a long way after the branch started.
+    for (let i = 0; i < 5; i++) r.commit(`main ${i + 2}`);
+    const mainTip = git(r.dir, "rev-parse", "HEAD");
+    // The agent merges main in, so the recorded base is now hundreds of commits behind the branch.
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", mainTip);
+
+    // Without a base ref the diff is still the old recorded-base one: it sees main's work too.
+    const stale = await ws.diff(spec);
+    expect(stale.files.map((f) => f.path)).toContain("README.md");
+
+    // With the default branch, it is the branch's own changes, the same file list as `origin/main...HEAD`.
+    const d = await ws.diff(spec, undefined, "main");
+    const byHand = git(w.path, "diff", "--name-only", "origin/main...HEAD").split("\n").filter(Boolean).sort();
+    expect(d.files.map((f) => f.path).sort()).toEqual(byHand);
+    expect(d.files.map((f) => f.path)).toEqual(["ticket.txt"]);
+    // The branch's own commits: its work and the merge that brought main in, but none of main's own commits.
+    expect(d.commits.map((c) => c.subject).filter((s) => !s.startsWith("Merge"))).toEqual(["Ticket work"]);
+    expect(d.commits.map((c) => c.subject)).not.toContain("main 5");
+    // The base is now the merge-base with main, not the ticket's stale recorded start.
+    expect(d.baseCommit).toBe(git(w.path, "merge-base", "origin/main", "HEAD"));
+    expect(d.baseCommit).not.toBe(w.baseCommit);
+  });
+
+  it("falls back to the recorded base when the default branch can't be fetched", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "ticket.txt"), "ours\n");
+    git(w.path, "add", "ticket.txt");
+    git(w.path, "commit", "-qm", "Ticket work");
+    // origin/<baseRef> can't be resolved: the diff still answers from the recorded base.
+    const d = await ws.diff(spec, undefined, "no-such-branch");
+    expect(d.baseCommit).toBe(w.baseCommit);
+    expect(d.files.map((f) => f.path)).toEqual(["ticket.txt"]);
+  });
+
+  it("reports the tree of the head it read, even when a commit lands mid-diff", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const headA = git(w.path, "rev-parse", "HEAD");
+    const treeA = git(w.path, "rev-parse", "HEAD^{tree}");
+    // A commit lands right after the head is read (during the slow steps).
+    const real = (ws as any).git.bind(ws);
+    let landed = false;
+    (ws as any).git = async (args: string[], opts?: unknown) => {
+      const out = await real(args, opts);
+      if (!landed && args[0] === "rev-parse" && args[1] === "HEAD") {
+        landed = true;
+        writeFileSync(path.join(w.path, "later.txt"), "B\n");
+        git(w.path, "add", "later.txt");
+        git(w.path, "commit", "-qm", "later");
+      }
+      return out;
+    };
+    const d = await ws.diff(spec);
+    expect(landed).toBe(true);
+    expect(d.head).toBe(headA);
+    expect(d.tree).toBe(treeA);
   });
 });
 
@@ -262,6 +374,97 @@ describe("workspace clean-up (R54)", () => {
   });
 });
 
+describe("kept scratch per ticket (BOS-592)", () => {
+  it("keeps a ticket's scratch on the workspaces disk, clears it once its work is released and old, and otherwise after a week", async () => {
+    const r = remote();
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const scratch = ws.scratchDir(ids.a);
+    expect(scratch).toBe(path.join(root, "scratch", ids.a));
+    expect(scratch.startsWith(path.join(root, "scratch"))).toBe(true);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "proof.log"), "the whole check\n");
+
+    // A restart is a new process: scratch is on the disk, not in /tmp, so it is still there.
+    const again = new Workspaces(root);
+    expect(readFileSync(path.join(again.scratchDir(ids.a), "proof.log"), "utf8")).toBe("the whole check\n");
+
+    // While the ticket still has its worktree, only the week clears it (here: past the week).
+    const fresh = await again.housekeeping();
+    expect(fresh.scratch).toEqual([{ ticketId: ids.a, bytes: expect.any(Number) }]);
+    expect(existsSync(scratch)).toBe(true);
+    const week = await again.housekeeping(Date.now() + SCRATCH_KEEP_MS + 1000);
+    expect(week.removed).toContain(ids.a);
+    expect(existsSync(scratch)).toBe(false);
+
+    // The ticket's work goes: its scratch goes with it, but only once it is old enough that a run can't be writing.
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "old-proof.log"), "x");
+    await again.release(spec);
+    expect(existsSync(scratch)).toBe(true);
+    const released = await again.housekeeping(Date.now() + RELEASED_SCRATCH_KEEP_MS + 1000);
+    expect(released.removed).toContain(ids.a);
+    expect(existsSync(scratch)).toBe(false);
+  });
+
+  it("only ever touches per-ticket folders of its own scratch, and counts them as used disk", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const mine = ws.scratchDir(ids.a);
+    mkdirSync(mine, { recursive: true });
+    writeFileSync(path.join(mine, "big.bin"), Buffer.alloc(64 * 1024, 1));
+    // Anything else in the folder (a stray name, a file) is left exactly as it is.
+    mkdirSync(path.join(root, "scratch", "not-a-ticket"));
+    writeFileSync(path.join(root, "scratch", "not-a-ticket", "keep.txt"), "x");
+    writeFileSync(path.join(root, "scratch", "loose.txt"), "x");
+    const kept = await ws.housekeeping();
+    expect(kept.scratch).toEqual([{ ticketId: ids.a, bytes: expect.any(Number) }]);
+    expect(kept.usedBytes).toBeGreaterThanOrEqual(kept.scratch![0]!.bytes);
+    expect(kept.removed).toEqual([]);
+    const report = await ws.housekeeping(Date.now() + 8 * 24 * 3_600_000);
+    expect(existsSync(path.join(root, "scratch", "not-a-ticket", "keep.txt"))).toBe(true);
+    expect(existsSync(path.join(root, "scratch", "loose.txt"))).toBe(true);
+    expect(report.removed).toEqual([ids.a]);
+    expect(report.scratch).toEqual([]);
+    expect(existsSync(mine)).toBe(false);
+  });
+
+  it("moves a ticket's own /tmp leftovers into its scratch, once, without following links or overwriting a kept file", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const tmp = mkdtempSync(path.join(tmpdir(), "bm-tmp-"));
+    const scratch = ws.scratchDir(ids.a);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "check-all.log"), "kept\n");
+    mkdirSync(path.join(tmp, ids.a));
+    writeFileSync(path.join(tmp, ids.a, "proof.txt"), "proof\n");
+    writeFileSync(path.join(tmp, `${ids.a}.log`), "log\n");
+    writeFileSync(path.join(tmp, "check-all.log"), "another ticket's log\n");
+    writeFileSync(path.join(tmp, "someone-else.log"), "not mine\n");
+    symlinkSync("/etc/hostname", path.join(tmp, `${ids.a}.link`));
+
+    expect(ws.rescueTmp(ids.a, tmp).sort()).toEqual([ids.a, `${ids.a}.log`].sort());
+    expect(readFileSync(path.join(scratch, ids.a, "proof.txt"), "utf8")).toBe("proof\n");
+    expect(readFileSync(path.join(scratch, `${ids.a}.log`), "utf8")).toBe("log\n");
+    expect(readFileSync(path.join(scratch, "check-all.log"), "utf8")).toBe("kept\n");
+    expect(existsSync(path.join(tmp, "someone-else.log"))).toBe(true);
+    expect(existsSync(path.join(tmp, `${ids.a}.link`))).toBe(true);
+    expect(ws.rescueTmp("../etc", tmp)).toEqual([]);
+  });
+
+  it("finds an image saved in the kept scratch as the ticket's own", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    expect(() => ws.readImage(ids.a, "shot.png")).toThrow();
+    const scratch = ws.scratchDir(ids.a);
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(path.join(scratch, "shot.png"), "png-bytes");
+    expect(ws.readImage(ids.a, "shot.png").base64).toBe(Buffer.from("png-bytes").toString("base64"));
+  });
+});
+
 describe("the git author a rename asks for (BOS-265)", () => {
   it("signs a turn's checkpoint with the agent's current name, and keeps Boss Man's own commits as Boss Man", async () => {
     const r = remote();
@@ -329,6 +532,41 @@ describe("turn checkpoints (R39)", () => {
     // Released: the checkpoints go with the worktree.
     await ws.release(spec);
     expect(git(ws.repoDir(ids.project), "for-each-ref", `refs/bossman/checkpoints/${ids.a}/`)).toBe("");
+  });
+});
+
+// BOS-832: the review-time clash check (BOS-426) must read the same current branch and main the merge gate will.
+describe("the clash check reads a current branch and a current main (BOS-832)", () => {
+  it("reports no clash when the branch already contains origin's main tip", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // The branch and main both touch the same line. The branch commit reaches the shared repo (a turn
+    // checkpoint), then main moves and the agent merges main in on the branch (the HOL-585 shape): the
+    // branch head holds main's tip and merges clean, but the shared ref is still the pre-merge commit.
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    await ws.checkpoint(spec, "after a turn");
+    r.commit("main side");
+    git(w.path, "fetch", "-q", "origin");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-edit", "-X", "ours", "origin/main");
+    // HOL-585's shape: the branch head already holds main's tip, so no clash is possible.
+    expect(git(w.path, "merge-base", "--is-ancestor", git(r.dir, "rev-parse", "main"), "HEAD")).toBe("");
+    expect(await ws.clash(spec, "main")).toEqual({ clashes: false, files: [] });
+  });
+
+  it("still reports a real clash", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "ticket side\n");
+    git(w.path, "commit", "-qam", "ticket side");
+    r.commit("main side");
+    const res = await ws.clash(spec, "main");
+    expect(res.clashes).toBe(true);
+    expect(res.files).toEqual(["README.md"]);
   });
 });
 

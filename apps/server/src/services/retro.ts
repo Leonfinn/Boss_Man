@@ -37,7 +37,7 @@ import { record } from "./activity.js";
 import { checkPolicy, legacyMarks } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
 import { serialiseWrite } from "./wiki.js";
-import { hashFiles } from "./skill-files.js";
+import { hashFiles, skillChangeEntry, skillSide } from "./skill-files.js";
 import { skillMarkdown, skillName, type skillsService } from "./skills.js";
 import type { skillProposalsService } from "./skill-proposals.js";
 import type { agentsService } from "./agents.js";
@@ -454,6 +454,8 @@ export function retroService(
       if (evidence.length < 2) throw new RetroError(422, "A change needs at least 2 different tickets as evidence.");
 
       const plan = await self.plan(companyId, input.lever, input.target, input.change);
+      // A lesson proposal whose card is gone can't be answered, so it must not hold the project's slot.
+      if (input.lever === "lesson") await self.skipOrphanLessons(companyId, { role: plan.role, reason: "Its decision card was gone, so it was closed when a new lesson was proposed." });
       const live = await db
         .select({ id: workflowChanges.id })
         .from(workflowChanges)
@@ -682,6 +684,36 @@ export function retroService(
       return row;
     },
 
+    /**
+     * Proposed lesson changes nobody can answer any more: the decision card was deleted, or it was answered and no
+     * "which line goes" card is open for the project. Optionally only those for one project (targetRole "project:<id>").
+     */
+    async orphanLessons(companyId: string, role?: string) {
+      const rows = await db
+        .select({ id: workflowChanges.id, targetRole: workflowChanges.targetRole })
+        .from(workflowChanges)
+        .leftJoin(decisions, eq(decisions.id, workflowChanges.decisionId))
+        .where(and(eq(workflowChanges.companyId, companyId), eq(workflowChanges.lever, "lesson"), eq(workflowChanges.status, "proposed"), or(isNull(decisions.id), ne(decisions.status, "open")), role ? eq(workflowChanges.targetRole, role) : undefined));
+      if (!rows.length) return [];
+      const replacing = await db.select({ projectId: sql<string>`${decisions.context}->>'projectId'` }).from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'lesson_replace'`));
+      const busy = new Set(replacing.map((r) => `project:${r.projectId}`));
+      return rows.filter((r) => !busy.has(r.targetRole ?? ""));
+    },
+
+    /** Closes orphaned lesson proposals as skipped, so they stop holding the project's one lesson slot. */
+    async skipOrphanLessons(companyId: string, input: { role?: string; changeId?: string; reason: string; reasonLink?: string }) {
+      const reason = checkChangeReason(input.reason);
+      const reasonLink = checkChangeLink(input.reasonLink);
+      const orphans = (await self.orphanLessons(companyId, input.role)).filter((o) => !input.changeId || o.id === input.changeId);
+      if (!orphans.length) return [];
+      const done = await db
+        .update(workflowChanges)
+        .set({ status: "skipped", reason, reasonLink, decidedBy: "ceo" })
+        .where(and(inArray(workflowChanges.id, orphans.map((o) => o.id)), eq(workflowChanges.status, "proposed")))
+        .returning({ id: workflowChanges.id });
+      return done.map((d) => d.id);
+    },
+
     /** The decision was answered: Apply carries the change out (once), anything else skips it. */
     async answered(changeId: string, answer: string, info: { reason: string; reasonLink: string | null; decidedBy: "ceo" | "owner" }) {
       const [c] = await db.select().from(workflowChanges).where(eq(workflowChanges.id, changeId));
@@ -706,9 +738,32 @@ export function retroService(
       try {
         await self.carryOut(claimed);
       } catch (err) {
+        // A change recorded as skipped must not ship: if propose() got as far as storing the proposal,
+        // close it before the change is marked skipped.
+        // `claimed` predates the proposalId carryOut wrote, so read the row again.
+        if (claimed.lever === "playbook") {
+          try {
+            const [fresh] = await db.select({ after: workflowChanges.after }).from(workflowChanges).where(eq(workflowChanges.id, changeId));
+            const proposalId = ((fresh?.after ?? {}) as Record<string, any>).proposalId as string | undefined;
+            if (proposalId) await deps.skillProposals.cancel(c.companyId, proposalId);
+          } catch {
+            /* no proposal was stored, nothing to close */
+          }
+        }
         await db.update(workflowChanges).set({ status: "skipped", appliedAt: null, checkDueAt: null, reason, reasonLink, decidedBy: info.decidedBy }).where(eq(workflowChanges.id, changeId));
         await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not applied (${c.lever}): ${(err as Error).message}`, at: now() });
       }
+    },
+
+    /** The add-a-skill flow ended a nomination without installing it: the playbook change never reached anyone, so it is skipped, not applied. */
+    async proposalEnded(companyId: string, proposalId: string) {
+      const rows = await db
+        .update(workflowChanges)
+        .set({ status: "skipped", checkDueAt: null })
+        .where(and(eq(workflowChanges.companyId, companyId), eq(workflowChanges.lever, "playbook"), eq(workflowChanges.status, "applied"), sql`${workflowChanges.after}->>'proposalId' = ${proposalId}`))
+        .returning({ id: workflowChanges.id });
+      for (const r of rows) await record(db, { companyId, kind: "workflow_change", summary: `Workflow change not applied (playbook): the playbook never reached the agents.`, at: now() });
+      return rows.length;
     },
 
     async carryOut(c: typeof workflowChanges.$inferSelect) {
@@ -897,7 +952,15 @@ export function retroService(
         }
         // Boss Man has no archive for skills: the playbook stays in the library (source "retro") with nobody using it. Only the agents Apply gave it to lose it.
         for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, installed.skill?.name ?? after.name, id);
-        if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
+        if (before.skillId) {
+          const [was] = await db.select().from(skillsTable).where(eq(skillsTable.id, before.skillId));
+          await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
+          // Every change to a skill's bytes leaves an old/new trace (BOS-181), Revert included.
+          if (was) {
+            const entry = skillChangeEntry(before.skillId, skillSide(was), skillSide({ name: was.name, description: before.description, files: before.files }), (from, to) => `Workflow Revert put the playbook ${was.name} back from ${from} to ${to}`, " The earlier version, as before Apply; full text in detail.");
+            await record(db, { companyId: c.companyId, kind: "skill.reverted_by_retro", ...entry, at: now() });
+          }
+        }
       } else if (c.lever === "lesson") {
         // Queued with every wiki write, so the version saved below matches what the page held (BOS-496).
         await serialiseWrite(async () => {

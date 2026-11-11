@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuilds the live blue/green colour in place (docs/06, "Rebuild the live colour in place"), for a change
 # the host deployer refuses (a Dockerfile, compose or script change) or a colour built from an older image.
-# For ordinary app changes use Settings → Updates → Deploy latest instead: that swaps colours with no downtime.
+# For ordinary app changes use Settings → Server and runner → Updates → Deploy latest instead: that swaps colours with no downtime.
 #
 # One step, so the server is never left on standby: back up the database, build the live colour at the
 # checkout's commit, migrate, recreate it, tell it to take charge (SIGUSR2), and wait until /api/ready says
@@ -17,8 +17,58 @@ D="${BOSSMAN_DEPLOYER:-$INSTALL_DIR/deployer}"
 BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-$INSTALL_DIR}"
 WAIT_SECONDS="${REBUILD_WAIT_SECONDS:-180}" POLL_SECONDS="${REBUILD_POLL_SECONDS:-3}"
 export BOSSMAN_DEPLOYER="$D"
+# BEGIN readable-check (the same text is in rebuild-live.sh, host-deployer.sh and deploy.sh; deploy.test.sh keeps them equal)
+# BOS-562: the server image copies file modes as they are on disk and the server runs as user node, so a git-tracked
+# file that others can't read (or a folder they can't read and search) makes it crash at start. Reads modes only and
+# changes nothing. Only tracked paths count: .env, secrets/ and the data folder must stay private.
+unreadable_tracked() { # checkout folder: the tracked files and folders others can't use, one path per line
+  (
+    cd "$1" || exit 0
+    {
+      git ls-files -z | xargs -0 -r stat -c 'f %a %n' --
+      { echo .; git -c core.quotepath=off ls-files | awk '{ while (sub("/[^/]*$", "")) print }'; } | sort -u | tr '\n' '\0' | xargs -0 -r stat -c 'd %a %n' --
+    } 2>/dev/null | while read -r kind mode path; do
+      m=$((8#$mode))
+      if [[ $kind == f ]]; then ((m & 4)) || printf '%s\n' "$path"; else (((m & 5) == 5)) || printf '%s\n' "$path"; fi
+    done
+  ) || true
+}
+readable_problem() { # checkout folder: prints nothing when all is readable, else the message with the fix
+  local dir bad n
+  dir="$(cd "$1" && pwd)" || return 0
+  bad="$(unreadable_tracked "$dir")"
+  [[ -n $bad ]] || return 0
+  n="$(grep -c '' <<<"$bad")"
+  printf "%s file(s) or folder(s) in %s can't be read by the server, which runs as user node and gets the permissions the files have on disk, so it would crash when it starts (a root shell with umask 077 does this to every file git writes). First %s:\n%s\nFix, then run this again:\n  cd %q && git ls-files -z | xargs -0 chmod go+r && git ls-files | awk '{ while (sub(\"/[^/]*\$\", \"\")) print }' | sort -u | xargs -d '\\\\n' chmod go+rx && chmod go+rx ." \
+    "$n" "$dir" "$((n < 10 ? n : 10))" "$(head -n 10 <<<"$bad" | sed 's/^/  /')" "$dir"
+}
+# END readable-check
 step() { printf '\n== %s\n' "$*"; }
 die() { printf '\nSTOPPED: %s\n' "$*" >&2; exit 1; }
+
+# DR-020 G: take the host deployer's lock ($D/lock, the file host-deployer.sh flocks) before reading the live colour or
+# touching anything, so a hand rebuild can't race a deploy's switch-back. Held until this script exits (fd 9).
+[[ -d $D ]] || die "the deployer folder $D doesn't exist, so there is no lock to take. Set BOSSMAN_DEPLOYER to it, then run this again."
+LOCK_WAIT="${REBUILD_LOCK_WAIT_SECONDS:-120}"
+exec 9>"$D/lock" || die "can't open the deployer's lock file $D/lock. Nothing was changed."
+if ! flock -n 9; then
+  echo "The host deployer is running a deploy or a switch-back (it holds $D/lock). Waiting up to ${LOCK_WAIT}s for it to finish..."
+  flock -w "$LOCK_WAIT" 9 || die "the host deployer still holds $D/lock after ${LOCK_WAIT}s, so nothing was changed. Look at the end of $D/deployer.log and the files in $D/state to see what it is doing, wait for it to finish (a deploy or soak switch-back can take several minutes), then run this again."
+fi
+
+# DR-020 G: an update's trial window (the deployer's state/soak) is running. Its next tick re-checks the live colour
+# against the update's commit; a hand rebuild at another commit fails that check and gets switched back to the old
+# colour. So refuse, with the lock held, before anything changes. The file is read the way soak_tick reads it.
+soakfile="$D/state/soak"
+if [[ -f $soakfile && ! -L $soakfile ]]; then
+  soak_deadline="$(sed -n 's/^old=\(blue\|green\) new=\(blue\|green\) deadline=\([0-9]\{1,12\}\) commit=\([0-9a-f]\{40\}\) prev=\([0-9a-f]\{40\}\)$/\3/p' "$soakfile" | head -1)"
+  if [[ -n $soak_deadline ]]; then
+    left=$(((soak_deadline - $(date +%s) + 59) / 60))
+    ((left > 0)) || left=1
+    when="$(date -d "@$soak_deadline" '+%F %H:%M %Z' 2>/dev/null || echo "epoch $soak_deadline")"
+    die "an update's trial window is running until $when. The deployer would switch your rebuild back to the old version. Nothing was changed (no backup, no build). Wait until it ends (about $left min; $soakfile goes away), then run this again."
+  fi
+fi
 
 # The live colour, read the way host-deployer.sh reads it; the include is never followed through a symlink.
 colour="${1:-}"
@@ -29,12 +79,14 @@ if [[ -z $colour ]]; then
 fi
 [[ $colour == blue || $colour == green ]] || die "the colour must be blue or green, not '$colour'."
 commit="$(git rev-parse HEAD)"
+problem="$(readable_problem .)"
+[[ -z $problem ]] || die "$problem"$'\nNothing was changed (no backup, no build).'
 echo "Rebuilding the live colour, $colour, at commit ${commit:0:7}."
 
 step "1/5 Back up the database"
 backup="$BACKUP_DIR/rebuild-$(date +%F-%H%M).sql.gz"
 mkdir -p "$BACKUP_DIR"
-(umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$backup.partial") || { rm -f "$backup.partial"; die "the backup failed; nothing was changed."; }
+(set -o pipefail; umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$backup.partial") || { rm -f "$backup.partial"; die "the backup failed; nothing was changed."; }
 { [[ -s $backup.partial ]] && gzip -t "$backup.partial"; } || { rm -f "$backup.partial"; die "the backup is empty or damaged; nothing was changed."; }
 mv "$backup.partial" "$backup"
 # Same retention as deploy.sh and the host deployer: only rebuild-*.sql.gz, newest 14 kept.
@@ -46,7 +98,7 @@ step "2/5 Build server-$colour"
 BOSSMAN_COMMIT="$commit" docker compose build "server-$colour" || die "the build failed; $colour still runs its old image. Backup: $backup"
 
 step "3/5 Migrate"
-BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"
+BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm --no-deps migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"
 
 step "4/5 Restart server-$colour"
 docker compose up -d --no-deps --force-recreate "server-$colour" || die "the restart failed. Backup: $backup"
@@ -76,4 +128,5 @@ while :; do
 done
 echo "Last answer from /api/ready: ${answer:-none}"
 docker compose logs --tail 200 "server-$colour" 2>&1 | grep LEADER | tail -5 || true
-die "server-$colour didn't become leader at ${commit:0:7} within ${WAIT_SECONDS}s. Last role seen: $last_role. To tell it to take charge by hand: docker compose kill -s SIGUSR2 server-$colour. If another colour is running, it may hold the lock: docker compose ps. Backup: $backup"
+logtail="$(docker compose logs --no-color --tail 20 "server-$colour" 2>&1 | cut -c1-300 || true)"
+die "server-$colour didn't become leader at ${commit:0:7} within ${WAIT_SECONDS}s. Last role seen: $last_role. To tell it to take charge by hand: docker compose kill -s SIGUSR2 server-$colour. If another colour is running, it may hold the lock: docker compose ps. Backup: $backup"$'\n\nLast 20 lines of the server-'"$colour"$' log:\n'"$logtail"

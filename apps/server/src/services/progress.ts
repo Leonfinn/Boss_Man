@@ -5,7 +5,7 @@
 // A failed start is handled where the start happens (the scheduler). Every rule fires once per
 // run, review or note, and works whether or not the watchdog is switched on.
 import { and, eq, inArray, isNotNull, isNull, like, lte, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, ruleFor, type ReviewSlot, type WatchdogSettings } from "@boss-man/shared";
+import { ageWords, readWatchdogSettings, ruleFor, type ReviewSlot, type WatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -20,7 +20,7 @@ export const STATUS_REASON = "status check";
 export const UNPROVEN_NOTE = /\b(likely|not proven|unproven|unconfirmed)\b/i;
 
 const MIN = 60_000;
-const ago = (ms: number) => (ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / MIN))} minutes`);
+const ago = (ms: number) => ageWords(ms);
 
 /** Which step a run's silence has reached: none yet, ask for a status, or flag it. Pure, so the sweep and tests agree. */
 export function silentStage(silentMs: number, s: Pick<WatchdogSettings, "silentSteerMinutes" | "silentFlagMinutes">): "ok" | "steer" | "flag" {

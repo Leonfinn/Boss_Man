@@ -62,3 +62,27 @@ export function fundingComboError(kind: string, provider: string): string | null
   if (kind === "subscription" && provider !== "anthropic" && provider !== "openai" && provider !== "ollama" && provider !== "synthetic") return "A subscription can only be Anthropic (Claude Pro/Max), OpenAI (ChatGPT plan), Ollama (Ollama Cloud plan) or Synthetic (standard plan). Use an API kind for this provider.";
   return null;
 }
+
+/**
+ * Synthetic's Infinite mode (BOS-279, Big plan): the model alias `infinite:small:vision` doesn't spend the
+ * plan's credits but is slow and needs streaming. Agents on a model whose last path part starts
+ * `infinite:` run in the background: no quota hold, their own run limit, a longer quiet-run limit, and no
+ * usage estimate. Matched on the model id alone, so it holds however OpenCode spells the provider
+ * (`synthetic/infinite:...`, `hf/infinite:...`).
+ */
+export const INFINITE_MODEL = "infinite:small:vision";
+export function isInfiniteModel(model: string | null | undefined): boolean {
+  if (!model) return false;
+  const id = model.trim().slice(model.lastIndexOf("/") + 1);
+  return id.toLowerCase().startsWith("infinite:");
+}
+
+/** The same model, named as OpenCode launches it on the infinite provider (runner: session-manager.ts). */
+export const infiniteLaunchModel = (model: string) => `hf/${model.slice(model.lastIndexOf("/") + 1)}`;
+
+/** The model picker's entry for Infinite mode, offered to OpenCode agents paid from a Synthetic plan. */
+export const INFINITE_MODEL_CHOICE = {
+  value: `synthetic/${INFINITE_MODEL}`,
+  name: "Infinite mode — free, slow (Synthetic Big plan)",
+  description: "Doesn't spend the plan's credits, so it never waits for the quota. Much slower. Runs in the background slots, not the normal ones.",
+} as const;

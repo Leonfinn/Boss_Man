@@ -6,12 +6,17 @@
 #   scripts/update-runner.sh             build with the latest Claude Code, check, promote, ask for the drain
 #   scripts/update-runner.sh 2.1.50      pin a Claude Code version instead of "latest"
 #   scripts/update-runner.sh --rollback  tag the image that was running before as current, then drain onto it
+#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_CPUS...; the check
+#                                        slots and runner memory follow Settings, not .env). Recreates the launcher so it reads
+#                                        them, then asks Boss Man to drain and recreate every runner as its company
+#                                        goes idle, and to wake the agents afterwards (BOS-594). Use this, never a bare
+#                                        "recreate-all", for a setting change.
 #   scripts/update-runner.sh --now       emergencies: recreate every runner at once (runs in progress are
 #                                        cut off, crash recovery restarts them). Works with the others.
 #
 # The drain is asked for by dropping inbox/drain.json into the deployer folder ($BOSSMAN_DEPLOYER: set by
 # the host deployer, or read from .env). The script returns at once, so a host lock is not held while runs finish; Boss Man
-# tells the owner when the swap is done. With no deployer folder, start it in Settings > Runner update.
+# tells the owner when the swap is done. With no deployer folder, start it in Settings > Server and runner > Updates > Runner update.
 # Without the launcher there is nothing to drain onto, so the runners are restarted at once, as with --now.
 #
 # The canary runs a real Claude Code session inside the new image against a stand-in model
@@ -22,7 +27,32 @@
 # Run it from the repository root, where docker-compose.yml is.
 set -euo pipefail
 
+# BOS-562: not affected by unreadable checkout files: the runner image copies with COPY --chown=node and the netguard image runs as root.
 IMAGE=boss-man-runner
+# BOS-69: this script tags boss-man-runner/netguard/launcher:current and talks to the project "boss-man", which are
+# production's. In a staging folder (another project name or a stack) it would put staging code under production's
+# image names, so it refuses; scripts/deploy-staging.sh builds the staging images and starts the staging launcher.
+env_get() { # file key: the last KEY=value in a .env-style file; accepts "export KEY=v", quotes and a trailing " # comment"
+  [[ -f $1 ]] || return 0
+  local line v
+  line="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*=" "$1" || true; } | tail -n 1)"
+  [[ -n $line ]] || return 0
+  v="${line#*=}"; v="${v#"${v%%[![:space:]]*}"}"
+  if [[ $v == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+  elif [[ $v == \'* ]]; then v="${v#\'}"; v="${v%%\'*}"
+  else v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+  printf '%s\n' "$v"
+}
+# A staging folder is also recognised by its compose overlay (COMPOSE_FILE with deploy/staging.yml), so one with no
+# project name or stack in .env still refuses.
+proj="${COMPOSE_PROJECT_NAME:-$(env_get .env COMPOSE_PROJECT_NAME)}"
+stack="${BOSSMAN_STACK:-$(env_get .env BOSSMAN_STACK)}"
+cfs="${COMPOSE_FILE:-$(env_get .env COMPOSE_FILE)}"
+if [[ -n $stack || ( -n $proj && $proj != boss-man ) || $cfs == *deploy/staging.yml* ]]; then
+  echo "This folder is not the production install (project '${proj:-boss-man}', stack '${stack:-none}'). update-runner.sh only handles production's images, so it refuses here." >&2
+  echo "For a staging stack use scripts/deploy-staging.sh, which builds the staging runner image." >&2
+  exit 1
+fi
 # Compose runners follow COMPOSE_PROFILES (from .env); with none set, the "runners" profile as
 # before. Runners the launcher made (R55) are recreated by the launcher itself.
 profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"
@@ -33,6 +63,19 @@ addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
+# Rebuilds and recreates the launcher when it is running, without touching the runners (BOS-335). "Build and update
+# runners" is the button the owner uses, and it used to build only the runner and netguard images: a launcher fix,
+# like the faster network-guard check, then never went live and nothing showed that. Recreating the launcher restarts
+# only it; its runners keep running and a company's runner is not touched.
+rebuild_launcher() {
+  [[ -n "$(launcher_id)" ]] || return 0
+  echo "Rebuilding the launcher, the part that starts the company runners..."
+  local lp="${profiles:-runners}"
+  case ",$lp," in *,launcher,*) ;; *) lp="$lp,launcher" ;; esac
+  COMPOSE_PROFILES="$lp" docker compose build launcher
+  COMPOSE_PROFILES="$lp" docker compose up -d --no-deps launcher
+}
+
 restart_runners() { # everything at once: the old behaviour
   compose up -d --no-build
   local launcher
@@ -40,23 +83,24 @@ restart_runners() { # everything at once: the old behaviour
   if [[ -n "$launcher" ]]; then docker exec "$launcher" node dist/main.js recreate-all; fi
 }
 
-# Asks the server to start the drain. The file's existence is the whole request (written, then renamed).
+# Asks the server to start the drain. The file's existence is the request (written, then renamed); an optional
+# reason "setting change" makes the drain recreate every runner, not only those on an old image.
 request_drain() {
-  local d="${BOSSMAN_DEPLOYER:-}"
+  local d="${BOSSMAN_DEPLOYER:-}" reason="${1:-}"
   if [[ -n $d && -d $d/inbox ]]; then
     # Written in the root-only state folder, then renamed in: the server can write to inbox, so writing
     # there directly would follow a symlink it planted. A rename replaces whatever is at the name instead.
     mkdir -p "$d/state" && chmod 700 "$d/state"
     local tmp
     tmp="$(mktemp "$d/state/drain.XXXXXX")"
-    printf '{"requestedAt":"%s","by":"update-runner.sh"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
+    printf '{"requestedAt":"%s","by":"update-runner.sh"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${reason:+,\"reason\":\"$reason\"}" >"$tmp"
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
-    echo "Boss Man notifies you when it is done. To stop it: Settings > Runner update > Cancel."
+    echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Runner update > Cancel the update."
   else
     echo "The new image is tagged, and the runners still run the old one. Start the drain in Boss Man:"
-    echo "Settings > Runner update > Update runners. (Or rerun with --now to cut runs off and restart at once.)"
+    echo "Settings > Server and runner > Updates > Runner update > Update runners. (Or rerun with --now to cut runs off and restart at once.)"
   fi
 }
 
@@ -70,15 +114,40 @@ move_runners() {
   request_drain
 }
 
-NOW=0 ROLLBACK=0 version=
+NOW=0 ROLLBACK=0 SETTINGS=0 version=
 for a in "$@"; do
   case $a in
     --now) NOW=1 ;;
     --rollback) ROLLBACK=1 ;;
-    -*) echo "Usage: $0 [--now] [--rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
+    --settings) SETTINGS=1 ;;
+    -*) echo "Usage: $0 [--now] [--settings | --rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
     *) version="$a" ;;
   esac
 done
+
+if ((SETTINGS)); then
+  if ((NOW)); then
+    # Emergencies only: the launcher re-reads .env, then every runner is recreated at once (runs are cut off).
+    compose up -d --no-deps launcher
+    restart_runners
+    echo "Runners recreated now with the new settings."
+    exit 0
+  fi
+  if [[ -z "$(launcher_id)" ]]; then
+    echo "No launcher is running, so the runners can't be drained: they are compose services. Rerun with --settings --now to recreate them at once (this cuts off runs in progress)." >&2
+    exit 1
+  fi
+  if [[ -z ${BOSSMAN_DEPLOYER:-} || ! -d $BOSSMAN_DEPLOYER/inbox ]]; then
+    echo "No deployer folder (BOSSMAN_DEPLOYER in .env), so Boss Man can't be asked to drain. Nothing was changed." >&2
+    echo "Set up self-deploy, or rerun with --settings --now to recreate the runners at once (this cuts off runs in progress)." >&2
+    exit 1
+  fi
+  # The launcher reads the runner settings from its environment at start; runners keep running meanwhile.
+  compose up -d --no-deps launcher
+  request_drain "setting change"
+  echo "The runners get the new settings as each company goes idle; agents are woken again afterwards."
+  exit 0
+fi
 
 if ((ROLLBACK)); then
   docker image inspect "$IMAGE:previous" >/dev/null 2>&1 || { echo "No previous image to roll back to." >&2; exit 1; }
@@ -93,6 +162,9 @@ if ((ROLLBACK)); then
 fi
 
 stamp="$(date -u +%Y%m%d%H%M)"
+# The commit the image is built from (BOS-764): Boss Man skips a "Build and update runners" ask when the image already has the change.
+# Empty outside a git checkout, and then the runner reports none and the ask is made as before.
+commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
 # The one before is kept as boss-man-netguard:previous, so --rollback undoes the whole update (BOS-382).
 if docker image inspect boss-man-netguard:current >/dev/null 2>&1; then docker tag boss-man-netguard:current boss-man-netguard:previous; fi
@@ -102,6 +174,7 @@ echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned 
 docker build --pull -f apps/runner/Dockerfile \
   ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
+  --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 
@@ -116,5 +189,7 @@ fi
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
+# Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
+rebuild_launcher
 move_runners
 echo "The new runner image ($stamp) is current. To undo: scripts/update-runner.sh --rollback"

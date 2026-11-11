@@ -6,7 +6,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
-import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
+import { addonById, isPrivateAddress, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { hashFiles, scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
@@ -150,17 +150,6 @@ export function parseGitHub(url: string): { owner: string; repo: string; ref: st
 
 /** The name a fetched skill will have: its frontmatter name, else its folder. */
 export const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
-
-/** Loopback, private, link-local, unique-local, carrier-grade NAT, multicast and unspecified addresses (IPv4 and IPv6). */
-export function isPrivateAddress(ip: string): boolean {
-  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i.exec(ip);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
-  }
-  const x = ip.toLowerCase();
-  return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("::ffff:");
-}
 
 const realLookup = async (host: string) => (await dnsLookup(host, { all: true })).map((a) => a.address);
 

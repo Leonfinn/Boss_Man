@@ -1,8 +1,6 @@
 // The Scrum Master's daily summary to the owner (BOS-60), written as a pure function of what the
 // watchdog saw, so the "only on days something happened" rule and the wording are testable.
-import { WATCHDOG_RULE_LABEL, type WatchdogRule } from "@boss-man/shared";
-
-const H = 3_600_000;
+import { ageWords, WATCHDOG_RULE_LABEL, type WatchdogRule } from "@boss-man/shared";
 
 export type SummaryInput = {
   now: Date;
@@ -21,7 +19,7 @@ export type SummaryInput = {
 
 export type Summary = { title: string; body: string; stuck: number; oldestRef: string | null };
 
-export const age = (ms: number) => (ms >= 2 * 24 * H ? `${Math.floor(ms / (24 * H))} days` : ms >= 2 * H ? `${Math.floor(ms / H)} hours` : `${Math.max(1, Math.round(ms / 60_000))} minutes`);
+export const age = (ms: number) => ageWords(ms);
 
 const ACTION_WORDS: Record<string, string> = {
   nudge: "nudged",
@@ -41,6 +39,8 @@ const RECORD_WORDS: Record<string, string> = {
   record_auto_escalate: "escalations to the CEO",
   record_urgent_page: "pages to you about a decision",
   record_alert_skip: "Boss Man alerts passed up the ladder",
+  record_quota_held_alert: "CEO alerts about work held by the usage limit",
+  record_spare_capacity_alert: "CEO alerts about spare capacity while work waits",
 };
 
 /** Null on a day nothing happened: no new problems, no actions, nothing cleared. Record-only runs always report. */

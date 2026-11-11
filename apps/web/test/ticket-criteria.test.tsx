@@ -58,10 +58,11 @@ describe("acceptance criteria on the ticket page", () => {
     expect(box.value).toBe("Health check returns 200");
     fireEvent.change(box, { target: { value: "Health check returns 200\n\nSecrets are never logged" } });
     fireEvent.click(screen.getByRole("button", { name: "Save criteria" }));
-    await waitFor(() => expect(patches).toEqual([{ acceptanceCriteria: ["Health check returns 200", "Secrets are never logged"] }]));
+    // Each save carries the criteria the page loaded, so a change since is refused rather than overwritten (BOS-905).
+    await waitFor(() => expect(patches).toEqual([{ acceptanceCriteria: ["Health check returns 200", "Secrets are never logged"], acceptanceCriteriaLoaded: ["Health check returns 200"] }]));
     fireEvent.change(box, { target: { value: "   " } });
     fireEvent.click(screen.getByRole("button", { name: "Save criteria" }));
-    await waitFor(() => expect(patches.at(-1)).toEqual({ acceptanceCriteria: [] }));
+    await waitFor(() => expect(patches.at(-1)).toEqual({ acceptanceCriteria: [], acceptanceCriteriaLoaded: ["Health check returns 200"] }));
   });
 
   it("marks an on-a-real-host criterion, skips it in the review warning, and saves the tick with a text edit (DR-024 #5)", async () => {
@@ -86,6 +87,7 @@ describe("acceptance criteria on the ticket page", () => {
     await waitFor(() =>
       expect(patches.at(-1)).toEqual({
         acceptanceCriteria: [{ text: "Health check returns 200", after: "merge" }, "Secrets are never logged", "Answers from the owner's Tailscale name on a real host"],
+        acceptanceCriteriaLoaded: [{ text: "Health check returns 200", after: "merge" }, "Secrets are never logged"],
       }),
     );
     // A tick saves the after-merge mark; a plain save adds new lines as before-merge ones.
@@ -126,7 +128,7 @@ describe("the last post on the ticket", () => {
     render(<Ticket id="t1" companies={[company]} />);
     await screen.findByText("Last activity");
     expect(screen.getByText("Last post")).toBeTruthy();
-    expect(screen.getByText("12m ago")).toBeTruthy();
+    expect(screen.getByText("12 min ago")).toBeTruthy();
   });
 
   it("has nothing to show when no agent has posted", async () => {

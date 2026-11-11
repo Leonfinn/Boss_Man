@@ -12,7 +12,9 @@ export class DockerError extends Error {
 }
 
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
-export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } } };
+export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null; Env?: string[] | null }; HostConfig?: { Memory?: number }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } }; NetworkSettings?: { Networks?: Record<string, unknown> | null } };
+/** One Docker event, as far as the launcher reads it: a container start, a restart or a die (a crash). */
+export type DockerEvent = { Type?: string; Action?: string; Actor?: { ID?: string; Attributes?: Record<string, string> } };
 
 export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs?: number; maxMs?: number } = {}) {
   const pollMs = wait.pollMs ?? 500;
@@ -72,6 +74,23 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/start`);
       if (r.status !== 204 && r.status !== 304) fail(r, "Starting the runner failed");
     },
+    /** Takes a container off a network (BOS-576: before it starts, it then has loopback only). Not on it already is fine. */
+    async disconnect(network: string, id: string) {
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/disconnect`, { Container: id, Force: false });
+      const msg = r.json && typeof r.json === "object" && "message" in r.json ? String((r.json as { message: unknown }).message) : "";
+      if (r.status !== 200 && !/is not connected/i.test(msg)) fail(r, "Taking the runner off its network failed");
+    },
+    /** Puts a container on a network. Being on it already is fine. */
+    async connect(network: string, id: string) {
+      const r = await call("POST", `/networks/${encodeURIComponent(network)}/connect`, { Container: id });
+      const msg = r.json && typeof r.json === "object" && "message" in r.json ? String((r.json as { message: unknown }).message) : "";
+      if (r.status !== 200 && !/already exists in network/i.test(msg)) fail(r, "Connecting the runner to its network failed");
+    },
+    /** Sends a signal, e.g. USR1 to wake the guard. */
+    async signal(id: string, signal: string) {
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/kill?signal=${encodeURIComponent(signal)}`);
+      if (r.status !== 204) fail(r, "Signalling the container failed");
+    },
     async restart(id: string) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/restart?t=30`);
       if (r.status !== 204) fail(r, "Restarting the runner failed");
@@ -114,6 +133,72 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
         }
       }
       fail(r, "Removing the runner failed");
+    },
+    /**
+     * Watches the container events the launcher cares about (BOS-335): a runner starting or restarting by itself
+     * needs its guard back at once, not up to 5 s later. `/events` is a streaming endpoint; this reads newline-
+     * delimited JSON until `signal` aborts. `since` is a Unix second so a reconnect doesn't lose what came between.
+     * Resolves when the stream ends; `onError` is told why, so the caller can reconnect after a pause.
+     */
+    events(
+      filter: { type?: string; action?: string[]; label?: string },
+      since: number,
+      onEvent: (e: DockerEvent) => void,
+      onError: (err: Error) => void,
+      signal: AbortSignal,
+    ): Promise<void> {
+      return new Promise((resolve) => {
+        const filters: Record<string, string[]> = {};
+        if (filter.type) filters.type = [filter.type];
+        if (filter.action) filters.event = filter.action;
+        if (filter.label) filters.label = [filter.label];
+        const qs = `since=${Math.floor(since)}&filters=${encodeURIComponent(JSON.stringify(filters))}`;
+        // Settle once and take the abort listener off, so a long-lived signal collecting one per reconnect (BOS-335)
+        // doesn't pile up listeners: Node warns past ten, and this reconnects for the life of the process.
+        let settled = false;
+        const onAbort = () => req.destroy();
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const req = http.request({ socketPath, method: "GET", path: `/events?${qs}`, headers: { host: "docker" } }, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            onError(new DockerError(res.statusCode ?? 0, `Watching Docker events failed: HTTP ${res.statusCode}`));
+            done();
+            return;
+          }
+          let buf = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            buf += chunk;
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              try {
+                onEvent(JSON.parse(line) as DockerEvent);
+              } catch {
+                /* a half line or something that isn't an event: skip it */
+              }
+            }
+          });
+          res.on("end", done);
+          res.on("error", (err) => {
+            onError(err);
+            done();
+          });
+        });
+        req.on("error", (err) => {
+          onError(err);
+          done();
+        });
+        signal.addEventListener("abort", onAbort, { once: true });
+        req.end();
+      });
     },
   };
 }

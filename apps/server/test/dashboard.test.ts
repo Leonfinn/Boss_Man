@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, tickets } from "../src/db/schema.js";
-import { runResult } from "../src/services/dashboard.js";
+import { decisions, runners, runs, tickets } from "../src/db/schema.js";
+import { dashboardService, runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -85,6 +85,27 @@ describe("dashboard (R74)", () => {
     stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
     expect(stats).toMatchObject({ monthCostMicros: 2_500_000, monthSubscriptionRuns: 1 });
   });
+  // BOS-672: the latest run comes from one index read per agent, and the day charts are counted in SQL by UTC day.
+  it("picks each agent's newest run and counts runs on the UTC day they ended", async () => {
+    const c = (ctx = await setup());
+    const now = new Date("2026-11-07T00:30:00Z");
+    const at = (iso: string) => new Date(iso);
+    await c.db.insert(runs).values([
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-06T23:00:00Z"), endedAt: at("2026-11-06T23:59:59Z"), outcome: "error: boom" },
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-07T00:00:00Z"), endedAt: at("2026-11-07T00:00:01Z"), outcome: "end_turn" },
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-11-05T10:00:00Z"), endedAt: at("2026-11-05T11:00:00Z"), outcome: "interrupted" },
+      // Ended before the 14-day window: not on the chart.
+      { companyId: c.company.id, agentId: c.worker.id, startedAt: at("2026-10-01T10:00:00Z"), endedAt: at("2026-10-01T11:00:00Z"), outcome: "end_turn" },
+    ]);
+    const data = await dashboardService(c.db, { now: () => now }).get(c.company.id);
+    expect(data.agents.find((a) => a.name === "Engineer")!.run).toMatchObject({ result: "succeeded", startedAt: at("2026-11-07T00:00:00Z") });
+    expect(data.runsByDay.slice(-3)).toEqual([
+      { day: "2026-11-05", succeeded: 0, failed: 0, other: 1 },
+      { day: "2026-11-06", succeeded: 0, failed: 1, other: 0 },
+      { day: "2026-11-07", succeeded: 1, failed: 0, other: 0 },
+    ]);
+    expect(data.runsByDay.reduce((n, d) => n + d.succeeded + d.failed + d.other, 0)).toBe(3);
+  });
   it("shows a ticket under its state, even when its column was left behind by an older move", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Research" })).json() as { id: string };
@@ -94,5 +115,21 @@ describe("dashboard (R74)", () => {
     expect(board.columns.find((col) => col.systemState === "review")!.tickets.map((x) => x.id)).toEqual([t.id]);
     expect(board.columns.find((col) => col.systemState === "backlog")!.tickets).toEqual([]);
     expect((await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats).toMatchObject({ inProgress: 0, inReview: 1 });
+  });
+});
+
+describe("QA: home screen 'Need your answer' equals the Decisions menu badge (BOS-969)", () => {
+  it("counts only the cards the owner can act on now: not superseded, CEO-tier or lesson ones", async () => {
+    const c = (ctx = await setup());
+    const ask = (question: string) => c.decisions.raise({ companyId: c.company.id, agentId: null, question, options: ["A", "B"], recommended: "A" });
+    await ask("Plain one?");
+    await ask("Another plain one?");
+    const stale = await ask("Superseded one?");
+    await c.db.update(decisions).set({ staleAt: new Date(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "Lesson?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never });
+    const tally = (await c.req("GET", "/api/decisions/tally")).json() as { open: number; waiting: number };
+    expect(tally).toEqual({ open: 2, waiting: 1 });
+    const data = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json();
+    expect(data.stats.decisionsWaiting).toBe(tally.open);
   });
 });

@@ -13,8 +13,8 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
-  const { db, close } = await openPglite();
+async function setup(logQuery?: (sql: string) => void) {
+  const { db, close } = await openPglite(undefined, logQuery ? { logQuery } : {});
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
@@ -54,8 +54,25 @@ describe("limit estimate and daily use (R78)", () => {
     expect(status.forecasts.seven_day).toMatchObject({ perHour: 0, runsOutAt: null, beforeReset: false });
   });
 
-  it("adds up a week of runs and spend per day", async () => {
+  // BOS-1012: the owner's page said Claude Max 2 ran out on Thu 12 Nov from a short busy spell,
+  // when the week's own pace reached Saturday's reset at about half used. The week's readings are
+  // all read back, not just the last two hours.
+  it("forecasts a week from its own readings, so a burst doesn't make it run out early", async () => {
     const c = (ctx = await setup());
+    const weekStart = Date.now() - 44.5 * 3_600_000;
+    const weekReset = Math.floor((Date.now() + 5.5 * 86_400_000) / 1000);
+    // 14% over the 44.5 h so far, then 3% in the last hour: the last two hours read ~2% an hour.
+    const rows = Array.from({ length: 45 }, (_, h) => ({ fundingSourceId: c.sub.id, window: "seven_day", utilization: (0.14 * h) / 44.5, resetsAt: new Date(weekReset * 1000), observedAt: new Date(weekStart + h * 3_600_000) }));
+    rows.push({ fundingSourceId: c.sub.id, window: "seven_day", utilization: 0.17, resetsAt: new Date(weekReset * 1000), observedAt: new Date() });
+    await c.db.insert(quotaSamples).values(rows);
+
+    const f = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status`)).json().forecasts.seven_day;
+    expect(f.perHour).toBeLessThan(0.01);
+    expect(f.beforeReset).toBe(false);
+    expect(new Date(f.runsOutAt).getTime()).toBeGreaterThanOrEqual(weekReset * 1000);
+  });
+
+  it("adds up a week of runs and spend per day", async () => {    const c = (ctx = await setup());
     const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
     const credit = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_credit", provider: "anthropic", monthlyGrantUsd: 100, cycleAnchor: new Date(Date.now() - 86_400_000).toISOString() })).json() as { id: string };
     const other = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Writer", fundingSourceId: credit.id })).json() as { id: string };
@@ -72,7 +89,15 @@ describe("limit estimate and daily use (R78)", () => {
     const [paid] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: other.id, startedAt: now, inputTokens: 10, outputTokens: 5 }).returning();
     await c.db.insert(costEvents).values({ fundingSourceId: credit.id, companyId: c.company.id, runId: paid!.id, costMicros: 1_500_000, occurredAt: now });
 
-    const daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=UTC`)).json().daily as Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
+    // Freeze the server's clock at the instant the runs were stamped, so "today" is the same day for both (a run across midnight UTC can't split them).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    let daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
+    try {
+      daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=UTC`)).json().daily;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(daily).toHaveLength(7);
     expect(daily.at(-1)!.day).toBe(now.toISOString().slice(0, 10));
     expect(daily.at(-1)).toMatchObject({ runs: 1, inputTokens: 1000, outputTokens: 200 });
@@ -100,6 +125,23 @@ describe("limit estimate and daily use (R78)", () => {
     expect((await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=Not%2FAZone`)).statusCode).toBe(200);
   });
 
+  // BOS-643: daily() built a date formatter per row per day; a busy week (~8,000 runs) froze the
+  // server for 3-4 s on every quota reading. Today's code takes ~3 s here; the fix takes milliseconds.
+  it("adds up a busy week quickly", async () => {
+    const c = (ctx = await setup());
+    const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
+    const now = new Date("2026-10-16T12:00:00Z");
+    const rows = Array.from({ length: 6000 }, (_, i) => ({ companyId: c.company.id, agentId: agent.id, startedAt: new Date(now.getTime() - (i % 7) * 86_400_000 - i * 1000), inputTokens: 10, outputTokens: 1 }));
+    for (let i = 0; i < rows.length; i += 1000) await c.db.insert(runs).values(rows.slice(i, i + 1000));
+    await c.funding.daily(c.sub.id, now, "Europe/London"); // warm up the query
+    const t = performance.now();
+    const daily = await c.funding.daily(c.sub.id, now, "Europe/London");
+    const ms = performance.now() - t;
+    expect(daily.reduce((n, d) => n + d.runs, 0)).toBe(6000);
+    expect(daily.reduce((n, d) => n + d.inputTokens, 0)).toBe(60_000);
+    expect(ms).toBeLessThan(750);
+  });
+
   it("tells the owner once per window when the limit runs out before it resets", async () => {
     const c = (ctx = await setup());
     const reg = (await c.req("POST", `/api/companies/${c.company.id}/runner`)).json() as { runnerId: string };
@@ -117,5 +159,39 @@ describe("limit estimate and daily use (R78)", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ requested: "flag", link: "#/funding", title: expect.stringMatching(/^Claude Max: the limit "5-hour window" runs out about \w{3} \d{1,2} \S+ at \d\d:\d\d$/) });
     expect(sent[0]!.body).toContain("60%");
+  });
+
+  // BOS-604 / BOS-649 T1: the alert only needs the forecasts, but it used to build the whole
+  // Funding page status (a week of runs per day, per company, and every cost event) on each event.
+  it("checks the quota alert without reading runs or spend, even with 20,000 runs", async () => {
+    const queries: string[] = [];
+    let logging = false;
+    const c = (ctx = await setup((q) => logging && queries.push(q)));
+    const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
+    const now = Date.now();
+    const rows = Array.from({ length: 20_000 }, (_, i) => ({ companyId: c.company.id, agentId: agent.id, startedAt: new Date(now - (i % 7) * 86_400_000 - i * 1000), inputTokens: 10, outputTokens: 1 }));
+    for (let i = 0; i < rows.length; i += 2000) await c.db.insert(runs).values(rows.slice(i, i + 2000));
+    await c.db.insert(costEvents).values(Array.from({ length: 2000 }, (_, i) => ({ fundingSourceId: c.sub.id, companyId: c.company.id, costMicros: 10, occurredAt: new Date(now - i * 60_000) })));
+    const reg = (await c.req("POST", `/api/companies/${c.company.id}/runner`)).json() as { runnerId: string };
+    const [runnerRow] = await c.db.select().from(runners).where(eq(runners.id, reg.runnerId));
+    const reset = resetIn(4);
+    await c.db.insert(quotaSamples).values({ fundingSourceId: c.sub.id, window: "five_hour", utilization: 0.3, resetsAt: new Date(reset * 1000), observedAt: new Date(now - 3_600_000) });
+
+    logging = true;
+    const t = performance.now();
+    await c.runners.ingest(runnerRow!, { seq: 1, at: new Date().toISOString(), event: { type: "run.quota", fundingSourceId: c.sub.id, claudeMeta: meta(0.6, reset) } });
+    await vi.waitFor(async () => expect(await c.db.select().from(notifications)).toHaveLength(1), { interval: 5 });
+    const ms = performance.now() - t;
+    logging = false;
+
+    // Measured at 20,000 runs: the old path ran 18 queries (2 of them over runs and cost events)
+    // in ~340 ms; this one runs 10 in ~65 ms. The table check is the guard; the counts leave room
+    // for ingest to grow and for a busy runner.
+    const touches = (table: string) => queries.filter((q) => q.includes(`from "${table}"`) || q.includes(`join "${table}"`));
+    expect(touches("runs")).toEqual([]);
+    expect(touches("cost_events")).toEqual([]);
+    const own = queries.filter((q) => !(q.startsWith("select") && q.includes('from "notifications"'))); // minus the test's own polling
+    expect(own.length).toBeLessThanOrEqual(15);
+    expect(ms).toBeLessThan(1000);
   });
 });
