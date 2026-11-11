@@ -258,14 +258,25 @@ step build pnpm build
 # The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
 # fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
 web_tests() {
-  local d=$1 report shots rc=0
+  local d=$1 report shots rc=0 out
   report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
   [ -n "$report" ] || report="$(mktemp)"
   shots="$(mktemp -d)"
-  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" || rc=$?
+  out="$(mktemp)"
+  # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
+  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out" || true
+  rc=${PIPESTATUS[0]}
   rm -rf "$shots"
-  [ "$rc" -eq 0 ] || return "$rc"
-  node "$(dirname "$self")/check-no-skips.mjs" "$report"
+  if [ "$rc" -eq 0 ]; then
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "check-all: web test reasons (real-page lines, env):"
+    grep -h "real-page:" "$out" | sort | uniq -c | head -20 || true
+    echo "check-all: HOME=${HOME:-unset} TMPDIR length=${#TMPDIR} user=$(id -un 2>/dev/null) uid=$(id -u)"
+  fi
+  rm -f "$out"
+  return "$rc"
 }
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
