@@ -6,21 +6,6 @@ set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$self")/.."
 
-# A check job's HOME folder must exist: a runner older than the jobFenceFor fix (BOS-1095) starts the job without
-# creating it, and tests that make temp files under HOME then fail with ENOENT. Creating it is safe to repeat.
-if [ -n "${HOME:-}" ] && [ ! -d "$HOME" ]; then
-  mkdir -p "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
-  export HOME
-  # The runner points the XDG folders inside that HOME; they must follow it, or Chromium and Vite can't write there.
-  export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
-fi
-if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
-  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_CONFIG_HOME:-$HOME/.config}" 2>/dev/null || {
-    export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
-    mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
-  }
-fi
-
 # Only the merge gate runs the full check. Inside an agent session (Claude Code sets CLAUDECODE; the runner's own
 # sessions may set BOSSMAN_AGENT_SESSION) a hand run is refused, because it fills the one-slot queue for hours.
 # The merge gate (BOSSMAN_MERGE_CHECK, which also runs with a bare environment) and humans are unaffected;
@@ -264,8 +249,11 @@ web_tests() {
   shots="$(mktemp -d)"
   out="$(mktemp)"
   # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
-  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out" || true
+  # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
+  set +e
+  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
+  set -e
   rm -rf "$shots"
   if [ "$rc" -eq 0 ]; then
     node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?

@@ -10,19 +10,6 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
-# A check job's HOME folder must exist; a runner older than the jobFenceFor fix (BOS-1095) doesn't create it. Safe to repeat.
-if [ -n "${HOME:-}" ] && [ ! -d "$HOME" ]; then
-  mkdir -p "$HOME" 2>/dev/null || HOME="$(mktemp -d "${TMPDIR:-/tmp}/check-home.XXXXXX")" || true
-  export HOME
-  # The runner points the XDG folders inside that HOME; they must follow it, or Chromium and Vite can't write there.
-  export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
-fi
-if [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
-  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}" "${XDG_CONFIG_HOME:-$HOME/.config}" 2>/dev/null || {
-    export XDG_CACHE_HOME="$HOME/.cache" XDG_CONFIG_HOME="$HOME/.config"
-    mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
-  }
-fi
 # One CPU budget for every step, the web build outside the slot included (BOS-674; see scripts/check-threads.mjs and check-all.sh).
 BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(node scripts/check-threads.mjs 2>/dev/null || true)}"
 [[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
