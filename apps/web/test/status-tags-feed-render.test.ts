@@ -17,6 +17,7 @@ const built = existsSync(path.join(DIST, "index.html"));
 
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", nextTicketNumber: 12, agents: [], projects: [] };
+const project = { id: "p1", companyId: "c1", name: "Development", archivedAt: null, repoUrl: null, defaultBranch: "main", verifyCommand: null, deepVerifyCommand: null, landing: "merge", gitHost: null, gitApiBase: null, starred: false, ticketCostCapMicros: null, monthlyCapMicros: null };
 const QUESTION = "Should the phone push only carry urgent cards from now on?";
 const LONG = "A very long event title that keeps going ".repeat(12).trim();
 const notice = (id: string, title: string, body: string | null) => ({ id, companyId: "c1", company: "Boss Man Co", agentId: null, requested: "ask", level: "ask", demotedBy: null, title, body, link: "#/decisions", pushedAt: null, pushError: null, readAt: null, createdAt: now() });
@@ -38,6 +39,24 @@ function answer(p: string): unknown {
       recentActivity: [
         { id: "a1", title: "Boss Man Co needs a decision", body: QUESTION, link: "#/decisions", level: "ask", agent: null, createdAt: now() },
         { id: "a2", title: LONG, body: null, link: "#/decisions", level: "note", agent: null, createdAt: now() },
+      ],
+    };
+  }
+  if (p === "/api/companies/c1/projects") return [project];
+  if (p === "/api/risk-tiers" || p === "/api/companies/c1/objectives") return [];
+  if (p === "/api/companies/c1/features") return { settings: { demandWeight: 1, ceoTriage: false }, drivers: [], maxDemand: 0, features: [] };
+  if (p === "/api/projects/p1/board") {
+    const card = (id: string, n: number, title: string, systemState: string, extra: Record<string, unknown> = {}) => ({ id, title, number: n, systemState, outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: "low", size: 2, planFirst: false, plan: null, planApprovedAt: null, ...extra });
+    return {
+      project,
+      workingAgents: 0,
+      withoutTicket: [],
+      columns: [
+        { id: "k1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card("t2", 2, "Add the export button", "ready"), card("t3", 3, "Fix the login redirect", "ready", { risk: "high" })] },
+        { id: "k2", name: "In progress", systemState: "in_progress", wipLimit: 3, tickets: [card("t4", 4, "Calmer status tags", "in_progress")] },
+        { id: "k3", name: "Review", systemState: "review", wipLimit: null, tickets: [card("t1", 1, "Shorter page intros", "review", { waitingOnOwner: true })] },
+        { id: "k4", name: "Blocked", systemState: "blocked", wipLimit: null, tickets: [card("t5", 5, "Wait for the merge gate fix", "blocked")] },
+        { id: "k5", name: "Done", systemState: "done", wipLimit: null, tickets: [card("t6", 6, "Tidy the settings page", "done", { outcome: "done" })] },
       ],
     };
   }
