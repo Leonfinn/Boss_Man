@@ -141,7 +141,7 @@ export const OWNER_CONTROLS = {
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Save", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test"],
+  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
