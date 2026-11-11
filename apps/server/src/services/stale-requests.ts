@@ -142,7 +142,75 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   return { flaggedDecisions, flaggedTickets, woken };
 }
 
-export type OwnerAnswer = { kind: "decision" | "message"; question: string | null; answer: string; at: Date };
+/**
+ * Flags these open cards "may be out of date" and wakes each author once (BOS-1161). Never closes a card: only a
+ * checkable `clearWhen` condition does that (alert-clearing.ts). A card already flagged is left alone, so one event is one wake.
+ */
+async function flagCards(db: Db, input: { cards: Array<{ id: string; raisedByAgentId: string | null }>; reason: string; wake?: WakeFn | null; now: Date }): Promise<{ flaggedDecisions: string[]; woken: string[] }> {
+  const ids = input.cards.map((c) => c.id);
+  if (!ids.length) return { flaggedDecisions: [], woken: [] };
+  await db.update(decisions).set({ staleAt: input.now, staleReason: input.reason }).where(and(inArray(decisions.id, ids), isNull(decisions.staleAt)));
+  const woken: string[] = [];
+  if (input.wake) {
+    for (const agentId of new Set(input.cards.map((c) => c.raisedByAgentId).filter((a): a is string => !!a))) {
+      const w = await input.wake({
+        agentId,
+        ticketId: null,
+        reason: STALE_REASON,
+        note: [
+          `${input.reason}, so a decision card you raised may now be out of date.`,
+          "Check the live state before you repeat anything to the owner: their latest answers, what's deployed, and whether the tickets involved are done.",
+          "If what you asked for is done or no longer needed, take the card back with withdraw_decision and update the ticket's state note in this run.",
+          "If nothing of yours is affected, end the run.",
+        ].join("\n"),
+      });
+      if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) continue;
+      woken.push(agentId);
+    }
+  }
+  return { flaggedDecisions: ids, woken };
+}
+
+/** The open cards a person (an agent) wrote and nobody has flagged yet: Boss Man's own cards close by their own condition instead (BOS-470). */
+const agentCardFilter = (companyId: string) =>
+  and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, sql`${decisions.context}->'ladder' is null`);
+
+/**
+ * The runners were rebuilt (BOS-1161): open question cards that talk about the runners or a rebuild may be moot now.
+ * Matched on the card's own words, because a card about the runner names no ticket; it is flagged and its author
+ * woken to confirm or withdraw, never closed (a card that named a rebuild in `clearsWhen` was closed already).
+ */
+export async function runnerRebuilt(db: Db, input: { companyId: string; wake?: WakeFn | null; now?: Date }) {
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId })
+    .from(decisions)
+    .where(and(agentCardFilter(input.companyId), sql`(${decisions.question} ~* 'runner|rebuild')`));
+  return flagCards(db, { cards: open, reason: "the runners were rebuilt", wake: input.wake, now: input.now ?? new Date() });
+}
+
+/**
+ * A card's own ticket changed state well after the card was raised (BOS-1161): the work went on without the answer, or
+ * someone moved it. Compared to the card's age plus a grace period, because raising a card that blocks its ticket moves
+ * the ticket too. Run from the sweep, since ticket state moves from many places (a database trigger stamps each one).
+ */
+export const STATE_CHANGE_GRACE_MS = 2 * 60_000;
+export async function ticketStateChanged(db: Db, input: { companyId?: string; wake?: WakeFn | null; now?: Date }) {
+  const now = input.now ?? new Date();
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, companyId: decisions.companyId })
+    .from(decisions)
+    .innerJoin(tickets, sql`${tickets.id}::text = (${decisions.context} ->> 'ticketId')`)
+    .where(and(eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, sql`${decisions.context}->'ladder' is null`, sql`(${decisions.kind} <> 'permission' or ${decisions.context}->>'plan' = 'true')`, sql`${tickets.stateChangedAt} > ${decisions.createdAt} + (${STATE_CHANGE_GRACE_MS} * interval '1 millisecond')`, ...(input.companyId ? [eq(decisions.companyId, input.companyId)] : [])));
+  const out = { flaggedDecisions: [] as string[], woken: [] as string[] };
+  for (const companyId of new Set(open.map((d) => d.companyId))) {
+    const r = await flagCards(db, { cards: open.filter((d) => d.companyId === companyId), reason: "the ticket it is about changed state", wake: input.wake, now });
+    out.flaggedDecisions.push(...r.flaggedDecisions);
+    out.woken.push(...r.woken);
+  }
+  return out;
+}
+
+export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date };
 
 const askWords = (s: string) =>
   new Set(

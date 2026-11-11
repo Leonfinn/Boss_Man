@@ -69,6 +69,7 @@ import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, notifications, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import type { ClearWhen } from "./alert-clearing.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 import { commandProblem, parseStep, strayFence } from "./steps.js";
 import { openReviewProposal } from "./skill-proposals.js";
@@ -465,6 +466,41 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
   }
   return cleared;
 }
+
+/**
+ * One open plan card per ticket (BOS-1161): a new plan for the ticket closes the older open plan cards for it, recorded
+ * as "superseded by <new card>". Until now only the owner could clear them, so a revised plan left duplicates (BOS-373, BOS-382).
+ * A plan card whose run is still alive stays: that run is waiting on its answer, and closing it would leave the run hanging.
+ * Both shapes count: the plan an agent submits (a question card with plan) and ExitPlanMode's (a permission card with plan).
+ */
+export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date }) {
+  const at = input.now ?? new Date();
+  const rows = await db
+    .select({ id: decisions.id, kind: decisions.kind, context: decisions.context })
+    .from(decisions)
+    .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, input.newCardId), sql`${decisions.context}->>'ticketId' = ${input.ticketId}`, sql`${decisions.context}->>'plan' = 'true'`, sql`${decisions.context}->>'type' in ('permission', 'question')`));
+  const note = `superseded by ${input.newCardId}`;
+  let cleared = 0;
+  for (const r of rows) {
+    const runId = (r.context as { runId?: unknown }).runId;
+    if (r.kind === "permission" && typeof runId === "string" && UUID_RE.test(runId)) {
+      const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
+      if (run && !run.endedAt) continue;
+    }
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: at, dedupeKey: null, context: mergeContext({ withdrawn: { by: "system", note, at: at.toISOString() } satisfies Withdrawal }) })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (!done) continue;
+    cleared++;
+    await markDecisionNotificationRead(db, r.id, at);
+    await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
+    await record(db, { companyId: input.companyId, ticketId: input.ticketId, kind: "decision_withdrawn", summary: `Boss Man closed an older plan card by itself: ${note}`, at });
+  }
+  return cleared;
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
@@ -1482,6 +1518,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     // Answering the card frees it the same way as any linked card. A failure here never loses the plan card.
     if (row && t && run?.agentId)
       await addTicketDependency(db, { companyId: runner.companyId, blockedTicketId: t.id, blockerDecisionId: row.id, actor: { type: "agent", agentId: run.agentId }, hold: true, now }).catch(() => undefined);
+    // BOS-1161: an older open plan card for this ticket is superseded by this one. A failure never loses the new card.
+    if (row && t) await supersedePlanCards(db, { companyId: runner.companyId, ticketId: t.id, newCardId: row.id, now: now() }).catch((err) => log(`closing older plan cards for ${t.id} failed: ${(err as Error).message}`));
     if (row && ladder && ceoId)
       await wakeLadderCeo(runner.companyId, row, { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ladder }, ceoId, [
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,
@@ -1834,7 +1872,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
       // Ordering links may only point at open cards in the raiser's own company (BOS-625).
       const after = await keepOpenInCompany(db, input.companyId, input.doAfter, "doAfter");
       const before = await keepOpenInCompany(db, input.companyId, input.doBefore, "doBefore");
@@ -1857,7 +1895,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
               ...(input.resetsOnRestart ? { resetsOnRestart: true } : {}),
               // An add-on's setup card closes itself once the add-on is seen working (DR-023 D, BOS-522).
-              ...(input.setsUp ? { setsUp: input.setsUp, clearWhen: [{ kind: "addonRunning", addon: input.setsUp }] } : {}),
+              ...(input.setsUp ? { setsUp: input.setsUp } : {}),
+              // What closes the card by itself: the add-on seen working (DR-023 D) and/or the agent's own checkable conditions (BOS-1161). Alternatives: any one closes it.
+              ...(input.setsUp || input.clearWhen?.length ? { clearWhen: [...(input.setsUp ? [{ kind: "addonRunning", addon: input.setsUp }] : []), ...(input.clearWhen ?? [])] } : {}),
             },
           })
           .returning();
@@ -1876,6 +1916,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         return row!;
       });
+      // BOS-1161: a new plan card closes the older open plan cards for the ticket.
+      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now() }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
       await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
       // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
       clearTallyCache();
