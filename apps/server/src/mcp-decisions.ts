@@ -57,6 +57,8 @@ export function registerDecisionTools(
         /** escalate, and advise with outcome reissue (BOS-1097, BOS-1110): the owner needs to act now, so the card also goes to their phone. Needs urgentWhy. */
         urgent: z.boolean().optional(),
         urgentWhy: z.string().max(200).optional(),
+        /** reissue of a card linked to after-merge criteria (BOS-1155): what each option means, pass, fail or none. */
+        optionVerdicts: z.record(z.string().max(200), z.enum(["pass", "fail", "none"])).optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
@@ -222,7 +224,7 @@ export function registerDecisionTools(
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";

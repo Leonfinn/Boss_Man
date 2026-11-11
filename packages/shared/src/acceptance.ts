@@ -49,16 +49,45 @@ const NUMBERED = /^c?(\d{1,2})\s*[:=)-]?\s*(pass(?:ed|es|ing)?|ok|done|yes|green
 
 /** Verdicts given by number; only where a segment (split on . ; , and newlines) starts with the number, so
  * "Suite: 3 passed" is not criterion 3. The first one stated for a number wins, numbers out of range are ignored. */
-function numberedVerdicts(count: number, note: string): Map<number, Exclude<Verdict, null>> {
-  const found = new Map<number, Exclude<Verdict, null>>();
-  for (const seg of note.split(/[.;,\n]/)) {
+function numberedVerdicts(count: number, segments: readonly string[]): Map<number, { verdict: Exclude<Verdict, null>; at: number }> {
+  const found = new Map<number, { verdict: Exclude<Verdict, null>; at: number }>();
+  segments.forEach((seg, at) => {
     const m = NUMBERED.exec(seg.trim());
-    if (!m) continue;
+    if (!m) return;
     const n = Number(m[1]);
-    if (n < 1 || n > count || found.has(n)) continue;
-    found.set(n, FAIL.test(m[2]!) ? "fail" : "pass");
-  }
+    if (n < 1 || n > count || found.has(n)) return;
+    found.set(n, { verdict: FAIL.test(m[2]!) ? "fail" : "pass", at });
+  });
   return found;
+}
+
+/**
+ * A verdict Boss Man wrote from the owner's answer on a card (BOS-1155): `Owner answered "..." (the owner): 5 pass and 6 fail — ...`.
+ * cardAnswerLine writes it with no . ; or , in it, so it is always one segment. A later verdict the ticket's
+ * own author reports for the same criterion replaces it; the card line never counts as the author's words.
+ */
+const CARD_LINE = /^Owner answered .*?\) ?: ((?:\d{1,2} (?:pass|fail)(?: and )?)+)/;
+
+/** What an option means for the criteria its card settles (BOS-1155). */
+export type OptionVerdicts = Record<string, "pass" | "fail" | "none">;
+
+/** Null when `map` gives every option exactly one of pass, fail or none (and names no other option); otherwise the refusal text. */
+export function optionVerdictsRefusal(options: readonly string[], map: Record<string, string> | undefined | null): string | null {
+  const how = "A card that settles an after-merge check needs optionVerdicts: for each option, whether choosing it means the check passed (\"pass\"), failed (\"fail\") or says nothing about it (\"none\"), e.g. {\"Close it on the tests\": \"pass\", \"Keep it open\": \"none\"}. Boss Man never guesses this from the option's words.";
+  if (!map || !Object.keys(map).length) return how;
+  const bad = options.filter((o) => !["pass", "fail", "none"].includes(map[o] as string));
+  if (bad.length) return `optionVerdicts has no pass, fail or none for ${bad.map((o) => `"${o}"`).join(", ")}. ${how}`;
+  const extra = Object.keys(map).filter((k) => !options.includes(k));
+  if (extra.length) return `optionVerdicts names ${extra.map((o) => `"${o}"`).join(", ")}, which ${extra.length === 1 ? "is" : "are"} not an option on the card. Use each option's exact text.`;
+  return null;
+}
+
+/** The note line for a card answer. `said` and `question` have their separators removed so the line stays one segment. */
+export function cardAnswerLine(question: string, by: string, verdicts: ReadonlyArray<{ n: number; verdict: "pass" | "fail"; text: string }>, said: string): string {
+  const plain = (s: string) => s.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim();
+  const nums = verdicts.map((v) => `${v.n} ${v.verdict}`).join(" and ");
+  const cue = verdicts.map((v) => `"${plain(v.text)}"`).join(" and ");
+  return `Owner answered "${plain(question).slice(0, 120)}" (${by}): ${nums} — ${cue} — "${plain(said)}"`;
 }
 
 /**
@@ -70,14 +99,27 @@ function numberedVerdicts(count: number, note: string): Map<number, Exclude<Verd
  */
 export function readVerdicts(criteria: readonly Criterion[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
   const texts = criteria.map(criterionText);
-  const segments = (note ?? "").split(/[.;\n]/).map((s) => s.trim()).filter(Boolean);
+  const all = (note ?? "").split(/[.;\n]/).map((s) => s.trim()).filter(Boolean);
+  // Card answers are read by their numbers (BOS-1155), never by the words they quote.
+  const cards = new Map<number, { verdict: "pass" | "fail"; at: number }>();
+  all.forEach((seg, at) => {
+    const m = CARD_LINE.exec(seg);
+    if (!m) return;
+    for (const v of m[1]!.matchAll(/(\d{1,2}) (pass|fail)/g)) cards.set(Number(v[1]), { verdict: v[2] as "pass" | "fail", at });
+  });
+  const segments = all.map((s) => (CARD_LINE.test(s) ? "" : s));
   const bag = segments.map((s) => new Set(tokens(s)));
   const raw = segments;
-  const numbered = numberedVerdicts(texts.length, note ?? "");
+  // The segment each numbered verdict sits in (a segment may hold commas, which also split verdicts).
+  const numberedAt = new Map<number, { verdict: Exclude<Verdict, null>; at: number }>();
+  segments.forEach((s, at) => {
+    for (const [n, v] of numberedVerdicts(texts.length, s.split(","))) if (!numberedAt.has(n)) numberedAt.set(n, { verdict: v.verdict, at });
+  });
   return texts.map((criterion, idx) => {
-    const byNumber = numbered.get(idx + 1) ?? null;
+    const byNumber = numberedAt.get(idx + 1) ?? null;
     const want = tokens(criterion);
     let verdict: Verdict = null;
+    let wordAt = -1;
     if (want.length) {
       const need = want.length <= 2 ? want.length : Math.ceil(want.length * 0.6);
       let best = -1;
@@ -85,11 +127,26 @@ export function readVerdicts(criteria: readonly Criterion[], note: string | null
         const hit = want.filter((w) => bag[i]!.has(w)).length;
         if (hit >= need && hit > (best < 0 ? 0 : want.filter((w) => bag[best]!.has(w)).length)) best = i;
       }
-      if (best >= 0) verdict = FAIL.test(raw[best]!) ? "fail" : PASS.test(raw[best]!) ? "pass" : null;
+      if (best >= 0) {
+        verdict = FAIL.test(raw[best]!) ? "fail" : PASS.test(raw[best]!) ? "pass" : null;
+        if (verdict) wordAt = best;
+      }
     }
     // A fail from either reading wins, so stray prose can never turn a stated fail into a pass.
-    if (byNumber === "fail" || verdict === "fail") verdict = "fail";
-    else verdict = byNumber ?? verdict;
+    let at = -1;
+    if (byNumber?.verdict === "fail" || verdict === "fail") {
+      verdict = "fail";
+      at = byNumber?.verdict === "fail" ? byNumber.at : wordAt;
+    } else {
+      verdict = byNumber?.verdict ?? verdict;
+      at = byNumber ? byNumber.at : wordAt;
+    }
+    // The owner's answer on a card stands in until the author reports the criterion: a verdict the author
+    // wrote later replaces it, and one written earlier is overruled by a card fail only (BOS-1155).
+    const card = cards.get(idx + 1);
+    if (card && !(verdict && at > card.at)) {
+      if (card.verdict === "fail" || !verdict) verdict = card.verdict;
+    }
     return { criterion, verdict };
   });
 }
