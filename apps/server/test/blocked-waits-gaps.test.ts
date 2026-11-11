@@ -61,7 +61,7 @@ describe("a ticket Blocked until a date is flagged once the date and grace have 
     c.advance(61 * MIN);
     await c.watchdog.run();
     expect(await c.smWakes()).toHaveLength(0); // date passed, inside the 2 h grace
-    c.advance(58 * MIN); // date + 119 min: one minute short of the 2 h grace
+    c.advance(118 * MIN); // date + 119 min: one minute short of the 2 h grace
     await c.watchdog.run();
     expect(await c.smWakes()).toHaveLength(0);
     c.advance(3 * MIN); // date + 122 min
