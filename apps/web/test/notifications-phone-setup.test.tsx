@@ -78,3 +78,18 @@ describe("iPhone Focus note", () => {
     expect(screen.queryByTestId("phone-iphone-note")).toBeNull();
   });
 });
+
+describe("Android Do Not Disturb note", () => {
+  it("names the Override Do Not Disturb switch when ntfy is set up, and not otherwise", async () => {
+    stub(settings({}));
+    render(<Notifications feed={{ items: [], unread: 0 }} onChanged={() => {}} />);
+    const note = await screen.findByTestId("phone-android-note");
+    expect(note.textContent).toContain("Override Do Not Disturb");
+    expect(screen.queryByText(/which breaks through Do Not Disturb on Android/)).toBeNull();
+    cleanup();
+    stub(settings({ ntfy: null }));
+    render(<Notifications feed={{ items: [], unread: 0 }} onChanged={() => {}} />);
+    await screen.findByRole("button", { name: /save/i });
+    expect(screen.queryByTestId("phone-android-note")).toBeNull();
+  });
+});
