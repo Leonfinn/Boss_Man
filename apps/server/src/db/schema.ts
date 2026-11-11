@@ -1298,6 +1298,8 @@ export const agentNotes = pgTable(
     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Optional day (YYYY-MM-DD) after which the note shows "review due" (BOS-1170). */
+    reviewBy: date("review_by", { mode: "string" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

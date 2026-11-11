@@ -1,5 +1,5 @@
 {
-  "id": "1cdc5c1f-5a60-4b57-85db-3e01ecebd201",
+  "id": "d673a958-3260-42e6-bb52-e0b9bb4a433a",
   "prevId": "ebea0baa-71cb-431b-b058-0d07f51dde0e",
   "version": "7",
   "dialect": "postgresql",
@@ -408,6 +408,12 @@
         "run_id": {
           "name": "run_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "review_by": {
+          "name": "review_by",
+          "type": "date",
           "primaryKey": false,
           "notNull": false
         },
@@ -6595,12 +6601,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "head": {
-          "name": "head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -9426,13 +9426,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "fixes_merge_check": {
-          "name": "fixes_merge_check",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "version": {
           "name": "version",

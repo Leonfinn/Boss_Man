@@ -79,6 +79,8 @@ export const OWNER_CONTROLS = {
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
+  // The Merge queue page's two views (BOS-1174).
+  "Merge queue": ["Merges", "Queued checks"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: [
     "Refresh",
@@ -223,7 +225,7 @@ export const OWNER_FIELDS = {
   ],
   Agents: [
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",
-    "Note", "Why (what you said)", "What waits for you from the CEO",
+    "Note", "Review by (optional)", "Why (what you said)", "What waits for you from the CEO",
   ],
   Skills: [
     "GitHub link to a repository, a folder or a SKILL.md", "Name", "What it does and when to use it",

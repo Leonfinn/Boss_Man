@@ -27,7 +27,29 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
   return r?.n ?? 0;
 }
 
-export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string) => countWip(db, and(eq(tickets.systemState, "in_progress"), where), exceptId);
+/**
+ * In-progress tickets that can't move don't count towards a limit (BOS-1172): one with an open waits-on link to an
+ * unfinished ticket, a plan-first one whose plan waits on the owner, and a merged one that only waits for its
+ * after-merge (go-live) check. A ticket with only a schedule_check booked still counts: nobody visibly holds it.
+ */
+export const cantMoveSql = sql`(
+  exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
+          where d.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
+  or (${tickets.planFirst} and ${tickets.planApprovedAt} is null and ${tickets.plan} is not null)
+  or (${tickets.mergedAt} is not null and ${tickets.goLiveWait} is not null)
+)`;
+
+export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string) => countWip(db, and(eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`, where), exceptId);
+
+export type WipExempt = "waits" | "plan" | "live";
+
+/** Why an in-progress ticket doesn't count towards the limit (same rule as cantMoveSql); null when it counts. `openWaits`: it has an open waits-on link to an unfinished ticket. */
+export function wipExemptKind(t: { planFirst: boolean; planApprovedAt: Date | null; plan: string | null; mergedAt: Date | null; goLiveWait: string | null }, openWaits: boolean): WipExempt | null {
+  if (openWaits) return "waits";
+  if (t.planFirst && !t.planApprovedAt && t.plan) return "plan";
+  if (t.mergedAt && t.goLiveWait) return "live";
+  return null;
+}
 
 export const agentWipCount = (db: Db, agentId: string, exceptId?: string) => countInProgress(db, eq(tickets.assigneeAgentId, agentId), exceptId);
 

@@ -743,6 +743,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         </details>
       )}
 
+      {loaded && linkedId && !decisions.some((d) => d.id === linkedId) && (
+        // (BOS-1159) A link to a card that is gone says so, instead of opening a page with nothing on it.
+        <p role="status" data-testid="linked-card-gone" className="card" style={{ fontWeight: 600 }}>
+          That card is not open any more: it was answered or withdrawn, or it belongs to another company. The Board stops showing it on its next refresh.
+        </p>
+      )}
       {loaded && queueCards.length === 0 && waitingCards.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
@@ -1316,11 +1322,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           {waitingCards.length > 0 && (
             // (BOS-551) Cards whose ticket is back with an agent, or that the agent is re-checking: not the
             // owner's to do yet. Folded at the bottom so they never sit beside the cards that are ready.
-            <details className="sub">
+            // A link to one of these (BOS-1159) opens the fold and marks the card, so it is never hidden behind a closed group.
+            <details className="sub" open={waitingCards.some((d) => d.id === linkedId) || undefined}>
               <summary>Waiting, nothing to do yet ({waitingCards.length})</summary>
               <ul>
                 {waitingCards.map((d) => (
-                  <li key={d.id} style={{ marginBottom: 8 }}>
+                  <li key={d.id} id={`decision-${d.id}`} className={d.id === linkedId ? "linked" : undefined} aria-current={d.id === linkedId ? "true" : undefined} style={{ marginBottom: 8 }}>
                     <TicketRefs about={d.about} />
                     <strong>{d.question.split("\n")[0]}</strong>
                     {d.waiting ? <div className="muted" style={{ fontSize: 13 }}>{d.waiting}</div> : null}

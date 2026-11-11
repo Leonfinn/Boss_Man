@@ -233,6 +233,8 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
+  /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
+  wipExempt?: "waits" | "plan" | "live" | null;
   blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
@@ -274,6 +276,8 @@ export type Ticket = {
   mergeNote?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
+  /** The open card behind `ownerQuestion`, so the Board's button opens that exact card. */
+  ownerQuestionId?: string | null;
   approvedBy?: string | null;
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */

@@ -192,7 +192,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               return { dependencyId: r.id, kind: "engagement" as const, id: r.blockerEngagementId, title: e?.title ?? "", state: e?.status ?? "", open: e?.status !== "signed_off", link: `#/engagements/${r.blockerEngagementId}` };
             }
             const d = ds.find((x) => x.id === r.blockerDecisionId);
-            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open", link: "#/decisions" };
+            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open", link: `#/decisions/${r.blockerDecisionId}` };
           }),
         blocks: rows
           .filter((r) => r.blockerTicketId === ticketId)
