@@ -93,7 +93,6 @@ p { margin: 0; }
 @media (max-width: 640px) {
   .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
-  .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
   .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
 }
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
@@ -833,7 +832,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .switcher-new small { width: 100%; color: #ffb4b4; }
 @media (max-width: 640px) {
   /* One header row: the mark, the company picker and a menu button (BOS-245). */
-  .side { padding: 6px 12px 8px; gap: 6px; }
+  /* The bar takes its natural height on every page; the full-height rule is for the side menu only (BOS-1213). */
+  .side { min-height: 0; padding: 6px 12px 8px; gap: 6px; }
   .side .brand span { display: none; }
   .side-bar { display: flex; align-items: center; gap: 8px; }
   .side-bar .switcher { flex: 1; min-width: 0; }
