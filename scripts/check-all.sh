@@ -254,13 +254,24 @@ web_tests() {
     gnm="$(npm root -g 2>/dev/null || true)"
     if [ -n "$gnm" ] && [ -d "$gnm/playwright" ]; then export NODE_PATH="$gnm"; fi
   fi
+  # Chromium keeps its crash database under XDG_CONFIG_HOME (default $HOME/.config) and its crashpad handler kills the browser
+  # ("--database is required") when that folder can't be made. A fenced check job on a runner that predates the home-folder fix
+  # has a HOME that doesn't exist and can't be created, so every real-browser test skipped (BOS-1095, reproduced in the fence).
+  # When HOME isn't a usable folder, give the web tests a home of their own under the temp folder.
+  webhome=()
+  if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
+    wh="$(mktemp -d)"
+    webhome=(HOME="$wh" XDG_CONFIG_HOME="$wh/.config" XDG_CACHE_HOME="$wh/.cache")
+    echo "check-all: HOME ${HOME:-unset} is not usable; web tests use $wh"
+  fi
   # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
   # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
   set +e
-  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
+  env ${webhome[@]+"${webhome[@]}"} BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   rm -rf "$shots"
+  [ "${#webhome[@]}" -eq 0 ] || rm -rf "${wh:?}"
   if [ "$rc" -eq 0 ]; then
     node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
   fi
