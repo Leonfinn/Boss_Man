@@ -14,10 +14,10 @@ import { OWNER_MESSAGE_MAX } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agentNotes, agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agents, checkJobs, companies, decisions, engagements, features as featuresTable, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
-import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
+import { notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
 import { assetPathOf, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
@@ -50,7 +50,7 @@ import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { deploysService } from "./services/deploys.js";
-import { RunError, runsService } from "./services/runs.js";
+import { runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
 import { isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
@@ -101,7 +101,7 @@ import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
 import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
-import { logoType } from "./services/image-type.js";
+import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
 import { createLeader, type Leader } from "./leader.js";
@@ -1898,31 +1898,9 @@ export async function buildApp(opts: AppOptions) {
 
     // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
     featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
-    // An agent's own picture, in place of its template's portrait.
-    owner.put("/api/agents/:id/avatar", { bodyLimit: 400 * 1024 }, async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const { data } = z.object({ data: z.string() }).parse(req.body);
-      const bytes = Buffer.from(data, "base64");
-      if (!bytes.length || bytes.length > 256 * 1024) return reply.code(413).send({ error: "too_large", message: "The picture must be 256 KB or smaller." });
-      const type = logoType(bytes);
-      if (!type) return reply.code(415).send({ error: "bad_type", message: "The picture must be a PNG, JPEG or WebP image." });
-      const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
-      if (!a) return reply.code(404).send({ error: "not_found", message: "No such agent." });
-      // An upload replaces any picture the CEO copied from a ticket image (BOS-265).
-      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: null } });
-      const [row] = await db.update(agents).set({ avatarAt: new Date() }).where(eq(agents.id, id)).returning({ avatarAt: agents.avatarAt });
-      return row;
-    });
-    owner.delete("/api/agents/:id/avatar", async (req) => {
-      const { id } = IdParam.parse(req.params);
-      await db.delete(agentAvatars).where(eq(agentAvatars.agentId, id));
-      await db.update(agents).set({ avatarAt: null }).where(eq(agents.id, id));
-      return { avatarAt: null };
-    });
-    owner.get("/api/agents/:id/avatar", async (req, reply) => {
-      const [pic] = await db.select({ bytes: agentAvatars.bytes, type: agentAvatars.type }).from(agentAvatars).where(eq(agentAvatars.agentId, IdParam.parse(req.params).id));
-      return pic ? sendLogo(reply, pic) : reply.code(404).send({ error: "not_found", message: "No picture." });
-    });
+
+    // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
+    agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
 
     // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
     const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -1958,7 +1936,7 @@ export async function buildApp(opts: AppOptions) {
     // The roadmap and plan views: routes/roadmap.ts, on this owner scope.
     roadmapRoutes(owner, db, { feedback, now: opts.now, planning: planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) }) });
 
-    // Agents (R62): hire from a template, change them, retire them, and undo any change.
+    // Agents (R62): hire from a template, and undo any change (the other agent routes are in routes/agents-runs.ts).
     const agentErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof AgentError) return reply.code(err.status).send({ error: "agent", message: err.message });
       throw err;
@@ -1996,62 +1974,7 @@ export async function buildApp(opts: AppOptions) {
       return agentsSvc.hire(id, b).then((a) => reply.code(201).send(a), agentErrors(reply));
     });
 
-    owner.patch("/api/agents/:id", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
-        .partial()
-        .parse(req.body);
-      // Who reviews what is set only in Settings > Reviews now (BOS-198); say so rather than drop it quietly.
-      if (req.body && typeof req.body === "object" && "reviewKind" in req.body) return reply.code(400).send({ error: "moved", message: "Reviewers are chosen in Settings > Reviews." });
-      const patch = b;
-      const [before] = await db.select().from(agents).where(eq(agents.id, id));
-      if (!before) return reply.code(404).send({ error: "not_found" });
-      // An agent with a standing job starts with no model; it needs one before it can run (R73).
-      if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
-        return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
-      }
-      return agentsSvc.update(id, patch).then((a) => {
-        // Unpausing lets its waiting work start now rather than at the next tick.
-        if (b.paused === false && before.paused) void scheduler.tick().catch((err) => app.log.error({ err }, "tick after unpause failed"));
-        return a;
-      }, agentErrors(reply));
-    });
-    owner.post("/api/agents/:id/retire", async (req, reply) => agentsSvc.retire(IdParam.parse(req.params).id).catch(agentErrors(reply)));
-    owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
     owner.post("/api/agent-changes/:id/undo", async (req, reply) => agentsSvc.undo(IdParam.parse(req.params).id).catch(agentErrors(reply)));
-
-    // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
-    const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
-      if (err instanceof NoteError) return reply.code(err.status).send({ error: "note", message: err.message });
-      throw err;
-    };
-    const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why) });
-    const noteOf = async (id: string) => (await db.select({ companyId: agentNotes.companyId }).from(agentNotes).where(eq(agentNotes.id, id)))[0];
-    owner.get("/api/agents/:id/notes", async (req, reply) => {
-      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, IdParam.parse(req.params).id));
-      if (!a) return reply.code(404).send({ error: "not_found" });
-      // Pending and declined requests from other agents show beside the notes.
-      return { items: await notesSvc.withOrigin(a.companyId, IdParam.parse(req.params).id), requests: await notesSvc.requests(a.companyId, IdParam.parse(req.params).id), limits: NOTE_LIMITS };
-    });
-    owner.post("/api/agents/:id/notes", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, id));
-      if (!a) return reply.code(404).send({ error: "not_found" });
-      return notesSvc.save(a.companyId, id, NoteBody.parse(req.body), { source: "owner" }).then((n) => reply.code(201).send(n), noteErrors(reply));
-    });
-    owner.patch("/api/agent-notes/:id", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const n = await noteOf(id);
-      if (!n) return reply.code(404).send({ error: "not_found" });
-      return notesSvc.update(n.companyId, id, NoteBody.partial().parse(req.body), { owner: true }).then((r) => r.after, noteErrors(reply));
-    });
-    owner.delete("/api/agent-notes/:id", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const n = await noteOf(id);
-      if (!n) return reply.code(404).send({ error: "not_found" });
-      return notesSvc.remove(n.companyId, id, { owner: true }).then(() => ({ ok: true }), noteErrors(reply));
-    });
 
     // The Scrum Master watchdog (BOS-58): settings and health, its flags and action log (read by the activity view and daily summary), and undo.
     const watchdogErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2307,30 +2230,6 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       return review.setTemplates(id, z.object({ commit: z.string().min(1).max(5000), pr: z.string().min(1).max(5000) }).partial().parse(req.body));
     });
-
-    // Steering and stopping running agents (R37).
-    const runErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
-      if (err instanceof RunError) return reply.code(err.status).send({ error: "run", message: err.message });
-      throw err;
-    };
-    owner.get("/api/runs", async (req) => runsSvc.active(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
-    owner.post("/api/runs/:id/message", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const b = z.object({ text: z.string().trim().min(1).max(OWNER_MESSAGE_MAX), interrupt: z.boolean().optional() }).parse(req.body);
-      return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
-    });
-    owner.get("/api/runs/recent", async (req) => {
-      const q = z.object({ companyId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
-      return runsSvc.recent(q.limit, q.companyId);
-    });
-    owner.get("/api/runs/:id/transcript", async (req, reply) => {
-      const { id } = IdParam.parse(req.params);
-      const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
-      return runsSvc.transcript(id, q).catch(runErrors(reply));
-    });
-    // End every run going now, in every company (BOS-837): the owner's emergency stop, behind the Runs page's confirm.
-    owner.post("/api/runs/cancel-all", async () => runsSvc.cancelAll());
-    owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
     // Stale-blocker, stalled-run and missed-work sweeps (R21, R32, R82); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
