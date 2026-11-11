@@ -39,7 +39,9 @@ export async function launch(): Promise<Browser | null> {
     // later; a missing executable never will, so that one is not retried.
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        return await chromium.launch(executablePath ? { executablePath, args: ["--no-sandbox"] } : { args: ["--no-sandbox"] });
+        // --disable-dev-shm-usage: Docker's default /dev/shm is 64 MB, which parallel Chromium launches exhaust.
+        const args = ["--no-sandbox", "--disable-dev-shm-usage"];
+        return await chromium.launch(executablePath ? { executablePath, args } : { args });
       } catch (e) {
         why(`chromium launch failed (${executablePath ?? "playwright default"}, try ${attempt})`, e);
         if (/doesn't exist/.test(String((e as Error)?.message))) break;
