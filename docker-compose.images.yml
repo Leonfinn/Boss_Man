@@ -33,6 +33,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - config:/config
+      - db-secret:/db-secret
 
   db:
     # Third-party image from Docker Hub (not published by Boss Man). Pinned by tag, like docker-compose.yml.
@@ -41,10 +42,11 @@ services:
     environment:
       POSTGRES_DB: bossman
       POSTGRES_USER: bossman
-      POSTGRES_PASSWORD_FILE: /run/config/db_password
+      POSTGRES_PASSWORD_FILE: /run/db/db_password
     volumes:
       - db-data:/var/lib/postgresql/data
-      - config:/run/config:ro
+      # Only the database password. The master key is in "config", which this third-party image never gets.
+      - db-secret:/run/db:ro
     mem_limit: ${BOSSMAN_DB_MEMORY:-0}
     mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
     oom_score_adj: -500
@@ -62,7 +64,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://bossman@db:5432/bossman
-      BOSSMAN_DATABASE_PASSWORD_FILE: /run/config/db_password
+      BOSSMAN_DATABASE_PASSWORD_FILE: /run/db/db_password
       BOSSMAN_MASTER_KEY_FILE: /run/config/master.key
       BOSSMAN_LAUNCHER: "1"
       BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
@@ -79,6 +81,7 @@ services:
     oom_score_adj: -500
     volumes:
       - config:/run/config:ro
+      - db-secret:/run/db:ro
       - launcher-key:/run/launcher:ro
     networks: [default, launcher]
     ports:
@@ -145,6 +148,7 @@ networks:
 
 volumes:
   config:
+  db-secret:
   data:
   launcher-key:
   db-data:

@@ -75,7 +75,7 @@ dc run --rm setup > "$T/setup1.log" 2>&1 || { cat "$T/setup1.log"; bad "setup, f
 grep -q 'Created master.key' "$T/setup1.log" && ok "setup created the keys" || bad "setup output: $(cat "$T/setup1.log")"
 # Read the files as uid 1000, the server's user (root without capabilities cannot read them), and compare only a hash.
 limg="$(grep '^BOSSMAN_REGISTRY=' "$T/run.env" | cut -d= -f2)/boss-man-launcher@$(grep '^BOSSMAN_LAUNCHER_DIGEST=' "$T/run.env" | cut -d= -f2)"
-sums() { docker run --rm --network none --user 1000:1000 -v "${P}_config:/c:ro" --entrypoint sh "$limg" -c 'cat /c/master.key /c/db_password' | sha256sum; }
+sums() { docker run --rm --network none --user 1000:1000 -v "${P}_config:/c:ro" -v "${P}_db-secret:/d:ro" --entrypoint sh "$limg" -c 'cat /c/master.key /d/db_password' | sha256sum; }
 sum1="$(sums)"
 [ "$sum1" != "$(printf '' | sha256sum)" ] && ok "uid 1000 can read both key files" || bad "uid 1000 cannot read the key files"
 dc run --rm setup > "$T/setup2.log" 2>&1 || { cat "$T/setup2.log"; bad "setup, second run"; exit 1; }

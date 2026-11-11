@@ -127,7 +127,13 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # images.env is only release.json's digests in the form docker-compose.images.yml reads; it fails if the runner image is missing.
+          # The image install needs all four images. Until the runner image is published (BOS-972) a release has no images.env;
+          # say so and carry on, so the existing beta release is not held up.
+          if ! jq -e '[.. | strings | select(test("boss-man-runner"))] | length > 0' release.json >/dev/null; then
+            echo "::warning::release.json lists no boss-man-runner image, so this release has no images.env or docker-compose.images.yml."
+            exit 0
+          fi
+          # images.env is only release.json's digests in the form docker-compose.images.yml reads.
           scripts/render-image-env.sh release.json > images.env
           # The compose file is the one checked out at this commit, signed as it is.
           for f in images.env docker-compose.images.yml; do
@@ -140,6 +146,7 @@ jobs:
       - name: Publish release.json as a pre-release (beta)
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" release.json release.json.sigstore.json images.env images.env.sigstore.json \
-            docker-compose.images.yml docker-compose.images.yml.sigstore.json --prerelease --target "$GITHUB_SHA" \
+          assets=(release.json release.json.sigstore.json)
+          if [ -f images.env ]; then assets+=(images.env images.env.sigstore.json docker-compose.images.yml docker-compose.images.yml.sigstore.json); fi
+          gh release create "v$VERSION" "${assets[@]}" --prerelease --target "$GITHUB_SHA" \
             --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."

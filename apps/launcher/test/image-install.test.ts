@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,28 +22,34 @@ const DIGEST = `sha256:${"a".repeat(64)}`;
 describe("setup", () => {
   it("makes the master key and database password once, and a second run changes nothing", () => {
     const dir = tmp();
+    const dbDir = tmp();
     const owner: string[] = [];
     const chown = (f: string, uid: number, gid: number) => owner.push(`${path.basename(f)} ${uid}:${gid}`);
-    expect(runSetup(dir, chown)).toEqual({ created: ["master.key", "db_password"], kept: [] });
+    expect(runSetup(dir, dbDir, chown)).toEqual({ created: ["master.key", "db_password"], kept: [] });
     const key = readFileSync(path.join(dir, "master.key"), "utf8");
-    const pw = readFileSync(path.join(dir, "db_password"), "utf8");
+    const pw = readFileSync(path.join(dbDir, "db_password"), "utf8");
     expect(Buffer.from(key.trim(), "base64")).toHaveLength(32);
     expect(pw.trim()).toMatch(/^[0-9a-f]{48}$/);
+    // The master key stays out of the database's folder; the password file is readable by the database's group (999) and not by others.
     expect(statSync(path.join(dir, "master.key")).mode & 0o777).toBe(0o400);
-    expect(owner).toEqual(["master.key 1000:1000", "db_password 1000:1000"]);
-    expect(runSetup(dir, chown)).toEqual({ created: [], kept: ["master.key", "db_password"] });
+    expect(statSync(path.join(dbDir, "db_password")).mode & 0o777).toBe(0o440);
+    expect(existsSync(path.join(dbDir, "master.key"))).toBe(false);
+    expect(existsSync(path.join(dir, "db_password"))).toBe(false);
+    expect(owner).toEqual(["master.key 1000:1000", "db_password 1000:999"]);
+    expect(runSetup(dir, dbDir, chown)).toEqual({ created: [], kept: ["master.key", "db_password"] });
     expect(readFileSync(path.join(dir, "master.key"), "utf8")).toBe(key);
-    expect(readFileSync(path.join(dir, "db_password"), "utf8")).toBe(pw);
+    expect(readFileSync(path.join(dbDir, "db_password"), "utf8")).toBe(pw);
     expect(owner).toHaveLength(2);
   });
   it("keeps a master key the owner already has, and makes only what is missing", () => {
     const dir = tmp();
     writeFileSync(path.join(dir, "master.key"), "mine\n");
-    expect(runSetup(dir, () => {})).toEqual({ created: ["db_password"], kept: ["master.key"] });
+    expect(runSetup(dir, tmp(), () => {})).toEqual({ created: ["db_password"], kept: ["master.key"] });
     expect(readFileSync(path.join(dir, "master.key"), "utf8")).toBe("mine\n");
   });
   it("refuses a folder that is not there", () => {
-    expect(() => runSetup(path.join(tmp(), "nope"))).toThrow(/not a folder/);
+    expect(() => runSetup(path.join(tmp(), "nope"), tmp())).toThrow(/not a folder/);
+    expect(() => runSetup(tmp(), path.join(tmp(), "nope"))).toThrow(/not a folder/);
   });
 });
 
