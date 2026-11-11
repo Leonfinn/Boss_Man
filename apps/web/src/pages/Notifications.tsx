@@ -358,6 +358,14 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
+      {saved?.ntfy && (
+        <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
+          On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
+          <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
+            Phone notifications guide: iPhone
+          </a>
+        </p>
+      )}
       {saved?.ntfy && saved.phoneTest && (
         <p role="status" data-testid="phone-test-status" style={{ fontSize: 14 }}>
           {saved.phoneTest.confirmedAt
