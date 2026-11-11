@@ -2467,7 +2467,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // answer buttons: the Board shows that ticket as waiting on the owner, and the raising agent may
         // never get to confirm or withdraw, so folding it left the owner a "Answer in Decisions" button
         // that led to nothing. The card itself says the owner acted since it was written.
-        if (r.staleAt && r.blocks.length === 0) return { reason: `The agent is checking whether this is still needed, because you acted since it was written${r.staleReason ? ` (${r.staleReason})` : ""}.` };
+        if (r.staleAt && r.blocks.length === 0) return { reason: `The agent is checking whether this is still needed, ${r.staleReason ? `because, since it was written, ${r.staleReason}` : "because you acted on its ticket since it was written"}.` };
         const c = contextOf(r);
         const t = cardTicket.get(r.id);
         if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
