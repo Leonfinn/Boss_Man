@@ -62,7 +62,26 @@ export type LauncherConfig = {
   pnpmStoreDir?: string;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
+  /** BOSSMAN_RUNNER_IMAGE (BOS-974): the runner image to start, e.g. ghcr.io/<owner>/boss-man-runner@sha256:... Unset = boss-man-runner:current, built on this host. */
+  runnerImage?: string;
+  /** BOSSMAN_NETGUARD_IMAGE (BOS-974): the same for the network guard. Unset = boss-man-netguard:current. */
+  netguardImage?: string;
+  /**
+   * BOS-974: where `dataRoot` is on the Docker host, when the data folder is a named volume mounted into this container
+   * (the image install). Binds given to runners must name host paths, so they use this; this container's own file work uses `dataRoot`.
+   * Unset = `dataRoot` is the host path too (the build install).
+   */
+  hostDataRoot?: string;
 };
+
+/** A Docker image reference: a name, with a tag or a sha256 digest. Anything else would be a way to start some other image. */
+const IMAGE_REF = /^[a-z0-9][a-z0-9._/:-]{0,200}(@sha256:[0-9a-f]{64})?$/;
+export function parseImageRef(name: string, v: string | undefined): string | undefined {
+  const s = (v ?? "").trim();
+  if (!s) return undefined;
+  if (!IMAGE_REF.test(s)) throw new Error(`${name} should be an image name with a tag or @sha256: digest, not ${v}`);
+  return s;
+}
 
 export type GuardMode = "auto" | "enforce" | "off";
 /** The exit code netguard.sh uses when the host can't load nftables rules. */
@@ -112,6 +131,10 @@ export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current
 export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
 const stackLabels = (stack?: string): Record<string, string> => (stack ? { [STACK_LABEL]: stack } : {});
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
+/** The same folder as the Docker host sees it: what goes into a runner's Binds (BOS-974). */
+const hostCompanyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.hostDataRoot ?? cfg.dataRoot, "companies", slug);
+export const runnerImageOf = (cfg: LauncherConfig) => cfg.runnerImage ?? runnerImage(cfg.stack);
+export const guardImageOf = (cfg: LauncherConfig) => cfg.netguardImage ?? guardImage(cfg.stack);
 /** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
 export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
@@ -167,9 +190,9 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
-  const dir = companyDir(cfg, slug);
+  const dir = hostCompanyDir(cfg, slug);
   return {
-    Image: runnerImage(cfg.stack),
+    Image: runnerImageOf(cfg),
     User: "1000:1000",
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,
@@ -180,7 +203,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
     ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
-      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
+      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],
@@ -287,13 +310,13 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
   if (!SLUG.test(slug)) throw new Error("bad slug");
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(runnerId)) throw new Error("bad runner id");
   return {
-    Image: guardImage(cfg.stack),
+    Image: guardImageOf(cfg),
     Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
     // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
     Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
     Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
-      Binds: [`${netguardDir(cfg, slug)}:/etc/netguard:ro`],
+      Binds: [`${path.join(hostCompanyDir(cfg, slug), "netguard")}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,
       CapDrop: ["ALL"],
       CapAdd: ["NET_ADMIN"],

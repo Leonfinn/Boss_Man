@@ -20,6 +20,11 @@ for v in POSTGRES_PASSWORD NTFY_BASE_URL BOSSMAN_TOOLSERVER_IMAGE PENPOT_PUBLIC_
 done
 # Folders must look like absolute paths (a bind mount) and the Penpot bind must be an address, or compose reads them as volume names.
 for v in BOSSMAN_DATA BOSSMAN_DEPLOYER; do [ -n "${!v:-}" ] || export "$v=/check-compose-placeholder"; done
+# The image install (BOS-974) names images by registry and digest, which must look like real ones.
+[ -n "${BOSSMAN_REGISTRY:-}" ] || export BOSSMAN_REGISTRY=registry.invalid/check-compose
+for v in BOSSMAN_SERVER_DIGEST BOSSMAN_LAUNCHER_DIGEST BOSSMAN_NETGUARD_DIGEST BOSSMAN_RUNNER_DIGEST; do
+  [ -n "${!v:-}" ] || export "$v=sha256:0000000000000000000000000000000000000000000000000000000000000000"
+done
 [ -n "${PENPOT_BIND:-}" ] || export PENPOT_BIND=127.0.0.1
 # A stray COMPOSE_FILE or COMPOSE_PROFILES from the caller would change what -f means.
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME
@@ -37,6 +42,7 @@ sets=(
   "deploy/ntfy.yml"
   "deploy/ntfy.yml deploy/ntfy-bluegreen.yml"
   "deploy/penpot.yml"
+  "docker-compose.images.yml"
 )
 
 failed=0 checked=0

@@ -122,8 +122,24 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
             release.json
+      - name: Make the image install files from the signed release.json, and sign them too (BOS-974)
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # images.env is only release.json's digests in the form docker-compose.images.yml reads; it fails if the runner image is missing.
+          scripts/render-image-env.sh release.json > images.env
+          # The compose file is the one checked out at this commit, signed as it is.
+          for f in images.env docker-compose.images.yml; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            cosign verify-blob --bundle "$f.sigstore.json" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+              "$f"
+          done
       - name: Publish release.json as a pre-release (beta)
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" release.json release.json.sigstore.json --prerelease --target "$GITHUB_SHA" \
+          gh release create "v$VERSION" release.json release.json.sigstore.json images.env images.env.sigstore.json \
+            docker-compose.images.yml docker-compose.images.yml.sigstore.json --prerelease --target "$GITHUB_SHA" \
             --title "Boss Man $VERSION" --notes "Beta release. The images are listed, by digest and architecture, in release.json, which is signed (release.json.sigstore.json)."

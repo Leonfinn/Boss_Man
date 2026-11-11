@@ -1,4 +1,5 @@
 import { loadMasterKey } from "./crypto.js";
+import { databaseUrl } from "./database-url.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
@@ -11,6 +12,9 @@ import { checkQueue } from "./services/check-queue.js";
 import { getHold } from "./services/maintenance.js";
 
 const env = process.env;
+// The password may live in a file (BOS-974); the rest of start-up, including the leader lock, then reads DATABASE_URL as before.
+const resolvedUrl = databaseUrl(env);
+if (resolvedUrl) env.DATABASE_URL = resolvedUrl;
 const master = loadMasterKey(env);
 // BOSSMAN_MIGRATE_ON_START=0: a separate step (node dist/migrate.js) migrates; this server only checks the database is current.
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL, { migrate: env.BOSSMAN_MIGRATE_ON_START !== "0" }) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
