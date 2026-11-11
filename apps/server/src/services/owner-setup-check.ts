@@ -1,0 +1,107 @@
+// DR-052: one card check for a ticket's owner setup steps (the "it's live, now do this" card, DR-011), used both
+// when the steps are written (create_ticket, update_ticket, set_ticket_state ownerSetup and the move to review)
+// and when the card is raised at go-live (raiseOwnerSetup). The same fill and the same lint run both times, so
+// the author finds out while they still have the ticket, and the owner only ever sees steps that passed.
+//
+// Host values come from the host deployer's report (host-facts.ts), never from text: authors write
+// `{{host.env.file}}` or `{{host.compose.cmd}} restart <service>`, and the card shows this server's real values.
+import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
+
+/**
+ * The host facts a setup step may name, and the plain words the card uses when the host hasn't reported one
+ * (DR-052 point 5, the DR-046 "unconfirmed, not refused" rule): a fresh install with no deployer still gets a
+ * card, which says where Boss Man shows the value once it knows it.
+ */
+export const HOST_FACT_LABELS: Readonly<Record<string, string>> = {
+  "env.file": "the .env file the stack starts with",
+  "compose.cmd": "the docker compose command for this stack",
+  "compose.files": "the compose files",
+  "paths.install": "the install folder",
+  "paths.src": "the source folder (the checkout Boss Man runs from)",
+  "paths.deployer": "the host deployer's folder",
+  "ntfy.container": "the ntfy container",
+};
+
+/** What authors are told to write, for refusals and tool help. */
+export const HOST_TOKEN_HELP =
+  "Name host files and commands with tokens, never a host path, address or container name: {{host.env.file}} (the .env the stack starts with), {{host.compose.cmd}} restart <service> (the docker compose command for this host), {{host.paths.install}}, {{host.paths.src}}, {{host.paths.deployer}}, {{host.ntfy.container}}. Boss Man fills in this server's values when the card goes out; a button in the app is written as its path (Settings → …).";
+
+const TOKEN = /\{\{\s*host\.([A-Za-z0-9_.]{1,80})\s*\}\}/g;
+/** A value that can go into a step as it is: one line, no backtick (it would end inline code). */
+const usable = (v: string | undefined): v is string => v !== undefined && !!v.trim() && !/[\n\r`]/.test(v);
+
+/**
+ * Fill each `{{host.KEY}}` from the facts. A known fact the host hasn't reported becomes its plain label plus where
+ * Boss Man shows it, but only in the words: inside inline code a label would break the command, so the token stays
+ * and R4 refuses it (at go-live that sends the steps to the CEO; when written it is let through, see below).
+ * `generic` says a label was used, so the card can say Boss Man doesn't know this server's folders yet.
+ */
+export function fillOwnerSetup(steps: readonly string[], values: Readonly<Record<string, string>>): { steps: string[]; generic: boolean } {
+  let generic = false;
+  const out = steps.map((s) => {
+    const code: [number, number][] = [...s.matchAll(/`[^`\n]+`/g)].map((m) => [m.index, m.index + m[0].length]);
+    return s.replace(TOKEN, (token, key: string, at: number) => {
+      const v = Object.hasOwn(values, key) ? values[key] : undefined;
+      if (usable(v)) return v;
+      const label = Object.hasOwn(HOST_FACT_LABELS, key) ? HOST_FACT_LABELS[key] : undefined;
+      if (!label || code.some(([a, b]) => at >= a && at < b)) return token;
+      generic = true;
+      return `${label} (${THIS_HOST_POINTER} shows it)`;
+    });
+  });
+  return { steps: out, generic };
+}
+
+export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[] };
+
+/** The facts both checks use, read from the host-facts service: every recorded fact's value, the server's
+ * reported name and the hosts for R6. The same inputs raise_decision gives checkAsk. */
+export async function ownerSetupFacts(hf: { sync: () => Promise<{ facts: Record<string, { value: string }> }>; serverHost: () => Promise<string | null>; hosts: () => Promise<HostFacts[]> }): Promise<OwnerSetupFacts> {
+  const rec = await hf.sync();
+  return { values: Object.fromEntries(Object.entries(rec.facts).map(([k, f]) => [k, f.value])), serverHost: await hf.serverHost(), hosts: await hf.hosts() };
+}
+export type OwnerSetupCheck = {
+  /** The steps as the owner will read them: tokens filled, or their labels. */
+  steps: string[];
+  generic: boolean;
+  /** Refusals no override lets through (R3, R4, R10, R14, R15). */
+  hard: LintFinding[];
+  /** Refusals a CEO override can let through, with a reason. */
+  soft: LintFinding[];
+  warn: LintFinding[];
+};
+
+/**
+ * Fill and lint a ticket's setup steps. `mode` is "write" while the ticket is being worked on and "raise" at go-live.
+ * Two rules differ from an agent's card (checkAsk), each for a reason:
+ * - R11 (a host command needs a rehearsal proof) never runs: a ticket has no proof field, and the steps are
+ *   checked by review and by this lint instead.
+ * - When written, an R4 on a known host token is dropped: the host may simply not have reported that fact yet (a
+ *   dev install, an older deployer). At go-live it stays, and the steps go to the CEO rather than the owner.
+ */
+export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts, mode: "write" | "raise"): OwnerSetupCheck {
+  const filled = fillOwnerSetup(steps, facts.values ?? {});
+  const shown = fillServerHost(filled.steps, facts.serverHost);
+  const { refuse, warn } = lintOwnerSteps(shown, { ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
+  const knownGap = (f: LintFinding) => f.rule === "R4" && Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "");
+  const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
+  return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn };
+}
+
+/**
+ * The write-time check (DR-052 point 1). Returns the refusal, or the override to store with the steps (null when
+ * nothing needed one). `lintOverride` is the CEO's alone, with a reason of 10 characters or more, as on raise_decision
+ * (DR-008); it can't let through a hard refusal.
+ */
+export function ownerSetupWriteCheck(steps: readonly string[], facts: OwnerSetupFacts, o: { lintOverride?: string; byCeo: boolean }): { error: string } | { error: null; override: string | null } {
+  const override = o.lintOverride?.replace(/\s+/g, " ").trim();
+  if (override !== undefined && !o.byCeo) return { error: "Only the CEO can pass lintOverride. Fix the setup steps instead." };
+  if (override !== undefined && override.length < 10) return { error: "lintOverride needs a reason the owner can read, at least 10 characters." };
+  if (!steps.length) return { error: null, override: null };
+  const c = checkOwnerSetup(steps, facts, "write");
+  const head = "These owner setup steps can't go to the owner as written (one step per line):";
+  const tail = `The owner pastes each command exactly as written and has no other document open. ${HOST_TOKEN_HELP}`;
+  if (c.hard.length) return { error: `${head}\n${lintLines([...c.hard, ...c.soft])}\n${tail}` };
+  if (c.soft.length && !override) return { error: `${head}\n${lintLines(c.soft)}\n${tail}${o.byCeo ? " If a finding is wrong, pass lintOverride with the reason; the owner sees it on the card." : ""}` };
+  return { error: null, override: c.soft.length ? override! : null };
+}

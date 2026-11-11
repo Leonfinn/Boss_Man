@@ -397,6 +397,9 @@ export const tickets = pgTable(
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
     ownerSetup: text("owner_setup"),
+    /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
+     * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
+    ownerSetupOverride: text("owner_setup_override"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
