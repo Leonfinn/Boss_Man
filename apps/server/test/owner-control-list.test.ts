@@ -103,6 +103,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Feedback.tsx": "Feedback",
   // Funding, Rules and Secrets are pages of their own, shown as tabs of Settings.
   "pages/Funding.tsx": "Funding",
+  "pages/MergeQueue.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
   "pages/Portal.tsx": "Feedback portal",
