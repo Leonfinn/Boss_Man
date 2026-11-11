@@ -53,7 +53,8 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
  */
 const UNTIERED_INSERTS: Record<string, number> = {
   // The agent's own question, a permission ask, an undelivered-answer notice: the owner is who they ask.
-  "services/decisions.ts": 3,
+  // Was 3. The advise reissue insert (BOS-1110) now has the word "tier" in a comment inside the scan window, so the scan no longer counts it; it still has no tier field (the owner default is right for it).
+  "services/decisions.ts": 2,
   // Disk, runner update, self-deploy, budget and cost-cap cards are the owner's own to answer.
   "services/disk.ts": 1,
   "services/maintenance.ts": 1,
