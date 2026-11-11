@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 420" width="1160" height="420" role="img" aria-labelledby="fh-title fh-desc">
+  <title id="fh-title">Your first half hour: company, connections, first task, first agent, more tickets</title>
+  <desc id="fh-desc">The setup wizard has eight steps, and you can skip any of them. Step 1 is the company and its project: Create the company, Add the project. Step 2 connects the runner, Claude, a git token, the checks before merging and a funding source. Step 3 is a first task, ending with Finish. Then you hire your first agent from Agents, Hire, and add more tickets with Add task on your project. From there each ticket follows the path in How Boss Man works: backlog, in progress, review, merge queue, done.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="fh-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="1160" height="420" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">The setup wizard has eight steps. You can skip any of them.</text>
+
+  <!-- wizard bracket over boxes 1-3 -->
+  <path d="M0 52 H678" stroke="#c3cbd6" stroke-width="2"/>
+  <text x="0" y="46" class="bb" font-size="12" fill="#3d4757">SETUP WIZARD, STEPS 1 TO 8</text>
+
+  <g stroke="#17202c" stroke-width="3" fill="none" marker-end="url(#fh-ar)">
+    <path d="M196 170 H239"/><path d="M437 170 H480"/><path d="M678 170 H721"/><path d="M919 170 H962"/>
+  </g>
+
+  <g fill="#17202c">
+    <rect x="0" y="100" width="196" height="200" rx="10"/>
+    <rect x="241" y="100" width="196" height="200" rx="10"/>
+    <rect x="482" y="100" width="196" height="200" rx="10"/>
+    <rect x="723" y="100" width="196" height="200" rx="10"/>
+    <rect x="964" y="100" width="196" height="200" rx="10"/>
+  </g>
+  <g class="d" font-size="21" fill="#eef2f6">
+    <text x="20" y="142">Company</text>
+    <text x="261" y="142">Connect</text>
+    <text x="502" y="142">First task</text>
+    <text x="743" y="142">First agent</text>
+    <text x="984" y="142">More tickets</text>
+  </g>
+  <g class="b" font-size="14" fill="#c3cbd6">
+    <text x="20" y="170">Steps 1 and 2.</text>
+    <text x="20" y="196">Name it, say what it's</text><text x="20" y="214">for, then add the git</text><text x="20" y="232">project. Boss Man</text><text x="20" y="250">creates your CEO.</text>
+    <text x="20" y="282" class="bb" fill="#eef2f6">Create the company</text>
+
+    <text x="261" y="170">Steps 3 to 7.</text>
+    <text x="261" y="196">Runner connected,</text><text x="261" y="214">Claude, a git token,</text><text x="261" y="232">checks before merging,</text><text x="261" y="250">what pays for the CEO.</text>
+    <text x="261" y="282" class="bb" fill="#eef2f6">Check with Claude</text>
+
+    <text x="502" y="170">Step 8.</text>
+    <text x="502" y="196">A title, such as "Read</text><text x="502" y="214">the repo and propose</text><text x="502" y="232">a roadmap". Tick the</text><text x="502" y="250">CEO to start it now.</text>
+    <text x="502" y="282" class="bb" fill="#eef2f6">Finish</text>
+
+    <text x="743" y="170">Agents in the sidebar.</text>
+    <text x="743" y="196">Start from a role,</text><text x="743" y="214">name it, pick Claude</text><text x="743" y="232">Code, Codex or</text><text x="743" y="250">OpenCode.</text>
+    <text x="743" y="282" class="bb" fill="#eef2f6">Hire</text>
+
+    <text x="984" y="170">Projects, your project.</text>
+    <text x="984" y="196">Title, description and</text><text x="984" y="214">"Done when" lines.</text><text x="984" y="232">Assign to an agent</text><text x="984" y="250">or leave it open.</text>
+    <text x="984" y="282" class="bb" fill="#eef2f6">Add and start</text>
+  </g>
+
+  <g class="bb" font-size="15" text-anchor="middle" fill="#ffffff">
+    <circle cx="20" cy="100" r="14" fill="#c8282f"/><text x="20" y="105.5">1</text>
+    <circle cx="261" cy="100" r="14" fill="#c8282f"/><text x="261" y="105.5">2</text>
+    <circle cx="502" cy="100" r="14" fill="#c8282f"/><text x="502" y="105.5">3</text>
+    <circle cx="743" cy="100" r="14" fill="#c8282f"/><text x="743" y="105.5">4</text>
+    <circle cx="984" cy="100" r="14" fill="#c8282f"/><text x="984" y="105.5">5</text>
+  </g>
+
+  <!-- hand-off to how it works -->
+  <path d="M1062 302 V334 H1030" fill="none" stroke="#c8282f" stroke-width="2.5" marker-end="url(#fh-ar)"/>
+  <rect x="0" y="334" width="1030" height="70" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="20" y="362" class="bb" font-size="15" fill="#c8282f">From here a ticket follows the usual path.</text>
+  <text x="20" y="384" class="b" font-size="14" fill="#17202c">Backlog, in progress, review, merge queue, done. Cards from the agents arrive in Decisions for you to answer.</text>
+</svg>
