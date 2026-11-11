@@ -299,6 +299,12 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec(config(), "app-co").HostConfig.CapAdd).toEqual([]);
   });
 
+  it("BOS-1152: Checks at once is taken even when the data folder cannot be written (the launcher's root is read-only)", () => {
+    const api = launcher({ ...config(), dataRoot: path.join(tmpdir(), "bm-no-such-folder-1152", "nested") }, fakeDocker().docker);
+    expect(api.setChecks(3)).toMatchObject({ requested: 3, slots: 3 });
+    expect(api.plannedChecks()).toMatchObject({ requested: 3, slots: 3 });
+  });
+
   it("BOS-69: a named stack uses its own names, images and labels, and never lists or touches the other stack's runners", async () => {
     const fake = fakeDocker();
     const prod = launcher(config(), fake.docker);
