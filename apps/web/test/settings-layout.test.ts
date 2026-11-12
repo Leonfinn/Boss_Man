@@ -223,6 +223,8 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const b = await links.nth(1).boundingBox();
         expect(b!.x, `${vp.name}: second page sits in a second column`).toBeGreaterThan(a!.x + a!.width - 1);
         expect(Math.abs(b!.y - a!.y), `${vp.name}: same row`).toBeLessThan(2);
+        const rowGap = await page.locator("nav[aria-label='Settings'] ul").first().evaluate((el) => getComputedStyle(el).rowGap);
+        expect(rowGap, `${vp.name}: the rows sit on the 8 px spacing scale`).toBe("8px");
         await saveShot(`settings-index-${vp.name}.png`, page);
         await page.close();
       }

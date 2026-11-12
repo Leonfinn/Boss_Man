@@ -547,7 +547,7 @@ details > summary { cursor: pointer; font-size: 14px; }
   .set-head-wizard { display: none; }
   .set-jump a { min-height: 24px; }
   /* (BOS-1126 Q8) The bare #/settings menu on a wide screen: each page's one-line hint under its name, two columns of pages (the sidebar beside a page stays names only). */
-  .set-nav-index ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; }
+  .set-nav-index ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
   .set-nav-index li > a { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; min-height: 56px; border: 1px solid var(--line); border-left-width: 4px; height: 100%; box-sizing: border-box; }
   .set-nav-index .set-item-label { grid-column: 1; grid-row: 1; }
   .set-nav-index .set-item-hint { display: block; grid-column: 1; grid-row: 2; }
@@ -584,7 +584,7 @@ details > summary { cursor: pointer; font-size: 14px; }
 .rm-card-title { display: flex; gap: 8px; align-items: flex-start; padding: 0; border: 0; background: none; color: var(--ink); text-align: left; font-size: 15px; }
 .rm-card-title a { color: var(--ink); text-decoration: none; }
 .rm-card-title a:hover { text-decoration: underline; }
-.rm-unfold { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 10px; font-size: 13px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: var(--ink); cursor: pointer; }
+.rm-unfold { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
 .rm-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform 0.15s; }
 .rm-unfold.open .rm-chevron { transform: rotate(90deg); }
 .rm-card-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }

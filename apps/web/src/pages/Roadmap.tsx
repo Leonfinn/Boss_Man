@@ -367,7 +367,7 @@ function FeatureCard({ f, companyId, onChanged }: { f: RoadmapFeature; companyId
           <b>{f.title}</b>
         </a>
         {f.milestones.length > 0 && (
-          <button type="button" className={`rm-unfold ${open ? "open" : ""}`} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} milestones for ${f.title}`} onClick={() => setOpen(!open)}>
+          <button type="button" className={`btn small rm-unfold ${open ? "open" : ""}`} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} milestones for ${f.title}`} onClick={() => setOpen(!open)}>
             <span aria-hidden="true" className="rm-chevron">›</span>
             Milestones
           </button>

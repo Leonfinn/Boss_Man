@@ -163,6 +163,13 @@ describe.skipIf(!can)("UI quick wins 4 layout (BOS-1126)", () => {
       const fold = page.locator(".rm-unfold").first();
       expect(await fold.getAttribute("aria-label")).toMatch(/milestones for/);
       expect((await fold.innerText()).trim(), "the chevron is labelled Milestones").toMatch(/Milestones/);
+      const btn = await fold.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { radius: cs.borderRadius, height: el.getBoundingClientRect().height, bg: cs.backgroundColor, card: getComputedStyle(document.documentElement).getPropertyValue("--card").trim() };
+      });
+      expect(btn.radius, "Milestones uses the shared button radius (8 px)").toBe("8px");
+      expect(btn.height, "Milestones is the shared small button height (32 px)").toBeGreaterThanOrEqual(32);
+      expect(btn.bg, "Milestones is the outline button, not a filled field").toBe("rgba(0, 0, 0, 0)");
       expect(await page.getByText("Not started", { exact: true }).count(), "0 done reads Not started").toBeGreaterThan(0);
       expect(await page.getByText("1 of 2 done", { exact: true }).count(), "partial reads n of m done").toBeGreaterThan(0);
     } finally {
