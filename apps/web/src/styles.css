@@ -834,6 +834,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   /* One header row: the mark, the company picker and a menu button (BOS-245). */
   /* The bar takes its natural height on every page; the full-height rule is for the side menu only (BOS-1213). */
   .side { min-height: 0; padding: 6px 12px 8px; gap: 6px; }
+  /* The bar and the page wrap onto two rows; without this the window's spare height is shared between the rows and the bar grows (BOS-1213). Chat keeps its own stretch above. */
+  .app { align-content: flex-start; }
   .side .brand span { display: none; }
   .side-bar { display: flex; align-items: center; gap: 8px; }
   .side-bar .switcher { flex: 1; min-width: 0; }

@@ -31,6 +31,11 @@ describe("the phone top bar keeps its natural height (BOS-1213)", () => {
     expect(rules.some((r) => /min-height:\s*0\b/.test(r))).toBe(true);
   });
 
+  it("the wrapped .app packs its rows at the top, so spare height does not grow the bar", () => {
+    const rules = phoneBlocks(css).flatMap((b) => [...b.matchAll(/(?:^|[}\/])\s*\.app\s*\{([^}]*)\}/g)].map((x) => x[1] ?? ""));
+    expect(rules.some((r) => /align-content:\s*flex-start\b/.test(r))).toBe(true);
+  });
+
   it("no page-specific reset is needed (the Chat-only rule stays gone)", () => {
     expect(css).not.toMatch(/\.chat-page[^{]*\)\s*>\s*nav\.side\s*\{\s*min-height:\s*0/);
   });
