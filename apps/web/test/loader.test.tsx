@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Loader } from "../src/components/Loader";
@@ -30,9 +32,9 @@ describe("shared Loader", () => {
 });
 
 describe("reduced motion", () => {
-  it("the stylesheet stops the animation and fade and sets still bar heights", async () => {
-    const { readFileSync } = await import("node:fs");
-    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  it("the stylesheet stops the animation and fade and sets still bar heights", () => {
+    // jsdom's import.meta.url is not a file URL, so read the sheet from the package dir.
+    const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
     const block = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce) {\n  .loader"));
     expect(block).toMatch(/\.loader \{ animation: none; \}/);
     expect(block).toMatch(/\.loader-mark rect \{ animation: none; \}/);
