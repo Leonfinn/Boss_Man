@@ -78,6 +78,7 @@ import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
 import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -1738,8 +1739,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput, agentId: run?.agentId ?? null };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
       const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      // BOS-1300: an ordinary agent's owner chat has its working tools, so it goes through the company's rules like its ticket runs.
+      // The CEO, Scrum Master and personal assistant chats stay board-only.
+      const [chatAgent] = asking?.purpose === "chat" && asking.agentId ? await db.select({ role: agents.role, duty: agents.duty }).from(agents).where(eq(agents.id, asking.agentId)) : [];
+      const boardOnlyChat = asking?.purpose === "chat" && (!chatAgent || runCapabilities(chatAgent, true).boardToolsOnly);
       const { outcome, rule, position } =
-        asking?.purpose === "chat"
+        boardOnlyChat
           ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
