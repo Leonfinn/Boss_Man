@@ -1038,7 +1038,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                           <svg width="16" height="16" {...iconProps} strokeWidth={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
                           <span>
                             <DoneTitle id={t.id} title={t.title} />
-                            <small>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{named(t)} · {when(t.lastActivityAt)}</small>
+                            <small title={named(t)}>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{t.assigneeAgentId ? named(t).split(" ")[0] : named(t)} · {when(t.lastActivityAt)}</small>
                           </span>
                         </li>
                       ))}

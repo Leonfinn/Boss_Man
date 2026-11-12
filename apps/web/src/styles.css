@@ -296,7 +296,7 @@ p { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .ticket .row .icon-btn svg { transition: none; } }
 .ticket .top { gap: 4px; }
 .ticket .top .tag, .ticket .top .type { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.ticket .top .ref { margin-left: auto; }
+.ticket .top .ref { margin-left: auto; font-size: 12px; }
 .ticket .clamp2, .done-list .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .ticket .clamp1 { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ticket .waits-open { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
