@@ -64,4 +64,5 @@ SET "slug" = x."clean_slug"
 FROM "bos1324_dash_pages" x
 WHERE p."id" = x."dash_id" AND x."keep_id" IS NULL;
 --> statement-breakpoint
+-- contract-ok: drops only this migration's own TEMP scratch table, no real data
 DROP TABLE "bos1324_dash_pages";
