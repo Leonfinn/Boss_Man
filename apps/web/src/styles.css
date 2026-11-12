@@ -1158,3 +1158,19 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
+
+/* Shared loading mark (BOS-1276). Three columns rise in turn; still under reduced motion. */
+.loader { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; animation: loader-in 0.2s ease-out; }
+.loader.sm { gap: 6px; font-size: 13px; }
+.loader-mark rect { transform-box: fill-box; transform-origin: 50% 100%; animation: loader-rise 1.1s ease-in-out infinite; }
+.loader-mark .b2 { animation-delay: 0.18s; }
+.loader-mark .b3 { animation-delay: 0.36s; }
+@keyframes loader-rise { 0%, 100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
+@keyframes loader-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .loader { animation: none; }
+  .loader-mark rect { animation: none; }
+  .loader-mark .b1 { transform: scaleY(0.55); }
+  .loader-mark .b2 { transform: scaleY(1); }
+  .loader-mark .b3 { transform: scaleY(0.75); }
+}

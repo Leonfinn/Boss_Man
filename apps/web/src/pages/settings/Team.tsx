@@ -6,6 +6,7 @@ import { clearDraft, readDraft } from "../../drafts";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { ReadOnlyText } from "../../components/ReadOnlyText";
 import { Section, useAction } from "./shared";
+import { Loader } from "../../components/Loader";
 
 type Chapter = {
   id: string;
@@ -229,7 +230,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
       {failed ? (
         <p className="muted">Couldn't load the standing rules.</p>
       ) : !rules ? (
-        <p className="muted">Loading…</p>
+        <Loader label="Loading the standing rules" />
       ) : open ? (
         <>
           <DraftTextarea draftKey={draftKey} aria-label="Standing rules" value={shown} onChange={(text) => { setShown(text); setKept(text); }} rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 14 }} />

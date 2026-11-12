@@ -6,6 +6,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
+import { Loader } from "../components/Loader";
 import { usePoll } from "../hooks";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -814,6 +815,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
+          {!board.data && current && !board.error && (
+            <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>
+          )}
           {lanes.map(({ col, tickets, mine, merging, held }) => {
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
