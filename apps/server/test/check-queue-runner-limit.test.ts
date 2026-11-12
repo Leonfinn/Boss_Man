@@ -53,7 +53,9 @@ async function setup() {
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "PUT" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
-  await vi.waitFor(() => expect(fake.calls.some((x) => x.startsWith("PUT /runners/app-co"))).toBe(true));
+  // Starting a company's runner sends PUT /runners/app-co then PUT /runners/app-co/allow; wait for the second, or a loaded
+  // runner can land it after the clear below and it becomes calls[0] (BOS-1303).
+  await vi.waitFor(() => expect(fake.calls).toContain("PUT /runners/app-co/allow"));
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   built.runners.connect(reg.runnerId, () => true, ["queued_checks"]);
   fake.calls.length = 0;

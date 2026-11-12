@@ -11,7 +11,7 @@ import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
 import { pickAccount } from "./claude-accounts.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -121,6 +121,20 @@ const LOOP_EXCHANGES = 4;
 /** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
 export const CARRY_ON_MS = 15 * 60_000;
 export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
+
+/**
+ * True while the agent has its own check job queued or running on the ticket (request_check, DR-003).
+ * The job's end always wakes the agent that asked (check-dispatcher.ts ended(), for every end state),
+ * so a carry-on wake meanwhile only makes it look at a check still in line and stop (BOS-1273).
+ */
+async function ownCheckLive(db: Db, ticketId: string, agentId: string) {
+  const [j] = await db
+    .select({ id: checkJobs.id })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.requestedBy, agentId), inArray(checkJobs.state, ["queued", "running"])))
+    .limit(1);
+  return !!j;
+}
 
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
@@ -693,6 +707,11 @@ export function schedulerService(
       const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
       if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review" && x.systemState !== "blocked")) {
         await log("Cleared the scheduled check: the ticket is no longer being worked");
+        continue;
+      }
+      // Only Boss Man's own carry-on wake gives way to a live check; a check the agent set itself still fires.
+      if (x.monitorNote === CARRY_ON_NOTE && (await ownCheckLive(db, x.id, x.assigneeAgentId))) {
+        await log("Skipped the carry-on wake: the agent's own check is still queued or running, and its result will wake them");
         continue;
       }
       if (x.monitorAttempts >= x.monitorMax) {
@@ -1490,6 +1509,7 @@ export function schedulerService(
       if (t.systemState !== "in_progress" || t.monitorAt) return;
       const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, run.agentId), eq(wakes.ticketId, t.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
       if (queued) return;
+      if (await ownCheckLive(db, t.id, run.agentId)) return;
       const at = new Date(now().getTime() + CARRY_ON_MS);
       await db.update(tickets).set({ monitorAt: at, monitorNote: CARRY_ON_NOTE, monitorAttempts: 0 }).where(and(eq(tickets.id, t.id), isNull(tickets.monitorAt)));
       const [{ name } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId));

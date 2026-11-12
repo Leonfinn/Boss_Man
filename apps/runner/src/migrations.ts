@@ -234,11 +234,17 @@ export function mergeSnapshots(base: Json, ours: Json, theirs: Json): Json {
   const walk = (b: Json | typeof ABSENT, o: Json | typeof ABSENT, t: Json | typeof ABSENT, p: string[]): Json | typeof ABSENT => {
     // Each snapshot's own id and its link to the one before are set by the caller, never merged.
     if (p.length === 1 && (p[0] === "id" || p[0] === "prevId")) return o;
-    if (same(o, t)) return o;
-    if (same(o, b)) return t;
-    if (same(t, b)) return o;
+    // Both sides added the same part (table, column, ...): even with identical definitions, the second
+    // branch's SQL would repeat the CREATE/ADD and fail at deploy, so refuse (BOS-736).
+    if (b === ABSENT && o !== ABSENT && t !== ABSENT) throw new SnapshotClash(p.join(".") || "snapshot");
     // The unit that must not change on both sides: tables.<t>.<section>.<name>, or <section>.<name> elsewhere.
     const unit = p[0] === "tables" ? 4 : 2;
+    // Two sides equal to each other but not to the base can still hide an identical addition below, so
+    // keep descending until the unit level (equal changes of an existing unit stay fine).
+    const descend = p.length < unit && isPlain(b as Json) && isPlain(o) && isPlain(t);
+    if (same(o, t) && (same(o, b) || !descend)) return o;
+    if (same(o, b)) return t;
+    if (same(t, b)) return o;
     if (p.length < unit && isPlain(o) && isPlain(t) && (b === ABSENT || isPlain(b))) {
       const bb: Plain = b === ABSENT ? {} : b;
       // Own keys only, and an output with no prototype: a column called "constructor" or "toString" must survive.

@@ -170,7 +170,19 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
           for (const target of hrefs) {
             await page.locator(`.set-jump a[href="#${target}"]`).click();
-            await new Promise((r) => setTimeout(r, 900));
+            // Wait for the smooth scroll to bring the section into view (not a fixed sleep); a miss falls through to the assertion below, which reports it.
+            await page
+              .waitForFunction(
+                (t: string) => {
+                  const el = document.getElementById(t);
+                  if (!el) return false;
+                  const r = el.getBoundingClientRect();
+                  return r.bottom > 0 && r.top < window.innerHeight;
+                },
+                target,
+                { timeout: 10_000 },
+              )
+              .catch(() => undefined);
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
             const inView = await page.evaluate((t: string) => {
               const el = document.getElementById(t);
