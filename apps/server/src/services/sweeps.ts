@@ -16,6 +16,7 @@ import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { record } from "./activity.js";
+import { canStartNow, cantMoveFor, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
@@ -111,6 +112,10 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
 };
 /** How many unassigned tickets the CEO's idle-agents wake lists (BOS-615). */
 const IDLE_ASK_TICKETS = 8;
+/** The wake reason for starting a ticket the WIP limit held, once there is room (BOS-1180); it is the ordinary "assigned" wake, so it is outside the idle-slot allowance. */
+const HELD_START_REASON = "assigned";
+/** The CEO's idle-agents wake lists work held behind an agent's WIP cap for longer than this (BOS-1180). */
+const HELD_LISTED_AFTER_MS = 30 * 60_000;
 /**
  * The line a re-queued wake carries at the end of its note: it is how the retries of one original
  * wake are counted without a column (BOS-480), and it tells the agent why it was started again.
@@ -1031,16 +1036,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
 
   /** Whether the ticket still waits on something unfinished, the way decisions.ts decides it. */
-  async function isBlocked(ticketId: string) {
-    const deps = await db
-      .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    return deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
-  }
+  const isBlocked = (ticketId: string) => ticketIsBlocked(db, ticketId);
 
   /** Whether the run started or waited on scripts/check-quick.sh or check-all.sh: its agent is in the shared check line (BOS-574). */
   async function ranCheckScript(runId: string) {
@@ -1150,13 +1146,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   /**
    * Tier 2 of the idle-slot sweep (BOS-615): an idle agent's assigned `ready` ticket is its next up (the CEO
    * or PM puts the plan's next ticket there), so a free slot starts it at once rather than after missed
-   * work's half hour. Agents with in-progress work that isn't waiting on a booked check are left to tier 1
-   * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order, quiet time and
-   * per-ticket limits as tier 1; blocked tickets and plan-first ones awaiting approval are skipped, and so is a
-   * ticket missed work has already nudged today (its own ladder ends in the "looks stuck" card).
+   * work's half hour. Agents with in-progress work that can move and isn't waiting on a booked check are left to
+   * tier 1 and missed work, so a ready ticket never pulls an agent off what it was doing; work that can't move
+   * (BOS-1172's `cantMoveSql`: waiting on an unfinished ticket, a plan, a go-live check) doesn't make an agent busy.
+   * Same order, quiet time and per-ticket limits as tier 1.
+   *
+   * BOS-1180: this is the one start step for Ready tickets, and it asks the one `canStartNow` test (no live run or
+   * queued wake, WIP room, not blocked, plan not waiting). It also starts tickets the WIP limit held (`wip_held_at`)
+   * the moment there is room: those skip the quiet time, the busy test and the allowance, as the agent has already
+   * been told to wait for room. Wakes the WIP limit refused don't count towards `idleFillsPerDay`, and a
+   * missed-work wake no longer stops this step (missed work keeps its own ladder, which ends in the "looks stuck" card).
    */
   async function readySlots(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
     const msObjective = alias(objectives, "ms_objective");
+    const doing = alias(tickets, "doing");
     const rows = await db
       .select({ ticket: tickets, krPriority: objectives.priority, msPriority: msObjective.priority })
       .from(tickets)
@@ -1174,11 +1177,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(companies.paused, false),
           // Plan-first tickets wait for their plan's approval, as in missed work.
           or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
-          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled.
-          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs)),
+          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled. A held start isn't: it was refused for room.
+          or(isNotNull(tickets.wipHeldAt), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs))),
           isNull(tickets.monitorAt),
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
-          sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null)`,
+          or(isNotNull(tickets.wipHeldAt), sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null and not ${cantMoveFor(doing)})`),
         ),
       );
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
@@ -1189,21 +1192,29 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     for (const { ticket } of candidates) {
       const agentId = ticket.assigneeAgentId!;
       if (busy.has(agentId)) continue;
-      if ((await roomIn(ticket.companyId)) <= 0) continue;
-      if (await isBlocked(ticket.id)) continue;
+      const held = !!ticket.wipHeldAt;
+      // A held start waits for WIP room, not a run slot: its wake queues like any other.
+      if (!held && (await roomIn(ticket.companyId)) <= 0) continue;
+      if (!(await canStartNow(db, ticket))) continue;
       const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
-      if (ticketRuns.some((r) => !r.endedAt)) continue;
       const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
-      if (t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
+      if (!held && t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
       const recent = await db
-        .select({ createdAt: wakes.createdAt, reason: wakes.reason })
+        .select({ createdAt: wakes.createdAt, statusReason: wakes.statusReason, reason: wakes.reason })
         .from(wakes)
-        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, [IDLE_SLOT_REASON, MISSED_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, held ? [IDLE_SLOT_REASON, HELD_START_REASON] : [IDLE_SLOT_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
         .orderBy(desc(wakes.createdAt));
-      // Once missed work has nudged this ticket, its ladder (two wakes, then "looks stuck") owns it; more wakes here would only hold that card back.
-      if (recent.some((w) => w.reason === MISSED_REASON)) continue;
-      if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
-      if (recent.length >= limits.idleFillsPerDay) continue;
+      // Dropped and refused wakes keep the gap (so none is retried every minute) but not the allowance: a wake the WIP limit refused wasn't a try at the work.
+      // For a held start the wake that was refused for room is the very thing being retried now, so it doesn't hold the next one off.
+      const gapOf = held ? recent.filter((w) => w.statusReason !== WIP_REFUSED_REASON) : recent;
+      if (gapOf[0] && t.getTime() - gapOf[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
+      if (held) {
+        await opts.wake({ agentId, ticketId: ticket.id, reason: HELD_START_REASON, priority: 1, note: "Your WIP limit has room again, so this held ticket can start now." });
+        busy.add(agentId);
+        woken++;
+        continue;
+      }
+      if (recent.filter((w) => w.reason === IDLE_SLOT_REASON && w.statusReason !== WIP_REFUSED_REASON).length >= limits.idleFillsPerDay) continue;
       await opts.wake({
         agentId,
         ticketId: ticket.id,
@@ -1227,6 +1238,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * `missedEveryMs`, so an agent the CEO leaves idle on purpose doesn't start a CEO run every half hour.
    */
   async function askCeoForWork(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>) {
+    const mine = alias(tickets, "mine");
     const idle = await db
       .select({ id: agents.id, companyId: agents.companyId, name: agents.name, title: agents.title, role: agents.role })
       .from(agents)
@@ -1237,7 +1249,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(agents.paused, false),
           isNull(agents.retiredAt),
           eq(companies.paused, false),
-          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress'))`,
+          // Work that can't move (waiting on an unmerged fix, a plan, a go-live check) doesn't make an agent busy (BOS-1172's rule, BOS-1180).
+          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not ${cantMoveFor(mine)})`,
           sql`not exists (select 1 from review_requests owed join tickets reviewed on reviewed.id = owed.ticket_id where owed.reviewer_agent_id = ${agents.id} and owed.status = 'pending' and reviewed.system_state = 'review')`,
         ),
       )
@@ -1267,7 +1280,16 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
         .leftJoin(msObjective, eq(msObjective.id, milestones.objectiveId))
         .where(and(eq(tickets.companyId, companyId), inArray(tickets.systemState, ["backlog", "ready"]), isNull(tickets.assigneeAgentId)));
-      if (!open.length) continue;
+      // Assigned work the agent's WIP cap has held for a while: not moved by Boss Man (fit is the CEO's call), only shown (BOS-1180).
+      const heldRows = await db
+        .select({ ticket: tickets, prefix: companies.ticketPrefix, owner: agents.name })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNotNull(tickets.wipHeldAt), lte(tickets.wipHeldAt, new Date(t.getTime() - HELD_LISTED_AFTER_MS))))
+        .orderBy(asc(tickets.wipHeldAt))
+        .limit(IDLE_ASK_TICKETS);
+      if (!open.length && !heldRows.length) continue;
       // While the merge line is long, work that needs no check slot (no-code: research, wiki, docs) goes first.
       const [{ waiting } = { waiting: 0 }] = await db.select({ waiting: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")));
       const lineLong = waiting > limits.mergeLineLongAt;
@@ -1287,15 +1309,15 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const marks = [ticket.systemState, ticket.urgent ? "urgent" : null, ticket.noCode ? "no code, needs no check slot" : null, ticket.planFirst ? "plan first" : null, ticket.risk ? `${ticket.risk} risk` : null].filter(Boolean).join(", ");
         top.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (${marks})`);
       }
-      if (!top.length) continue;
+      if (!top.length && !heldRows.length) continue;
+      const heldLines = heldRows.map(({ ticket, prefix, owner }) => `- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, held behind ${owner}'s cap${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
       const body = [
-        `Idle agents (no live run, no ready or in-progress ticket, no review owed):`,
+        `Idle agents (no live run, no ready or in-progress ticket they can move, no review owed):`,
         ...people.map((p) => `- ${p.name} (${p.title ?? p.role})`),
         ``,
-        `Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`,
-        ...top,
-        ``,
+        ...(top.length ? [`Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`, ...top, ``] : []),
+        ...(heldLines.length ? [`Assigned, but held behind the assignee's cap for over 30 minutes (Boss Man doesn't move these; move one to an idle agent with assign_ticket if it fits: check its plan, branch and risk first):`, ...heldLines, ``] : []),
         `Give an idle agent its next ticket with assign_ticket and move it to ready; Boss Man then starts it in a free slot. Match the role, keep plan-first and risky work for agents who can carry it, and leave an agent idle if nothing fits. You are asked again only when this list changes.`,
       ].join("\n");
       if (lastAsks[0]?.note?.endsWith(`\n${body}`)) continue;

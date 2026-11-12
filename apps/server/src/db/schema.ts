@@ -419,6 +419,8 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
+    wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
     /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
     stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
