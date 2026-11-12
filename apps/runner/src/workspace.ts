@@ -24,7 +24,7 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, re
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -931,6 +931,59 @@ export class Workspaces {
     }
   }
 
+  /** Paths in `git status --porcelain -z` output (git() trims, so the first entry may have lost its leading space). */
+  private static statusPaths(out: string): string[] {
+    return out
+      .split("\0")
+      .filter(Boolean)
+      .map((e) => (e[2] === " " ? e.slice(3) : e.slice(2)));
+  }
+
+  /**
+   * What in the ticket's copy isn't on its branch, or null when nothing is (BOS-1231). Callers hold the repo lock.
+   *
+   * A copy can fall behind its own branch. An agent that checks the branch out in another ticket's folder and commits
+   * there moves the branch, while this folder's index and files stay at the old commit (BOS-1128 and BOS-1130, 11 Nov).
+   * `git status` here then shows everything since as uncommitted: the target's newer files, and the agent's own commits
+   * undone. The merge told the author to commit all of it, which is other tickets' code.
+   *
+   * The sign is the copy's index: it is still exactly an older commit on the branch's first-parent line (a commit
+   * made in this folder would have moved it along). Then the folder is moved from that commit to the branch head
+   * with git's own two-tree switch (`read-tree -m -u`, what `git checkout` does): files the author changed and the
+   * branch didn't are kept, and it refuses rather than overwrite one that clashes. Whatever is still uncommitted after
+   * that is the author's own. If the switch refuses, the files that differ only because the branch moved on are
+   * `foreign`: never offered to the author, who would be committing other tickets' code.
+   *
+   * The ticket's own commits made elsewhere count as moved-on too: their content is on the branch already.
+   */
+  private async uncommitted(repo: string, dir: string): Promise<Uncommitted | null> {
+    const status = async () => Workspaces.statusPaths(await this.git(["status", "--porcelain", "-z", "--no-renames"], { cwd: dir, repo }));
+    const files = await status();
+    if (!files.length) return null;
+    const behind = await this.staleAt(repo, dir);
+    if (!behind) return { status: "uncommitted", files };
+    const moved = await this.gitCode(["read-tree", "-m", "-u", behind, "HEAD"], { cwd: dir, repo });
+    if (moved.code === 0) {
+      console.warn(`[runner] ticket copy ${dir} was behind its own branch (at ${behind.slice(0, 8)}); moved it to the branch head (BOS-1231)`);
+      const left = await status();
+      return left.length ? { status: "uncommitted", files: left } : null;
+    }
+    const movedOn = new Set((await this.git(["diff", "--name-only", "--no-renames", "-z", behind, "HEAD"], { cwd: dir, repo })).split("\0").filter(Boolean));
+    const foreign = files.filter((f) => movedOn.has(f));
+    return { status: "uncommitted", files: files.filter((f) => !movedOn.has(f)), foreign };
+  }
+
+  /** The older commit on the branch's first-parent line whose tree the copy's index still is, or null (BOS-1231). */
+  private async staleAt(repo: string, dir: string): Promise<string | null> {
+    // write-tree only adds tree objects; it fails with unmerged entries, which is never a stale copy.
+    const index = await this.gitCode(["write-tree"], { cwd: dir, repo });
+    if (index.code !== 0 || !index.stdout) return null;
+    const line = await this.git(["log", "--first-parent", "--max-count=2000", "--format=%H %T", "HEAD"], { cwd: dir, repo });
+    const [head, ...older] = line.split("\n").map((l) => l.split(" "));
+    if (!head || head[1] === index.stdout) return null;
+    return older.find(([, t]) => t === index.stdout)?.[0] ?? null;
+  }
+
   /**
    * Frees the worktree. Uncommitted work, tracked or not, is saved as a patch first and put
    * back the next time the ticket's workspace is made. The branch and its commits stay.
@@ -1464,8 +1517,8 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const branch = `refs/heads/${branchFor(spec.ticketId)}`;
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, dir);
+        if (dirty) return dirty;
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1499,8 +1552,8 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
       const ticketDir = this.ticketDir(spec.ticketId);
       if (existsSync(path.join(ticketDir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, ticketDir);
+        if (dirty) return dirty;
         // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
         if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
@@ -1559,8 +1612,8 @@ export class Workspaces {
       const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
         const ticketDir = this.ticketDir(spec.ticketId);
         if (existsSync(path.join(ticketDir, ".git"))) {
-          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
-          if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+          const dirty = await this.uncommitted(repo, ticketDir);
+          if (dirty) return dirty;
           if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
@@ -1822,8 +1875,8 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const name = branchFor(spec.ticketId);
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, dir);
+        if (dirty) return dirty;
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
