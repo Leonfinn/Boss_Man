@@ -340,6 +340,7 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     expect(screen.getByRole("heading", { name: "Merge queue" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Merges" })).toBeTruthy();
-    expect(screen.getByText("Loading…")).toBeTruthy();
+    // The shared loader stays mounted (silent for the first second).
+    expect(screen.getByRole("status")).toBeTruthy();
   });
 });
