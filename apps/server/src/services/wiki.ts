@@ -159,6 +159,9 @@ export const SHRINK_FRACTION = 0.25;
  */
 export const MIN_SHRINK = 40;
 
+/** A page this long can only be shortened by an agent with replace: true plus confirmReplace (BOS-1280). */
+export const LONG_PAGE_CHARS = 40_000;
+
 /**
  * Why a write that replaces a page's body is refused without `replace: true` (BOS-430): it would
  * remove more than a quarter of the text, or drop a heading the page has now. Null when it's safe
@@ -397,7 +400,7 @@ export type SectionHit = { slug: string; title: string; path: string; snippet: s
 type Author = { agentId: string | null; runId: string | null };
 
 /** What `write` saves. Shared by `write`, `writeWithin` and `append`, which all reach the same save (BOS-430). */
-export type WriteInput = { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; isCeo?: boolean; fromRestore?: boolean } & Author;
+export type WriteInput = { slug?: string; folder?: string; title: string; body: string; ticketId?: string | null; replace?: boolean; confirmReplace?: string; isCeo?: boolean; fromRestore?: boolean } & Author;
 
 export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "similar">) {
   async function ownTicket(conn: Db, companyId: string, ticketId: string) {
@@ -791,6 +794,16 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       const baseline = input.body.length < existing.body.length ? await largestEver(conn, existing.id, existing.body.length) : existing.body.length;
       const refusal = input.replace ? null : shrinkRefusalAgainst(existing.body, baseline, input.body);
       if (refusal) throw new WikiError(409, refusal);
+      // (BOS-1280) A long page (a release log) is wiped by one whole-page write with replace: true
+      // (BOS-447, BOS-1279). An agent write that makes such a page shorter needs replace: true AND
+      // confirmReplace naming the page's slug, whoever the agent is. A restore and the owner's own
+      // editor (no agentId) are exempt.
+      if (input.agentId && !input.fromRestore && existing.body.length >= LONG_PAGE_CHARS && input.body.length < existing.body.length && input.confirmReplace !== existing.slug) {
+        throw new WikiError(
+          409,
+          `"${existing.slug}" is a long page (${existing.body.length.toLocaleString("en-GB")} characters) and this write would shorten it to ${input.body.length.toLocaleString("en-GB")}. Do not re-send a long page: add to it with append. If you really mean to replace it, pass replace: true and confirmReplace: "${existing.slug}".`,
+        );
+      }
       if (input.replace && !input.isCeo && input.agentId) {
         const [first] = await conn
           .select({ agentId: wikiRevisions.agentId })
