@@ -47,6 +47,31 @@ describe("CI on a commit for the merge gate (BOS-1070)", () => {
     expect((await host.ciStatus(cfg("github"), "t", "e".repeat(40))).billing).toBe(true);
   });
 
+  it("a failing test that only mentions billing is a real failure, in the run's output or its annotations", async () => {
+    const { host } = github(
+      [{ status: "completed", conclusion: "failure", latest_check_runs_count: 1 }],
+      [{ ...done("check", "failure", 5), output: { title: "1 failed", summary: "billing > spending limit card: payment failed" } }],
+      {
+        5: [
+          // A test about GitHub's billing text, failing: it names its file, so it is the agent's to fix.
+          { annotation_level: "failure", path: "apps/server/test/git-hosts.test.ts", start_line: 9, title: "billing", message: "expected 'The job was not started because your spending limit needs to be increased' to match" },
+          { annotation_level: "failure", path: ".github", message: "Process completed with exit code 1." },
+        ],
+      },
+    );
+    expect((await host.ciStatus(cfg("github"), "t", "e".repeat(40))).billing).toBe(false);
+    const [found] = await host.failures(cfg("github"), "t", [{ id: 5, name: "check", url: "" }]);
+    expect(found!.billing).toBe(false);
+    expect(found!.lines).toHaveLength(1);
+  });
+
+  it("GitHub's own account-level refusal in the annotations is billing", async () => {
+    const { host } = github([], [], {
+      5: [{ annotation_level: "failure", path: ".github", message: "The job was not started because recent account payments have failed or your spending limit needs to be increased." }],
+    });
+    expect((await host.failures(cfg("github"), "t", [{ id: 5, name: "check", url: "" }]))[0]!.billing).toBe(true);
+  });
+
   it("a refused read is a GitHostError with the status, so the gate can tell a token problem from an outage", async () => {
     const host = gitHostService({ fetch: (async () => json(403, { message: "Resource not accessible by personal access token" })) as unknown as typeof fetch });
     await expect(host.ciStatus(cfg("github"), "t", "e".repeat(40))).rejects.toMatchObject({ status: 403, message: expect.stringContaining("not accessible") });

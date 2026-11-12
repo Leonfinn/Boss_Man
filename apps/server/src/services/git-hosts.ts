@@ -18,7 +18,13 @@ export type CiRun = { id: number; name: string; url: string };
 export type CiStatus = { state: "passed" | "failed" | "pending" | "none"; failed: CiRun[]; waiting: string[]; billing: boolean };
 const FAILED_CONCLUSIONS = ["failure", "timed_out", "cancelled", "startup_failure", "action_required", "stale"];
 const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?failed/i;
-export type MergeAttempt ={ merged: true; commit: string | null } | { merged: false; note: string };
+/**
+ * GitHub's own refusal to start a job: "The job was not started because recent account payments have failed or your
+ * spending limit needs to be increased" (or "...your account is locked due to a billing issue"). Both parts must match, so
+ * a failing test that merely mentions billing is still the agent's to fix, not an owner card.
+ */
+const billingRefusal = (text: string) => /\bjob was not started\b/i.test(text) && BILLING_TEXT.test(text);
+export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
 
@@ -162,7 +168,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         const o = (r.output ?? {}) as { title?: unknown; summary?: unknown };
         return `${String(o.title ?? "")} ${String(o.summary ?? "")}`;
       };
-      const billing = runs.some((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)) && BILLING_TEXT.test(outputOf(r)));
+      const billing = runs.some((r) => FAILED_CONCLUSIONS.includes(String(r.conclusion)) && billingRefusal(outputOf(r)));
       const suiteFailed = live.some((s) => s.status === "completed" && FAILED_CONCLUSIONS.includes(String(s.conclusion)));
       const suitePending = live.some((s) => s.status !== "completed");
       const state = failed.length || suiteFailed ? "failed" : !live.length && !runs.length ? "none" : suitePending || waiting.length ? "pending" : "passed";
@@ -180,7 +186,8 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
         const res = await call(cfg, token, "GET", `/check-runs/${run.id}/annotations?per_page=50`).catch(() => null);
         const rows = res?.ok && Array.isArray(res.json) ? res.json : [];
         const failing = rows.filter((a) => a.annotation_level === "failure");
-        const billing = failing.some((a) => BILLING_TEXT.test(`${String(a.title ?? "")} ${String(a.message ?? "")}`));
+        // Only GitHub's account-level note counts (no file, or ".github"): a test's annotation always names its file.
+        const billing = failing.some((a) => (!a.path || a.path === ".github") && billingRefusal(`${String(a.title ?? "")} ${String(a.message ?? "")}`));
         const lines = failing
           .filter((a) => !/^Process completed with exit code/i.test(String(a.message ?? "")))
           .map((a) => {

@@ -1846,10 +1846,18 @@ export function reviewService(
       const alongsideCi = async <O extends object>(prep: { commit: string; tree: string; targetSha: string }, own: (stop: CiStop) => Promise<O | null>): Promise<O | Early | null> => {
         if (!ci) return own({ stopped: false });
         const stop: CiStop = { stopped: false };
-        const ownP = own(stop).then((r) => {
-          if (r) stop.stopped = true;
-          return r;
-        });
+        const ownP = own(stop).then(
+          (r) => {
+            if (r) stop.stopped = true;
+            return r;
+          },
+          (e: unknown) => {
+            // The gate's own check threw (the runner went away): stop the CI poll too, or it holds this landing for up to
+            // the CI ceiling before the error reaches the retry.
+            stop.stopped = true;
+            throw e;
+          },
+        );
         const ciP = publishAndWait(prep, stop).then((o) => {
           if (ciStops(o)) stop.stopped = true;
           return o;
@@ -1857,7 +1865,10 @@ export function reviewService(
         const first = await new Promise<"both" | "ci">((resolve) => {
           let n = 0;
           const one = () => void (++n === 2 && resolve("both"));
-          ownP.then(one, one);
+          ownP.then(one, () => {
+            ciP.catch(() => undefined);
+            resolve("both");
+          });
           ciP.then((o) => (ciStops(o) ? resolve("ci") : one()), one);
         });
         if (first === "ci") {

@@ -209,6 +209,20 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `ci-billing:${c.project.id}` }]);
   });
 
+  it("a failing test whose name or message mentions billing still goes back to the assignee, with no owner card", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) =>
+      sha === MERGE ? { suites: [{ status: "completed", conclusion: "failure", latest_check_runs_count: 1 }], runs: [{ id: 7, name: "check", status: "completed", conclusion: "failure" }] } : green();
+    c.gh.state.annotations.set(7, [
+      { annotation_level: "failure", path: "apps/server/test/billing.test.ts", start_line: 5, title: "billing > spending limit card", message: "AssertionError: payment failed text not matched" },
+    ]);
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("apps/server/test/billing.test.ts:5: billing > spending limit card");
+  });
+
   it("no CI run at all after the grace period: merges on its own check and says so", async () => {
     const c = (ctx = await setup());
     c.gh.state.ci = (sha) => (sha === MERGE ? { suites: [], runs: [] } : green());
