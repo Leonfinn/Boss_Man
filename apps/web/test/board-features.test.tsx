@@ -328,7 +328,7 @@ describe("features page", () => {
     expect(within(list).getByText("Dev")).toBeTruthy();
     expect(within(list).getByText("unassigned")).toBeTruthy();
     expect(within(list).getByText("in progress")).toBeTruthy();
-    expect(screen.getByText("1 of 2 complete")).toBeTruthy();
+    expect(screen.getByText("1 of 2 done")).toBeTruthy();
   });
 
   it("loads with the tasks folded, the summary in the WORK column, and the arrow opens and closes them", async () => {
@@ -337,7 +337,7 @@ describe("features page", () => {
     const arrow = await screen.findByRole("button", { name: "Show tasks of Dark mode" });
     expect(arrow.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("list", { name: "Tasks of Dark mode" })).toBeNull();
-    const work = screen.getByRole("button", { name: "1 of 2 complete" });
+    const work = screen.getByRole("button", { name: "1 of 2 done" });
     expect(work.getAttribute("aria-expanded")).toBe("false");
 
     fireEvent.click(arrow);
@@ -377,7 +377,9 @@ describe("features page", () => {
       }),
     );
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
-    expect(await screen.findByRole("button", { name: "1 of 3 complete · 1 blocked" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "1 of 3 done" })).toBeTruthy();
+    // A blocked task is said on its own line, with a mark so it isn't colour alone.
+    expect(screen.getByText("⚠ 1 blocked")).toBeTruthy();
     // A feature with no tasks shows a dash and no arrow.
     expect(screen.getByText("No tasks yet")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Show tasks of No tasks yet" })).toBeNull();

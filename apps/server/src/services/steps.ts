@@ -9,6 +9,7 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -59,7 +60,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R19" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -743,6 +744,10 @@ export function fillServerHost(steps: readonly string[], serverHost: string | nu
  * R12 (BOS-543): a command block that prints nothing when it works must say so or show its result (`silentBlock`).
  * R17 (DR-052): a vague host step, a host file named with no location or a host action with neither a command nor a
  * Settings → path (`vagueHostFindings`). It can be overridden by the CEO.
+ * R18 (DR-057): a step that adds, edits or offers "if it isn't there" on one of Boss Man's own forms (OWNER_FORMS)
+ * without a value for every field it needs, or that names a "Settings → … form" the registry doesn't know
+ * (`formStepFindings`). It can be overridden by the CEO. A `[if company.….deployTarget …]` branch still here wasn't
+ * settled from the record (company-facts.ts), so it is R4.
  */
 export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
@@ -832,6 +837,13 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   if (notSeenStep && given.options && !given.options.some((o) => SCREEN_DIFFERENT.test(o))) {
     refuse.push({ step: notSeenStep, rule: "R19", problem: `is a "not seen" step on someone else's website, so the card must offer the option "${SCREEN_DIFFERENT_OPTION}" for when the owner's screen doesn't match` });
   }
+  // R18 (DR-057): a step on one of Boss Man's own forms gives every value. Read over the whole card, as one visit to
+  // a form can take two steps; only the sentences, as a command block is never a form.
+  refuse.push(...formStepFindings(steps.map((s) => pieces(s).prose)));
+  steps.forEach((text, i) => {
+    const m = BRANCH_MARKER.exec(text);
+    if (m) refuse.push({ step: i + 1, rule: "R4", problem: `starts "${m[0].trim()}", a branch only Boss Man's own record can settle, and it couldn't (no such company, or no single deploy target to read). Write the step without the branch, with every value` });
+  });
   if (hostStep && !proof) {
     refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });
   } else if (proof && !proof.rehearsed) {

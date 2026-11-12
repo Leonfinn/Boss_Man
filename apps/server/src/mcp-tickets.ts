@@ -9,7 +9,8 @@ import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
-import { HOST_TOKEN_HELP, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
+import { HOST_TOKEN_HELP, type OwnerSetupFacts, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
+import { loadCompanyFacts } from "./services/company-facts.js";
 import { splitSteps } from "./services/runner-image.js";
 import { EngagementError } from "./services/engagements.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
@@ -40,7 +41,14 @@ const LINT_OVERRIDE = z.string().max(500).optional().describe("CEO only: the rea
 async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: string | undefined) {
   const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
   const steps = splitSteps(ownerSetup ?? "");
-  return ownerSetupWriteCheck(steps, steps.length && hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride, byCeo: me?.role === "ceo" });
+  return ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride, byCeo: me?.role === "ceo" });
+}
+
+/** Host facts (DR-052) and other companies' records (DR-057) for a write-time setup check. */
+async function setupFacts(db: Db, hostFacts: Services["hostFacts"] | undefined, companyId: string, steps: string[]): Promise<OwnerSetupFacts> {
+  if (!steps.length) return {};
+  const company = await loadCompanyFacts(db, companyId, steps);
+  return { ...(hostFacts ? await ownerSetupFacts(hostFacts) : {}), ...(company ? { company } : {}) };
 }
 
 /** Whether the caller is the CEO and Boss Man's card to fix this live ticket's setup steps is open (DR-052). */
@@ -278,7 +286,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
   const isManager = () => managerIn(db, scope);
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
-  const chatRefusal = async () => (chat && !(await isManager()) ? "In chat only your CEO or a manager can move tickets. Offer the owner to create a ticket for the work, or nudge your CEO." : null);
+  // In chat a worker may only start or pause its own ticket (BOS-1300): in_progress and blocked, so "the wait is over" can restart
+  // a Blocked ticket. moveRefusal below still limits it to tickets assigned to it, and the WIP limit applies in moveTicket.
+  const chatRefusal = async (state?: string) =>
+    chat && !(await isManager()) && state !== "in_progress" && state !== "blocked"
+      ? "In chat only your CEO or a manager can move tickets, except that you can start your own ticket (in_progress) or block it. Offer the owner to create a ticket for the work, or nudge your CEO."
+      : null;
   const noteRunTicket = runTicketNoter(scope, hooks);
 
   server.registerTool(
@@ -411,7 +424,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, lintOverride, fixesLive }) => {
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
-      const no = await chatRefusal();
+      const no = await chatRefusal(state);
       if (no) return fail(no);
       // The state note is read by the reviewer as trusted text: on an open review ticket only the
       // reviewer assigned to it may write one (BOS-86, round 9).
@@ -486,7 +499,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (!setup && state === "review" && !sameState) {
         const [stored] = await db.select({ ownerSetup: tickets.ownerSetup, override: tickets.ownerSetupOverride }).from(tickets).where(eq(tickets.id, ticketId));
         const steps = splitSteps(stored?.ownerSetup ?? "");
-        const again = steps.length ? ownerSetupWriteCheck(steps, hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
+        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
         if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
       }
       const note = summary ?? withCriteria.current;
