@@ -93,7 +93,6 @@ p { margin: 0; }
 @media (max-width: 640px) {
   .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
-  .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
   .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
 }
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
@@ -500,7 +499,7 @@ details > summary { cursor: pointer; font-size: 14px; }
 }
 /* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
 .page-head h1:focus { outline: none; }
-.set-scope { margin-left: 10px; vertical-align: middle; }
+.set-scope { margin-left: 10px; vertical-align: middle; white-space: nowrap; }
 .set-jump { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
 .set-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .set-jump a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
@@ -520,6 +519,8 @@ details > summary { cursor: pointer; font-size: 14px; }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
   .set-back { display: inline-flex; }
+  /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
+  .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
   .set-nav li > a { min-height: 56px; flex-wrap: wrap; }
   .set-item-label { flex: 0 0 100%; }
@@ -833,7 +834,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .switcher-new small { width: 100%; color: #ffb4b4; }
 @media (max-width: 640px) {
   /* One header row: the mark, the company picker and a menu button (BOS-245). */
-  .side { padding: 6px 12px 8px; gap: 6px; }
+  /* The bar takes its natural height on every page; the full-height rule is for the side menu only (BOS-1213). */
+  .side { min-height: 0; padding: 6px 12px 8px; gap: 6px; }
+  /* The bar and the page wrap onto two rows; without this the window's spare height is shared between the rows and the bar grows (BOS-1213). Chat keeps its own stretch above. */
+  .app { align-content: flex-start; }
   .side .brand span { display: none; }
   .side-bar { display: flex; align-items: center; gap: 8px; }
   .side-bar .switcher { flex: 1; min-width: 0; }

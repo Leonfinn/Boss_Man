@@ -8,13 +8,16 @@ import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNT
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
-import { FIXES_LIVE_MAX, fixesLiveProblem } from "./services/decisions.js";
+import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
+import { HOST_TOKEN_HELP, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
+import { splitSteps } from "./services/runner-image.js";
 import { EngagementError } from "./services/engagements.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 import { NOTHING_CHANGED } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
+import { addTicketDependency } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FIXES_LIVE_HELP, managerIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
@@ -26,8 +29,30 @@ const CRITERIA_REPLACED_NOTE = "The CEO replaced this ticket's acceptance criter
 // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
 const runTicketNoter = (scope: Scope, hooks: McpHooks) => (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
+/** The words every ownerSetup field adds to its help (DR-052). */
+const SETUP_HELP = `${HOST_TOKEN_HELP} Each step is checked like an owner card when you write it; a vague host step (".env" with no path, "restart the add-on" with no command or button path) is refused. lintOverride (CEO only) lets a wrong finding through with a reason.`;
+const LINT_OVERRIDE = z.string().max(500).optional().describe("CEO only: the reason, for the owner, to let ownerSetup past a card-check finding you judge wrong. It can't let through a command that isn't copy-safe or a value Boss Man doesn't have.");
+
+/**
+ * DR-052 point 1: the card check on a ticket's owner setup steps, as they are written. Blank steps (none) pass.
+ * Returns the refusal, or the CEO override to store with the steps (null when none was needed).
+ */
+async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: string | undefined) {
+  const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+  const steps = splitSteps(ownerSetup ?? "");
+  return ownerSetupWriteCheck(steps, steps.length && hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride, byCeo: me?.role === "ceo" });
+}
+
+/** Whether the caller is the CEO and Boss Man's card to fix this live ticket's setup steps is open (DR-052). */
+async function openSetupFixFor(db: Db, scope: Scope, ticketId: string) {
+  const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+  if (me?.role !== "ceo") return false;
+  const [card] = await db.select({ id: decisionsTable.id }).from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.dedupeKey, ownerSetupFixKey(ticketId))));
+  return !!card;
+}
+
 /** assign_ticket, set_ticket_risk and create_ticket for a run. */
-export function registerTicketAdmin(server: McpServer, db: Db, { work, engagements, feedback }: Pick<Services, "work" | "engagements" | "feedback">, scope: Scope) {
+export function registerTicketAdmin(server: McpServer, db: Db, { work, engagements, feedback, hostFacts }: Pick<Services, "work" | "engagements" | "feedback"> & Partial<Pick<Services, "hostFacts">>, scope: Scope) {
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
   const isManager = () => managerIn(db, scope);
@@ -109,13 +134,16 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         waitsOnUntil: z.enum(["merged", "done"]).optional().describe("With waitsOn: when the wait ends, the other ticket's merge on main (merged, the default) or its done state (done)."),
         acceptanceCriteria: acceptanceCriteriaSchema.optional(),
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
-        ownerSetup: z.string().max(4000).optional().describe("What the owner has to do once this change is live (a setting, a secret, a button), in plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps only when the change goes live, not at merge. Leave it off when there is nothing for them to do."),
+        ownerSetup: z.string().max(4000).optional().describe(`What the owner has to do once this change is live (a setting, a secret, a button), in plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps only when the change goes live, not at merge. Leave it off when there is nothing for them to do. ${SETUP_HELP}`),
+        lintOverride: LINT_OVERRIDE,
         fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(FIXES_LIVE_HELP),
       },
     },
-    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, waitsOnUntil, acceptanceCriteria, noCode, ownerSetup, fixesLive, ...rest }) => {
+    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, waitsOnUntil, acceptanceCriteria, noCode, ownerSetup, lintOverride, fixesLive, ...rest }) => {
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
+      const setup = await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride);
+      if (setup.error !== null) return fail(setup.error);
       if (scope.agentId && !isTaskSize(size)) return fail(`${size === undefined ? "A ticket you create needs a size" : `${size} is not a size`}: ${SIZE_SCALE}, relative to the tickets your team has finished. Call sizing_guide to see finished tickets of each size, pick the one yours is most like, then call create_ticket again with size.`);
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
@@ -180,7 +208,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim() } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
       // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
       if (blocker && blocker.state !== "done") await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
@@ -246,7 +274,7 @@ export function registerClearCheck(server: McpServer, { work }: Pick<Services, "
  * managers may: the owner asks them there to close or tidy work, and workers move their own
  * tickets from the ticket's run.
  */
-export function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback }: Pick<Services, "review" | "work" | "feedback" | "skillProposals">, scope: Scope, hooks: McpHooks, chat: boolean) {
+export function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback, hostFacts }: Pick<Services, "review" | "work" | "feedback" | "skillProposals"> & Partial<Pick<Services, "hostFacts">>, scope: Scope, hooks: McpHooks, chat: boolean) {
   const isManager = () => managerIn(db, scope);
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -267,7 +295,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         body: z.string().max(10_000).optional(),
         assignee: z.string().min(1).nullable().optional(),
         noCode: z.boolean().optional(),
-        ownerSetup: z.string().max(4000).nullable().optional().describe("What the owner has to do once this change is live, in plain words by button path, one step per line. Null or an empty string clears it. Once the ticket is merged it is frozen against agents; only the owner changes it on the ticket page."),
+        ownerSetup: z.string().max(4000).nullable().optional().describe(`What the owner has to do once this change is live, in plain words by button path, one step per line. Null or an empty string clears it. Once the ticket is merged it is frozen against agents; only the owner changes it on the ticket page, except that the CEO may fix it while Boss Man's "setup steps can't go to the owner" card for it is open. ${SETUP_HELP}`),
+        lintOverride: LINT_OVERRIDE,
         urgent: z.boolean().optional(),
         fixesLive: z.string().max(FIXES_LIVE_MAX).nullable().optional().describe(`${FIXES_LIVE_HELP} Null or an empty string clears it.`),
         size: z.number().nullable().optional(),
@@ -283,7 +312,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, fixesLive, size, acceptanceCriteria, waitsOn, ceoPlan, ceoPlanDeadline, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, lintOverride, urgent, fixesLive, size, acceptanceCriteria, waitsOn, ceoPlan, ceoPlanDeadline, reason, expected_version }) => {
       const manager = await isManager();
       const otherChange = project !== undefined || featureId !== undefined || parentTicketId !== undefined || title !== undefined || body !== undefined || assignee !== undefined || noCode !== undefined || ownerSetup !== undefined || urgent !== undefined || fixesLive !== undefined || size !== undefined || acceptanceCriteria !== undefined || ceoPlan !== undefined || ceoPlanDeadline !== undefined;
       // A ticket's own assignee may order their own ticket (BOS-989): waitsOn alone, nothing else.
@@ -321,6 +350,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         }
       }
       if (expected_version !== undefined && t.version !== expected_version) return fail(await staleVersionMessage(db, scope.companyId, ticketId, expected_version));
+      if (lintOverride !== undefined && ownerSetup === undefined) return fail("lintOverride goes with ownerSetup.");
+      const setup = ownerSetup !== undefined ? await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride) : null;
+      if (setup && setup.error !== null) return fail(setup.error);
+      // DR-052: a merged ticket's steps are frozen against agents, except the CEO fixing them while Boss Man's card
+      // says they can't go to the owner; that card is what lets them be changed after review.
+      const setupFix = setup ? await openSetupFixFor(db, scope, ticketId) : false;
       const p = project !== undefined ? await resolveProject(project) : null;
       if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
       let assigneeId: string | null | undefined;
@@ -334,7 +369,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       try {
         const onlyPlan = planGiven && waitsOn === undefined && project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && fixesLive === undefined && size === undefined && acceptanceCriteria === undefined;
         const noFieldWrite = onlyPlan || (waitsOn !== undefined && !otherChange);
-        const u =noFieldWrite ?{ version: t.version } : await work.updateTicket(ticketId, { byAgentId: scope.agentId, expectedVersion: expected_version, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(ownerSetup !== undefined ? { ownerSetup } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(fixesLive !== undefined ? { fixesLive } : {}), ...(size !== undefined ? { size } : {}), ...(acceptanceCriteria !== undefined ? { acceptanceCriteria, stateNote: CRITERIA_REPLACED_NOTE } : {}) });
+        const u =noFieldWrite ?{ version: t.version } : await work.updateTicket(ticketId, { byAgentId: scope.agentId, expectedVersion: expected_version, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(ownerSetup !== undefined ? { ownerSetup, ownerSetupOverride: setup?.error === null ? setup.override : null, ...(setupFix ? { setupFix } : {}) } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(fixesLive !== undefined ? { fixesLive } : {}), ...(size !== undefined ? { size } : {}), ...(acceptanceCriteria !== undefined ? { acceptanceCriteria, stateNote: CRITERIA_REPLACED_NOTE } : {}) });
         // A new plan starts its own clock: the "deadline passed" card comes once per plan (BOS-612).
         if (planGiven) {
           // A plan-only call has no updateTicket write, so its own write carries the version check (BOS-897).
@@ -363,9 +398,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
     "set_ticket_state",
     {
       description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is for every kind of wait and does not count toward the in-progress limits: it is accepted for a waits-on ticket, an open card (plan cards too), a blocked_until date, or a merged ticket with after-merge checks not yet reported; anything else is refused. If you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria to check before merge, the summary must say pass or fail for each; a criterion marked checked after merge is reported once the work is live, and the ticket cannot be marked done until it is. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe("The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it, and not once the ticket is merged (the steps freeze at merge; only the owner changes them on the ticket page)."), fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(`${FIXES_LIVE_HELP} An empty string clears it. Only the ticket's own assignee, CEO or a manager may set it here; a reviewer adds it with the review tool.`) },
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe(`The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it, and not once the ticket is merged (the steps freeze at merge; only the owner changes them on the ticket page). ${SETUP_HELP}`), lintOverride: LINT_OVERRIDE, fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(`${FIXES_LIVE_HELP} An empty string clears it. Only the ticket's own assignee, CEO or a manager may set it here; a reviewer adds it with the review tool.`) },
     },
-    async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, fixesLive }) => {
+    async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, lintOverride, fixesLive }) => {
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
       const no = await chatRefusal();
@@ -432,8 +467,20 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const next = ownerSetup.trim() || null;
         if (mergedNow?.mergeCommit && next !== (mergedNow.ownerSetup?.trim() || null)) return fail('This ticket is merged, so its setup steps are frozen: they are the ones review saw, and Boss Man raises the owner\'s "Ready to use" card from them when it goes live. An agent can\'t change them now. If they are wrong, ask the owner to fix them on the ticket page, or open a follow-up ticket with the right steps.');
       }
+      if (lintOverride !== undefined && ownerSetup === undefined) return fail("lintOverride goes with ownerSetup.");
       // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
       const sameState = withCriteria.prev === state;
+      // DR-052 point 1: setup steps are checked like an owner card when they are written, and the stored ones again
+      // on the move to review (host facts may have changed, or they were written before this check existed). A CEO
+      // override given with the steps still covers them.
+      const setup = ownerSetup !== undefined ? await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride) : null;
+      if (setup && setup.error !== null) return fail(setup.error);
+      if (!setup && state === "review" && !sameState) {
+        const [stored] = await db.select({ ownerSetup: tickets.ownerSetup, override: tickets.ownerSetupOverride }).from(tickets).where(eq(tickets.id, ticketId));
+        const steps = splitSteps(stored?.ownerSetup ?? "");
+        const again = steps.length ? ownerSetupWriteCheck(steps, hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
+        if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
+      }
       const note = summary ?? withCriteria.current;
       // The done gate also reads the state note already on the ticket: the owner's answer on a linked card
       // records its pass or fail there (DR-024 #5), so a short closing summary mustn't hide it.
@@ -474,7 +521,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           note: summary,
           blockedUntil: state === "blocked" ? until : undefined,
           blockedUntilReason: blocked_reason?.trim() || null,
-          fields: { ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          fields: { ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
           hooks: {
             onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
             onReview: () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),
@@ -485,6 +532,13 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       } catch (e) {
         if (e instanceof WorkError) return fail(e.message);
         throw e;
+      }
+      // BOS-1209: Blocked on an open card needs a hold row, or answering the card has nothing to release.
+      if (state === "blocked" && !sameState && !until) {
+        for (const cardId of await openCardIds(db, ticketId)) {
+          const [has] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerDecisionId, cardId))).limit(1);
+          if (!has) await addTicketDependency(db, { companyId: scope.companyId, blockedTicketId: ticketId, blockerDecisionId: cardId, actor: { type: "agent", agentId: scope.agentId ?? null }, now: () => at }).catch(() => undefined);
+        }
       }
       // A state note is a post: the run's silence is measured from it (BOS-314).
       if (summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
@@ -533,12 +587,16 @@ export const BLOCKED_REFUSAL =
 
 /** True when an open card names this ticket (a plan card, a permission card or a question), linked or not. */
 export async function hasOpenCard(db: Db, ticketId: string) {
-  const [x] = await db
+  return (await openCardIds(db, ticketId)).length > 0;
+}
+
+/** The open cards that name this ticket: the one definition of "an open card holds it" for accepting Blocked and for releasing it. */
+export async function openCardIds(db: Db, ticketId: string): Promise<string[]> {
+  const rows = await db
     .select({ id: decisionsTable.id })
     .from(decisionsTable)
-    .where(and(eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->>'ticketId' = ${ticketId}`))
-    .limit(1);
-  return !!x;
+    .where(and(eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->>'ticketId' = ${ticketId}`));
+  return rows.map((r) => r.id);
 }
 
 /** True when the ticket has merged and still has after-merge criteria without a reported pass or fail. */

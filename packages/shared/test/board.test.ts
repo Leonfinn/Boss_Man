@@ -93,8 +93,8 @@ describe("stateNoteLine: the state note an agent reads, with its age (R85, BOS-1
   });
 
   it("flags the note when stateNoteStaleAt is after it, and not otherwise", () => {
-    expect(stateNoteLine(note({ stateNoteStaleAt: new Date(now.getTime() - H) }), now)).toContain("(may be out of date)");
-    expect(stateNoteLine(note({ stateNoteStaleAt: new Date(now.getTime() - 3 * H) }), now)).not.toContain("(may be out of date)");
+    expect(stateNoteLine(note({ stateNoteStaleAt: new Date(now.getTime() - H) }), now)).toContain("the owner acted on this ticket 1h ago, after this was written");
+    expect(stateNoteLine(note({ stateNoteStaleAt: new Date(now.getTime() - 3 * H) }), now)).not.toContain("after this was written");
   });
 });
 

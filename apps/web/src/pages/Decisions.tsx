@@ -870,9 +870,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     ) : (
                       <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
-                    {d.staleAt && !done && (
-                      <p role="status" style={{ fontWeight: 600 }}>
-                        The owner acted since this was written{d.staleReason ? ` (${d.staleReason})` : ""}. The agent that raised it has been asked to confirm or withdraw it.
+                    {/* BOS-1193: a card the owner sees is valid or already closed. One kept in the list while it is re-checked
+                        (urgent, holding a live run, or a merge card) says who is checking it; one nobody re-checked in time says who failed to. */}
+                    {d.rechecking && !done && (
+                      <p role="status" className="muted" data-testid="rechecking-note">
+                        Being re-checked by {d.rechecking.by}{d.staleReason ? ` (${d.staleReason})` : ""}. You can still answer it.
+                      </p>
+                    )}
+                    {d.notRechecked && !done && (
+                      <p role="status" style={{ fontWeight: 600 }} data-testid="not-rechecked-note">
+                        {d.notRechecked}
                       </p>
                     )}
                     {rule && (

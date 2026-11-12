@@ -397,6 +397,9 @@ export const tickets = pgTable(
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
     ownerSetup: text("owner_setup"),
+    /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
+     * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
+    ownerSetupOverride: text("owner_setup_override"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
@@ -416,6 +419,10 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
+    wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
+    /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
+    stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -473,6 +480,21 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
+  /**
+   * Where a flagged card is in its re-check (BOS-1193, DR-054): "author" (the agent that raised it has 30 minutes),
+   * "ceo" (the CEO has a further 30), or "lapsed" (neither confirmed it, so it is back with the owner and says so).
+   * Null when the card is not being re-checked. The card stays `open` throughout, so holds and answers keep working.
+   */
+  recheckStage: text("recheck_stage"),
+  /** When the card entered its current re-check stage; the deadline for the stage counts from here. */
+  recheckStageAt: timestamp("recheck_stage_at", { withTimezone: true }),
+  /** When the last re-check confirmed the card still holds; events older than this don't flag it again. */
+  recheckedAt: timestamp("rechecked_at", { withTimezone: true }),
+  /** The agent that confirmed it, and the one line on what they checked (kept for the card's history, never on its face). */
+  recheckedByAgentId: uuid("rechecked_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  recheckNote: text("recheck_note"),
+  /** How many times a re-check confirmed this card; a card confirmed twice and flagged again within a day goes straight to the CEO. */
+  recheckCount: integer("recheck_count").notNull().default(0),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.

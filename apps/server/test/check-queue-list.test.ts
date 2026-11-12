@@ -53,4 +53,36 @@ describe("check queue list (BOS-1174)", () => {
     expect(r.rows[1]!.heldBy).toMatch(/slot is busy/);
     expect(r.rows[0]!.heldBy).toBeNull();
   });
+
+  it("leaves out a check queued between the list's two reads instead of throwing", async () => {
+    const c = (ctx = await setup());
+    const [a, b] = [await c.mk("Seen"), await c.mk("Late")];
+    const enq = (ticketId: string, tree: string) =>
+      c.queue.enqueue({ companyId: c.company.id, projectId: c.project.id, ticketId, kind: "pre_review", scope: "quick", commit: `c-${tree}`, tree, requestedBy: c.ceo.id });
+    await enq(a, "t1");
+    // Interleave: right after the live-jobs read (the select with fields), the next argument-less select (the queue order) first queues another check.
+    let armed = false;
+    let fired = false;
+    const real = c.db as unknown as { select: (...a: unknown[]) => { from: (t: unknown) => { where: (w: unknown) => Promise<unknown> } } };
+    const wrapped = new Proxy(c.db as object, {
+      get(target, prop, recv) {
+        if (prop !== "select") return Reflect.get(target, prop, recv);
+        return (...args: unknown[]) => {
+          if (args.length) {
+            armed = true;
+            return real.select(...args);
+          }
+          if (!armed || fired) return real.select();
+          fired = true;
+          return { from: (t: unknown) => ({ where: async (w: unknown) => { await enq(b, "t2"); return real.select().from(t).where(w); } }) };
+        };
+      },
+    });
+    const racing = checkQueue(wrapped as never);
+    const out = await racing.list(c.company.id);
+    expect(fired).toBe(true);
+    expect(out.rows.map((x) => x.title)).toEqual(["Seen"]);
+    // The next read shows it.
+    expect((await c.queue.list(c.company.id)).rows.map((x) => x.title)).toEqual(["Seen", "Late"]);
+  });
 });
