@@ -998,6 +998,21 @@ const UNBLOCKED_TOTAL_MAX = 800;
 const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conversation.";
 
 /**
+ * The plain state note for a ticket Boss Man frees from Blocked (BOS-1209), so it never keeps "waiting on the owner"
+ * after the owner answered. Names the answer when there is one.
+ */
+export async function releasedNote(db: Db, ticketId: string, answered?: { question: string; answer: string; keepNote?: boolean }) {
+  // A card linked to after-merge criteria carries the criterion record on the note (a "none" answer writes nothing): leave it.
+  if (answered?.keepNote) return undefined;
+  const [r] = await db.select({ name: agents.name, note: tickets.stateNote }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, ticketId));
+  // This answer already wrote its own line on the note (the owner's check of an after-merge criterion): keep it.
+  if (answered && r?.note?.includes(`Owner answered "${answered.question.split("\n")[0]!.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)}"`)) return undefined;
+  const cut = (s: string, n: number) => { const x = s.replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+  const what = answered ? `the owner answered "${cut(answered.question, 80)}" (${cut(answered.answer, 80)})` : "what it was waiting on is settled";
+  return `Ready: ${what}. Starts when ${r?.name ?? "its assignee"} has a free slot.`;
+}
+
+/**
  * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
  * decision's dependency row is already gone by then, so its question and answer come in as `answered`.
  * The question is cut, never the answer: the answer is what the agent has to act on (BOS-951).
@@ -1197,7 +1212,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
-  async function releaseIfFree(ticketId: string, wakeAssignee = true) {
+  async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
     const deps = await db
       .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
       .from(ticketDependencies)
@@ -1207,7 +1222,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
@@ -3369,7 +3384,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         for (const f of freed) {
-          const t = await releaseIfFree(f.ticketId, false);
+          const t = await releaseIfFree(f.ticketId, false, { question: d.question, answer, keepNote: !!(ctx as { criterionIndexes?: number[] }).criterionIndexes?.length });
           if (t) unblocked.push(t);
         }
         const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));
