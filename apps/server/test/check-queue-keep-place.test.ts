@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
-import { checkQueue, PLACE_KEEP_MS } from "../src/services/check-queue.js";
+import { checkQueue, PLACE_KEEP_MS, SUPERSEDED_TEXT } from "../src/services/check-queue.js";
 
 // BOS-1328: a merge job that replaces an earlier merge job of the same ticket keeps the earlier job's place in line.
 const shared = openPglite();
@@ -56,6 +56,21 @@ describe("a merge job keeps its ticket's place in line (BOS-1328)", () => {
     await s.db.update(checkJobs).set({ endedAt: longAgo }).where(eq(checkJobs.id, old.id));
     const fresh = await s.req(a, "a3");
     expect(fresh.queuedAt.getTime()).toBeGreaterThan(start.getTime() + 60 * 60_000);
+  });
+
+  it("a deliberate cancel never lends its place, a 'newer commit' cancel does", async () => {
+    const s = await setup();
+    const a = await s.ticket();
+    const old = await s.req(a, "a1");
+    const start = new Date(Date.now() - 2 * 60 * 60_000);
+    await s.age(old.id, start);
+    await s.q.cancel(old.id, "Pulled back by the owner.");
+    const again = await s.req(a, "a2");
+    expect(again.queuedAt.getTime()).toBeGreaterThan(start.getTime() + 60 * 60_000);
+    await s.age(again.id, start);
+    await s.q.cancel(again.id, SUPERSEDED_TEXT);
+    const third = await s.req(a, "a3");
+    expect(third.queuedAt.getTime()).toBe(start.getTime());
   });
 
   it("a failed job never lends its place, and another ticket's job never does", async () => {

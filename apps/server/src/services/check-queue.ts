@@ -128,7 +128,8 @@ export function checkQueue(db: Db) {
     if (input.kind === "merge") {
       const since = Date.now() - PLACE_KEEP_MS;
       const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
-        (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since),
+        // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
+        (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
       );
       for (const j of earlier) if (!inheritedAt || j.queuedAt < inheritedAt) inheritedAt = j.queuedAt;
     }
