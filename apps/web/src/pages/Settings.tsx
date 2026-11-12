@@ -313,11 +313,11 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <RunLimits />
         <WipLimits />
         <CheckQueueSetting />
-        <PrivateDetails />
         <ServerPanel />
         <ThisHost />
         <NetguardAllow />
         <Devices />
+        <PrivateDetails />
       </>
     ),
     transfer: (
