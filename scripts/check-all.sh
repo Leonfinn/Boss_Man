@@ -16,6 +16,20 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -
   exit 2
 fi
 
+# A fenced check job on a runner that predates the home-folder fix has a HOME that doesn't exist and can't be created. Chrome
+# (its crash handler and profile folder), git, npm and others then fail in whichever step needs them (BOS-1095: web tests, then
+# the shell tests' Chrome demo). When HOME isn't a writable folder, the whole run gets a home of its own under the temp folder,
+# with XDG folders, removed when the run ends. The child run inherits it, so this happens once, before any step.
+check_home=""
+if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
+  # The temp folder first; a host whose default temp folder isn't writable falls back to this ticket's scratch folder.
+  check_home="$(mktemp -d 2>/dev/null || mktemp -d "${BOSSMAN_SCRATCH:-.}/check-home.XXXXXX")"
+  echo "check-all: HOME ${HOME:-unset} is not usable; this run uses $check_home"
+  export HOME="$check_home" XDG_CONFIG_HOME="$check_home/.config" XDG_CACHE_HOME="$check_home/.cache" XDG_DATA_HOME="$check_home/.local/share"
+  mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+  trap 'rm -rf "$check_home"' EXIT
+fi
+
 # Where finished runs are kept (result + full log), keyed by the git tree of the checked-out files, so a check that
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
@@ -41,7 +55,13 @@ scratch_log() {
   if [ -z "$out" ]; then
     [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
     tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$tmp" 2>/dev/null || return 0
+    if ! { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
+      # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
+      # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
+      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
+      echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
+    fi
   fi
   if [ -z "$tmp" ]; then
     [ ! -s "$SCRATCH_LOG" ] || mv -f "$SCRATCH_LOG" "$SCRATCH_LOG.previous" 2>/dev/null || true
@@ -58,7 +78,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   # The child leaves per-file test times here (vitest JSON reports, shell test times); record() folds them into $STORE/<tree>.test-times (BOS-654).
   times_dir="$(mktemp -d)"
-  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"' EXIT
+  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"; [ -z "$check_home" ] || rm -rf "$check_home"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
   key=""
@@ -137,7 +157,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
@@ -198,6 +218,19 @@ BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(BOSSMAN_CHECK_SLOTS="${SLOTS:-
 [[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
 export BOSSMAN_CHECK_THREADS GOMAXPROCS="${GOMAXPROCS:-$BOSSMAN_CHECK_THREADS}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$BOSSMAN_CHECK_THREADS}" TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-$BOSSMAN_CHECK_THREADS}"
 echo "check-all: CPU budget $BOSSMAN_CHECK_THREADS threads per step (BOSSMAN_CHECK_THREADS)"
+# One memory ceiling per check (BOS-1165; see scripts/check-mem-guard.mjs): the runner has one Docker limit for everything in it, and
+# without this a runaway check could take all of it. BOSSMAN_CHECK_MEMORY_MB sets it (default 6912 = 1.5 times the largest peak measured,
+# 4.5 GB; the slot is sized at 3 GB for the average; 0 = no ceiling, measure only). A nested check-all (the script tests) is already inside the outer check's ceiling.
+# The guard is a safety net: with no writable temp dir it is skipped, never a reason to fail the check.
+mem_peak=""
+if [ -z "${BOSSMAN_CHECK_GUARDED:-}" ] && [ -f "$(dirname "$self")/check-mem-guard.mjs" ] && command -v node >/dev/null; then mem_peak="$(mktemp 2>/dev/null)" || mem_peak=""; fi
+if [ -n "$mem_peak" ]; then
+  export BOSSMAN_CHECK_GUARDED=1
+  mem_mb="${BOSSMAN_CHECK_MEMORY_MB:-6912}"; [[ "$mem_mb" =~ ^[0-9]{1,6}$ ]] || mem_mb=6912
+  node "$(dirname "$self")/check-mem-guard.mjs" "$$" "$mem_mb" "$mem_peak" &
+  mem_guard=$!
+  trap 'kill "$mem_guard" 2>/dev/null || true; [ ! -s "$mem_peak" ] || echo "check-all: peak memory of this check about $(( $(cat "$mem_peak") * 10 / 1024 / 10 )).$(( $(cat "$mem_peak") * 10 / 1024 % 10 )) GB (ceiling ${mem_mb} MB, BOSSMAN_CHECK_MEMORY_MB)"; rm -f "$mem_peak"' EXIT
+fi
 if [ -n "${CHECK_ALL_SLOT_COMMAND:-}" ]; then rc=0; bash -c "$CHECK_ALL_SLOT_COMMAND" || rc=$?; exit "$rc"; fi
 # step <name> <command...>: runs one stage and prints how long it took, so a slow host shows which stage slowed down (BOS-523).
 step() { local name=$1 began=$SECONDS rc=0; shift; "$@" || rc=$?; echo "check-all: step $name took $((SECONDS - began))s (exit $rc, at $(date -u +%H:%M:%S) UTC)"; return "$rc"; }
@@ -231,12 +264,47 @@ for d in "${pkg_dirs[@]}"; do
   step "typecheck:${d##*/}" pnpm --dir "$d" run typecheck
 done
 unset NODE_OPTIONS  # the heap cap is for tsc only
+# The build runs before the tests (BOS-1071): the web tests that load the built page (wrap-up-layout, settings-walk, ...)
+# skip when apps/web/dist is missing, so with the build after them a change that broke them passed this gate and only GitHub CI saw it.
+step build pnpm build
+# The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
+# fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
+web_tests() {
+  local d=$1 report shots rc=0 out
+  report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
+  [ -n "$report" ] || report="$(mktemp)"
+  shots="$(mktemp -d)"
+  out="$(mktemp)"
+  # Playwright is a global npm tool. A fenced check job on a runner that predates the NODE_PATH pass-through gets no NODE_PATH, so
+  # the real-browser tests skip (BOS-1095). With none set, use npm's own global folder when it exists; no host path is assumed.
+  if [ -z "${NODE_PATH:-}" ] && command -v npm >/dev/null 2>&1; then
+    gnm="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$gnm" ] && [ -d "$gnm/playwright" ]; then export NODE_PATH="$gnm"; fi
+  fi
+  # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
+  # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
+  set +e
+  env BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
+  rc=${PIPESTATUS[0]}
+  set -e
+  rm -rf "$shots"
+  if [ "$rc" -eq 0 ]; then
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "check-all: web test reasons (real-page lines, env):"
+    grep -h "real-page:" "$out" | sort | uniq -c | head -20 || true
+    echo "check-all: HOME=${HOME:-unset} TMPDIR length=${#TMPDIR} user=$(id -un 2>/dev/null) uid=$(id -u)"
+  fi
+  rm -f "$out"
+  return "$rc"
+}
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
+  if [ "${d##*/}" = web ]; then step "test:web" web_tests "$d"; continue; fi
   # BOSSMAN_TEST_TIMES_FILE makes vitest also write a JSON report, which the parent folds into the result store (BOS-654).
   step "test:${d##*/}" env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_TEST_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/vitest-${d##*/}.json"} pnpm --dir "$d" run test
 done
-step build pnpm build
 step shellcheck scripts/check-shell.sh
 step shell-tests env ${BOSSMAN_CHECK_TIMES_DIR:+BOSSMAN_SHELL_TIMES_FILE="$BOSSMAN_CHECK_TIMES_DIR/shell.tsv"} scripts/test-shell.sh
 echo "check-all: everything passed"

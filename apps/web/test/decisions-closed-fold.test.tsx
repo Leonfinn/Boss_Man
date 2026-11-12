@@ -252,7 +252,7 @@ describe.skipIf(!browser)("closed Decisions cards fold away (BOS-809)", () => {
       });
       // The "Nothing needs you" state still shows, and the notices below it are not lost.
       expect(r.nothingState).toBe(true);
-      expect(r.summary).toBe("Closed (2)");
+      expect(r.summary).toBe("Closed in the last 30 days (2)");
       expect(r.groupOpen).toBe(false);
       expect(r.cards).toBe(2);
     } finally {

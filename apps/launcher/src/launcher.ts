@@ -5,10 +5,12 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writ
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, LABEL, listLabel, runnerImage, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, LABEL, listLabel, runnerImage, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, planChecks, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
+/** Where setChecks keeps the owner's "Checks at once", under the data folder. */
+export const CHECKS_FILE = "launcher-checks.json";
 
 export class LauncherError extends Error {
   constructor(
@@ -197,6 +199,42 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     cpu: () => cfg.cpuPlan ?? { on: false, reserved: [] as number[], runnerThreads: [] as number[], hostThreads: 0, reason: "Not worked out." },
     /** The guard mode and the BOSSMAN_NETGUARD_ALLOW entries this launcher started with (host:port only), so the owner can see them (BOS-770). */
     netguard: () => ({ mode, allow: [...(cfg.guardAllow ?? [])] }),
+    /**
+     * BOS-993: the owner's "Checks at once". Remembered in a file under the data folder (so a launcher restart keeps it)
+     * and used for every runner made from now on; running runners change when they are recreated.
+     */
+    setChecks(slots: number) {
+      if (!Number.isInteger(slots) || slots < 1 || slots > 16) throw new LauncherError(400, "Slots must be a whole number from 1 to 16.");
+      // The number is taken first: the launcher container's root is read-only and only companies/ is mounted, so the file
+      // may not be writable. The server sends the setting again every minute (BOS-1152), so a launcher that cannot
+      // remember it across a restart still ends up on the right number.
+      cfg.requestedSlots = slots;
+      try {
+        const file = path.join(cfg.dataRoot, CHECKS_FILE);
+        writeFileSync(`${file}.tmp`, JSON.stringify({ slots }), { mode: 0o600 });
+        renameSync(`${file}.tmp`, file);
+      } catch (e) {
+        console.warn(JSON.stringify({ at: new Date().toISOString(), msg: "could not save Checks at once; the server will send it again after a restart", error: String((e as Error)?.message ?? e) }));
+      }
+      return this.plannedChecks();
+    },
+
+    /** What a runner made now gets, and why it is below the setting if it is. */
+    plannedChecks: () => planChecks(cfg),
+
+    /** The plan, and what each running runner was made with (read from its container), so the panel shows the limit in force. */
+    async checks() {
+      const plan = planChecks(cfg);
+      const runners: { slug: string; slots: number; memoryBytes: number }[] = [];
+      for (const r of await this.list()) {
+        const c = await docker.inspect(containerName(r.slug, cfg.stack)).catch(() => null);
+        if (!c) continue;
+        const slots = Number((c.Config.Env ?? []).find((e) => e.startsWith("BOSSMAN_CHECK_SLOTS="))?.split("=")[1] ?? 1) || 1;
+        runners.push({ slug: r.slug, slots, memoryBytes: c.HostConfig?.Memory ?? 0 });
+      }
+      return { ...plan, runners };
+    },
+
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
     put: (slug: string, token: string, allow?: string[], trusted: Set<string> = new Set()) => locked(slug, async () => {
       mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
@@ -435,6 +473,13 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (url.pathname === "/runners") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
+      }
+      if (url.pathname === "/checks") {
+        if (req.method === "GET") return send(200, await api.checks());
+        if (req.method !== "PUT") throw new LauncherError(405, "Only GET or PUT here.");
+        const body = await readJson(req);
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof (body as { slots?: unknown }).slots !== "number") throw new LauncherError(400, "Send { slots }.");
+        return send(200, api.setChecks((body as { slots: number }).slots));
       }
       if (url.pathname === "/wanted") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");

@@ -34,7 +34,7 @@ async function setup(leader?: Leader) {
   const hire = async (name: string) => (await req("POST", `/api/companies/${company.id}/agents`, { name })).json() as { id: string };
   const missed = (ticketId?: string) => db.select().from(wakes).where(and(eq(wakes.reason, MISSED_REASON), ticketId ? eq(wakes.ticketId, ticketId) : undefined));
   /** The agent got the wake and ran (or the wake was dropped): it no longer waits in the queue. */
-  const settle = () => db.update(wakes).set({ status: "launched" }).where(eq(wakes.reason, MISSED_REASON));
+  const settle = () => db.update(wakes).set({ status: "launched" }).where(eq(wakes.status, "queued"));
   const stuckDecisions = () => db.select().from(decisions).where(like(decisions.dedupeKey, "missed:%"));
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, close, req, company, worker, project, forgotten, hire, missed, settle, stuckDecisions, advance };
@@ -129,6 +129,8 @@ describe("missed-work sweep (R82)", () => {
 
     ctx.advance(3 * HOUR);
     await ctx.sweeps.run();
+    // BOS-1180: the idle-slot step may now start the ticket in between (a missed-work wake no longer stops it); let that run end so missed work's next window isn't held by a queued wake.
+    await ctx.settle();
     expect(await ctx.missed(id)).toHaveLength(1);
 
     ctx.advance(2 * HOUR); // past the 4 hour window
@@ -234,7 +236,7 @@ describe("unmerged approvals sweep", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, plain)))[0]!.systemState).toBe("done");
     const asked = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatchObject({ dedupeKey: `merge-stuck:${repo}`, options: ["Run the check again", "Send it back to the agent"] });
+    expect(asked[0]).toMatchObject({ tier: "ceo", dedupeKey: `merge-stuck:${repo}`, options: ["Run the check again", "Send it back to the agent"] });
     expect(asked[0]!.question).toContain('"Ship the API" was approved, but its merge didn\'t finish');
     // Asked once, not every pass, and not retried again.
     expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });

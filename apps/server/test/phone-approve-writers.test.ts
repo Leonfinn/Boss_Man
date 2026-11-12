@@ -122,12 +122,13 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
   "src/services/decisions.ts": {
-    counts: { insert: 12, question: 8, todo: 2 },
-    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
+    counts: { insert: 13, question: 9, todo: 2 },
+    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), owner setup fix (DR-052: tier ceo, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
   },
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 1, question: 1 }, why: "no raising agent, one option" },
   "src/services/engagements.ts": { counts: { insert: 1 }, why: "kind engagement" },
+  "src/services/fence-default.ts": { counts: { insert: 1, question: 1 }, why: "type fence_default (BOS-940): no raising agent, owner-only answer" },
   "src/services/goal-check.ts": { counts: { insert: 1 }, why: "kind approval: goal_check" },
   "src/services/loop-guards.ts": { counts: { insert: 3, question: 2 }, why: "no raising agent, one option (repeated-failure and account-outage notices)" },
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
@@ -137,8 +138,8 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/signoff.ts": { counts: { insert: 1 }, why: "kind approval: risk_review (moved here from review.ts)" },
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 4, question: 1 }, why: "kind budget: budget_limit, project_cap, ticket_cap; unblocked-but-unassigned notice (no raising agent, one option)" },
-  "src/services/self-deploy.ts": { counts: { insert: 1, todo: 1 }, why: "kind approval: self_deploy; the changed database/proxy settings card (BOS-487) is an owner to-do (type owner_todo, steps, ownerMustDo)" },
-  "src/services/sweeps.ts": { counts: { insert: 4, question: 3 }, why: "stale_blocker kind; gave-up notice (now Reassign/Got it, BOS-612), CEO-plan deadline-passed card (BOS-612) and released-unblocked catch-up notice have no raising agent (its alerts now use named alert kinds via the ladder: tier ceo, ladder key)" },
+  "src/services/self-deploy.ts": { counts: { insert: 1, todo: 2 }, why: "kind approval: self_deploy; the changed database/proxy settings card (BOS-487) and the deployer-script-behind card (BOS-990) are owner to-dos (type owner_todo, steps, ownerMustDo)" },
+  "src/services/sweeps.ts": { counts: { insert: 2, question: 1 }, why: "stale_blocker kind (tier ceo); released-unblocked catch-up notice (tier ceo, no raising agent). The gave-up and CEO-plan deadline-passed cards now go through the alert ladder (BOS-1015: tier ceo, ladder key)" },
 };
 const PATTERNS: Record<string, RegExp> = { insert: /insert\(decisions\w*\)/g, question: /kind: "question"/g, raise: /\.raise\(/g, todo: /raiseOwnerTodo\(/g };
 

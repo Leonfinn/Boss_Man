@@ -190,14 +190,30 @@ describe("ranked decision queue (R20)", () => {
       ctx = await setup();
       const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
       const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
 
       const rows = await ordered();
       // The waiting card is last, is marked, and the hands-on card is numbered.
       expect(rows[rows.length - 1]!.id).toBe(stale.id);
-      expect(rows[rows.length - 1]!.waiting).toMatch(/checking whether this is still needed/i);
+      expect(rows[rows.length - 1]!.waiting).toMatch(/being re-checked/i);
       expect(rows[0]!.id).toBe(hands.id);
       expect(rows[0]!.step).toBe(1);
+    });
+
+    it("keeps a flagged card that holds up a live ticket answerable, and the Board links to that exact card (BOS-1159)", async () => {
+      ctx = await setup();
+      const ticket = await ctx.ticket({ title: "Close the loop", state: "in_progress", assigneeAgentId: ctx.worker.id });
+      const asked = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.worker.id, question: "Press Build and update runners?", options: ["Done", "Not yet"], recommended: "Done", blocksTicketId: ticket.id });
+      // The owner acted on the ticket, so the card is flagged "may be out of date" (as ownerActed does).
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you replied" }).where(eq(decisions.id, asked.id));
+
+      const row = (await ordered()).find((r) => r.id === asked.id)!;
+      expect(row.waiting).toBeUndefined();
+      expect((await ctx.req("GET", "/api/decisions/tally")).json()).toEqual({ open: 1, waiting: 0 });
+
+      // The Board's button names the card, not just the page.
+      const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ id: string; ownerQuestionId: string | null }>;
+      expect(board.find((x) => x.id === ticket.id)!.ownerQuestionId).toBe(asked.id);
     });
 
     it("puts a card whose ticket is back with an agent into the waiting group, with the reason", async () => {
@@ -312,8 +328,8 @@ describe("ranked decision queue (R20)", () => {
       const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
       const plain = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
       // One the owner already acted on: the agent is checking it (superseded → waiting group).
-      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the other budget?", options: ["Approve", "No"], recommended: "Approve" });
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Hire the new designer?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
       // One whose ticket went back to an agent (a merge card in the waiting group).
       const sentBackTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
       const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
@@ -346,7 +362,7 @@ describe("ranked decision queue (R20)", () => {
       await ctx.db.update(decisions).set({ staleAt: null, staleReason: null }).where(eq(decisions.id, stale.id));
       expect(await tally()).toEqual({ open: 3, waiting: 1 });
       ctx.advance(6_000);
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, plain.id));
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, plain.id));
       expect(await tally()).toEqual({ open: 2, waiting: 2 });
       // Answering the hands-on card drops it out of both figures at once: an answer clears the kept tally.
       await ctx.req("POST", `/api/decisions/${hands.id}/answer`, { answer: "Done" });
@@ -379,7 +395,7 @@ describe("ranked decision queue (R20)", () => {
       expect(dash.queueRows).toBe(0);
       // Past the few seconds the queue is walked again, so a card moving between groups shows at once.
       ctx.advance(6_000);
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
       const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
       expect(later.body).toEqual({ open: 0, waiting: 1 });
       expect(later.queueRows).toBeGreaterThan(0);
@@ -626,6 +642,7 @@ describe("stale blockers (R21)", () => {
     const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
     expect(open).toHaveLength(1);
     expect(open[0]!.question).toContain("Get certs");
+    expect(open[0]!.tier).toBe("ceo"); // BOS-1015: the CEO chases or reassigns first
   });
 
   it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
@@ -1320,7 +1337,7 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
     // Same chain as the old whole-table walk.
     const legacyRaw = await legacyQueue(ctx.db, () => new Date());
-    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, createdAt: r.createdAt.toISOString() }));
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
     expect(mine).toEqual(old);
   });
 
@@ -1352,6 +1369,8 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     const about = (id: string) => [{ ticketId: id, title: id === root[0]!.id ? "Root 0" : "Branch 0", ref: id === root[0]!.id ? "APP-1" : "APP-5" }];
     const old = legacyRaw.map((r) => ({
       ...r,
+      rechecking: null,
+      notRechecked: null,
       about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
       // A Date in the old body, an ISO string over HTTP.
       createdAt: r.createdAt.toISOString(),

@@ -242,11 +242,11 @@ describe("portal logo", () => {
     const c = await setup();
     expect((await c.req("GET", `/api/companies/${c.company.id}/feedback-settings`)).json().portalUrl).toBeNull();
     await t!.close();
-    t = await makeApp({ portalUrl: "http://192.168.68.67:3111/" });
+    t = await makeApp({ portalUrl: "http://192.168.1.50:3111/" });
     const { cookie } = await signIn(t);
     const { company } = (await t.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "Port Co" } })).json();
     const s = (await t.app.inject({ method: "GET", url: `/api/companies/${company.id}/feedback-settings`, headers: { cookie } })).json();
-    expect(s.portalUrl).toBe("http://192.168.68.67:3111");
+    expect(s.portalUrl).toBe("http://192.168.1.50:3111");
   });
 
   it("is a 404 when the portal is off or the token is wrong", async () => {

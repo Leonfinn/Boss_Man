@@ -40,7 +40,12 @@ const RESULT: Record<Result, { icon: string; label: string; tone: string }> = {
 };
 const STATE_TONE: Record<string, string> = { backlog: "grey", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
-function Chart({ title, days, series }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }> }) {
+/** Words in the middle of a chart with nothing to draw, so it isn't just bare axes (BOS-1125). */
+function NoData({ children }: { children: string }) {
+  return <span className="chart-empty muted">{children}</span>;
+}
+
+function Chart({ title, days, series, emptyText }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }>; emptyText: string }) {
   const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
   const max = Math.max(1, ...totals);
   const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
@@ -60,6 +65,7 @@ function Chart({ title, days, series }: { title: string; days: Day[]; series: Ar
             {totals[i] === 0 && <span className="seg empty" />}
           </div>
         ))}
+        {totals.every((n) => n === 0) && <NoData>{emptyText}</NoData>}
       </div>
       <div className="axis">
         <span>{label(String(days[0]?.day ?? ""))}</span>
@@ -95,6 +101,7 @@ function SuccessChart({ days }: { days: Day[] }) {
             {r.rate === null ? <span className="seg empty" /> : <span className={`seg ${r.rate >= 0.8 ? "green" : r.rate >= 0.5 ? "amber" : "red"}`} style={{ height: `${Math.max(4, r.rate * 100)}%` }} />}
           </div>
         ))}
+        {rates.every((r) => r.rate === null) && <NoData>No runs in the last 14 days</NoData>}
       </div>
       <div className="axis">
         <span>{label(String(rates[0]?.day ?? ""))}</span>
@@ -209,6 +216,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
       <section className="dash-charts" aria-label="Last 14 days">
         <Chart
           title="Run activity"
+          emptyText="No runs in the last 14 days"
           days={d.runsByDay}
           series={[
             { key: "succeeded", label: "Finished", tone: "green" },
@@ -218,6 +226,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
         />
         <Chart
           title="New tasks by status"
+          emptyText="No new tasks in the last 14 days"
           days={d.ticketsByDay}
           series={[
             { key: "backlog", label: "Backlog", tone: "grey" },

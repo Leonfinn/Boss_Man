@@ -2,7 +2,7 @@
 // have it. Nobody is woken, and no owner card is taken, before that.
 import { readFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -108,19 +108,22 @@ describe("after-merge checks wait for go-live", () => {
     const waiting = await ctx.row(id);
     expect(waiting.goLiveWait).toBe("server");
     expect(waiting.touchesRunner).toBe(false);
-    expect(waiting.systemState).toBe("in_progress");
+    // BOS-1171: it only waits for go-live, so it sits in Blocked and holds no in-progress slot.
+    expect(waiting.systemState).toBe("blocked");
     expect(await afterMergeWakes(id)).toEqual([]);
     // Nothing happens while the old commit runs.
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
     // The agent can neither ask the owner nor close it yet.
     const c = await ctx.agent(ctx.dev.id);
-    const card = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the panel show the host?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, criterion: 1, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false } }));
+    const card = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the panel show the host?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, criterion: 1, optionVerdicts: { Yes: "pass", No: "fail" }, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false } }));
     expect(card).toContain("isn't live yet");
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "1 pass" } }))).toContain("isn't live yet");
     // The deploy lands.
     await serverRuns(NEW);
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
     expect((await ctx.row(id)).goLiveWait).toBeNull();
+    // Live: the checks are work now, so it leaves Blocked.
+    expect((await ctx.row(id)).systemState).toBe("in_progress");
     const wakeNotes = await afterMergeWakes(id);
     expect(wakeNotes).toHaveLength(1);
     expect(wakeNotes[0]!.note).toContain(LIVE.text);
@@ -177,6 +180,34 @@ describe("after-merge checks wait for go-live", () => {
   it("a merge that is already live is handed to the assignee at once, as before", { timeout: 120_000 }, async () => {
     await serverRuns(NEW);
     const { id } = await mergeOne(NEW, "apps/server/src/app.ts");
+    expect((await ctx.row(id)).goLiveWait).toBeNull();
+    expect(await afterMergeWakes(id)).toHaveLength(1);
+  });
+
+  // BOS-1037: a hand-apply (the one-time escape for an infra change) restarts the server on the new commit, but
+  // Boss Man's live-commit record (live_release:*) is only written by the deployer's own reports. The restarted
+  // server, built from the new commit, must record that it runs it, or every merge that waits for go-live stays
+  // stuck: "This ticket's merge isn't live yet" even though the host runs it.
+  it("a server restarted by a hand-apply records its own commit as live, so later merges stop waiting for it", { timeout: 120_000 }, async () => {
+    // Approved and merged while the previous commit runs: it waits for the server update.
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "scripts/host-deployer.sh");
+    expect((await ctx.row(id)).goLiveWait).toBe("server");
+    // The owner hand-applied it: the restarted process was built from NEW and says so on its own build. The host's
+    // own reports still describe the last deployer run (the old commit): a hand-apply goes straight to the host's
+    // git and deploy scripts and never touches the deployer's status.json, and its available.json can be gone.
+    const a = { version: 1, checkedAt: new Date().toISOString(), deployed: OLD, tip: OLD, commits: [], paths: [], infraPaths: [], runnerChanged: false, changedServices: [], pendingServices: [] };
+    const s = { id: "prev", target: "server" as const, result: "deployed" as const, message: "Deployed.", from_commit: "0".repeat(40), to_commit: OLD, started: "2026-11-09T18:00:00Z", ended: "2026-11-09T18:02:00Z", backup: "" };
+    vi.stubEnv("BOSSMAN_COMMIT", NEW);
+    try {
+      await ctx.selfDeploy.noteLive(a, s);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const [rec] = await ctx.db.select().from(settings).where(eq(settings.key, `live_release:${ctx.co.company.id}`));
+    expect((rec!.value as { new: string }).new).toBe(NEW);
+    // noteLive notes the commit and runs the go-live pass for the companies in the same call (release-log's afterLive),
+    // so the ticket that was waiting for the server is released as soon as the hand-apply's commit is recorded.
     expect((await ctx.row(id)).goLiveWait).toBeNull();
     expect(await afterMergeWakes(id)).toHaveLength(1);
   });

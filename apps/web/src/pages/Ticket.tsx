@@ -8,6 +8,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
@@ -15,6 +16,7 @@ import { criterionText, criteriaText, goLiveWaitWords, isAfterMerge, readVerdict
 import { usePoll } from "../hooks";
 import { clearDraft, readDraft, saveDraft as keepDraftText } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { NotFoundBlock } from "../components/NotFoundBlock";
 import { away } from "../server-watch";
 
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
@@ -203,7 +205,7 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
         id="t-owner-setup"
         rows={3}
         maxLength={4_000}
-        placeholder={"Settings → Funding → Add account, then sign in to the second plan"}
+        placeholder={"Settings → Funding → Add funding source, then sign in to the second plan"}
         value={text}
         onChange={setText}
         style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
@@ -570,7 +572,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error && !away(ticket.error)) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
+  if (ticket.error && !away(ticket.error)) return ticket.error.status === 404 ? <NotFoundBlock title="Ticket not found" backHref="#/board" backLabel="Back to Tickets">This ticket doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Collapsed, a long description still shows its first 8 lines.
@@ -693,6 +695,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
       <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
+          <TicketOpenCards ticketId={t.id} />
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>

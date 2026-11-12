@@ -1,7 +1,7 @@
 // The brief an agent gets at every wake (R84): built by code from live tables, no model call.
 // Every section is capped, and says how many more there are.
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { DEVICE_UNITS, isRenderableProfile, runLabel, tallestReading, untrusted } from "@boss-man/shared";
+import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReading, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
@@ -33,10 +33,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
     return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
   };
-  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null }) => {
+  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null; stateNoteStaleReason?: string | null }) => {
     if (!t.stateNote || !t.stateNoteAt) return "";
-    const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
-    return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
+    const stale = t.stateNoteStaleAt != null && t.stateNoteStaleAt > t.stateNoteAt;
+    // Say what the owner did, not a general warning (BOS-1192).
+    return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? ` (${staleNoteWhy(t.stateNoteStaleReason, age(t.stateNoteStaleAt!))})` : ""}`;
   };
   /** The owner's recorded screens (BOS-641): a layout ticket that names one is checked at its
    * measured figures, in a rendering test, not by reading the CSS. Just the facts, one line each.

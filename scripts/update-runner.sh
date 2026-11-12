@@ -6,8 +6,8 @@
 #   scripts/update-runner.sh             build with the latest Claude Code, check, promote, ask for the drain
 #   scripts/update-runner.sh 2.1.50      pin a Claude Code version instead of "latest"
 #   scripts/update-runner.sh --rollback  tag the image that was running before as current, then drain onto it
-#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_MEMORY,
-#                                        BOSSMAN_CHECK_SLOTS, BOSSMAN_RUNNER_CPUS...). Recreates the launcher so it reads
+#   scripts/update-runner.sh --settings  no new image: apply changed runner settings in .env (BOSSMAN_RUNNER_CPUS...; the check
+#                                        slots and runner memory follow Settings, not .env). Recreates the launcher so it reads
 #                                        them, then asks Boss Man to drain and recreate every runner as its company
 #                                        goes idle, and to wake the agents afterwards (BOS-594). Use this, never a bare
 #                                        "recreate-all", for a setting change.
@@ -16,7 +16,7 @@
 #
 # The drain is asked for by dropping inbox/drain.json into the deployer folder ($BOSSMAN_DEPLOYER: set by
 # the host deployer, or read from .env). The script returns at once, so a host lock is not held while runs finish; Boss Man
-# tells the owner when the swap is done. With no deployer folder, start it in Settings > Runner update.
+# tells the owner when the swap is done. With no deployer folder, start it in Settings > Server and runner > Updates > Runner update.
 # Without the launcher there is nothing to drain onto, so the runners are restarted at once, as with --now.
 #
 # The canary runs a real Claude Code session inside the new image against a stand-in model
@@ -95,10 +95,10 @@ request_drain() {
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
     mv -fT "$tmp" "$d/inbox/drain.json"
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
-    echo "Boss Man notifies you when it is done. To stop it: Settings > Runner update > Cancel."
+    echo "Boss Man notifies you when it is done. To stop it: Settings > Server and runner > Updates > Runner update > Cancel the update."
   else
     echo "The new image is tagged, and the runners still run the old one. Start the drain in Boss Man:"
-    echo "Settings > Runner update > Update runners. (Or rerun with --now to cut runs off and restart at once.)"
+    echo "Settings > Server and runner > Updates > Runner update > Update runners. (Or rerun with --now to cut runs off and restart at once.)"
   fi
 }
 

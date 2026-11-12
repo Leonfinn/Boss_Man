@@ -17,7 +17,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number; isLeader?: () => boolean; /** A runner said hello with its image commit (BOS-1021): checks that waited for the rebuild can start. */ onImage?: (companyId: string) => Promise<unknown>; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean; /** A runner said hello with its image commit (BOS-1021): checks that waited for the rebuild can start. */ onImage?: (companyId: string) => Promise<unknown>; /** A runner said hello with a different image commit than before: a rebuild finished (BOS-1161). */ onRebuilt?: (companyId: string) => Promise<unknown>; checks?: Pick<ReturnType<typeof import("../services/check-dispatcher.js").checkDispatcher>, "onHello" | "onDone" | "onProgress"> } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -84,9 +84,10 @@ export async function runnerSocketRoutes(
               return;
             }
             queue = queue.then(async () => {
-              await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
+              const touched = await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
+              if (touched?.imageChanged) void opts.onRebuilt?.(runner.companyId)?.catch((err) => app.log.warn({ err, runnerId: runner.id }, "flagging cards after a runner rebuild failed"));
               if (msg.imageCommit) void opts.onImage?.(runner.companyId)?.catch((err) => app.log.warn({ err, runnerId: runner.id }, "starting go-live checks failed"));
-              await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "waking parked checks after a restart failed"));
+              await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "marking parked checks after a restart failed"));
               release = runners.connect(runner.id, (command) => {
                 if (socket.readyState !== socket.OPEN) return false;
                 send({ type: "command", id: randomUUID(), command });

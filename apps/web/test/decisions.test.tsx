@@ -72,7 +72,7 @@ describe("decision queue", () => {
     render(<Decisions decisions={[plan]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("Skills: dogfood.", { exact: false })).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox", { name: /Rae/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Hire the ticked ones" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hire the ticked ones, recommended" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Hire the ticked ones", picks: [0] }) })));
   });
 
@@ -99,19 +99,15 @@ describe("decision queue", () => {
     const { container } = render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
 
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
-    expect(screen.getByLabelText("Score 52")).toBeTruthy();
-    expect(container.querySelector(".parts")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
-    expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
-    // The legend folds away behind one line (BOS-245), so it opens before it can be read.
-    fireEvent.click(screen.getByText("What the score means"));
-    // (BOS-1005) The fold-out says what the score is and that the order is newest first, not that it ranks.
-    expect(screen.getByText(/The number shows how much each decision holds up\. It doesn't change the order: cards stay newest first\./)).toBeTruthy();
-    expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
+    // (BOS-1236) The score column, its bars and its fold are gone: plain pills say what the card holds up.
+    expect(container.querySelector(".score")).toBeNull();
+    expect(container.querySelector(".parts")).toBeNull();
+    expect(screen.queryByText("What the score means")).toBeNull();
+    expect(screen.getByText("Holds up APP-3")).toBeTruthy();
     // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
     expect(screen.getByText(`1 decision to do in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
+    fireEvent.click(screen.getByRole("button", { name: "Raise to $80, recommended" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
     expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ method: "POST", body: JSON.stringify({ answer: "Raise to $80" }) }));
     expect(onAnswered).toHaveBeenCalled();
@@ -244,15 +240,20 @@ describe("decision queue", () => {
       refs: { "APP-70": { ticketId: "t70", ref: "APP-70", title: "Restore proof" } },
     });
     render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByRole("link", { name: "APP-70" }).getAttribute("href")).toBe("#/tickets/t70");
-    expect(screen.getByRole("link", { name: "APP-71 Release" }).getAttribute("href")).toBe("#/tickets/t71");
+    // (BOS-1236) The ticket is a small chip in the head line (its title is the tooltip) and the text still links known references.
+    const links = screen.getAllByRole("link", { name: "APP-70" });
+    expect(links.map((l) => l.getAttribute("href"))).toEqual(["#/tickets/t70", "#/tickets/t70"]);
+    expect(links[0]!.getAttribute("title")).toBe("Restore proof");
+    expect(screen.getByText("Holds up APP-70 +1 more")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "ZZZ-9" })).toBeNull();
     expect(screen.getByRole("heading", { name: /ZZZ-9/ })).toBeTruthy();
   });
 
-  it("explains a paused agent's score", () => {
-    render(<Decisions decisions={[decision({ score: 5, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("Score 5: 5 for a paused agent.")).toBeTruthy();
+  it("says in words that an agent is waiting on the owner, and when it is due (BOS-1236)", () => {
+    render(<Decisions decisions={[decision({ blocks: [], dueDate: "2026-11-14T12:00:00Z", parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("CEO is waiting on you")).toBeTruthy();
+    expect(screen.getByText(/^Due .*\b1[3-5]\b/)).toBeTruthy();
+    expect(screen.queryByText(/Holds up/)).toBeNull();
   });
 
   it("shows no score line or number for a card scoring 0 (BOS-804)", () => {
@@ -272,21 +273,12 @@ describe("decision queue", () => {
     expect(screen.queryByText("just now")).toBeNull();
   });
 
-  it("drops the rank's age reason but keeps the others (BOS-804)", () => {
-    const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
-    render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Waiting 3 h", "Blocks 1 ticket"], ageReason: "Waiting 3 h" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("3h ago")).toBeTruthy();
-    expect(screen.queryByText("Waiting 3 h")).toBeNull();
-    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
-  });
-
-  it("drops a reworded age reason by its mark, not its wording (BOS-869)", () => {
-    // The server now writes the age differently; the card follows the mark, so no second age shows.
+  it("shows the age once, in the head line, and none of the rank's reason sentences (BOS-804, BOS-1236)", () => {
     const hours = new Date(Date.now() - 3 * 3_600_000).toISOString();
     render(<Decisions decisions={[decision({ createdAt: hours, reasons: ["Open a while (about 3 hours)", "Blocks 1 ticket"], ageReason: "Open a while (about 3 hours)" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText("3h ago")).toBeTruthy();
+    expect(screen.getAllByText("3h ago")).toHaveLength(1);
     expect(screen.queryByText("Open a while (about 3 hours)")).toBeNull();
-    expect(screen.getByText("Blocks 1 ticket")).toBeTruthy();
+    expect(screen.queryByText("Blocks 1 ticket")).toBeNull();
   });
 
   it("shows the age in hours and days as the card gets older (BOS-804)", () => {
@@ -308,7 +300,7 @@ describe("decision queue", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "invalid_answer", message: "That ticket is already done." }), { status: 422 })));
     render(<Decisions decisions={[decision()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Keep $60" }));
-    expect((await screen.findByRole("alert")).textContent).toBe("That ticket is already done.");
+    expect((await screen.findByRole("alert")).textContent).toBe("Couldn't send your answer: That ticket is already done. Your note is kept; try again.");
   });
 
   it("is empty with the right illustration: done when idle, busy while agents work", () => {
@@ -353,8 +345,10 @@ describe("decision queue", () => {
     expect(screen.getByText("Last activity 14 min ago: Run npm test in_progress")).toBeTruthy();
     expect(screen.getByText("Runner: offline since", { exact: false })).toBeTruthy();
     expect(screen.getByText("It is not waiting on you.")).toBeTruthy();
-    expect(screen.getByText("Cancel run: stops it; message the agent on the task to start again.")).toBeTruthy();
-    expect(screen.getByText("Keep waiting: you'll be asked again in 30 minutes if it stays quiet.")).toBeTruthy();
+    // (BOS-1236) Each line sits under its own button, which it describes.
+    expect(screen.getByText("Stops it; message the agent on the task to start again.")).toBeTruthy();
+    expect(screen.getByText("You'll be asked again in 30 minutes if it stays quiet.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel run" }).getAttribute("aria-describedby")).toBeTruthy();
     expect((await screen.findByRole("link", { name: "See the whole run" })).getAttribute("href")).toBe("#/runs/r1");
     expect(screen.queryByText("Step 1")).toBeNull();
     expect(screen.getByText("Step 6")).toBeTruthy();
@@ -368,7 +362,7 @@ describe("decision queue", () => {
     render(<Decisions decisions={[decision({ kind: "stalled_run", createdAt: at, question: "CEO has sent nothing for 119 minutes.", options: ["Keep waiting", "Cancel run"], recommendedOption: "Keep waiting", evidence })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("Last activity 1h ago", { exact: false })).toBeTruthy();
     // The Raised line is the same age in its long words, and both floor 119 minutes to the same hour.
-    expect(screen.getByText("Raised", { exact: false }).textContent).toContain("1h ago");
+    expect(document.querySelector(".head-line time")?.textContent).toBe("1h ago");
     expect(screen.queryByText(/119 minutes ago/)).toBeNull();
     expect(screen.queryByText(/2 hours ago/)).toBeNull();
   });
@@ -398,21 +392,35 @@ describe("permission cards", () => {
     expect(screen.getByRole("link", { name: "BOS-208" }).getAttribute("href")).toBe(`#/tickets/${ticketId}`);
     expect(screen.getByText("Pushes to main.")).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("Pushes to main.");
-    expect(screen.getByRole("button", { name: "Deny" }).className).toContain("primary");
+    expect(screen.getByRole("button", { name: "Deny, recommended" }).className).toContain("primary");
   });
 
   it("lead with plain words and keep the command behind a fold", () => {
     const explain = { title: "Wiki Maintainer wants to run a command", summary: "Only reads information (the machine's memory); it doesn't change anything.", effect: "reads" as const, command: "grep MemTotal /proc/meminfo", reason: "Check how much memory is available" };
     render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByRole("heading", { name: explain.title })).toBeTruthy();
+    // (BOS-1236) The question says what the command does; the card has Does / For / Command rows.
+    expect(screen.getByRole("heading", { name: "Let CEO run a command that only reads files?" })).toBeTruthy();
     expect(screen.getByText("Reads only")).toBeTruthy();
     expect(screen.getByText(explain.summary, { exact: false })).toBeTruthy();
-    expect(screen.getByText("What the agent says it's for: Check how much memory is available")).toBeTruthy();
+    const rows = [...document.querySelectorAll(".facts dt")].map((t) => t.textContent);
+    expect(rows).toEqual(["Does", "For", "Command"]);
+    expect(screen.getByText("Check how much memory is available", { exact: false })).toBeTruthy();
+    // A short command shows in full; it appears once.
+    expect(document.body.textContent!.split("grep MemTotal").length).toBe(2);
+    expect(screen.queryByText("Show the exact command")).toBeNull();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+    // Each button says what it sets off, and describes the button.
+    expect(screen.getByText("The command runs this one time. CEO carries on.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allow once, recommended" }).getAttribute("aria-describedby")).toBeTruthy();
+  });
+
+  it("folds a command longer than three lines behind 'Show the exact command' (BOS-1236)", () => {
+    const command = "set -e\ncd /srv/app\nnpm ci\nnpm test";
+    const explain = { title: "Dev wants to run a command", summary: "Runs the tests.", effect: "changes" as const, command };
+    render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     const details = screen.getByText("Show the exact command").closest("details")!;
     expect(details.hasAttribute("open")).toBe(false);
-    expect(details.textContent).toContain("grep MemTotal /proc/meminfo");
-    expect(document.body.textContent!.split("grep MemTotal").length).toBe(2);
-    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+    expect(details.textContent).toContain("npm ci");
   });
 });
 
@@ -436,13 +444,13 @@ describe("Allow always", () => {
     fireEvent.click(screen.getByLabelText("Every agent in this company"));
     expect(screen.getByText("Always allow any agent to use crawl4ai's md tool.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: always[0]!.label }));
-    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Rules\./)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Saved as a rule for every agent\. To undo it, remove it under Settings → Permissions\./)).toBeTruthy());
     const answerCall = fetchMock.mock.calls.find((c) => (c[0] as unknown as string) === "/api/decisions/d1/answer") as unknown as [string, { body: string }];
     expect(JSON.parse(answerCall[1].body)).toMatchObject({ answer: always[0]!.label, alwaysScope: "company" });
   });
-  it("says why a command has no always option", () => {
+  it("no longer explains a button that isn't there (BOS-1236)", () => {
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.getByText(/doesn't offer 'always'/)).toBeTruthy();
+    expect(screen.queryByText(/doesn't offer 'always'/)).toBeNull();
   });
 
   it("shows a proposed rule's explanation and folds the exact rule away", () => {
@@ -460,7 +468,7 @@ describe("Allow always", () => {
     expect(fold.open).toBe(false);
     expect(fold.textContent).toContain("^mcp__github__(get|list)_");
     expect(fold.textContent).toContain("Then: Allow");
-    expect(screen.getByRole("button", { name: "Add this rule" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add this rule, recommended" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Write my own answer" })).toBeTruthy();
   });
 });
@@ -724,7 +732,7 @@ describe("approval card while the merge runs", () => {
   const approval = (over: Partial<Decision> = {}) =>
     decision({
       kind: "approval",
-      question: "Ada approved \"Export CSV\", which is rated medium risk. Merge it, or send it back?",
+      question: "Merge \"Export CSV\"? Ada approved it, and it is rated medium risk.",
       options: ["Approve and merge", "Send it back"],
       recommendedOption: "Approve and merge",
       context: { type: "risk_review", ticketId: "t9" },
@@ -762,7 +770,7 @@ describe("approval card while the merge runs", () => {
       }),
     );
     render(<Decisions decisions={[approval()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge, recommended" }));
     expect(await screen.findByText(/Already being checked and merged since .*nothing more to do\./)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
@@ -777,7 +785,7 @@ describe("approval card while the merge runs", () => {
       context: { type: "workflow_change" },
     });
     render(<Decisions decisions={[change]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    const apply = screen.getByRole("button", { name: "Apply the change" });
+    const apply = screen.getByRole("button", { name: "Apply the change, recommended" });
     expect((apply as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Skip the change" }) as HTMLButtonElement).disabled).toBe(true);
     expect(apply.getAttribute("title")).toBe("Type a reason above to Apply or Skip");
@@ -789,14 +797,14 @@ describe("approval card while the merge runs", () => {
 
     fireEvent.change(box, { target: { value: "Adds a skill; waits for BOS-172" } });
     expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
-    expect((screen.getByRole("button", { name: "Apply the change" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByRole("button", { name: "Apply the change" }).getAttribute("title")).toBeNull();
+    expect((screen.getByRole("button", { name: "Apply the change, recommended" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply the change, recommended" }).getAttribute("title")).toBeNull();
   });
 
   it("other card kinds never show the reason hint (BOS-799)", () => {
     const ask = decision({ kind: "budget", question: "Raise the budget?", context: undefined });
     render(<Decisions decisions={[ask]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.queryByText("Type a reason above to Apply or Skip")).toBeNull();
-    expect((screen.getByRole("button", { name: "Raise to $80" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Raise to $80, recommended" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

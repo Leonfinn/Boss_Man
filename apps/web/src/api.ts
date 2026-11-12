@@ -75,7 +75,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; fenceModeChosenAt?: string | null; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -126,7 +126,7 @@ export type AdvisedDecision = {
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
   advice?: Advice;
   settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
-  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string };
+  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string; /** A plan card a newer plan replaced (BOS-1219): the newer card, its author (null if unknown) and when. */ newer?: { id: string; author: string | null; at: string } };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
@@ -179,6 +179,10 @@ export type Decision = {
   /** An owner action made this card possibly out of date; the raising agent is checking it (BOS-123). */
   staleAt?: string | null;
   staleReason?: string | null;
+  /** BOS-1193: set while the card is being re-checked but still shown (urgent, a live run, a merge card): who is checking it. */
+  rechecking?: { by: string; stage: "author" | "ceo" } | null;
+  /** BOS-1193: set when nobody re-checked the card in an hour; says plainly who failed to. */
+  notRechecked?: string | null;
   companyName: string;
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
@@ -202,7 +206,7 @@ export type Decision = {
   doAfter?: string[];
   /** (BOS-551) A short label for the card this one must be done before, for each one. */
   doBefore?: string[];
-  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A hire: the proposal the owner is being asked to approve. */ proposal?: { skills?: string[] }; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string; what?: string }>; /** The agent an "always" rule is limited to unless the owner widens it (BOS-294). */ alwaysAgent?: { id: string; name: string }; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A hire: the proposal the owner is being asked to approve. */ proposal?: { skills?: string[] }; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string; what?: string }>; /** The agent an "always" rule is limited to unless the owner widens it (BOS-294). */ alwaysAgent?: { id: string; name: string }; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } }; /** A sign-off card (BOS-1236): who reviewed and what they said, the last quick check, the risk, the size of the change and who built it. */ reviews?: Array<{ name: string; kind: string; verdict: "passed" | "changes" | "waiting" | "overruled" }>; quickCheck?: { result: "passed" | "failed"; sha: string; at: string } | null; files?: number | null; builder?: string | null; risk?: string };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
@@ -233,7 +237,9 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
-  blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
+  wipExempt?: "waits" | "plan" | "live" | null;
+  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
@@ -274,6 +280,10 @@ export type Ticket = {
   mergeNote?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
+  /** The open card behind `ownerQuestion`, so the Board's button opens that exact card. */
+  ownerQuestionId?: string | null;
+  /** The agent re-checking a card this ticket waits on (BOS-1193); the board says so instead of asking the owner to answer. */
+  recheckingBy?: string | null;
   approvedBy?: string | null;
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */
@@ -396,12 +406,21 @@ export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;
   ntfy: { url: string; topic: string; hasToken: boolean } | null;
-  pushLevels: NotifyLevel[];
+  /** Which cards go to the phone (BOS-1006): urgent ones by default. */
+  phonePush?: "urgent" | "all";
+  /** Only "flag" matters now: the Flags tick. */
+  pushLevels?: NotifyLevel[];
   publicUrl: string | null;
   /** Phone Approve buttons (BOS-243): on unless switched off. */
   approveButtons?: boolean;
   /** Whether Approve buttons are actually offered, and if not why. */
   approve?: { on: true } | { on: false; why: string };
+  /** The ntfy address the phone app must use (the add-on's NTFY_BASE_URL, as the host reports it); null when not known. */
+  phoneAddress?: string | null;
+  /** The ntfy container's name on the host (for `docker exec`); null when the host doesn't report it. */
+  phoneContainer?: string | null;
+  /** The last test push: when sent, and when the phone tapped Got it (null: not tapped). */
+  phoneTest?: { sentAt: string; confirmedAt: string | null } | null;
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
@@ -453,12 +472,12 @@ export type PlanNode = {
 };
 export type Plan = { nodes: PlanNode[]; edges: Array<{ id: string; from: string; to: string }>; columns: string[][] };
 export type TicketLinks = {
-  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; link: string }>;
+  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; until?: "merged" | "done"; link: string }>;
   blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
 };
 
 /** One ticket in the ticket page's Related section. */
-export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean };
+export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean; /** On a "Waits on" row: when the wait ends (BOS-989). */ until?: "merged" | "done" };
 export type TicketRelated = { feature: { id: string; title: string; status: string } | null; parent: RelatedTicket | null; subtasks: RelatedTicket[]; peers: RelatedTicket[]; waitsOn: RelatedTicket[]; blocks: RelatedTicket[]; mentioned: RelatedTicket[] };
 
 /** Today's date in the browser's time zone, YYYY-MM-DD. */

@@ -288,7 +288,7 @@ export const RunnerMessage = z.discriminatedUnion("type", [
   /** A running check job printed something: the log tail so far (BOS-316). */
   z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
   /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
-  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000) }),
+  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional() }),
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
@@ -328,7 +328,7 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 /** fenced: set only when the check was asked to run fenced, saying whether it was. */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean; /** BOS-1228: the whole log of a server-queued job, cut and redacted by the runner (see prepareFullLog). */ fullLog?: string; /** BOS-1228: set by the server when the failed job's whole log is kept (read with the check_log tool). */ keptLog?: { jobId: string; chars: number; ticketId: string } };
 /**
  * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
  * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
@@ -431,11 +431,13 @@ export type MigrationsResult =
   | { needed: null; reason: string };
 
 /**
- * The company's agent fence setting (BOS-325): off (default), watch (agents run fenced and refusals are logged) or
- * enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
+ * The company's agent fence setting (BOS-325): off, watch (default for new companies since BOS-940: agents run
+ * fenced and refusals are logged) or enforce. "enforce" is not selectable yet: it waits for BOS-323's git fix, so the server refuses it.
  */
 export const FENCE_MODES = ["off", "watch", "enforce"] as const;
 export type FenceMode = (typeof FENCE_MODES)[number];
+/** What Off means, in BOS-373's words, said wherever the owner chooses Off (BOS-940): Settings and the fence card. */
+export const FENCE_OFF_CONSEQUENCE = "With the fence Off, agents can read the runner's key and this company's git login.";
 /** Flip once BOS-323 is merged and its test shows the git gap closed. */
 export const FENCE_ENFORCE_AVAILABLE = false;
 /** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */

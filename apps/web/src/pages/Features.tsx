@@ -21,6 +21,7 @@ import { clearDraft, readDraftJson, useFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
 import { when } from "./Runs";
+import { NotFoundBlock } from "../components/NotFoundBlock";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
@@ -671,7 +672,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
       (err: Error) => setError(err.message),
     );
-  if (data.error && !away(data.error)) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
+  if (data.error && !away(data.error)) return data.error.status === 404 ? <NotFoundBlock title="Feature not found" backHref="#/features" backLabel="Back to Features">This feature doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const f = d.feature;

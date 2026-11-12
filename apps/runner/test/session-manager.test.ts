@@ -1,5 +1,6 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
+// Under the merge check these tests run in a bare environment (PATH, a job HOME and TMPDIR, CI=1); see BOS-1114.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,12 +30,24 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; lockRetryMs?: number; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { expectError?: boolean; skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; lockRetryMs?: number; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
-  let done!: () => void;
-  const ended = new Promise<void>((r) => (done = r));
+  let done!: (error: string | null) => void;
+  // Settles when the run ends. A run that ends with an error rejects with that error, unless the test expects one
+  // (expectError): under load the agent can fail to start, and the test should then read "the run ended with: <reason>"
+  // instead of a bare "undefined" or "expected false to be true" further down (BOS-965).
+  const ended = new Promise<void>((resolve, reject) => {
+    done = (error) => {
+      if (!error || opts.expectError) return resolve();
+      // No stack frames: they push the reason out of a short log tail, and the reason is what matters.
+      const failure = new Error(`The run ended with an error: ${error}`);
+      failure.stack = `Error: ${failure.message}`;
+      reject(failure);
+    };
+  });
+  ended.catch(() => {});
   const manager: SessionManager = new SessionManager({
     workspaces: opts.workspaces,
     lockRetryMs: opts.lockRetryMs,
@@ -51,7 +64,7 @@ function harness(model: string | null, opts: { skills?: Array<{ name: string; fi
         const cmd = String((e.rawInput as { command?: string } | null)?.command ?? "");
         manager.handle({ type: "permission.decide", runId: e.runId, requestId: e.requestId, verdict: /rm -rf/.test(cmd) ? "deny" : "allow" });
       }
-      if (e.type === "run.ended") done();
+      if (e.type === "run.ended") done(e.error ?? null);
     },
   });
   const runId = randomUUID();
@@ -177,7 +190,7 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
   }, 60_000);
 
   it("refuses a skill file that would land outside its folder", async () => {
-    const h = harness(null, { skills: [{ name: "evil", files: [{ path: "../../escape.txt", content: "eA==" }] }] });
+    const h = harness(null, { expectError: true, skills: [{ name: "evil", files: [{ path: "../../escape.txt", content: "eA==" }] }] });
     await h.ended;
     expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ error: expect.stringContaining("Couldn't set up the agent's skills") });
   }, 30_000);
@@ -300,7 +313,7 @@ describe("runs in a git workspace (R38)", () => {
         throw new Error("boom");
       },
     } as unknown as Workspaces;
-    const h = harness(null, { workspaces: fake, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
+    const h = harness(null, { expectError: true, workspaces: fake, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
     await h.ended;
     expect(calls).toBe(3);
     expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toBe("Couldn't prepare the git workspace: boom");
@@ -308,14 +321,14 @@ describe("runs in a git workspace (R38)", () => {
 
   it("gives up on a lock that never frees once the retry limit is up", async () => {
     const fake = { ensure: async () => { throw new RepoLockTimeout("p"); } } as unknown as Workspaces;
-    const h = harness(null, { workspaces: fake, lockRetryMs: 50, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
+    const h = harness(null, { expectError: true, workspaces: fake, lockRetryMs: 50, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
     await h.ended;
     expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/Timed out waiting for the lock/);
   }, 30_000);
 
   it("ends the run with a clear error when the repo can't be cloned", async () => {
     const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
-    const h = harness(null, { workspaces, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "/nonexistent/repo", baseRef: "main" } });
+    const h = harness(null, { expectError: true, workspaces, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "/nonexistent/repo", baseRef: "main" } });
     await h.ended;
     expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/^Couldn't prepare the git workspace/);
   }, 30_000);

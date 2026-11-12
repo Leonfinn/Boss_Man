@@ -3,6 +3,7 @@
 // hours and each agent's hourly cap lower it rather than drop it, and every one links to its
 // evidence. Pages and asks also go to the owner's phone through their own ntfy server, so
 // Boss Man only ever sends outbound requests and is never exposed at the router.
+import { createHash, randomBytes } from "node:crypto";
 import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, isTimeZone, NOTIFY_LEVELS, sinceHours, type NotifyLevel } from "@boss-man/shared";
@@ -22,6 +23,10 @@ export const NtfyUrl = z
     return !p.search && !p.hash && !u.includes("?") && !u.includes("#");
   }, "Use the ntfy server's address without a ? or # part, e.g. https://ntfy.example.ts.net or https://host/ntfy");
 
+/** Which cards reach the phone (BOS-1006): the urgent ones by default, or everything the old tick boxes did. */
+export const PHONE_PUSH_MODES = ["urgent", "all"] as const;
+export type PhonePushMode = (typeof PHONE_PUSH_MODES)[number];
+
 export const NotifySettings = z.object({
   quietHours: z
     .object({
@@ -34,8 +39,17 @@ export const NotifySettings = z.object({
   agentHourlyCap: z.number().int().min(1).max(100),
   /** Phone push through the owner's own ntfy server; the token is held as a secret. */
   ntfy: z.object({ url: NtfyUrl, topic: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Letters, digits, - and _ only"), tokenSecretId: z.string().uuid().nullable() }).nullable(),
-  /** Levels that go to the phone. */
-  pushLevels: z.array(z.enum(NOTIFY_LEVELS)),
+  /**
+   * Which cards go to the phone (BOS-1006). "urgent" (the default, and what an install saved before the
+   * setting existed reads as) sends only a blocking card, a fixesLive deploy, a page and the test push.
+   * "all" sends the routine ones too, at a normal priority. Kept for installs that saved it.
+   */
+  phonePush: z.enum(PHONE_PUSH_MODES).optional(),
+  /**
+   * The old tick boxes, which "all" stands in for (BOS-1006). Kept so an install saved before the setting
+   * still loads: its list of levels says whether it wanted pages and asks on the phone.
+   */
+  pushLevels: z.array(z.enum(NOTIFY_LEVELS)).optional(),
   /** Boss Man's address as the phone should open it, e.g. https://bossman.tailnet.ts.net. */
   publicUrl: z.string().url().nullable(),
   /** The owner's off switch for phone Approve buttons (BOS-243); on unless set to false. */
@@ -67,9 +81,18 @@ export function ntfyPublishUrl(url: string): string {
 
 /** A link in the app as the phone opens it on the public URL. */
 export const appUrl = (publicUrl: string, link: string) => `${publicUrl.replace(/\/$/, "")}/${link}`;
-export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, pushLevels: ["page", "ask"], publicUrl: null };
+export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { quietHours: null, agentHourlyCap: 6, ntfy: null, phonePush: "urgent", publicUrl: null };
+
+/** Whether the owner wants routine cards on the phone too (BOS-1006); urgent-only unless they chose all. */
+export function wantsEveryPush(s: NotifySettings): boolean {
+  return s.phonePush === "all";
+}
 
 const KEY = "notifications";
+const PHONE_TEST_KEY = "notifications.phone-test";
+const PHONE_TEST_TTL_MS = 15 * 60_000;
+type PhoneTestRecord = { sentAt: string; tokenHash: string | null; expiresAt: string | null; confirmedAt: string | null };
+const hashTestToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 /** Cuts text to fit in `max` bytes of UTF-8, without splitting a character. */
 export function fitBytes(text: string, max: number): string {
@@ -91,14 +114,25 @@ function evidenceLink(ctx: DecisionContext): string {
   if (ctx.type === "stale_blocker") return `#/tickets/${ctx.blockedTicketId}`;
   return "#/decisions";
 }
-const PRIORITY: Record<NotifyLevel, number> = { note: 2, flag: 3, page: 4, ask: 4 };
+/** An urgent push breaks through on the phone (BOS-1006); a routine one sent under "All decisions" is normal. */
+export const URGENT_PRIORITY = 5;
+export const ROUTINE_PRIORITY = 3;
 
 /**
  * `noPush` keeps a routine card (BOS-1010's runner update) in the feed and the browser only, never on the phone,
  * whatever the owner's push levels say: it is not urgent, and the owner should see it when they next look, not be
  * buzzed for it.
  */
-export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean };
+export type NotifyInput = { companyId: string | null; agentId?: string | null; level: NotifyLevel; title: string; body?: string | null; link: string; decisionId?: string | null; noPush?: boolean; /** Why the card is urgent (BOS-1097): a live-fix deploy or the CEO's urgent mark. Set, it goes to the phone whatever the setting; the text is shown on the Notifications page. */ urgentReason?: string };
+
+/** What the CEO sets to mark an owner card urgent (BOS-1097): decisions escalate with urgent true; stored on the card's context. */
+export type UrgentPush = { by: string; at: string; why: string };
+export const urgentPushOf = (context: unknown): UrgentPush | null => {
+  const u = (context as { urgentPush?: UrgentPush } | null)?.urgentPush;
+  return u && typeof u.why === "string" ? u : null;
+};
+/** ntfy answers these when the server has no clear endpoint (before 2.14): 404/405, or 400 for the sequence id form. */
+const CLEAR_UNSUPPORTED = /^ntfy answered (400|404|405|501)$/;
 
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
@@ -114,7 +148,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
    * Publishes to ntfy as JSON (to the server's URL, path kept), so titles needn't fit in a header.
    * `plain` turns markdown off, for text that is shown exactly as stored (BOS-243).
    */
-  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel; actions?: PushAction[]; plain?: boolean }) {
+  async function push(s: NotifySettings, n: { title: string; body: string | null; link: string; level: NotifyLevel; urgent: boolean; actions?: PushAction[]; plain?: boolean; /** Lets a later clear find this message (ntfy 2.14+; older servers ignore it). */ sequenceId?: string }) {
     if (!s.ntfy) throw new Error("Phone push isn't set up.");
     const token = s.ntfy.tokenSecretId ? await deps.reveal(s.ntfy.tokenSecretId) : null;
     const res = await doFetch(ntfyPublishUrl(s.ntfy.url), {
@@ -122,10 +156,11 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({
         topic: s.ntfy.topic,
+        ...(n.sequenceId ? { sequence_id: n.sequenceId } : {}),
         title: fitBytes(n.title, 250),
         // ntfy turns a message over 4,096 bytes into an attachment.
         message: fitBytes(n.body ?? n.title, 3500),
-        priority: PRIORITY[n.level],
+        priority: n.urgent ? URGENT_PRIORITY : ROUTINE_PRIORITY,
         tags: [n.level === "ask" ? "question" : n.level === "page" ? "rotating_light" : "bell"],
         ...(s.publicUrl ? { click: appUrl(s.publicUrl, n.link) } : {}),
         ...(n.actions?.length ? { actions: n.actions } : {}),
@@ -169,12 +204,25 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       .onConflictDoNothing()
       .returning();
     if (!row) return null;
-    // A routine card never reaches the phone (BOS-1010): the feed and the browser still show it.
-    if (s.ntfy && !input.noPush && s.pushLevels.includes(level)) {
+    // BOS-1006: only an urgent card reaches the phone unless the owner chose "All decisions". Quiet hours
+    // still demote first, so an urgent ask in quiet hours arrives as a flag and doesn't push.
+    // A routine card marked noPush (BOS-1010) never reaches the phone: the feed and the browser still show it.
+    const urgent = input.level === "page" || !!input.urgentReason;
+    const flagsToPhone = s.pushLevels?.includes("flag") ?? false;
+    const routineToPhone = wantsEveryPush(s) && (level === "page" || level === "ask");
+    const toPhone = s.ntfy && !input.noPush && (urgent ? level === "page" || level === "ask" : routineToPhone || (level === "flag" && flagsToPhone));
+    if (toPhone) {
+      // BOS-1097: re-read the card just before sending. One answered, withdrawn or no longer the owner's
+      // (back with the CEO) while we were busy sends nothing.
+      if (row.decisionId && !(await stillOwnersOpenCard(row.decisionId))) {
+        deps.log?.(`phone push skipped: card ${row.decisionId} is settled or no longer the owner's`);
+        return row;
+      }
+      const pushReason = input.level === "page" ? (input.urgentReason ?? "A page: Boss Man marked it urgent") : urgent ? input.urgentReason! : routineToPhone ? "You chose to send all decisions to your phone" : "You chose to send flags to your phone";
       const { actions, approve } = row.decisionId ? await decisionButtons(s, row.decisionId, row.link) : { actions: [], approve: null };
       try {
-        await push(s, { ...row, actions, ...(approve ? { body: approve.message, plain: true } : {}) });
-        await db.update(notifications).set({ pushedAt: now() }).where(eq(notifications.id, row.id));
+        await push(s, { ...row, actions, urgent, sequenceId: row.id, ...(approve ? { body: approve.message, plain: true } : {}) });
+        await db.update(notifications).set({ pushedAt: now(), pushReason }).where(eq(notifications.id, row.id));
       } catch (err) {
         const msg = (err as Error).message;
         // A link the phone never received must not stay live.
@@ -198,8 +246,92 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       .set({ readAt: now() })
       .where(and(isNull(notifications.readAt), sql`${notifications.decisionId} in (select ${decisions.id} from ${decisions} where ${decisions.status} <> 'open')`));
 
+  /** The card is open and on the owner's tier now (and not parked on an alert-ladder rung before the owner). */
+  async function stillOwnersOpenCard(decisionId: string): Promise<boolean> {
+    const [d] = await db.select({ status: decisions.status, tier: decisions.tier, context: decisions.context }).from(decisions).where(eq(decisions.id, decisionId));
+    if (!d || d.status !== "open" || d.tier !== "owner") return false;
+    const rung = (d.context as { ladder?: { rung?: string } } | null)?.ladder?.rung;
+    return !rung || rung === "owner";
+  }
+
+  /**
+   * Takes a settled card's push off the phone (BOS-1097): ntfy 2.14+ clears a message by its sequence id (the
+   * notification's id). Never throws, and never holds up the answer: a failure is written on the row and shown
+   * on the Notifications page. An older server answers 404/405, noted as "unsupported" and not retried.
+   */
+  async function clearPush(decisionId: string): Promise<void> {
+    try {
+      const [n] = await db.select().from(notifications).where(and(eq(notifications.decisionId, decisionId), isNotNull(notifications.pushedAt), isNull(notifications.pushClearedAt)));
+      if (!n) return;
+      const s = await getSettings();
+      if (!s.ntfy) return;
+      const setNote = (note: string | null, clearedAt: Date | null) => db.update(notifications).set({ pushClearNote: note, pushClearedAt: clearedAt }).where(eq(notifications.id, n.id));
+      try {
+        const token = s.ntfy.tokenSecretId ? await deps.reveal(s.ntfy.tokenSecretId) : null;
+        const url = new URL(`${encodeURIComponent(s.ntfy.topic)}/${n.id}/clear`, ntfyPublishUrl(s.ntfy.url));
+        const res = await doFetch(url, { method: "PUT", headers: token ? { authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(10_000) });
+        if (res.ok) await setNote(null, now());
+        else {
+          const msg = `ntfy answered ${res.status}`;
+          await setNote(CLEAR_UNSUPPORTED.test(msg) ? "unsupported: this ntfy server is too old to clear a push (it needs version 2.14 or newer)" : `clear failed: ${msg}`, null);
+        }
+      } catch (err) {
+        await setNote(`clear failed: ${(err as Error).message}`.slice(0, 300), null);
+      }
+    } catch (err) {
+      deps.log?.(`phone push clear failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Safety net for a card settled anywhere that did not call clearPush, and for a clear that failed in passing. */
+  async function clearSettledPushes(): Promise<number> {
+    const rows = await db
+      .select({ decisionId: notifications.decisionId })
+      .from(notifications)
+      .where(
+        and(
+          isNotNull(notifications.pushedAt),
+          isNull(notifications.pushClearedAt),
+          gt(notifications.pushedAt, sinceHours(now(), 24)),
+          sql`(${notifications.pushClearNote} is null or ${notifications.pushClearNote} not like 'unsupported:%')`,
+          sql`${notifications.decisionId} in (select ${decisions.id} from ${decisions} where ${decisions.status} <> 'open')`,
+        ),
+      )
+      .limit(20);
+    for (const r of rows) if (r.decisionId) await clearPush(r.decisionId);
+    return rows.length;
+  }
+
   return {
     getSettings,
+    clearPush,
+    clearSettledPushes,
+
+    /** The last 20 phone pushes with why each counted as urgent and whether its card is still open (BOS-1097). */
+    async recentPushes(limit = 20) {
+      const rows = await db
+        .select({ n: notifications, status: decisions.status, tier: decisions.tier, company: companies.name })
+        .from(notifications)
+        .leftJoin(decisions, eq(decisions.id, notifications.decisionId))
+        .leftJoin(companies, eq(companies.id, notifications.companyId))
+        .where(isNotNull(notifications.pushedAt))
+        .orderBy(desc(notifications.pushedAt))
+        .limit(Math.min(limit, 50));
+      return rows.map((r) => ({
+        id: r.n.id,
+        title: r.n.title,
+        body: r.n.body,
+        link: r.n.link,
+        company: r.company,
+        pushedAt: r.n.pushedAt,
+        reason: r.n.pushReason,
+        /** open: the card still waits on the owner; settled: answered or withdrawn; notice: not a card (a page). */
+        state: r.status === null ? "notice" : r.status === "open" ? (r.tier === "owner" ? "open" : "with_ceo") : "settled",
+        clearedAt: r.n.pushClearedAt,
+        clearNote: r.n.pushClearNote,
+      }));
+    },
+
     async setSettings(next: NotifySettings) {
       const value = NotifySettings.parse(next);
       await db.insert(settings).values({ key: KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
@@ -220,7 +352,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       const s = await getSettings();
       if (!s.ntfy) return false;
       try {
-        await push(s, { ...n, level: "flag", plain: true });
+        await push(s, { ...n, level: "flag", urgent: false, plain: true });
         return true;
       } catch (err) {
         deps.log?.(`phone push failed: ${(err as Error).message}`);
@@ -257,12 +389,17 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
         // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
         const c = d.context as DecisionContext;
-        const urgent = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
-        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgent && !urgent.repeat ? "page" : alertOnly ? "flag" : "ask";
+        const urgentFix = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const level: NotifyLevel = d.tier === "ceo" ? "note" : urgentFix && !urgentFix.repeat ? "page" : alertOnly ? "flag" : "ask";
+        // BOS-1097: only two kinds of card are urgent by themselves: a live-problem deploy, and a card the CEO
+        // marked urgent when escalating it (context.urgentPush). Blocking a ticket no longer counts, and a
+        // "Got it" notice never pushes. Pages come from notify_owner and the test push is urgent in `test`.
+        const mark = urgentPushOf(d.context);
+        const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? "A deploy that carries the fix for a live problem" : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
         // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
-        // even when the owner's push levels include asks. (A self_deploy card that is not the runner update is unchanged.)
+        // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
         const routineRunner = c.type === "self_deploy" && c.target === "runner";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : urgent ? urgent.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
+        await notify({ companyId: d.companyId, agentId: null, level, ...(urgentReason ? { urgentReason } : {}), title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
       }
       return open.length;
     },
@@ -301,10 +438,43 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         .where(ids === "all" ? isNull(notifications.readAt) : and(inArray(notifications.id, ids), isNull(notifications.readAt)));
     },
 
-    /** Sends a test push with the current settings and says how it went. */
+    /**
+     * Sends a test push with the current settings. With a public https address it carries a "Got it" button: a
+     * random one-use link (only its hash is kept, 15 minutes) whose tap proves the phone received the push.
+     * Urgent (BOS-1006): it is what the owner pressed.
+     */
     async test() {
       const s = await getSettings();
-      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device.", link: "#/notifications", level: "page" });
+      const t = now();
+      const actions: PushAction[] = [];
+      let rec: PhoneTestRecord = { sentAt: t.toISOString(), tokenHash: null, expiresAt: null, confirmedAt: null };
+      if (s.publicUrl && new URL(s.publicUrl).protocol === "https:") {
+        const token = randomBytes(32).toString("base64url");
+        rec = { ...rec, tokenHash: hashTestToken(token), expiresAt: new Date(t.getTime() + PHONE_TEST_TTL_MS).toISOString() };
+        actions.push({ action: "http", label: "Got it", url: `${s.publicUrl.replace(/\/$/, "")}/api/phone/got-it`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }), clear: true });
+      }
+      await push(s, { title: "Boss Man test", body: "Phone notifications from Boss Man reach this device." + (actions.length ? " Tap Got it to confirm." : ""), link: "#/notifications", level: "page", urgent: true, actions });
+      await db.insert(settings).values({ key: PHONE_TEST_KEY, value: rec }).onConflictDoUpdate({ target: settings.key, set: { value: rec } });
+    },
+
+    /** The last test push: when it was sent and whether the phone tapped Got it (null: none sent yet). */
+    async testStatus(): Promise<{ sentAt: string; confirmedAt: string | null } | null> {
+      const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
+      const r = row?.value as PhoneTestRecord | undefined;
+      return r ? { sentAt: r.sentAt, confirmedAt: r.confirmedAt } : null;
+    },
+
+    /** A tap on Got it. True only for the live, unused link of the last test; the link then stops working. */
+    async confirmTest(token: unknown): Promise<boolean> {
+      if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) return false;
+      const [row] = await db.select().from(settings).where(eq(settings.key, PHONE_TEST_KEY));
+      const r = row?.value as PhoneTestRecord | undefined;
+      const t = now();
+      if (!r || !r.tokenHash || r.confirmedAt || !r.expiresAt || new Date(r.expiresAt) <= t || r.tokenHash !== hashTestToken(token)) return false;
+      const next: PhoneTestRecord = { ...r, confirmedAt: t.toISOString() };
+      // Compare-and-set on the unconfirmed record, so two taps can't both win.
+      const res = await db.update(settings).set({ value: next }).where(and(eq(settings.key, PHONE_TEST_KEY), sql`${settings.value}->>'confirmedAt' is null`)).returning({ key: settings.key });
+      return res.length > 0;
     },
   };
 }

@@ -8,6 +8,7 @@ import { useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
 import { outcomeTag, usage, when } from "./Runs";
+import { NotFoundBlock } from "../components/NotFoundBlock";
 
 /** Steering (R37): a message after the current turn, or one that interrupts it, and stop. */
 function Steer({ runId, companyId, ticketId }: { runId: string; companyId: string; ticketId?: string | null }) {
@@ -115,7 +116,7 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
     return () => cancelAnimationFrame(frame);
   }, [items.length, rows]);
 
-  if (error && !run && !away(error)) return <p className="error" role="alert">{error.status === 404 ? "There's no such run." : error.message}</p>;
+  if (error && !run && !away(error)) return error.status === 404 ? <NotFoundBlock title="Run not found" backHref="#/runs" backLabel="Back to Runs">This run doesn't exist any more, or the link is wrong.</NotFoundBlock> : <p className="error" role="alert">{error.message}</p>;
   const company = companies.find((c) => c.id === run?.companyId);
   return (
     <>

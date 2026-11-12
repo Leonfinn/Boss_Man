@@ -33,6 +33,9 @@ type AgentRow = {
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
   openTickets: number;
+  /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 / 2" (BOS-1029). */
+  wipCount?: number;
+  wipLimit?: number | null;
   pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
@@ -298,7 +301,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
         <small className="muted">Given to the agent at the start of every run. Tailor them to your company.</small>
       </div>
       <small className="muted">
-        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/workflow`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
+        Who does code, security, infra and adversarial reviews is chosen in <a href={`#/settings/${companyId}/reviews`}>Settings › Reviews</a>. A Senior Developer hire takes the cells set to Senior Developer; name any other reviewer there.
       </small>
       {error && (
         <p className="error" role="alert">
@@ -391,7 +394,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
               <div className="field">
                 <span className="label">Reviews</span>
                 <p style={{ margin: 0 }}>
-                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/workflow`}>Change in Settings › Reviews</a>
+                  {describeRoles(reviewRolesOf(policy.rules as SharedPolicy, a.id, a.template === SENIOR_DEV_TEMPLATE))} <a href={`#/settings/${policy.companyId}/reviews`}>Change in Settings › Reviews</a>
                 </p>
               </div>
             )}
@@ -420,7 +423,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <DraftTextarea draftKey={instructionsKey} id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(text) => setForm({ ...form, instructions: text })} />
             <small className="muted">{a.role === "ceo"
-                ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
+                ? "The CEO picks up new instructions in its next chapter (Settings › Team and CEO › CEO chapters)."
                 : a.duty === "wiki"
                   ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
                   : "Used from the agent's next run."}</small>
@@ -480,7 +483,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   );
 }
 
-type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
+type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string; reviewBy: string | null; ageDays: number; reviewDue: boolean; reviewReason: string | null };
 type NoteRequest = { id: string; title: string; text: string; why: string; from: string; ticketId: string; ticketRef: string | null; status: "pending" | "accepted" | "declined"; declineReason: string | null; createdAt: string };
 
 /** Where a note came from, for the owner. */
@@ -509,8 +512,8 @@ function NoteOrigin({ n }: { n: AgentNote }) {
 type NoteLimits = { count: number; title: number; text: number; why: number };
 
 /** One note's fields, for adding or editing. */
-function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string }) => Promise<boolean>; onCancel?: () => void }) {
-  const [f, setF] = useState(start);
+function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string; reviewBy: string | null }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string; reviewBy: string | null }) => Promise<boolean>; onCancel?: () => void }) {
+  const [f, setF] = useState({ title: start.title, text: start.text, why: start.why, reviewBy: start.reviewBy });
   // The note text is kept in this browser as it is typed (DR-045); it goes once the note is saved.
   const textKey = `agent-note/${id}`;
   return (
@@ -518,10 +521,10 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
       onSubmit={(e) => {
         e.preventDefault();
-        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => {
+        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim(), reviewBy: f.reviewBy || null }).then((ok) => {
           if (!ok) return;
           clearDraft(textKey);
-          if (!onCancel) setF({ title: "", text: "", why: "" });
+          if (!onCancel) setF({ title: "", text: "", why: "", reviewBy: null });
         });
       }}
     >
@@ -536,6 +539,10 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       <div className="field">
         <label htmlFor={`${id}-why`}>Why (what you said)</label>
         <input id={`${id}-why`} maxLength={limits.why} value={f.why} onChange={(e) => setF({ ...f, why: e.target.value })} required />
+      </div>
+      <div className="field">
+        <label htmlFor={`${id}-review`}>Review by (optional)</label>
+        <input id={`${id}-review`} type="date" value={f.reviewBy ?? ""} onChange={(e) => setF({ ...f, reviewBy: e.target.value || null })} />
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <button type="submit" className="btn primary">
@@ -608,7 +615,10 @@ function CeoNotes({ agentId }: { agentId: string }) {
                 </div>
                 <div>{n.text}</div>
                 <div className="muted" style={{ fontSize: 13 }}>
-                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)}
+                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)} ({n.ageDays === 0 ? "today" : `${n.ageDays} d ago`}){n.reviewBy ? ` · review by ${n.reviewBy}` : ""}
+                  {n.reviewDue && (
+                    <strong className="error"> · Review due: {n.reviewReason}</strong>
+                  )}
                 </div>
               </li>
             ),
@@ -635,7 +645,7 @@ function CeoNotes({ agentId }: { agentId: string }) {
           </ul>
         </>
       )}
-      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "" }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
+      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "", reviewBy: null }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
     </details>
   );
 }
@@ -734,12 +744,20 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               ) : (
                 "No open tasks"
               )}
+              {a.wipLimit != null && a.wipCount !== undefined && (
+                <>
+                  {" · "}
+                  <span title="Tickets in progress, against the limit per agent set in Settings" style={a.wipCount > a.wipLimit ? { color: "var(--danger, #b3261e)" } : undefined}>
+                    {a.wipCount} / {a.wipLimit} in progress
+                  </span>
+                </>
+              )}
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
               {isInfiniteModel(a.model) && (
                 <>
                   {" "}
-                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › How many agents run at once.">
+                  <span className="tag" title="Synthetic Infinite mode: free (doesn't spend the plan's credits) and slow. Runs in the background slots from Settings › Server and runner › Agents at once.">
                     Infinite mode · free, slow
                   </span>
                 </>
