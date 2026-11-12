@@ -30,6 +30,8 @@ export const OWNER_CONTROLS = {
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
     "Resume",
+    // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
+    "More about this",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [

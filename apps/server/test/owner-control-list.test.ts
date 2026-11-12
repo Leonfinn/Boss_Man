@@ -87,6 +87,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
+  // The page-intro fold, on four screens (P7, BOS-1278).
+  "components/MoreAbout.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",
