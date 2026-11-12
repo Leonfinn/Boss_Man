@@ -163,7 +163,7 @@ describe.skipIf(!can)("UI quick wins 4 layout (BOS-1126)", () => {
       const fold = page.locator(".rm-unfold").first();
       expect(await fold.getAttribute("aria-label")).toMatch(/milestones for/);
       expect((await fold.innerText()).trim(), "the chevron is labelled Milestones").toMatch(/Milestones/);
-      const btn = await fold.evaluate((el) => {
+      const btn = await fold.evaluate((el: Element) => {
         const cs = getComputedStyle(el);
         const probe = document.createElement("span");
         probe.style.background = getComputedStyle(document.documentElement).getPropertyValue("--card").trim();
