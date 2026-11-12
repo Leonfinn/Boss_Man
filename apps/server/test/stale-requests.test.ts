@@ -91,7 +91,8 @@ describe("stale requests (BOS-123)", () => {
 
     const allowed = await ask("Which payment provider should I use, Stripe or Mollie?", { stillNeeded: "The owner chose Mollie, but the Mollie key has expired and they must pick again." });
     expect(isError(allowed)).toBe(false);
-    expect(textOf(allowed)).toMatch(/in the owner's queue/i);
+    // BOS-1318: a plain question goes to the CEO first.
+    expect(textOf(allowed)).toMatch(/went to the CEO first/i);
   });
 
   it("lets the same agent ask an unrelated question after the owner answered a different one (BOS-175)", async () => {
@@ -106,7 +107,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the checkout button?", options: ["Green", "Brand blue"], recommended: "Green", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("flags notes and cards that wait on a ticket when that ticket is done", async () => {
@@ -215,7 +216,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the footer?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("marks cards and notes across every kind of card in one action, and wakes each author once (BOS-175 item 3)", async () => {
