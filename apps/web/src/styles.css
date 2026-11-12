@@ -106,7 +106,6 @@ p { margin: 0; }
 @media (max-width: 640px) {
   .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
-  .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
   .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 auto; }
 }
 .page-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
@@ -184,19 +183,37 @@ p { margin: 0; }
 .score-legend { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .score-legend .swatch { display: inline-block; width: 12px; height: 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: grid; grid-template-columns: 88px minmax(0, 1fr); }
+.decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: block; }
 /* The card a link opened (#/decisions/<id>, BOS-1078). */
 .decision.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
-.decision .score { padding: 18px 0 18px 20px; display: flex; flex-direction: column; gap: 8px; }
-.decision .score b { font-family: var(--mono); font-size: 26px; font-weight: 500; line-height: 1; }
-.decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
-.decision .parts span { height: 4px; border-radius: 2px; min-width: 4px; }
-.decision .body { padding: 18px 20px 18px 8px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.decision .body { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
-.decision .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
-.decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
-.decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
+/* (BOS-1236) One head line: kind tag, ticket chip, who and how long ago; the pills sit on the right and wrap under on a phone. */
+.decision .head-line { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.decision .ref-chip { font-size: 12px; padding: 1px 8px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--ink); text-decoration: none; }
+.decision .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.decision .pill { text-transform: none; letter-spacing: 0; font-size: 12px; }
+.decision .strip { display: block; margin: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; }
+.decision .strip.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.decision .strip.red { background: var(--red-soft); color: var(--red-ink); }
+.decision .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 14px; }
+.decision .facts dt { color: var(--muted); }
+.decision .facts dd { margin: 0; overflow-wrap: anywhere; }
+.decision .plain-list { list-style: none; margin: 0; padding: 0; }
+.decision .plan-preview { font-size: 14px; }
+.decision .answer-label { margin: 4px 0 -2px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Each button with its effect line under it; the recommended one is filled and tagged on its line. */
+.decision .actions.stacked { flex-direction: column; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
+.decision .actions.stacked .answer { display: grid; grid-template-columns: minmax(150px, max-content) minmax(0, 1fr); gap: 4px 14px; align-items: center; }
+.decision .actions.stacked .answer .effect { margin: 0; font-size: 14px; color: var(--muted); }
+.decision .rec-tag { text-transform: uppercase; font-size: 10px; margin-left: 6px; }
+.decision .btn.primary .rec-tag { background: rgba(255, 255, 255, 0.22); color: #fff; }
+/* A question's own options: full-width rows, left-aligned, long text wrapping inside. */
+.decision .actions.wide { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+.decision .actions.wide .btn { width: 100%; text-align: left; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.decision .card-foot { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: 13px; }
+.decision .card-foot-note { margin: 0; font-size: 13px; }
 /* "Not enough detail?": the note and its button are one row on a wide card, the button reading as the
    field's send and lining up with Approve / Reject; on a narrow card the button drops under the field
    with the card's normal gap (BOS-756). */
@@ -204,12 +221,13 @@ p { margin: 0; }
 .decision .advice-row .field { flex: 1 1 240px; min-width: 0; }
 .decision .advice-row .actions { flex: none; }
 @media (max-width: 640px) { .decision .advice-row .field { flex-basis: 100%; } }
-@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
+@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; min-height: 44px; } .decision .pills { margin-left: 0; width: 100%; } .decision .actions.stacked .answer { grid-template-columns: minmax(0, 1fr); } .decision .body { padding: 14px 16px 16px; } }
 
 /* (BOS-809) Closed cards fold to one clipped line each inside the "Closed (N)" group, so the full-size
    card (and its narrow "A newer update card covers this one" column that wrapped one word per line) is
    gone. A line opens to reveal its kept steps in .closed-body, which keeps a readable minimum width. */
 .closed-covers .covered-line { list-style: none; cursor: pointer; display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.closed-covers .covered-line.wraps { white-space: normal; }
 .closed-covers .covered-line::-webkit-details-marker { display: none; }
 .closed-covers .covered-line::before { content: "▸ "; color: var(--muted); }
 .closed-covers details[open] > .covered-line::before { content: "▾ "; }
@@ -516,7 +534,7 @@ details > summary { cursor: pointer; font-size: 14px; }
 }
 /* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
 .page-head h1:focus { outline: none; }
-.set-scope { margin-left: 10px; vertical-align: middle; }
+.set-scope { margin-left: 10px; vertical-align: middle; white-space: nowrap; }
 .set-jump { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
 .set-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .set-jump a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
@@ -536,6 +554,8 @@ details > summary { cursor: pointer; font-size: 14px; }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
   .set-back { display: inline-flex; }
+  /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
+  .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
   .set-nav li > a { min-height: 56px; flex-wrap: wrap; }
   .set-item-label { flex: 0 0 100%; }
@@ -851,7 +871,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .switcher-new small { width: 100%; color: #ffb4b4; }
 @media (max-width: 640px) {
   /* One header row: the mark, the company picker and a menu button (BOS-245). */
-  .side { padding: 6px 12px 8px; gap: 6px; }
+  /* The bar takes its natural height on every page; the full-height rule is for the side menu only (BOS-1213). */
+  .side { min-height: 0; padding: 6px 12px 8px; gap: 6px; }
+  /* The bar and the page wrap onto two rows; without this the window's spare height is shared between the rows and the bar grows (BOS-1213). Chat keeps its own stretch above. */
+  .app { align-content: flex-start; }
   .side .brand span { display: none; }
   .side-bar { display: flex; align-items: center; gap: 8px; }
   .side-bar .switcher { flex: 1; min-width: 0; }
@@ -1115,6 +1138,36 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-list { display: flex; flex-direction: column; gap: 8px; }
 .mq-item { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; min-width: 0; }
 .mq-item.stuck { border-color: var(--red-ink); }
+/* BOS-1239: a 4 px left edge repeats the row's state word (amber: needs you, red: stuck or failed); colour is never the only signal. */
+.mq-item.need { border-left: 4px solid var(--amber); }
+.mq-item.stuck { border-left-width: 4px; }
+.mq-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mq-pos { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 1.5em; }
+.mq-item .tag { white-space: nowrap; }
+.mq-sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; margin: 18px 0 8px; }
+.mq-sec-head h2 { margin: 0; }
+.mq-sec-head .muted { font-size: 13px; }
+.mq-status { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0 0 12px; padding: 0; }
+.mq-pill { display: inline-flex; align-items: center; min-height: 32px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.mq-pill.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.mq-pill.red { background: var(--red-soft); color: var(--red-ink); }
+.mq-calm { margin: 0 0 12px; }
+.mq-needs { margin: 8px 0 4px; padding: 12px 14px; border: 1px solid var(--amber-line); border-left: 4px solid var(--amber); border-radius: 10px; background: var(--amber-soft); }
+.mq-needs h2 { margin: 0 0 8px; color: var(--amber-ink); }
+.mq-needs ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.mq-needs li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.mq-needs-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.mq-needs-text a { color: var(--head); font-size: 14px; font-weight: 500; text-decoration: none; overflow-wrap: anywhere; }
+.mq-red { padding: 10px 14px; border-radius: 8px; background: var(--red-soft); color: var(--red-ink); font-size: 14px; margin-bottom: 8px; }
+.mq-red a { color: inherit; font-weight: 600; }
+.mq-empty { padding: 14px; font-size: 14px; }
+.tabs .tab-count.warn { background: var(--amber-soft); color: var(--amber-ink); }
+@media (max-width: 640px) {
+  .mq-needs .btn { width: 100%; justify-content: center; }
+}
+@media (pointer: coarse) {
+  .mq-head a { padding: 10px 0; }
+}
 .mq-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .mq-head a { font-size: 14px; font-weight: 500; color: var(--head); text-decoration: none; overflow-wrap: anywhere; min-width: 0; }
 .mq-head a:hover { text-decoration: underline; }

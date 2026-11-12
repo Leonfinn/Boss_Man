@@ -6,7 +6,8 @@
 import { and, asc, desc, eq, inArray, isNull, like, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, ticketMessages, tickets, wakes } from "../db/schema.js";
-import { raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import { OWNER_SETUP_FIX_PREFIX, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import type { OwnerSetupFacts } from "./owner-setup-check.js";
 import type { NotifyInput } from "./notifications.js";
 import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
 import { moveTicket } from "./ticket-moves.js";
@@ -41,7 +42,7 @@ function setupStepsOf(steps: string[]) {
 }
 
 /** A live ticket and the owner steps it still needs after the runner-update-only ones are taken out (BOS-741). */
-type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string };
+type SetupTicket = { id: string; title: string; steps: Map<string, string>; decisionId: string | null; mergeCommit: string; /** The CEO's lintOverride for these steps (DR-052). */ override: string | null };
 
 const short = (sha: string) => sha.slice(0, 8);
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
@@ -71,6 +72,9 @@ export const releaseLogService = (
     notifyOwner?: (n: NotifyInput) => Promise<unknown>;
     /** Runs on every pass for each company, after the live commit is noted: lets after-merge checks that waited for go-live start (BOS-1021). */
     afterLive?: (companyId: string) => Promise<unknown>;
+    /** The host facts a go-live setup card is filled from and checked against (DR-052); without it, every host token
+     * becomes its plain label and the lint runs without host facts. */
+    ownerSetupFacts?: () => Promise<OwnerSetupFacts>;
     log?: (msg: string) => void;
   },
 ) => {
@@ -245,7 +249,7 @@ export const releaseLogService = (
       // A ticket whose every step is the runner update comes through with no steps: it is named on the
       // runner-update card instead of getting one of its own (BOS-741).
       const steps = setupStepsOf(t.steps);
-      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit });
+      live.push({ id: t.id, title: t.title, steps, decisionId: t.ownerSetupDecisionId, mergeCommit: t.mergeCommit, override: t.override });
     }
     // Take back each affected card once, clearing every ticket that pointed at it (BOS-741). A ticket
     // still live here that shared a withdrawn card now has no card, so the grouping below raises one for
@@ -260,8 +264,14 @@ export const releaseLogService = (
       withdrew++;
       for (const t of live) if (covered.some((x) => x.id === t.id)) t.decisionId = null;
     }
+    // DR-052: the host facts the card's tokens are filled from and the lint checks against, read once per pass.
+    const facts = (await deps.ownerSetupFacts?.().catch((err: Error) => { log(`owner setup host facts: ${err.message}`); return undefined; })) ?? {};
     for (const group of setupGroups(live)) {
-      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title })), steps: group.steps, commit: to });
+      // A CEO override covers only the exact steps it was given with, so it counts only from a ticket whose own
+      // steps are the card's (a bigger card shared with other tickets carries steps it never saw).
+      const same = (t: SetupTicket) => t.steps.size === group.steps.length && group.steps.every((s) => t.steps.has(stepKey(s)));
+      const override = group.tickets.find((t) => t.override && same(t))?.override ?? null;
+      const card = await raiseOwnerSetup(db, { companyId, tickets: group.tickets.map((t) => ({ ticketId: t.id, title: t.title })), steps: group.steps, commit: to, facts, override });
       if (!card) continue;
       raised++;
       const ids = group.tickets.filter((t) => t.decisionId !== card.id).map((t) => t.id);
@@ -308,15 +318,25 @@ export const releaseLogService = (
    */
   const mergeOrder = (companyId: string) => mergeCommitOrder(db, companyId);
 
+  /** Whether the CEO has an open card to fix a live ticket's setup steps (DR-052). */
+  async function hasOpenSetupFix(companyId: string) {
+    const [row] = await db
+      .select({ id: decisions.id })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), like(decisions.dedupeKey, `${OWNER_SETUP_FIX_PREFIX}%`)))
+      .limit(1);
+    return !!row;
+  }
+
   /** Done tickets in this company that carry setup steps and a merge commit, with their card if raised. */
   async function ticketsWithSetup(companyId: string) {
     const rows = await db
-      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
+      .select({ id: tickets.id, title: tickets.title, ownerSetup: tickets.ownerSetup, ownerSetupOverride: tickets.ownerSetupOverride, mergeCommit: tickets.mergeCommit, ownerSetupDecisionId: tickets.ownerSetupDecisionId })
       .from(tickets)
       .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")));
     return rows
       .filter((t) => !!t.mergeCommit && !!t.ownerSetup?.trim())
-      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!) }));
+      .map((t) => ({ id: t.id, title: t.title, mergeCommit: t.mergeCommit!, ownerSetupDecisionId: t.ownerSetupDecisionId, steps: splitSteps(t.ownerSetup!), override: t.ownerSetupOverride }));
   }
 
   return {
@@ -341,6 +361,11 @@ export const releaseLogService = (
           const seen = (row.value as Seen | undefined) ?? {};
           // Checks that waited for go-live start now, whether or not the commit changed on this pass (BOS-1021).
           await deps.afterLive?.(companyId).catch((err: Error) => log(`go-live checks for company ${companyId}: ${err.message}`));
+          // DR-052: while the CEO has a card to fix a live ticket's setup steps, retry the owner's card on every pass
+          // (same commit, nothing withdrawn), so fixed steps reach the owner without waiting for the next deploy.
+          if (isSha(seen.new) && seen.old === seen.new && (await hasOpenSetupFix(companyId))) {
+            await ownerSetupPass(companyId, seen.new, "deployed").catch((err: Error) => log(`owner setup retry for company ${companyId}: ${err.message}`));
+          }
           if (!isSha(seen.old) || !isSha(seen.new) || seen.old === seen.new) continue;
           // The record moves on whatever happens below, so a retry (or the next pass) can't double the ticket.
           await saveSeen(companyId, { old: seen.new, new: seen.new });

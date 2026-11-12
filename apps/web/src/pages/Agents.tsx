@@ -483,7 +483,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template, policy }: { a: Ag
   );
 }
 
-type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
+type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string; reviewBy: string | null; ageDays: number; reviewDue: boolean; reviewReason: string | null };
 type NoteRequest = { id: string; title: string; text: string; why: string; from: string; ticketId: string; ticketRef: string | null; status: "pending" | "accepted" | "declined"; declineReason: string | null; createdAt: string };
 
 /** Where a note came from, for the owner. */
@@ -512,8 +512,8 @@ function NoteOrigin({ n }: { n: AgentNote }) {
 type NoteLimits = { count: number; title: number; text: number; why: number };
 
 /** One note's fields, for adding or editing. */
-function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string }) => Promise<boolean>; onCancel?: () => void }) {
-  const [f, setF] = useState(start);
+function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string; reviewBy: string | null }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string; reviewBy: string | null }) => Promise<boolean>; onCancel?: () => void }) {
+  const [f, setF] = useState({ title: start.title, text: start.text, why: start.why, reviewBy: start.reviewBy });
   // The note text is kept in this browser as it is typed (DR-045); it goes once the note is saved.
   const textKey = `agent-note/${id}`;
   return (
@@ -521,10 +521,10 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
       onSubmit={(e) => {
         e.preventDefault();
-        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => {
+        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim(), reviewBy: f.reviewBy || null }).then((ok) => {
           if (!ok) return;
           clearDraft(textKey);
-          if (!onCancel) setF({ title: "", text: "", why: "" });
+          if (!onCancel) setF({ title: "", text: "", why: "", reviewBy: null });
         });
       }}
     >
@@ -539,6 +539,10 @@ function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: 
       <div className="field">
         <label htmlFor={`${id}-why`}>Why (what you said)</label>
         <input id={`${id}-why`} maxLength={limits.why} value={f.why} onChange={(e) => setF({ ...f, why: e.target.value })} required />
+      </div>
+      <div className="field">
+        <label htmlFor={`${id}-review`}>Review by (optional)</label>
+        <input id={`${id}-review`} type="date" value={f.reviewBy ?? ""} onChange={(e) => setF({ ...f, reviewBy: e.target.value || null })} />
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <button type="submit" className="btn primary">
@@ -611,7 +615,10 @@ function CeoNotes({ agentId }: { agentId: string }) {
                 </div>
                 <div>{n.text}</div>
                 <div className="muted" style={{ fontSize: 13 }}>
-                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)}
+                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)} ({n.ageDays === 0 ? "today" : `${n.ageDays} d ago`}){n.reviewBy ? ` · review by ${n.reviewBy}` : ""}
+                  {n.reviewDue && (
+                    <strong className="error"> · Review due: {n.reviewReason}</strong>
+                  )}
                 </div>
               </li>
             ),
@@ -638,7 +645,7 @@ function CeoNotes({ agentId }: { agentId: string }) {
           </ul>
         </>
       )}
-      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "" }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
+      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "", reviewBy: null }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
     </details>
   );
 }

@@ -12,7 +12,8 @@ import { openPglite } from "../src/db/client.js";
 import { issueRunToken } from "../src/mcp.js";
 import { activity, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { moveTicket } from "../src/services/ticket-moves.js";
-import { agentWipCount } from "../src/services/agent-wip.js";
+import { agentWipCount, WIP_REFUSED_REASON } from "../src/services/agent-wip.js";
+import { IDLE_SLOT_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -187,10 +188,47 @@ describe("a freed slot starts the held ticket by itself", () => {
     // The run the held wake launched has ended; one of the agent's tickets goes to review.
     await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.agentId, c.worker.id));
     await moveTicket(c.db, first!, "review", { internal: true });
+    // The sweep (BOS-1180's one start step) wakes the agent on the held ticket; the next tick launches it.
+    const swept = await c.sweeps.run();
     await c.scheduler.tick();
     const after = await c.row(t.id);
+    expect(swept.idleSlots).toBeDefined();
     expect(after.systemState).toBe("in_progress");
     expect(after.stateNote).toBeNull();
+    expect(after.wipHeldAt).toBeNull();
+  });
+
+  // BOS-1180 gap 1: the hold used to live in the state note, so any later note erased it and nothing restarted the ticket.
+  it("the hold is a field: the agent rewrites the state note, and the ticket still starts when room frees", async () => {
+    const c = (ctx = await setup());
+    const [first] = await holding(c, 2);
+    const t = await c.ticket("ready");
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: t.id, reason: "assigned", note: "Please start." });
+    await c.scheduler.tick();
+    const held = await c.row(t.id);
+    expect(held.systemState).toBe("ready");
+    expect(held.wipHeldAt).not.toBeNull();
+    // The agent's own summary replaces the Waiting note (as BOS-1138's did) via set_ticket_state on the same state.
+    const client = await c.mcp(c.worker.id);
+    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "ready", summary: "Plan approved. It starts by itself when a place frees." } });
+    const rewritten = await c.row(t.id);
+    expect(rewritten.stateNote).toMatch(/starts by itself/);
+    expect(rewritten.wipHeldAt?.getTime()).toBe(held.wipHeldAt!.getTime());
+    await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.agentId, c.worker.id));
+    await moveTicket(c.db, first!, "review", { internal: true });
+    await c.sweeps.run();
+    await c.scheduler.tick();
+    expect((await c.row(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("a wake the limit refused is marked, so it is not counted against the daily idle-slot allowance", async () => {
+    const c = (ctx = await setup());
+    await holding(c, 2);
+    const t = await c.ticket("ready");
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: t.id, reason: IDLE_SLOT_REASON, note: "A run slot is free." });
+    await c.scheduler.tick();
+    const [w] = await c.db.select().from(wakes).where(eq(wakes.ticketId, t.id));
+    expect(w).toMatchObject({ status: "launched", statusReason: WIP_REFUSED_REASON });
   });
 });
 

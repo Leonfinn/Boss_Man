@@ -92,7 +92,7 @@ export function agentRunsRoutes(
     if (err instanceof NoteError) return reply.code(err.status).send({ error: "note", message: err.message });
     throw err;
   };
-  const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why) });
+  const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why), reviewBy: z.string().nullable().optional() });
   const noteOf = async (id: string) => (await db.select({ companyId: agentNotes.companyId }).from(agentNotes).where(eq(agentNotes.id, id)))[0];
   owner.get("/api/agents/:id/notes", async (req, reply) => {
     const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, IdParam.parse(req.params).id));

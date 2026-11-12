@@ -125,7 +125,7 @@ describe("QA: home screen 'Need your answer' equals the Decisions menu badge (BO
     await ask("Plain one?");
     await ask("Another plain one?");
     const stale = await ask("Superseded one?");
-    await c.db.update(decisions).set({ staleAt: new Date(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+    await c.db.update(decisions).set({ staleAt: new Date(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
     await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "Lesson?", options: ["Apply", "Skip"], recommendedOption: "Skip", context: { type: "lesson", lesson: "Say it plainly." } as never });
     const tally = (await c.req("GET", "/api/decisions/tally")).json() as { open: number; waiting: number };
     expect(tally).toEqual({ open: 2, waiting: 1 });

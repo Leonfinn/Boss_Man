@@ -43,8 +43,11 @@ import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
 import { releaseLogService } from "./services/release-log.js";
+import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
+import { recheckDeadlines, runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -310,7 +313,13 @@ export async function buildApp(opts: AppOptions) {
   const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve() });
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
+    // BOS-1161: a finished runner rebuild closes the cards that named it in clearsWhen and flags (and wakes the authors of) the rest that talk about the runners.
+    onRebuilt: async (companyId) => {
+      const closed = await clearing.check();
+      await runnerRebuilt(db, { companyId, wake: (input) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number }), now: opts.now?.() });
+      if (closed) await notes.syncDecisions();
+    } });
   // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
   // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
   const releaseLog = releaseLogService(db, {
@@ -319,6 +328,9 @@ export async function buildApp(opts: AppOptions) {
     closeTicket: (id) => work.updateTicket(id, { state: "done" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
+    // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
+    // hostFacts is created just below; this only runs on a later release pass.
+    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
@@ -666,6 +678,7 @@ export async function buildApp(opts: AppOptions) {
     addons: addonFacts,
     release: (ticketId) => decisionsSvc.release(ticketId),
     serverCalm: (rule) => health?.calmReason(rule) ?? null,
+    liveCommit: () => process.env.BOSSMAN_COMMIT || null,
     now: opts.now,
   });
   // A runner coming back clears "could not start … runner offline" cards at once, on any tier
@@ -689,7 +702,17 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
-    clearAlerts: () => clearing.check(),
+    // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
+    clearAlerts: async () => {
+      const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
+      let closed = await clearing.check();
+      // BOS-1193: the validity table runs over every open agent card (a dead one closes by itself, which also
+      // clears the leftovers older flagging left behind), then a stale one is flagged and its re-check clock moves.
+      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
+      await ticketStateChanged(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "flagging cards after a ticket changed state failed"));
+      await recheckDeadlines(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "moving cards on in their re-check failed"));
+      return closed;
+    },
     // A feature the roadmap commits to but nothing is working on (BOS-595): the sweep raises one CEO
     // card, which the one closer above withdraws as soon as a ticket is linked to the feature.
     featuresWithoutTickets: async () => {
@@ -1666,6 +1689,8 @@ export async function buildApp(opts: AppOptions) {
 
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
     owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
+    // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
+    owner.get("/api/companies/:id/check-queue", async (req) => checkQueueSvc.list(IdParam.parse(req.params).id));
 
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {

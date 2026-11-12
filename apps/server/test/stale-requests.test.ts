@@ -162,7 +162,11 @@ describe("stale requests (BOS-123)", () => {
     const note = { stateNote: "Waiting on the owner.", stateNoteAt: new Date("2026-10-27T10:00:00Z"), lastActivityAt: new Date("2026-10-27T09:00:00Z") };
     expect(stateNoteLine(note, now)).not.toContain("(may be out of date)");
     expect(stateNoteLine({ ...note, lastActivityAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
-    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
+    // An owner action says what it was and when, never a bare "check before repeating" (BOS-1192).
+    const byOwner = stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z"), stateNoteStaleReason: 'the owner answered "Approve BOS-1095?"' }, now);
+    expect(byOwner).toContain('after this was written, the owner answered "Approve BOS-1095?", 1h ago');
+    expect(byOwner).not.toContain("check before repeating");
+    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("the owner acted on this ticket 1h ago");
     // A flag from before the note was rewritten doesn't make the fresh note stale.
     expect(stateNoteLine({ ...note, stateNoteAt: new Date("2026-10-27T11:30:00Z"), stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).not.toContain("(may be out of date)");
   });
@@ -176,6 +180,7 @@ describe("stale requests (BOS-123)", () => {
 
     let [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+    expect(row!.stateNoteStaleReason).toContain('the owner answered "Which colour?"');
 
     await c.work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
     [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));

@@ -7,7 +7,7 @@ import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notI
 import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
@@ -328,15 +328,16 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       else withOwner.add(id!);
     }
     if (stalls.length) for (const r of await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(inArray(reviewRequests.id, stalls))) withOwner.add(r.ticketId);
-    const bounces = new Map(
-      (
-        await db
-          .select({ ticketId: ticketReviews.ticketId, n: sql<number>`count(*)::int` })
-          .from(ticketReviews)
-          .where(and(inArray(ticketReviews.ticketId, ids), eq(ticketReviews.verdict, "changes_requested")))
-          .groupBy(ticketReviews.ticketId)
-      ).map((r) => [r.ticketId, r.n]),
-    );
+    // Send-backs count only from when the ticket's last review hold ended (BOS-1167): a hold is a deliberate stop.
+    const holdEnds = new Map<string, number>();
+    for (const h of await db.select({ ticketId: reviewHolds.ticketId, closedAt: reviewHolds.closedAt }).from(reviewHolds).where(and(inArray(reviewHolds.ticketId, ids), isNotNull(reviewHolds.closedAt))))
+      holdEnds.set(h.ticketId, Math.max(holdEnds.get(h.ticketId) ?? 0, h.closedAt!.getTime()));
+    const bounces = new Map<string, number>();
+    for (const r of await db
+      .select({ ticketId: ticketReviews.ticketId, createdAt: ticketReviews.createdAt })
+      .from(ticketReviews)
+      .where(and(inArray(ticketReviews.ticketId, ids), eq(ticketReviews.verdict, "changes_requested"))))
+      if (r.createdAt.getTime() > (holdEnds.get(r.ticketId) ?? 0)) bounces.set(r.ticketId, (bounces.get(r.ticketId) ?? 0) + 1);
     const runRows = await db
       .select({ id: runs.id, ticketId: runs.ticketId, agentId: runs.agentId, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
       .from(runs)
