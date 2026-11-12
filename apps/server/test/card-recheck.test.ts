@@ -122,7 +122,45 @@ describe("the validity table closes a dead card by itself (BOS-1193)", () => {
     const tk = await c.ticket("Reassigned");
     const older = await plan(c, tk.id, "first");
     const newer = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "Plan: second", options: ["Approve plan", "Keep planning"], recommended: "Approve plan", blocksTicketId: tk.id, triedFirst: "Investigated", plan: "second" });
-    expect((await cardOf(c, older.id)).context).toMatchObject({ withdrawn: { note: `superseded by ${newer.id}` } });
+    // BOS-1219: the note names the replacing card and the author of the newer plan.
+    expect((await cardOf(c, older.id)).context).toMatchObject({ withdrawn: { note: expect.stringMatching(new RegExp(`^Superseded by card ${newer.id} \\(newer plan from [^,]+, \\d{4}-`)) } });
+  });
+
+  it("BOS-1219: a new plan on an approved ticket says it amends the approved plan, and the approval stays", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("Amended");
+    const approvedAt = new Date(Date.now() - 60_000);
+    await c.db.update(tickets).set({ planApprovedAt: approvedAt, plan: "first" }).where(eq(tickets.id, tk.id));
+    const amend = await plan(c, tk.id, "second");
+    expect((await cardOf(c, amend.id)).question).toContain(`This amends the approved plan of ${approvedAt.toISOString()}`);
+    const [after] = await c.db.select({ at: tickets.planApprovedAt, plan: tickets.plan }).from(tickets).where(eq(tickets.id, tk.id));
+    expect(after!.at?.getTime()).toBe(approvedAt.getTime());
+    expect(after!.plan).toBe("first"); // the approved plan text is not replaced
+    // a first plan carries no such line
+    const fresh = await c.ticket("First plan");
+    expect((await cardOf(c, (await plan(c, fresh.id)).id)).question).not.toContain("amends");
+  });
+
+  it("BOS-1219: the owner's open 'Ask the CEO' request moves to the newer plan card", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("Advice moves");
+    const older = await plan(c, tk.id, "first");
+    const advice = { state: "asking", askedAt: new Date().toISOString(), note: "Why this order?" };
+    await c.db.update(decisions).set({ context: { ...((await cardOf(c, older.id)).context as object), advice } }).where(eq(decisions.id, older.id));
+    const newer = await plan(c, tk.id, "second");
+    expect((await cardOf(c, older.id)).status).toBe("withdrawn");
+    expect((await cardOf(c, newer.id)).context).toMatchObject({ advice });
+  });
+
+  it("BOS-1219: a card of another kind on the ticket is left alone, and an already-answered plan card is not touched", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("Only plans");
+    const q = await ask(c, "Which colour for the footer?", tk.id);
+    const answered = await plan(c, tk.id, "first");
+    await c.db.update(decisions).set({ status: "answered", answer: "Keep planning", answeredAt: new Date() }).where(eq(decisions.id, answered.id));
+    await plan(c, tk.id, "second");
+    expect((await cardOf(c, q.id)).status).toBe("open");
+    expect((await cardOf(c, answered.id)).status).toBe("answered");
   });
 });
 

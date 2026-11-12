@@ -190,7 +190,7 @@ describe("a new plan card supersedes the older ones for the ticket (BOS-1161)", 
 
     const old = await cardOf(c, older.id);
     expect(old.status).toBe("withdrawn");
-    expect((old.context as { withdrawn: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: `superseded by ${newer.id}` });
+    expect((old.context as { withdrawn: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringContaining(`Superseded by card ${newer.id} (newer plan from `) });
     expect((await cardOf(c, newer.id)).status).toBe("open");
     expect((await cardOf(c, other.id)).status).toBe("open"); // only plan cards are superseded
   });

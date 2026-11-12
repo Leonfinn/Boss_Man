@@ -474,18 +474,24 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
  * A plan card whose run is still alive stays: that run is waiting on its answer, and closing it would leave the run hanging.
  * Both shapes count: the plan an agent submits (a question card with plan) and ExitPlanMode's (a permission card with plan).
  */
-export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown> }) {
+export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown>; /** Who wrote the new plan, named in the closed card's note (BOS-1219). */ author?: string | null; /** Called for each closed card the owner had asked the CEO about (BOS-1219): moves that request to the new card. */ carryAdvice?: (from: { id: string; advice: Advice }) => Promise<unknown> }) {
   const at = input.now ?? new Date();
   const rows = await db
     .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, context: decisions.context })
     .from(decisions)
     .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), ne(decisions.id, input.newCardId), sql`${decisions.context}->>'ticketId' = ${input.ticketId}`, sql`${decisions.context}->>'plan' = 'true'`, sql`${decisions.context}->>'type' in ('permission', 'question')`));
-  const note = `superseded by ${input.newCardId}`;
+  // BOS-1219: says what replaced it (card, author, time), on the closed card and in the audit list.
+  const note = `Superseded by card ${input.newCardId} (newer plan from ${input.author ?? "an agent"}, ${at.toISOString()})`;
   let cleared = 0;
   for (const r of rows) {
     // BOS-1193: the shared close path, so the old card's approve links are revoked and its ticket is released too.
     if (await holdsLiveRun(db, r.context)) continue;
-    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at })) cleared++;
+    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at })) {
+      cleared++;
+      // BOS-1219: the owner's open "Ask the CEO" request moves to the new card. Only a request that was still open is moved.
+      const advice = adviceOf(r.context);
+      if (advice?.state === "asking" && input.carryAdvice) await input.carryAdvice({ id: r.id, advice }).catch(() => undefined);
+    }
   }
   return cleared;
 }
@@ -1424,6 +1430,30 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /**
+   * What a new plan card passes to supersedePlanCards (BOS-1219), the same for both plan paths: the author's name for the
+   * "Superseded by" note, and the move of the owner's open "Ask the CEO" request onto the new card, with the CEO told.
+   */
+  async function supersedeExtras(companyId: string, ticketId: string, newCardId: string, authorId: string | null) {
+    const [author] = authorId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, authorId)) : [];
+    return {
+      author: author?.name ?? null,
+      carryAdvice: async (from: { id: string; advice: Advice }) => {
+        const [moved] = await db
+          .update(decisions)
+          .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(from.advice)}::jsonb)` })
+          .where(and(eq(decisions.id, newCardId), eq(decisions.status, "open"), sql`${decisions.context}->'advice' is null`))
+          .returning({ id: decisions.id });
+        if (!moved) return;
+        const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+        if (ceo && wake) await wake({ agentId: ceo.id, ticketId, reason: "decision", note: `The owner's request for your advice was on plan card ${from.id}, which a newer plan has replaced. The request now belongs on card ${newCardId}: give your advice there (decisions tool, action advise).${from.advice.note ? ` What the owner wrote: ${from.advice.note}` : ""}`.slice(0, 4000) });
+      },
+    };
+  }
+
+  /** "This amends the approved plan of <time>" for a new plan card on a ticket whose plan the owner already approved (BOS-1219). */
+  const amendsText = (approvedAt: Date | null | undefined) => (approvedAt ? ` This amends the approved plan of ${approvedAt.toISOString()}; the approval stays in force.` : "");
+
+  /**
    * Wakes the CEO about a card on the ladder, tied to the card's ticket so it can't hit the
    * ticketless-wake limit (BOS-159). If the wake is dropped anyway, the card goes straight to the
    * owner: a request must never sit at a rung nobody was woken for while the runner counts down.
@@ -1513,7 +1543,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .values({
         companyId: runner.companyId,
         kind: "approval",
-        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
         options: [APPROVE_PLAN, KEEP_PLANNING],
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
@@ -1529,7 +1559,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (row && t && run?.agentId)
       await addTicketDependency(db, { companyId: runner.companyId, blockedTicketId: t.id, blockerDecisionId: row.id, actor: { type: "agent", agentId: run.agentId }, hold: true, now }).catch(() => undefined);
     // BOS-1161: an older open plan card for this ticket is superseded by this one. A failure never loses the new card.
-    if (row && t) await supersedePlanCards(db, { companyId: runner.companyId, ticketId: t.id, newCardId: row.id, now: now(), release: (id) => releaseIfFree(id, false) }).catch((err) => log(`closing older plan cards for ${t.id} failed: ${(err as Error).message}`));
+    if (row && t) await supersedePlanCards(db, { companyId: runner.companyId, ticketId: t.id, newCardId: row.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(runner.companyId, t.id, row.id, run?.agentId ?? null)) }).catch((err) => log(`closing older plan cards for ${t.id} failed: ${(err as Error).message}`));
     if (row && ladder && ceoId)
       await wakeLadderCeo(runner.companyId, row, { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ladder }, ceoId, [
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,
@@ -1899,13 +1929,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const doAfter = after.kept;
       const doBefore = before.kept;
       const droppedLinks = [...after.dropped, ...before.dropped];
+      // BOS-1219: a plan on a ticket whose plan the owner already approved amends it; the approval stays.
+      const [approvedOf] = input.plan && input.blocksTicketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, input.blocksTicketId)) : [];
+      const questionText = `${input.question}${amendsText(approvedOf?.at)}`;
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
           .values({
             companyId: input.companyId,
             kind: "question",
-            question: input.question,
+            question: questionText,
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
@@ -1937,7 +1970,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return row!;
       });
       // BOS-1161: a new plan card closes the older open plan cards for the ticket.
-      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
+      if (input.plan && input.blocksTicketId) await supersedePlanCards(db, { companyId: input.companyId, ticketId: input.blocksTicketId, newCardId: raised.id, now: now(), release: (id) => releaseIfFree(id, false), ...(await supersedeExtras(input.companyId, input.blocksTicketId, raised.id, input.agentId)) }).catch((err) => log(`closing older plan cards for ${input.blocksTicketId} failed: ${(err as Error).message}`));
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
       if (!input.plan) {
