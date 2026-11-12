@@ -1158,3 +1158,34 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
+
+/* ---------- Features table: values read as text, cards on a phone (BOS-1257) ---------- */
+.cell { position: relative; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 32px; padding: 2px 6px; border: 1px solid transparent; border-radius: 6px; }
+.cell-text { color: var(--ink); font-size: 13px; }
+.cell.empty .cell-text { color: var(--muted); }
+.cell-caret { font-size: 10px; color: var(--muted); opacity: 0; }
+.cell-select { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; margin: 0; opacity: 0; cursor: pointer; font-size: 16px; }
+.cell:hover, .cell:focus-within { border-color: var(--line-strong); background: var(--field); }
+.cell:hover .cell-caret, .cell:focus-within .cell-caret { opacity: 1; }
+.cell:has(.cell-select:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+table.features .num, table.features th.num { text-align: right; }
+table.features .num .cell { justify-content: flex-end; }
+.feature-priority { font-size: 15px; font-weight: 700; color: var(--head); }
+.feature-blocked { display: block; font-size: 12px; color: var(--amber-ink); white-space: nowrap; }
+.fcards-area { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.fcard-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.fcard { display: flex; flex-direction: column; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+.fcard.sub { margin-left: 16px; border-left: 3px solid var(--line-strong); }
+.fcard-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.fcard-title { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; overflow-wrap: anywhere; }
+.fcard-title a { font-weight: 600; }
+.fcard-priority { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+.fcard-priority b { font-size: 24px; color: var(--head); line-height: 1.1; }
+.fcard-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.fcard-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fcard-grid .cell { justify-content: flex-start; min-height: 44px; border-color: var(--line); }
+.fcard-grid .cell-text { flex: 1; }
+.fcard-grid .mono { display: flex; align-items: center; min-height: 44px; padding: 2px 6px; }
+.fcard-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.fcard-foot .portal-tick-word { min-height: 44px; }
+.fcard-foot .feature-fold { min-height: 44px; }
