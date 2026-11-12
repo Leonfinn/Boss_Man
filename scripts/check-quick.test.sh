@@ -379,6 +379,13 @@ run 0 "journal-only clash" env REBASE_OUT="$(printf '0141_mine -> 0142_mine\nreb
 grep -q "^PASS  merge with origin/main is clean" "$t/out" || fail "clash: merge step not PASS: $(cat "$t/out")"
 grep -q "migration 0141 (mine) will be renumbered to 0142 by the merge gate" "$t/out" || fail "clash: no renumber line: $(cat "$t/out")"
 grep -q "^PASS  migration lint (on the tree the gate will build)" "$t/out" || fail "clash: lint not run on the rebuilt tree: $(cat "$t/out")"
+# BOS-1258: this tree has no node_modules, and rebase-migrations.mjs needs tsx from it: the install must come first.
+[ ! -d "$repo/node_modules" ] || fail "clash fixture has node_modules"
+ilines="$(grep -n '^pnpm install' "$LOG" | head -1 | cut -d: -f1)"; nline="$(grep -n '^node scripts/rebase-migrations.mjs' "$LOG" | head -1 | cut -d: -f1)"
+if ! { [ -n "$ilines" ] && [ -n "$nline" ] && [ "$ilines" -lt "$nline" ]; }; then fail "clash: install must run before rebase-migrations: $(cat "$LOG")"; fi
+# A failed install is named as such, not counted as a migration clash.
+run 1 "clash, install fails" env FAIL_ON=install REBASE_OUT="$(printf '0141_mine -> 0142_mine\nrebuilt tree: %s' "$tree")"
+grep -q "package install failed (not a clash" "$t/out" || fail "clash: failed install not named: $(cat "$t/out")"
 # the old plain merge-tree step failed on exactly this tree
 g merge-tree --write-tree origin/main HEAD >/dev/null 2>&1 && fail "clash fixture is not a real conflict"
 start="$(g rev-parse origin/main)"
