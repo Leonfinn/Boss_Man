@@ -182,7 +182,7 @@ export const runners = pgTable("runners", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
   bootId: text("boot_id"),
-  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  /** Kept for older databases: when a restart last pulled parked checks forward. No longer written (BOS-1075). */
   bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
@@ -388,7 +388,7 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
-    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    /** When a runner restart happened while this check was waiting (BOS-352, BOS-1075); the wake at its booked time says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
