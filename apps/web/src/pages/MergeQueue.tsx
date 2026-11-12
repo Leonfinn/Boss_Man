@@ -411,7 +411,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <p className="muted mq-calm">Nothing needs you. Everything here is moving by itself.</p>
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
-        {tabButton("merges", "Merges", data ? data.waitingCount : null, needsYou.length > 0)}
+        {tabButton("merges", "Merges", data ? data.waitingCount + data.running.length : null, needsYou.length > 0)}
         {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, heldChecks > 0)}
       </div>
       {tab === "checks" ? (

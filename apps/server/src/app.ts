@@ -896,6 +896,12 @@ export async function buildApp(opts: AppOptions) {
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
+    runningChecks: (companyId) =>
+      db
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
+        .orderBy(asc(checkJobs.startedAt)),
     queueStatus: async (companyId) => {
       const mode = await checkQueueSvc.mode();
       if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
