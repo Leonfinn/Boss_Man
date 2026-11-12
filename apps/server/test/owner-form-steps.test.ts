@@ -29,6 +29,12 @@ describe("R18: a step on a registered form gives every value", () => {
     expect(f!.problem).toContain("Settings → Tools and deploys");
   });
 
+  it("refuses the card as the CEO reissued it (an 'if … isn't listed' branch with no values)", () => {
+    const [f] = r18(["Open Settings → Tools and deploys. If HolidayHours' target isn't listed, fill in the Add a deploy target form."]);
+    for (const field of ['"Name"', '"Kind"', '"Address"']) expect(f!.problem).toContain(field);
+    expect(f!.problem).toContain("if it isn't there");
+  });
+
   it("refuses an add step with some values missing, and names only those", () => {
     const [f] = r18(["Open Settings → Tools and deploys and add a deploy target: Name `production`, Kind SSH host."]);
     expect(f!.problem).toContain('"Address"');

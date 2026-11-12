@@ -23,7 +23,7 @@ const EDIT = /\b(?:edit|change|update)\b/i;
 const FILL = /\b(?:fill(?:\s+in|\s+out)?|enter|type|tick|set|choose|pick|select|paste|put)\b/i;
 /** An "if it isn't there" branch: the owner is asked to settle a question the card should have settled. */
 export const IF_MISSING =
-  /\bif\s+(?:it|they|there|one|that|this|the\s+[\w -]{1,40}?)\s+(?:isn't|is\s+not|aren't|are\s+not|doesn't|does\s+not|don't|do\s+not)\s+(?:there|listed|exist|shown|show|appear|have)\b|\bif\s+(?:it's|it\s+is|they're|they\s+are)\s+(?:missing|not\s+(?:there|listed|yet))\b|\bif\s+there\s+(?:is|are)\s+no\b|\bif\s+(?:it|one)\s+(?:is\s+)?missing\b/i;
+  /\bif\s+(?:[\w'’-]+\s+){0,5}?(?:isn't|is\s+not|aren't|are\s+not|doesn't|does\s+not|don't|do\s+not)\s+(?:there|listed|exist|shown|show|appear|have)\b|\bif\s+(?:it's|it\s+is|they're|they\s+are)\s+(?:missing|not\s+(?:there|listed|yet))\b|\bif\s+there\s+(?:is|are)\s+no\b|\bif\s+(?:it|one)\s+(?:is\s+)?missing\b/i;
 /** A "Settings → …" path. */
 const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
 
