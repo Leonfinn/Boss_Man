@@ -327,6 +327,8 @@ export function checkQueue(db: Db) {
         minutes: minutes(j.state === "running" ? j.startedAt : j.queuedAt),
         fixesMain: j.fixesMain,
         heldBy,
+        // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
+        heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
       };
     };
     const rows = [
