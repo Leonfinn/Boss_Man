@@ -27,8 +27,8 @@ const VERDICT: Record<string, SignoffReview["verdict"] | undefined> = {
 export async function signoffFacts(db: Db, ticketId: string): Promise<SignoffFacts> {
   const rows = (await latestRows(db, ticketId)).filter((r) => VERDICT[r.status]);
   const ids = [...new Set(rows.map((r) => r.reviewerAgentId).filter((x): x is string => !!x))];
-  const names = new Map<string, string>();
-  if (ids.length) for (const a of await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ids))) names.set(a.id, a.name);
+  const found = ids.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ids)) : [];
+  const names = new Map(found.map((a) => [a.id, a.name] as const));
   const [job] = await db
     .select({ state: checkJobs.state, commit: checkJobs.commit, at: checkJobs.endedAt })
     .from(checkJobs)
