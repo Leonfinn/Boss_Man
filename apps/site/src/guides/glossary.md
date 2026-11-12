@@ -11,6 +11,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Add-ons**: Optional extras that Boss Man works without: Tailscale, ntfy, Penpot and runner add-ons. Each one is off until you turn it on. ([Guide 9](/guides/add-ons))
 - **Advice on permission cards**: A setting under **Settings > Reviews and CEO** that lets Boss Man suggest which button to press on a permission card: **Advise**, **Watch** or **Off**. It never answers a card for you. ([Guide 6](/guides/permissions#advice-on-permission-cards))
+- **After-merge check**: A Done when line ticked **On a real host (checked after merge)**, because it can only be checked on the live system. Reviewers skip it, and the ticket stays open after the merge until it has a pass or fail. ([Guide 7](/guides/reviews-and-merge-queue#after-it-goes-live))
 - **Agent**: An AI worker in a company, with a role, instructions and a model. Each agent is a session of Claude Code, Codex or OpenCode. ([Guide 1](/guides/how-boss-man-works#companies-and-agents))
 - **Agent program**: The program an agent runs in: Claude Code, Codex or OpenCode. Each one can use different AI accounts. ([Guide 5](/guides/agents-and-models#agent-programs-and-accounts))
 - **Approved, merging**: The Review lane on the board for tickets that every reviewer approved, while Boss Man checks and merges them. ([Guide 4](/guides/board-and-decisions#the-three-review-lanes))
@@ -21,7 +22,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Backlog**: The board column for tickets that are written but not started. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Backups**: Copies of the database that Boss Man makes before every update, kept in the install folder next to `src`. Test one with `scripts/restore-test.sh` before you rely on it. ([Guide 10](/guides/updates-and-backups#where-backups-are-kept))
-- **Blocked**: The board column for tickets waiting on something, such as another ticket or your answer. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **Blocked**: The board column for tickets that are only waiting: on another ticket, an open card (plan cards too), a date, or the change going live. Blocked tickets do not count towards the in-progress limits. ([Guide 4](/guides/board-and-decisions#what-blocked-means))
 - **Board**: The page that shows every ticket in a project, in six columns. Open **Projects** and choose a project to see it. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
 - **Built-in allows**: What agents may do at once, with no card: use Boss Man's own tools, read, search and edit files, fetch web pages and run other shell commands. Ask rules do not apply to them. ([Guide 6](/guides/permissions#who-is-asked))
 - **Built-in guards**: Boss Man's fixed checks on risky requests: pushing, publishing and destructive commands come to you, and some deletes go to the CEO first. An Allow rule cannot let a guarded request run. ([Guide 6](/guides/permissions#who-is-asked))
@@ -54,6 +55,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## I
 
 - **In progress**: The board column for tickets an agent is working on. ([Guide 4](/guides/board-and-decisions#the-board-s-columns))
+- **In-progress limit**: How many tickets one agent, or the whole company, may have in progress at once, set under **Settings > Server and runner**. A ticket over the limit waits in Ready and starts by itself when a place frees up. Agents also call it the WIP limit. ([Guide 4](/guides/board-and-decisions#in-progress-limits))
 
 ## L
 
@@ -85,6 +87,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## Q
 
+- **Queued checks**: The tab on the **Merge queue** page that lists every check running or waiting on the company's runner, with its ticket, kind, place in line and wait. ([Guide 7](/guides/reviews-and-merge-queue#queued-checks))
 - **Quiet hours**: Hours you set under **Notifications > How you're told**, when pages and asks become flags and flags become notes. ([Guide 8](/guides/phone-notifications#quiet-hours-and-limits))
 
 ## R

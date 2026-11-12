@@ -1,5 +1,5 @@
 {
-  "id": "150f2e63-cb4e-440d-879e-1da59bbaa1bf",
+  "id": "584f968f-4794-4ab4-ba42-0e24b816c0f7",
   "prevId": "d673a958-3260-42e6-bb52-e0b9bb4a433a",
   "version": "7",
   "dialect": "postgresql",
@@ -6601,12 +6601,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "head": {
-          "name": "head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -9414,6 +9408,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "owner_setup_override": {
+          "name": "owner_setup_override",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "owner_setup_decision_id": {
           "name": "owner_setup_decision_id",
           "type": "uuid",
@@ -9432,13 +9432,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "fixes_merge_check": {
-          "name": "fixes_merge_check",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "version": {
           "name": "version",

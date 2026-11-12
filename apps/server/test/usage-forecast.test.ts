@@ -89,7 +89,15 @@ describe("limit estimate and daily use (R78)", () => {
     const [paid] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: other.id, startedAt: now, inputTokens: 10, outputTokens: 5 }).returning();
     await c.db.insert(costEvents).values({ fundingSourceId: credit.id, companyId: c.company.id, runId: paid!.id, costMicros: 1_500_000, occurredAt: now });
 
-    const daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=UTC`)).json().daily as Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
+    // Freeze the server's clock at the instant the runs were stamped, so "today" is the same day for both (a run across midnight UTC can't split them).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    let daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
+    try {
+      daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=UTC`)).json().daily;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(daily).toHaveLength(7);
     expect(daily.at(-1)!.day).toBe(now.toISOString().slice(0, 10));
     expect(daily.at(-1)).toMatchObject({ runs: 1, inputTokens: 1000, outputTokens: 200 });

@@ -280,7 +280,7 @@ function SettingsForm() {
               </select>
             </div>
             <p className="muted" style={{ fontSize: 14, margin: 0 }}>
-              Urgent means a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO marked urgent because you must act now, or the test button. A card that only holds up a ticket does not push, and a settled card is cleared from your phone if your ntfy server is 2.14 or newer. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
+              Urgent means a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO marked urgent because you must act now, or the test button. A card that only holds up a ticket does not push, and a settled card is cleared from your phone if your ntfy server is 2.14 or newer. Urgent pushes go at the top priority (5), which can break through Do Not Disturb on Android once you switch that on in ntfy (see the note by the test button). With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
             </p>
             <label style={check}>
               <input type="checkbox" checked={form.pushLevels.includes("flag")} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, "flag"] : form.pushLevels.filter((x) => x !== "flag") })} />
@@ -358,6 +358,19 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
+      {saved?.ntfy && (
+        <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
+          On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
+          <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
+            Phone notifications guide: iPhone
+          </a>
+        </p>
+      )}
+      {saved?.ntfy && (
+        <p className="muted" data-testid="phone-android-note" style={{ fontSize: 14, margin: 0 }}>
+          On Android, urgent pushes only break through Do Not Disturb after you turn on "Override Do Not Disturb" once for ntfy's max-priority channel: ntfy app → Settings → Notifications → the max-priority channel → Override Do Not Disturb. Test once with Do Not Disturb on.
+        </p>
+      )}
       {saved?.ntfy && saved.phoneTest && (
         <p role="status" data-testid="phone-test-status" style={{ fontSize: 14 }}>
           {saved.phoneTest.confirmedAt

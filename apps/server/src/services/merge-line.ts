@@ -1,6 +1,7 @@
 // The merge line's timeline (BOS-769): when approved work was approved, checked, held and merged, so a jam's
 // length can be measured afterwards (BOS-590's "how we will know it worked"). Each moment is one activity row
-// of kind "merge_line" with the facts in `detail`; there is no screen, the rows are read directly:
+// of kind "merge_line" with the facts in `detail`; there is no screen. Agents read the rows with the read-only
+// `merge_line_records` tool (BOS-1210, mcp-merge-line.ts); on the database directly:
 //
 //   select at, ticket_id, detail from activity where kind = 'merge_line' order by ticket_id, at;
 //

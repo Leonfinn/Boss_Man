@@ -12,6 +12,7 @@ import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
+import { hiddenWhileRechecked } from "./card-validity.js";
 import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
@@ -71,6 +72,10 @@ type TicketPatch = {
   noCode?: boolean;
   /** What the owner has to do once this is live, in plain words by button path (DR-011); null clears it. */
   ownerSetup?: string | null;
+  /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
+  ownerSetupOverride?: string | null;
+  /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
+  setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
@@ -291,9 +296,18 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
       );
       // Any other open question for the owner that a ticket waits on (raise_decision with blocksTicketId, loop alerts).
+      const openOwnerCards = decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question, staleAt: decisions.staleAt, recheckStage: decisions.recheckStage, context: decisions.context, raisedByAgentId: decisions.raisedByAgentId }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"), eq(decisions.tier, "owner"))) : [];
+      // BOS-1193 (DR-054): a card being re-checked is not the owner's to answer yet, so the ticket it holds is not "waiting on
+      // you" either; the Decisions list folds it away by the same rule. Urgent, live-run and merge/review cards stay.
+      const hiddenCards = await hiddenWhileRechecked(db, openOwnerCards);
+      const rechecking = new Map<string, string>();
+      if (hiddenCards.size) {
+        const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, openOwnerCards.filter((d) => hiddenCards.has(d.id) && d.raisedByAgentId).map((d) => d.raisedByAgentId!)))).map((a) => [a.id, a.name] as const));
+        for (const d of openOwnerCards) if (hiddenCards.has(d.id)) rechecking.set(d.id, (d.raisedByAgentId && names.get(d.raisedByAgentId)) || "the agent");
+      }
       const questions = new Map(
-        (decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"), eq(decisions.tier, "owner"))) : [])
-          .filter((d) => !signoffs.has(d.id))
+        openOwnerCards
+          .filter((d) => !signoffs.has(d.id) && !hiddenCards.has(d.id))
           .map((d) => [d.id, d.question] as const),
       );
       // A review no agent could take (the CEO did the work and nobody else can review it) waits on the owner too.
@@ -383,6 +397,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         // The card itself, so "Answer in Decisions" opens that exact card (BOS-1159).
         ownerQuestionId: askedId,
+        // The agent re-checking a card this ticket waits on (BOS-1193): the board says so instead of asking the owner to answer it.
+        recheckingBy: [...rechecking].find(([cardId]) => deps.some((d) => d.blockedTicketId === t.id && d.blockerDecisionId === cardId))?.[1] ?? null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
@@ -642,9 +658,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Blank setup steps mean none: store null, so the go-live pass never raises an empty card.
       // A merged ticket's steps are frozen against agents (BOS-443); the owner's web edit still works.
       if (patch.ownerSetup !== undefined) {
-        const frozen = setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
+        // DR-052: the CEO fixing steps that failed the go-live card check (the caller checked its card is open).
+        const frozen = patch.setupFix ? null : setupFrozenRefusal(t.mergeCommit, t.ownerSetup, patch);
         if (frozen) throw new WorkError(409, frozen);
         fields.ownerSetup = patch.ownerSetup?.trim() || null;
+        // An override covers only the text it came with, so any other write of the steps clears it.
+        fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
       }
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;

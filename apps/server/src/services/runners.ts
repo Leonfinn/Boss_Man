@@ -463,7 +463,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>, imageCommit?: string) {
       // An older runner sends none: keep what we last knew rather than blanking it. A new image with no
       // commit (built outside a checkout) clears the old one, so a stale commit never vouches for it (BOS-764).
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: imageCommit?.toLowerCase() ?? null, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+      const [before] = await db.select({ commit: runners.imageCommit }).from(runners).where(eq(runners.id, runner.id));
+      const next = imageCommit?.toLowerCase() ?? null;
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: next, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+      // BOS-1161: a hello that brings a different image commit is a finished rebuild; the caller flags the cards it makes moot.
+      return { imageChanged: !!next && next !== (before?.commit ?? null) };
     },
 
     /**

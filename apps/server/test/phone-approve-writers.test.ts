@@ -122,8 +122,8 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/agents.ts": { counts: { insert: 6 }, why: "kind approval: hire, model_change, instructions, team_plan, rename, standing_rules (CEO rules change)" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
   "src/services/decisions.ts": {
-    counts: { insert: 12, question: 8, todo: 2 },
-    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
+    counts: { insert: 13, question: 9, todo: 2 },
+    why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), owner setup fix (DR-052: tier ceo, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
   },
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 1, question: 1 }, why: "no raising agent, one option" },

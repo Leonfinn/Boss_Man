@@ -17,7 +17,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
-import { agentWipHold, isWipHeldNote, oldestInProgress } from "./agent-wip.js";
+import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -266,37 +266,12 @@ export function schedulerService(
    * in-progress ticket to carry on with instead (BOS-1029). Null when the ticket isn't held.
    */
   async function wipHeldRefusal(ticketId: string): Promise<string | null> {
-    const [t] = await db.select({ state: tickets.systemState, note: tickets.stateNote, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
-    if (t?.state !== "ready" || !isWipHeldNote(t.note) || !t.agentId) return null;
+    const [t] = await db.select({ state: tickets.systemState, heldAt: tickets.wipHeldAt, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+    if (t?.state !== "ready" || !t.heldAt || !t.agentId) return null;
     const oldest = await oldestInProgress(db, t.agentId);
-    if (!oldest) return `${t.note} (Not started.)`;
+    if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
     return `you are at your limit of in-progress tickets, so it stays in Ready and starts when one finishes. Carry on with your oldest unfinished ticket, "${o?.title ?? oldest}", instead.`;
-  }
-
-  /**
-   * A freed slot starts a held ticket by itself (BOS-1029): an agent under its limit with a held Ready ticket is woken on it,
-   * and the launch then starts it. One per pass per agent, oldest first.
-   */
-  async function wakeHeldStarts(self: { notify: (agentId: string, input: { ticketId: string; reason: string; note: string }) => Promise<unknown> }) {
-    const held = await db
-      .select({ id: tickets.id, note: tickets.stateNote, agentId: tickets.assigneeAgentId })
-      .from(tickets)
-      .where(and(eq(tickets.systemState, "ready"), isNotNull(tickets.assigneeAgentId), like(tickets.stateNote, "Waiting: %")))
-      .orderBy(asc(tickets.createdAt));
-    const seen = new Set<string>();
-    for (const h of held) {
-      if (!h.agentId || seen.has(h.agentId) || !isWipHeldNote(h.note)) continue;
-      seen.add(h.agentId);
-      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(and(eq(agents.id, h.agentId), isNull(agents.retiredAt)));
-      if (!a) continue;
-      const [t] = await db.select().from(tickets).where(eq(tickets.id, h.id));
-      if (!t || (await agentWipHold(db, t)).hold) continue;
-      // Already woken (queued or running on it): don't pile another note on every pass.
-      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, h.agentId), eq(wakes.ticketId, h.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
-      if (waiting) continue;
-      await self.notify(h.agentId, { ticketId: h.id, reason: "assigned", note: "Your WIP limit has room again, so this held ticket can start now." });
-    }
   }
 
   /** Why a launch did not start a ticket it was woken for, in words the agent can act on (BOS-254). */
@@ -1022,7 +997,8 @@ export function schedulerService(
     const reply = w.reason === CEO_REPLY_REASON;
     const startsTicket = !!w.ticketId && w.reason !== WATCH_REASON && !reply;
     const startedIt = startsTicket ? await startTicket(w.ticketId!) : false;
-    const notStarted = startsTicket && !startedIt ? await startRefusalFor(w.ticketId!) : null;
+    const wipRefused = startsTicket && !startedIt ? await wipHeldRefusal(w.ticketId!) : null;
+    const notStarted = wipRefused ?? (startsTicket && !startedIt ? await startRefusalFor(w.ticketId!) : null);
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
     const [ticket] = runTicketId
       ? await db
@@ -1103,7 +1079,8 @@ export function schedulerService(
       await db.update(wakes).set({ runId: null }).where(eq(wakes.id, w.id));
       return { ok: false, reason: "runner offline" };
     }
-    await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: null }).where(eq(wakes.id, w.id));
+    // A wake the WIP limit refused is marked, so the idle-slot sweeps don't count it against the ticket's daily allowance (BOS-1180).
+    await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: wipRefused ? WIP_REFUSED_REASON : null }).where(eq(wakes.id, w.id));
     if (!chat && !reply) {
       // The cursor moves only now the run is sent, so a failed launch loses no changes (R83).
       await db.update(agents).set({ briefSeenAt: briefAt }).where(eq(agents.id, agent.id));
@@ -1633,7 +1610,6 @@ export function schedulerService(
       const result = { launched: 0, deferred: 0, waiting: 0, dropped: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
       const t = now();
-      await wakeHeldStarts(this).catch((e) => deps.log?.(`held starts: ${e instanceof Error ? e.message : String(e)}`));
       const queue = await db
         .select()
         .from(wakes)
@@ -2070,6 +2046,11 @@ export function schedulerService(
     async onTicketMerged(ticketId: string, causedByRunId?: string | null) {
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(and(eq(ticketDependencies.blockerTicketId, ticketId), eq(ticketDependencies.until, "merged")));
       for (const { id } of dependents) await this.releaseIfUnblocked(id, causedByRunId);
+      // BOS-1161: a merge settles questions about the ticket (and what waits on it) as much as finishing does, and only the
+      // merge happens for a ticket with an after-merge check left. Cards that named the merge in clearsWhen are closed by the
+      // closer; the rest are flagged and their authors woken.
+      const [merged] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      if (merged) await ownerActed(db, { companyId: merged.companyId, ticketIds: [ticketId], reason: "a ticket it is about merged", now: now(), wake: (input) => this.notify(input.agentId, input) });
     },
 
     /**
