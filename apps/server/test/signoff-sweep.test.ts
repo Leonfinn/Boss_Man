@@ -96,7 +96,7 @@ describe("what a sign-off card lists (BOS-1236)", () => {
     const endedAt = new Date(Date.now() - 600_000);
     await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: ticket.projectId, ticketId: t.id, kind: "pre_review", scope: "quick", commit: "f".repeat(40), tree: "1".repeat(40), state: "failed", exitCode: 1, endedAt: new Date(endedAt.getTime() - 60_000) });
     await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: ticket.projectId, ticketId: t.id, kind: "pre_review", scope: "quick", commit: "e".repeat(40), tree: "2".repeat(40), state: "passed", exitCode: 0, endedAt });
-    const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "open", context: { type: "risk_review", ticketId: t.id, reviewer: "Sam", risk: "high" } }).returning();
+    const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "open", context: { type: "risk_review", ticketId: t.id, reviewer: "Sam", risk: "high", files: 3 } }).returning();
     const listed = ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: Record<string, unknown> }>).find((d) => d.id === card!.id)!;
     expect(listed.context).toMatchObject({
       type: "risk_review",
@@ -104,8 +104,23 @@ describe("what a sign-off card lists (BOS-1236)", () => {
       builder: "Engineer",
       reviews: [{ name: "Sam", kind: "code", verdict: "passed" }, { name: "CEO", kind: "adversarial", verdict: "waiting" }],
       quickCheck: { result: "passed", sha: "e".repeat(40), at: endedAt.toISOString() },
-      files: null,
+      files: 3,
     });
+  });
+});
+
+describe("the files count on a sign-off card (BOS-1236)", () => {
+  it("is saved when the card is raised and listed back; a card raised without it lists null", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const ticket = await c.row(t.id);
+    const { raiseSignoffCard } = await import("../src/services/signoff.js");
+    const id = await raiseSignoffCard(c.db, ticket, { reviewer: "Sam", reviewerAgentId: c.senior.id, head: "b".repeat(40), files: 7 });
+    const filesOf = async () => ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: { files?: number | null } }>).find((d) => d.id === id)!.context.files;
+    expect(await filesOf()).toBe(7);
+    const id2 = await raiseSignoffCard(c.db, ticket, { reviewer: "Sam", reviewerAgentId: c.senior.id, head: "b".repeat(40) });
+    const listed = ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: { files?: number | null } }>).find((d) => d.id === id2)!;
+    expect(listed.context.files).toBeNull();
   });
 });
 

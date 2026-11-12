@@ -11,7 +11,7 @@ export type SignoffReview = { name: string; kind: string; verdict: "passed" | "c
 export type SignoffFacts = {
   reviews: SignoffReview[];
   quickCheck: { result: "passed" | "failed"; sha: string; at: string } | null;
-  /** The number of files the branch changes. Not recorded anywhere on the server yet, so null; the card then leaves the row out. */
+  /** The number of files the branch changed when the card was raised (saved on the card). Null on an older card, which then leaves the row out. */
   files: number | null;
   /** The agent who holds the ticket (built it), so the card can say where "Send it back" goes. */
   builder: string | null;
@@ -24,7 +24,7 @@ const VERDICT: Record<string, SignoffReview["verdict"] | undefined> = {
   pending: "waiting",
 };
 
-export async function signoffFacts(db: Db, ticketId: string): Promise<SignoffFacts> {
+export async function signoffFacts(db: Db, ticketId: string, files: number | null = null): Promise<SignoffFacts> {
   const rows = (await latestRows(db, ticketId)).filter((r) => VERDICT[r.status]);
   const ids = [...new Set(rows.map((r) => r.reviewerAgentId).filter((x): x is string => !!x))];
   const found = ids.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, ids)) : [];
@@ -40,6 +40,6 @@ export async function signoffFacts(db: Db, ticketId: string): Promise<SignoffFac
     builder: held?.name ?? null,
     reviews: rows.map((r) => ({ name: (r.reviewerAgentId && names.get(r.reviewerAgentId)) || "A reviewer", kind: r.kind, verdict: VERDICT[r.status]! })),
     quickCheck: job?.at ? { result: job.state === "passed" ? "passed" : "failed", sha: job.commit, at: job.at.toISOString() } : null,
-    files: null,
+    files,
   };
 }

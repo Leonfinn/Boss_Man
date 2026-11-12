@@ -2453,7 +2453,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const signoffFactsOf = new Map<string, SignoffFacts>();
       for (const { d } of open) {
         const c = d.context as DecisionContext;
-        if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId));
+        if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId, typeof c.files === "number" ? c.files : null));
       }
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
