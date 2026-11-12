@@ -97,6 +97,7 @@ export const OWNER_CONTROLS = {
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
     "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
+    "Tasks", "Less", "How the portal works",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
@@ -121,7 +122,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
-    "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
     // Ask every running agent to stop cleanly before an update (BOS-929).
@@ -176,6 +177,7 @@ export const OWNER_FIELDS = {
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
+    "Your one-line reason, or the corrected lesson (needed for Edit)",
   ],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
@@ -214,7 +216,6 @@ export const OWNER_FIELDS = {
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public title (optional)", "Public summary", "Show publicly",
-    "On portal",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",

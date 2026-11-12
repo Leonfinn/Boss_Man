@@ -304,7 +304,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
         </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)} title={!text.trim() && !img.attached.length ? "Type a message first" : undefined}>
             Send
           </button>
           {live && (

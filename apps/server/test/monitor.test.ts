@@ -5,7 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, companies, decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkJobs, companies, decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { CARRY_ON_NOTE } from "../src/services/scheduler.js";
 import { issueRunToken } from "../src/mcp.js";
 
 const clients: Client[] = [];
@@ -225,5 +226,57 @@ describe("carry on after a run", () => {
     await ctx.db.update(tickets).set({ monitorAt: own, stateNote: "Waiting on CI.", stateNoteAt: new Date() }).where(eq(tickets.id, t.id));
     await ctx.scheduler.afterTicketRun(idle.id);
     expect((await row(t.id)).monitorAt).toEqual(own);
+  });
+
+  // BOS-1273: the check's result wakes the agent, so a carry-on wake meanwhile is a ~20 s run that sees "still queued" and stops.
+  const ownCheck = async (ticketId: string, state = "queued", requestedBy: string | null = ctx.co.ceo.id) =>
+    (await ctx.db.insert(checkJobs).values({ companyId: ctx.co.company.id, projectId: ctx.p.id, ticketId, kind: "pre_review", scope: "quick", commit: "c".repeat(40), tree: "t".repeat(40), state, requestedBy }).returning())[0]!;
+  const progressed = async (ticketId: string) => {
+    await ctx.db.delete(wakes);
+    const run = await ranOn(ticketId);
+    await ctx.work.updateTicket(ticketId, { stateNote: "Committed; quick check requested." });
+    return run;
+  };
+
+  it("books no carry-on wake while the agent's own check is queued or running, and the result still wakes them", async () => {
+    for (const state of ["queued", "running"]) {
+      const t = await working();
+      const job = await ownCheck(t.id, state);
+      await ctx.scheduler.afterTicketRun((await progressed(t.id)).id);
+      expect((await row(t.id)).monitorAt, state).toBeNull();
+      // The check ending (any way) wakes the agent that asked, as before.
+      await ctx.checks.cancel(job.id, "test");
+      const [w] = await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, t.id), eq(wakes.reason, "check_result")));
+      expect(w, state).toMatchObject({ agentId: ctx.co.ceo.id });
+    }
+  });
+
+  it("still books it when the only check is finished, or was asked for by someone else", async () => {
+    const t = await working();
+    await ownCheck(t.id, "passed");
+    await ownCheck(t.id, "queued", ctx.peer.id);
+    await ownCheck(t.id, "queued", null);
+    await ctx.scheduler.afterTicketRun((await progressed(t.id)).id);
+    expect((await row(t.id)).monitorAt).not.toBeNull();
+  });
+
+  it("skips a carry-on wake that falls due while the agent's check is live, but an agent's own schedule_check still fires", async () => {
+    const t = await working();
+    await ctx.scheduler.afterTicketRun((await progressed(t.id)).id);
+    expect((await row(t.id)).monitorNote).toBe(CARRY_ON_NOTE);
+    // A later run asked for a check (it found the carry-on already set, so it left it).
+    await ownCheck(t.id);
+    await due(t.id);
+    await ctx.scheduler.slow();
+    expect(await checkWakes(t.id)).toHaveLength(0);
+    expect((await row(t.id)).monitorAt).toBeNull();
+    const log = await ctx.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "monitor")));
+    expect(log.map((a) => a.summary).join()).toContain("Skipped the carry-on wake");
+
+    const c = await agent(ctx.co.ceo.id);
+    await schedule(c, t.id);
+    await due(t.id);
+    await ctx.scheduler.slow();
+    expect(await checkWakes(t.id)).toHaveLength(1);
   });
 });

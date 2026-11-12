@@ -308,6 +308,7 @@ export function StandingRules({ company, onChanged }: { company: Company; onChan
               type="button"
               className="btn"
               disabled={act.busy || !rules.at}
+              title={!rules.at ? "Nothing to undo yet" : act.busy ? "Saving, one moment" : undefined}
               onClick={() =>
                 void act.run(async () => {
                   const saved = await api<Rules>(`${url}/undo`, { method: "POST" });
