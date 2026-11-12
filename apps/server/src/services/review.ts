@@ -312,11 +312,13 @@ export function reviewService(
   // Where a running merge is: waiting its turn for a check slot, running the check, or merging (DR-014). In memory like `landings`.
   const phases = new Map<string, "queued" | "checking" | "merging" | "waiting_to_retry">();
   // BOS-1070: a merge waiting for the git host's CI, beside its own check (so not a phase): since when, and the jobs still running.
+  // shortcut: in memory like `landings`, lost on restart, harmless because a restart ends the wait it describes.
   const ciWaits = new Map<string, { since: number; waiting: string[] }>();
   // Merged trees the git host's CI passed. A merge rebuilt on a moved main with the same tree keeps the pass, as a
   // check-all pass is kept (P11a), so it isn't pushed and waited for again. shortcut: in memory, so a restart waits again.
   const ciPassedTrees = new Set<string>();
   // Tickets held by another ticket's open CI access or billing card in the same project: started again once CI reads work.
+  // shortcut: lost on restart, harmless because the unmerged-approvals sweep starts the held tickets again and they rejoin the open card.
   const ciCardWaiting = new Map<string, Set<string>>();
   const ciTiming = { ...CI_TIMING, ...deps.ciTiming };
   const beatNow = (ticketId: string) => {
