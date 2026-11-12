@@ -288,7 +288,19 @@ p { margin: 0; }
 .ticket h3 { font-size: 14px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .ticket .top { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ticket .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; }
+.ticket .row .who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.ticket .row .who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ticket .row .end { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.ticket .row .icon-btn { margin-left: 0; }
+.ticket .row .icon-btn svg { transition: transform 0.15s; }
+@media (prefers-reduced-motion: reduce) { .ticket .row .icon-btn svg { transition: none; } }
+.ticket .top { gap: 4px; }
+.ticket .top .tag, .ticket .top .type { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.ticket .top .ref { margin-left: auto; }
+.ticket .clamp2, .done-list .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.ticket .clamp1 { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ticket .waits-open { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+@media (hover: none) { .ticket .row .icon-btn.expand { width: 44px; height: 44px; } }
 .ticket .note { font-size: 12px; color: var(--muted); }
 .ticket .note a { color: var(--type-ink); }
 .type { align-self: flex-start; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; background: var(--type-soft); color: var(--type-ink); }
