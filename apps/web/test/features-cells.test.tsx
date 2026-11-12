@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Features } from "../src/pages/Features";
@@ -53,7 +53,8 @@ describe("Features table cells (BOS-1257)", () => {
     const score = (await screen.findByRole("combobox", { name: "Reach for Gift cards" })) as HTMLSelectElement;
     expect(score.parentElement?.classList.contains("cell")).toBe(true);
     expect(score.parentElement?.classList.contains("empty")).toBe(true);
-    expect(within(score.parentElement!).getByText("–")).toBeTruthy();
+    // (the select's own "–" option is also in the cell, so read the visible text span)
+    expect(score.parentElement?.querySelector(".cell-text")?.textContent).toBe("–");
     // Status keeps the word, in the tag.
     expect(screen.getByRole("combobox", { name: "Status of Gift cards" }).parentElement?.textContent).toContain("Planned");
     fireEvent.change(score, { target: { value: "4" } });
@@ -68,6 +69,24 @@ describe("Features table cells (BOS-1257)", () => {
     expect(screen.queryByText("On portal")).toBeNull();
   });
 
+  it("keeps the intro to one line with the portal rules behind a toggle, and long headings in a 2-line span with the full name as tooltip", async () => {
+    stub([feature()]);
+    render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
+    await screen.findByRole("combobox", { name: "Reach for Gift cards" });
+    expect(screen.queryByText(/Visitors see the public summary/)).toBeNull();
+    const toggle = screen.getByRole("button", { name: "How the portal works" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(screen.getByText(/Visitors see the public summary/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Less" }).getAttribute("aria-expanded")).toBe("true");
+    const head = document.querySelector("th .th-clamp");
+    expect(head?.textContent).toBe("Reach");
+    expect(head?.parentElement?.getAttribute("title")).toContain("Reach");
+    // New feature and the sort row share one bar
+    expect(document.querySelectorAll(".features-toolbar").length).toBe(1);
+    expect(screen.getByRole("textbox", { name: "New feature" })).toBeTruthy();
+  });
+
   it("on a phone shows one card per feature with the same controls, and edits save the same way", async () => {
     phone();
     const patches = stub([feature(), feature({ id: "f2", parentId: "f1", title: "Sub card", tickets: { total: 0, done: 0, items: [] } })]);
@@ -77,7 +96,7 @@ describe("Features table cells (BOS-1257)", () => {
     expect(document.querySelectorAll(".fcard").length).toBe(2);
     expect(document.querySelector(".fcard.sub")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Tasks: 1 of 3 complete/ })).toBeTruthy();
-    expect(screen.getByText("On portal")).toBeTruthy();
+    expect(screen.getAllByText("On portal").length).toBe(2);
     fireEvent.click(screen.getByRole("checkbox", { name: "On portal: Gift cards" }));
     await waitFor(() => expect(patches).toEqual([{ url: "/api/features/f1", body: { portalVisible: true } }]));
   });
