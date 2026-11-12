@@ -124,6 +124,8 @@ describe("the validity table closes a dead card by itself (BOS-1193)", () => {
     const newer = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "Plan: second", options: ["Approve plan", "Keep planning"], recommended: "Approve plan", blocksTicketId: tk.id, triedFirst: "Investigated", plan: "second" });
     // BOS-1219: the note names the replacing card and the author of the newer plan.
     expect((await cardOf(c, older.id)).context).toMatchObject({ withdrawn: { note: expect.stringMatching(new RegExp(`^Superseded by card ${newer.id} \\(newer plan from [^,]+, \\d{4}-`)) } });
+    // The same facts as fields, so a screen can say "by a newer plan from <name>" without printing the id.
+    expect((await cardOf(c, older.id)).context).toMatchObject({ withdrawn: { newer: { id: newer.id, author: expect.any(String), at: expect.stringMatching(/^\d{4}-/) } } });
   });
 
   it("BOS-1219: a new plan on an approved ticket says it amends the approved plan, and the approval stays", async () => {

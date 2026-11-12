@@ -305,7 +305,7 @@ export const TODO_FAILED = "A step failed";
 export const APPROVE_HAND_APPLY = "Approve";
 
 /** Who ended a card without answering it, and why (BOS-149): the CEO clears a stale or duplicate card, or the product does. */
-export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string };
+export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
 
 /**
  * Cards that answer an action rather than make an owner choice: a merge retry and Boss Man's own
@@ -486,7 +486,7 @@ export async function supersedePlanCards(db: Db, input: { companyId: string; tic
   for (const r of rows) {
     // BOS-1193: the shared close path, so the old card's approve links are revoked and its ticket is released too.
     if (await holdsLiveRun(db, r.context)) continue;
-    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at })) {
+    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at, newer: { id: input.newCardId, author: input.author ?? null, at: at.toISOString() } })) {
       cleared++;
       // BOS-1219: the owner's open "Ask the CEO" request moves to the new card. Only a request that was still open is moved.
       const advice = adviceOf(r.context);
@@ -2954,7 +2954,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         ...withdrawn.map((r) => {
           const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
           const closed = (r.context as { closedNotice?: { text?: string } }).closedNotice;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note, ...(closed?.text ? { notice: closed.text } : {}) } };
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note, ...(w.newer ? { newer: w.newer } : {}), ...(closed?.text ? { notice: closed.text } : {}) } };
         }),
         ...fromAlerts,
       ];
