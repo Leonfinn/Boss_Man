@@ -62,6 +62,13 @@ export function rowState(r: WaitingRow): { word: string; tone: "amber" | "red" |
   return { word: "Waiting", tone: "grey" };
 }
 
+/** The free-slot sentence: never "the slot" when there are several slots. */
+export function freeSlotsText(free: number, slots: number): string {
+  if (free >= slots) return slots === 1 ? "The slot is free." : slots === 2 ? "Both slots are free." : `All ${slots} slots are free.`;
+  if (free === 0) return slots === 1 ? "The slot is busy." : "No slot is free.";
+  return `${free} of ${slots} slots are free.`;
+}
+
 /** The Needs you button for a row, by the kind of card behind it. Null when there is no card to open. */
 function needsButton(r: WaitingRow): { text: string; href: string } | null {
   const id = r.card?.id ?? r.decisionId;
@@ -156,7 +163,7 @@ function NeedsYou({ rows }: { rows: WaitingRow[] }) {
       <h2 id="mq-needs-h">Needs you</h2>
       <ul>
         {rows.map((r) => {
-          const b = needsButton(r);
+          const b = needsButton(r) ?? { text: "Open ticket", href: `#/tickets/${r.ticketId}` };
           return (
             <li key={r.ticketId} data-needs-row={r.ticketId}>
               <div className="mq-needs-text">
@@ -165,11 +172,9 @@ function NeedsYou({ rows }: { rows: WaitingRow[] }) {
                   {upFirst(r.label)}. <span className="mq-wait">waiting {waited(r.minutes)}</span>
                 </span>
               </div>
-              {b && (
-                <a className="btn" href={b.href} data-needs-button="true">
-                  {b.text}
-                </a>
-              )}
+              <a className="btn" href={b.href} data-needs-button="true">
+                {b.text}
+              </a>
             </li>
           );
         })}
@@ -306,7 +311,7 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
       {!data.rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No checks queued.</strong> When an agent or the merge gate asks for a check, it shows here until it finishes.{" "}
-          {free === data.slots && data.slots === 2 ? "Both slots are free." : free === 1 ? "The slot is free." : `${free} ${free === 1 ? "slot is" : "slots are"} free.`}
+          {freeSlotsText(free, data.slots)}
         </div>
       ) : (
         <div className="mq-list" data-checks-list="true">
