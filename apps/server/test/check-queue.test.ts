@@ -58,6 +58,29 @@ describe("check queue", () => {
     await s.close();
   });
 
+  it("with 3 slots, merge checks leave the last slot to a waiting quick check (BOS-1264), and use it when none waits", async () => {
+    const s = await setup();
+    await s.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 3 });
+    const merges = [await s.req({ tree: "m1" }), await s.req({ tree: "m2" }), await s.req({ tree: "m3" })].map((r) => r.job);
+    const quick = (await s.req({ tree: "q1", kind: "pre_review", scope: "quick" })).job;
+    // Two merges start, then the quick check takes the third slot ahead of the third merge.
+    expect((await s.q.claimNext(null)).map((j) => j.id)).toEqual([merges[0]!.id, merges[1]!.id, quick.id]);
+    await s.q.complete(quick.id, { commit: quick.commit, exitCode: 0, logTail: "", runnerId: null });
+    // No quick check waits any more, so the last merge may use the free slot.
+    expect((await s.q.claimNext(null)).map((j) => j.id)).toEqual([merges[2]!.id]);
+    await s.close();
+  });
+
+  it("a merge that fixes main is never held by the quick-check reserve", async () => {
+    const s = await setup();
+    await s.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 2 });
+    const fix1 = (await s.req({ tree: "f1", fixesMain: true })).job;
+    const fix2 = (await s.req({ tree: "f2", fixesMain: true })).job;
+    await s.req({ tree: "q", kind: "pre_review", scope: "quick" });
+    expect((await s.q.claimNext(null)).map((j) => j.id)).toEqual([fix1.id, fix2.id]);
+    await s.close();
+  });
+
   it("a pass of one command never stands in for another on the same tree", async () => {
     const s = await setup();
     const quick = (await s.req({ tree: "c1", kind: "pre_review", scope: "full", command: "scripts/check-quick.sh" })).job;

@@ -164,8 +164,17 @@ export function checkQueue(db: Db) {
     const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
     const free = limit - n;
     if (free <= 0) return [];
+    // BOS-1264: with two or more slots, merge checks (15 minutes) may not take the last slot while a quick pre-review check
+    // (2 to 5 minutes) waits, or a full line of merges keeps every developer waiting 30 to 60 minutes. Merges that fix main are exempt.
+    const [{ m }] = (await tx.select({ m: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), eq(checkJobs.kind, "merge"), companyId ? eq(checkJobs.companyId, companyId) : undefined))) as [{ m: number }];
+    let mergeRoom = limit >= 2 && candidates.some((j) => j.kind !== "merge") ? Math.max(0, limit - 1 - m) : Infinity;
     const claimed: CheckJob[] = [];
-    for (const j of candidates.slice(0, free)) {
+    for (const j of candidates) {
+      if (claimed.length >= free) break;
+      if (j.kind === "merge") {
+        if (mergeRoom <= 0 && !j.fixesMain) continue;
+        mergeRoom--;
+      }
       // Guarded on state so two callers can't both start the same job.
       const [row] = await tx
         .update(checkJobs)
