@@ -90,7 +90,7 @@ export const OWNER_CONTROLS = {
     "What's holding work up …", "Show all …", "Show fewer",
   ],
   Wiki: [
-    "Show older versions", "Loading",
+    "Show older versions",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
