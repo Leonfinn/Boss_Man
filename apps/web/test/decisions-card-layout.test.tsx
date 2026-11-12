@@ -57,6 +57,14 @@ describe("the line under each button", () => {
     expect(screen.getByLabelText('Note for Parsley, sent with "Send it back"')).toBeTruthy();
   });
 
+  it("a lesson card has a note box for the reason or the corrected lesson, and a plain question has none", () => {
+    show(decision({ kind: "question", question: "Add this lesson to App's brief?", options: ["Add", "Edit", "Don't add it"], recommendedOption: "Add", context: { type: "question" } }));
+    expect(screen.getByLabelText("Your one-line reason, or the corrected lesson (needed for Edit)")).toBeTruthy();
+    cleanup();
+    show(decision({ kind: "question", question: "Which one?", options: ["Ship it now", "Wait for the review"], context: { type: "question" } }));
+    expect(screen.queryByRole("textbox", { name: /note|reason/i })).toBeNull();
+  });
+
   it("a permission card: Allow once and Deny, and an Always line beside its own button", () => {
     show(decision({ kind: "permission", options: ["Allow once", "Always allow npm test", "Deny"], recommendedOption: "Allow once", context: { type: "permission", always: [{ label: "Always allow npm test", what: "run npm test" }], alwaysAgent: { id: "a1", name: "Moss" } } }));
     expect(screen.getByText("The command runs this one time. Moss carries on.")).toBeTruthy();

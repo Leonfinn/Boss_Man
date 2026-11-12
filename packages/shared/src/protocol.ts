@@ -371,6 +371,14 @@ export type MigrationRenamed = { from: string; to: string };
  */
 export const ciBranchFor = (ticketId: string) => `bossman-ci/${ticketId}`;
 
+/**
+ * The ticket's copy holds changes its branch doesn't (R46). `files` are the author's to commit. `foreign` (BOS-1231): the
+ * copy fell behind its own branch (the branch moved on from another folder) and couldn't be moved up safely; these files
+ * differ only because the branch moved on, so they are never the author's to commit. While any are there, the CEO is
+ * told instead of the author.
+ */
+export type Uncommitted = { status: "uncommitted"; files: string[]; foreign?: string[] };
+
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
   | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
@@ -385,7 +393,7 @@ export type MergeResult =
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] }
+  | Uncommitted
   /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
   | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
@@ -401,7 +409,7 @@ export type CarriedTicket = { ticketId: string; branch: string; contained?: bool
 export type CarriedResult = { carried: CarriedTicket[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
-export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };
+export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
 
 /** The answer to workspace.resolve (DR-033). `commit` is null when the ref names no commit (an image tag, say). */
 export type ResolveResult = { commit: string | null; onBase: boolean; branches: string[]; error?: string };
