@@ -10,6 +10,9 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
+# A runner older than the jobFenceFor fix (BOS-1095) starts a check job without creating its HOME, and tests that make temp files there fail with ENOENT.
+# Only create the folder; never move HOME or the XDG folders (that hid Playwright's browser cache from the web tests).
+[ -z "${HOME:-}" ] || [ -d "$HOME" ] || mkdir -p "$HOME" 2>/dev/null || true
 # One CPU budget for every step, the web build outside the slot included (BOS-674; see scripts/check-threads.mjs and check-all.sh).
 BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(node scripts/check-threads.mjs 2>/dev/null || true)}"
 [[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
