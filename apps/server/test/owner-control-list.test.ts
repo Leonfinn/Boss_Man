@@ -202,6 +202,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   Ticket: ["Approve", "Approve and open a pull request", "Approve and merge"],
   // The two tabs are drawn by one helper (tabButton) that adds the count, so their text is a variable (BOS-1239).
   "Merge queue": ["Merges", "Queued checks"],
+  // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
+  Agents: ["Retire"],
 };
 
 function skipString(s: string, i: number): number {
