@@ -1010,8 +1010,49 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 /* ---------- Agents (R62) ---------- */
 .agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .agent-card { display: flex; flex-direction: column; gap: 12px; }
-.agent-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
-.agent-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* Row = avatar | head (name, job, pill) | buttons, then the doing and stats lines (BOS-1256). */
+.agent-line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "av head act" "av body body"; column-gap: 12px; row-gap: 4px; align-items: center; }
+.agent-line > .avatar { grid-area: av; align-self: start; }
+.agent-head { grid-area: head; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.agent-actions { grid-area: act; display: flex; gap: 8px; align-items: center; }
+.agent-body { grid-area: body; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agent-name { all: unset; box-sizing: border-box; font-size: 16px; font-weight: 700; cursor: pointer; padding: 4px 0; min-height: 24px; }
+.agent-name:hover { text-decoration: underline; }
+.agent-name:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.agent-star { color: var(--amber-ink); flex: none; }
+.agent-job { font-size: 14px; }
+.agent-doing { font-size: 14px; }
+.agent-stats { font-size: 13px; }
+.over-limit { color: var(--red-ink); font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--grey-soft); color: var(--grey-ink); }
+.pill.green { background: var(--green-soft); color: var(--green-ink); }
+.pill.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.pill-mark { display: inline-block; flex: none; width: 8px; height: 8px; }
+/* Paused: two bars (❚❚) drawn in CSS, so it never depends on a font having the glyph. */
+.pill.paused .pill-mark { height: 10px; background: linear-gradient(90deg, currentColor 0 3px, transparent 3px 5px, currentColor 5px 8px); }
+.pill.working .pill-mark, .pill.idle .pill-mark, .pill.retired .pill-mark { border-radius: 50%; }
+.pill.working .pill-mark { background: currentColor; }
+.pill.idle .pill-mark, .pill.retired .pill-mark { border: 2px solid currentColor; box-sizing: border-box; }
+.row-menu { position: relative; display: inline-flex; }
+.row-menu-btn { padding-left: 10px; padding-right: 10px; }
+.row-menu-dim { display: none; }
+.row-menu-head { display: none; }
+.row-menu-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; min-width: 260px; background: var(--card); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); padding: 4px; }
+.row-menu-item { all: unset; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 1px; width: 100%; min-height: 40px; padding: 4px 12px; border-radius: 6px; cursor: pointer; color: var(--ink); font-size: 14px; }
+.row-menu-item small { font-size: 12px; color: var(--muted); }
+.row-menu-item:hover, .row-menu-item:focus-visible { background: var(--ground); }
+.row-menu-item:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.row-menu-item.danger { color: var(--red-ink); }
+.row-menu-sep { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+@media (max-width: 640px) {
+  .agent-line { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "av head act" "body body body"; }
+  .agent-line > .avatar { align-self: center; }
+  .agent-actions .btn { min-width: 44px; }
+  .row-menu-dim { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.55); }
+  .row-menu-list { position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 41; min-width: 0; border-radius: 14px 14px 0 0; padding: 8px 8px calc(12px + env(safe-area-inset-bottom)); }
+  .row-menu-head { display: block; padding: 8px 12px 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .row-menu-item { min-height: 48px; }
+}
 .agent-edit { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
 .template-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
 .template { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 14px; }
