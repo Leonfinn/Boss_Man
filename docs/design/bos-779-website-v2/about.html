@@ -28,19 +28,20 @@
 
 <main id="main">
 
-<!-- The owner's words go in the dashed boxes (owner, 9 Nov). Everything dashed is a placeholder, not copy.
+<!-- The owner's own words, typed into Penpot on 12 Nov (BOS-1080). Only spelling and punctuation were tidied, and the
+     feature run became a list; keep the wording as it is unless the owner changes it.
      Photo: the owner attached it to BOS-1080 (11 Nov), 928 x 1152. It is not in the repo: save it as img/owner.jpg (see README).
      The first section is "About me" (owner, 11 Nov); "Why I built Boss Man" heads the story below. -->
 <section class="about-head dark">
   <div class="wrap">
     <figure class="portrait">
-      <img class="photo" src="img/owner.jpg" width="928" height="1152" alt="The maker of Boss Man, smiling, on a clifftop above the sea.">
+      <img class="photo" src="img/owner.jpg" width="928" height="1152" alt="Leon Finnerty, smiling, on a clifftop above the sea.">
       <img class="sidekick" src="img/hero-clean.png" alt="">
     </figure>
     <div class="about-title">
       <h1>About me</h1>
-      <p class="yours lead-slot"><span class="slot-tag">YOUR WORDS</span>One or two sentences: who you are, and what Boss Man is for, in your own voice.</p>
-      <p class="byline yours inline"><span class="slot-tag">NAME</span>Your name, and what you do</p>
+      <p class="lead">I'm a product manager, and I've worked on some of England's largest IT systems across financial services and public-sector national infrastructure. I've also been a passionate tech geek all my life: I wrote my first program in BASIC on my Acorn Electron at the age of 7.</p>
+      <p class="byline">Leon Finnerty</p>
     </div>
   </div>
 </section>
@@ -49,12 +50,18 @@
   <div class="wrap story">
     <article class="story-text" aria-labelledby="story-h">
       <h2 id="story-h">Why I built Boss Man</h2>
-      <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>The itch.</strong> What were you trying to get done, and what kept getting in the way?</p>
-      <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>What you tried first.</strong> Other tools, chat windows, doing it by hand. What didn't work for you?</p>
-      <blockquote class="yours pull"><span class="slot-tag">OPTIONAL</span>One line you'd like a visitor to remember. It's shown large, like this.</blockquote>
-      <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>What Boss Man does differently.</strong> The board, one queue for decisions, your own machine. Why those mattered to you.</p>
-      <p class="yours"><span class="slot-tag">YOUR WORDS</span><strong>Where it's going.</strong> What you'd like it to become, and who you'd like to use it.</p>
-      <p class="story-help muted">Write as much or as little as you like: the column reads well from one short paragraph to a few pages. Headings are up to you. Soo can tidy the wording if you'd like her to.</p>
+      <p>Given my inclination to tinker with new tech, I started learning some of the Python machine-learning tools (scikit-learn, Keras, etc.) back in 2017. I managed to develop a few useful tools, but it was tough going. Then LLMs came along. Initially they were pretty poor, but it wasn't long before they could generate code better than I could write myself. More recently agents came along and made that process even easier. A huge thanks to the developers of Hermes Agent and Paperclip, both of which have influenced my development of Boss Man.</p>
+      <p>Despite liking those tools, I did keep running into a number of frustrations. I won't list them in detail here, but essentially I wanted to be able to work with my agent teams the same way as I work with my human teams at work.</p>
+      <h3>What Boss Man does differently</h3>
+      <p>I wanted to try to reduce wasted tokens, so Boss Man doesn't have a heartbeat (waking agents just to check if they might be needed). Instead, a lot of that mundane checking is written into Boss Man. You can also set up a scrum master agent to help keep work flowing. Boss Man also has these, and much more:</p>
+      <ul class="has-list">
+        <li>a kanban board per project</li>
+        <li>cross-company engagements: one team requesting work from a different team in a formal, tracked way</li>
+        <li>a roadmap you can share publicly</li>
+        <li>a user feedback portal, where your users can suggest ideas and vote on what they'd like to see next</li>
+        <li>retros: a review of the last period of work, to see how the team can improve, with actionable outcomes</li>
+      </ul>
+      <p>And yes, after the initial three weeks of development, Boss Man is now developed fully by Boss Man. There's even a blue/green, zero-downtime deployment option. I suspect most people won't need it, but for me it's invaluable.</p>
     </article>
 
     <aside class="in-short" aria-labelledby="short-h">
