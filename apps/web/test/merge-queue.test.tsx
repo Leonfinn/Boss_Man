@@ -284,6 +284,30 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(screen.queryByText(/Main is failing/)).toBeNull();
   });
 
+  it("free-slot wording names the count when there are three slots", async () => {
+    goTo("#/merge-queue/c1/checks");
+    const wording = async (slots: number, running: number) => {
+      serve(calm, { mode: "server", slots, running, rows: [] });
+      render(<MergeQueue companies={[company]} companyId="c1" />);
+      const empty = await screen.findByText("No checks queued.");
+      const text = empty.parentElement!.textContent!;
+      cleanup();
+      return text.replace(/^.*finishes\. /, "");
+    };
+    expect(await wording(3, 0)).toBe("All 3 slots are free.");
+    expect(await wording(3, 2)).toBe("1 of 3 slots are free.");
+    expect(await wording(3, 1)).toBe("2 of 3 slots are free.");
+    expect(await wording(3, 3)).toBe("No slot is free.");
+    expect(await wording(1, 0)).toBe("The slot is free.");
+  });
+
+  it("a Needs you row with no card gets an Open ticket button to the ticket", async () => {
+    serve({ ...data, waitingCount: 1, waiting: [{ ...base, ticketId: "z", ref: "APP-7", title: "No card", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: null }] }, noChecks);
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const card = await screen.findByRole("region", { name: "Needs you" });
+    expect(within(card).getByRole("link", { name: "Open ticket" }).getAttribute("href")).toBe("#/tickets/z");
+  });
+
   it("arrow keys move between the tabs and keep the tab in the address", async () => {
     serve(calm, noChecks);
     render(<MergeQueue companies={[company]} companyId="c1" />);
