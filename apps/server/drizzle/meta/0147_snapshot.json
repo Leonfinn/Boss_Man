@@ -1,5 +1,5 @@
 {
-  "id": "48eb6d9a-3746-483c-af52-1917f52d4735",
+  "id": "e8e52f8f-72e0-4619-ad9a-39422b8b6d3c",
   "prevId": "ebd961ed-c5bc-4e6d-b0ab-df44301baf62",
   "version": "7",
   "dialect": "postgresql",
@@ -1227,6 +1227,74 @@
           "tableTo": "agents",
           "columnsFrom": [
             "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.check_job_logs": {
+      "name": "check_job_logs",
+      "schema": "",
+      "columns": {
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "log": {
+          "name": "log",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "chars": {
+          "name": "chars",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "check_job_logs_created": {
+          "name": "check_job_logs_created",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "check_job_logs_job_id_check_jobs_id_fk": {
+          "name": "check_job_logs_job_id_check_jobs_id_fk",
+          "tableFrom": "check_job_logs",
+          "tableTo": "check_jobs",
+          "columnsFrom": [
+            "job_id"
           ],
           "columnsTo": [
             "id"
@@ -6651,12 +6719,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "head": {
-          "name": "head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -9488,13 +9550,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "fixes_merge_check": {
-          "name": "fixes_merge_check",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "version": {
           "name": "version",

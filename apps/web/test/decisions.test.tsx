@@ -732,7 +732,7 @@ describe("approval card while the merge runs", () => {
   const approval = (over: Partial<Decision> = {}) =>
     decision({
       kind: "approval",
-      question: "Ada approved \"Export CSV\", which is rated medium risk. Merge it, or send it back?",
+      question: "Merge \"Export CSV\"? Ada approved it, and it is rated medium risk.",
       options: ["Approve and merge", "Send it back"],
       recommendedOption: "Approve and merge",
       context: { type: "risk_review", ticketId: "t9" },

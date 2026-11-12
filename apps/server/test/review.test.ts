@@ -262,6 +262,17 @@ describe("approval lands in the background (B)", () => {
     expect(stopped).toContain("was stopped before it reported");
     expect(stopped).not.toMatch(/undefined|null/);
   });
+
+  // BOS-1228: the bounce says where the whole log is and how to open it; no pointer when none was kept.
+  it("names the kept full log in a failed-check bounce", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const jobId = "11111111-2222-4333-8444-555555555555";
+    const ticketId = "66666666-7777-4888-8999-000000000000";
+    const withLog = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x", keptLog: { jobId, ticketId, chars: 300_000 } } }, ctx);
+    expect(withLog).toContain(`tickets tool with action check_log, ticketId ${ticketId} and jobId ${jobId}`);
+    expect(withLog).toMatch(/293 KB, kept 14 days/);
+    expect(landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x" } }, ctx)).not.toContain("check_log");
+  });
 });
 
 describe("landing an approved ticket (R46, R47)", () => {

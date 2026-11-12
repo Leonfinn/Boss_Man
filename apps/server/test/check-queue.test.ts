@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+import { FULL_LOG_MAX } from "@boss-man/shared";
 const OTHER_RUNNER = "00000000-0000-4000-8000-000000000001";
 
 // One database for the whole file (each test uses its own company); the queue is global, so tests clear it first.
@@ -171,5 +172,77 @@ describe("check queue", () => {
     expect(stuck[0]!.reason).toMatch(/No output/);
     await expect(s.q.cancel(a.id, " ")).rejects.toThrow(/reason/);
     await s.close();
+  });
+
+  // BOS-1228: the whole log of a failed job is kept, redacted, capped, readable by company and ticket, and pruned after 14 days.
+  describe("kept full log", () => {
+    // Fake secrets, made up for this test; none is a real credential.
+    const FAKES = ["MY_API_KEY=hunter2fakevalue", "Bearer fakebearer1234567890", "postgres://svc:fakepassw0rd@db.internal/app", "Zq8Lm2Xv9Rt4Bn7Cw3Dk6Fh1Jg5Ps0Aa"];
+    const dirty = (extra = "") => `FAIL  related tests (exit 1)\n${FAKES.join("\n")}\n${extra}`;
+
+    it("stores a failed job's whole log with the planted secrets removed, and keeps a pass's log out", async () => {
+      const s = await setup();
+      const bad = (await s.req({ tree: "l1" })).job;
+      await s.q.claimNext(null);
+      const done = await s.q.complete(bad.id, { commit: bad.commit, exitCode: 1, logTail: "tail", runnerId: null, fullLog: dirty("x".repeat(20_000)) });
+      expect(done?.state).toBe("failed");
+      const kept = await s.q.readLog(s.companyId, bad.ticketId, bad.id);
+      expect(kept?.log).toContain("FAIL  related tests");
+      expect(kept!.log.length).toBeGreaterThan(20_000); // more than the 8 KB tail
+      expect(kept!.log).not.toMatch(/hunter2fakevalue|fakebearer1234567890|fakepassw0rd|Zq8Lm2Xv9Rt4Bn7Cw3Dk6Fh1Jg5Ps0Aa/);
+      expect(await s.q.logChars(bad.id)).toBe(kept!.chars);
+
+      const good = (await s.req({ tree: "l2" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(good.id, { commit: good.commit, exitCode: 0, logTail: "", runnerId: null, fullLog: "fine" });
+      expect(await s.q.logChars(good.id)).toBeNull();
+      await s.close();
+    });
+
+    it("redacts again on the server even when the runner sent the secrets as they were", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l3" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 2, logTail: "", runnerId: null, fullLog: dirty() });
+      expect((await s.q.readLog(s.companyId, j.ticketId, null))?.log).not.toMatch(/hunter2fakevalue|fakebearer1234567890|fakepassw0rd|Zq8Lm2Xv9Rt4Bn7Cw3Dk6Fh1Jg5Ps0Aa/);
+      await s.close();
+    });
+
+    it("cuts a huge log to the cap, keeping its start and its end", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l4" })).job;
+      await s.q.claimNext(null);
+      const huge = `START-LINE\n${"a ".repeat(1_200_000)}\nEND-LINE`;
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 1, logTail: "", runnerId: null, fullLog: huge });
+      const kept = await s.q.readLog(s.companyId, j.ticketId, j.id);
+      expect(kept!.chars).toBeLessThanOrEqual(FULL_LOG_MAX + 200);
+      expect(kept!.log.startsWith("START-LINE")).toBe(true);
+      expect(kept!.log.endsWith("END-LINE")).toBe(true);
+      expect(kept!.log).toMatch(/characters cut from the middle/);
+      await s.close();
+    });
+
+    it("is readable only for the company and ticket it belongs to", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l5" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 1, logTail: "", runnerId: null, fullLog: "secret-free log" });
+      expect(await s.q.readLog(OTHER_RUNNER, j.ticketId, j.id)).toBeNull(); // another company
+      expect(await s.q.readLog(s.companyId, await s.ticket(), j.id)).toBeNull(); // another ticket
+      expect((await s.q.readLog(s.companyId, j.ticketId, null))?.jobId).toBe(j.id); // newest, no job id
+      await s.close();
+    });
+
+    it("deletes logs older than the retention period and no others", async () => {
+      const s = await setup();
+      const j = (await s.req({ tree: "l6" })).job;
+      await s.q.claimNext(null);
+      await s.q.complete(j.id, { commit: j.commit, exitCode: 1, logTail: "", runnerId: null, fullLog: "old" }, T(0));
+      expect(await s.q.pruneLogs(new Date(T(0).getTime() + 13 * 86_400_000))).toBe(0);
+      expect(await s.q.logChars(j.id)).not.toBeNull();
+      expect(await s.q.pruneLogs(new Date(T(0).getTime() + 15 * 86_400_000))).toBe(1);
+      expect(await s.q.logChars(j.id)).toBeNull();
+      await s.close();
+    });
   });
 });

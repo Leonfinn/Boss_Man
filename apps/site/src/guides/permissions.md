@@ -26,7 +26,7 @@ A request does not wait for ever. If nobody answers within 10 minutes, the agent
 
 ## Answering a permission card
 
-A permission card explains the command in plain words. Its buttons are:
+A permission card explains the command in plain words, in up to three rows: **Does** (what the command does), **For** (why the agent wants it) and **Command** (the exact command). A line under each button says what happens if you press it. The buttons are:
 
 - **Allow once**: this run only
 - **Always allow this exact command**: offered only for read-only commands under 250 characters with no secrets in them

@@ -64,7 +64,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## M
 
 - **Master key**: The file `secrets/master.key`, which encrypts every secret Boss Man stores. Keep a copy off the machine, because a backup without it cannot restore your secrets. ([Guide 10](/guides/updates-and-backups#keep-the-master-key-safe))
-- **Merge queue**: Where approved tickets wait while Boss Man runs the checks and merges them, shown under **Merge queue** in the sidebar. Agents sometimes call it the merge gate or the merge line. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
+- **Merge queue**: Where approved tickets wait while Boss Man runs the checks and merges them, shown under **Merge queue** in the sidebar. Work that waits on you is listed first, under **Needs you**. Agents sometimes call it the merge gate or the merge line. ([Guide 7](/guides/reviews-and-merge-queue#the-merge-queue))
 - **Model**: The AI model an agent uses, chosen from the **Model** list. **Default** uses the agent program's own default. ([Guide 5](/guides/agents-and-models#choose-a-model))
 
 ## N
@@ -87,7 +87,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## Q
 
-- **Queued checks**: The tab on the **Merge queue** page that lists every check running or waiting on the company's runner, with its ticket, kind, place in line and wait. ([Guide 7](/guides/reviews-and-merge-queue#queued-checks))
+- **Queued checks**: The tab on the **Merge queue** page that lists every check running or waiting on the company's runner, with its ticket, kind, place in line and wait. Checks are **Held** while main is red. ([Guide 7](/guides/reviews-and-merge-queue#queued-checks))
 - **Quiet hours**: Hours you set under **Notifications > How you're told**, when pages and asks become flags and flags become notes. ([Guide 8](/guides/phone-notifications#quiet-hours-and-limits))
 
 ## R
@@ -107,7 +107,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Secrets**: The tokens and keys Boss Man stores encrypted under **Settings > Secrets**, such as a Claude setup-token or a git token. Boss Man never shows a secret again after you save it. ([Guide 5](/guides/agents-and-models#add-an-account))
 - **Setup-token**: A long-lived token for your Claude Pro or Max plan, made by running `claude setup-token` on your own computer. ([Guide 3](/guides/first-company-and-ticket#4-claude))
 - **Setup wizard**: The eight steps that open after you make the owner account, to create a company, connect your accounts and start a first ticket. Run it again with **Settings > Run the setup wizard**. ([Guide 3](/guides/first-company-and-ticket))
-- **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
+- **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. The card lists the reviews, the last quick check and how many files changed. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
 - **Standing rules**: A block of text, up to 2,000 characters, that every agent reads at the start of each run. Edit them under **Settings > Reviews and CEO**. ([Guide 6](/guides/permissions#standing-rules))
 - **Synthetic**: A model provider (synthetic.new) for OpenCode agents. Add its key as **Synthetic API key**. ([Guide 5](/guides/agents-and-models#synthetic))
 
