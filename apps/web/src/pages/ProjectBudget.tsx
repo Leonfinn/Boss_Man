@@ -32,7 +32,7 @@ export function ProjectBudget({ project }: { project: Project }) {
       <p className="muted" style={{ fontSize: 13 }}>Money is pay-as-you-go and API credit only: runs paid from a subscription (such as Claude Max) cost nothing extra, so they aren't in these figures and caps don't stop them. The month is the calendar month (UTC). Set the caps on the Config tab.</p>
       {s.tokens && (
         <>
-          <h2 style={{ fontSize: 16 }}>Tokens</h2>
+          <h2 style={{ fontSize: 16, marginTop: 24 }}>Tokens</h2>
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>Every run on this project's tasks, subscription runs included.</p>
           <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
             <div><dt className="muted">This month in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.month.input)} / {n.format(s.tokens.month.output)}</dd></div>
@@ -40,7 +40,7 @@ export function ProjectBudget({ project }: { project: Project }) {
           </dl>
         </>
       )}
-      <h2 style={{ fontSize: 16 }}>Most expensive tasks</h2>
+      <h2 style={{ fontSize: 16, marginTop: 24 }}>Most expensive tasks</h2>
       {s.topTickets.length ? (
         <ol>
           {s.topTickets.map((t) => (

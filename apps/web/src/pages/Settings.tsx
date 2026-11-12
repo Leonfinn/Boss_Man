@@ -199,7 +199,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     </button>
   );
   const menu = (
-    <nav aria-label="Settings" className="set-nav">
+    <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
       {SETTINGS_GROUPS.map((g) => (
         <div key={g.label} className="set-group">
           <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">

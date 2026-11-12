@@ -624,8 +624,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <p className="label">{company ? `${company.name} · project` : "Project"}</p>
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
+          {/* (BOS-1126 Q10) The watchdog status is a small pill on the line under the project name, not floating mid-heading. */}
+          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /></p>}
         </div>
-        {current && <WatchdogHealth companyId={current.companyId} />}
         {current && (
           <StarButton
             agent={current}
@@ -792,12 +793,6 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             </button>
           )}
         </div>
-        {view !== "features" && (
-          <p>
-            <svg width="14" height="14" {...iconProps}>{PENCIL}</svg>
-            Rename a column with its pencil. Agents always see the fixed state.
-          </p>
-        )}
       </div>
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
@@ -865,7 +860,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
                       </span>
-                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
+                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>

@@ -978,7 +978,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 {t.assignee ? ` · ${t.assignee}` : ""}
               </span>
             )}
-            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
+            <button type="button" className="btn props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
               {propsCollapsed ? "Show" : "Hide"}
             </button>
           </div>

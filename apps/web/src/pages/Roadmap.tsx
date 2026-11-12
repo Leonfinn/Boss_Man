@@ -368,7 +368,8 @@ function FeatureCard({ f, companyId, onChanged }: { f: RoadmapFeature; companyId
         </a>
         {f.milestones.length > 0 && (
           <button type="button" className={`rm-unfold ${open ? "open" : ""}`} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} milestones for ${f.title}`} onClick={() => setOpen(!open)}>
-            <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+            <span aria-hidden="true" className="rm-chevron">›</span>
+            Milestones
           </button>
         )}
       </div>
@@ -378,7 +379,7 @@ function FeatureCard({ f, companyId, onChanged }: { f: RoadmapFeature; companyId
         <span className="muted">Priority {f.priority.toFixed(1)}</span>
       </div>
       <span className="muted" style={{ fontSize: 13 }}>
-        {f.tickets.done} of {f.tickets.total} tickets done
+        {f.tickets.done === 0 ? "Not started" : `${f.tickets.done} of ${f.tickets.total} done`}
       </span>
       {open && (
         <ul className="rm-milestones">
@@ -496,7 +497,6 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
       <header className="page-head">
         <div>
           <h1>Roadmap</h1>
-          <p className="sub">Features grouped by objective: what's being built now, what's next, and what's later. Unfold a feature for its milestones.</p>
         </div>
         {tab === "timeline" && (
           <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
