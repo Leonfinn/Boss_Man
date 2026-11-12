@@ -411,7 +411,7 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
-    log: (m) => app.log.error(m),
+    log: (m, companyId) => (companyId ? app.log.error({ companyId }, m) : app.log.error(m)),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
   });
@@ -888,6 +888,7 @@ export async function buildApp(opts: AppOptions) {
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     isLeader: () => leader.isLeader(),
+    cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
@@ -2194,5 +2195,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

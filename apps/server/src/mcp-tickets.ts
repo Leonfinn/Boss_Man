@@ -278,7 +278,12 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
   const isManager = () => managerIn(db, scope);
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
-  const chatRefusal = async () => (chat && !(await isManager()) ? "In chat only your CEO or a manager can move tickets. Offer the owner to create a ticket for the work, or nudge your CEO." : null);
+  // In chat a worker may only start or pause its own ticket (BOS-1300): in_progress and blocked, so "the wait is over" can restart
+  // a Blocked ticket. moveRefusal below still limits it to tickets assigned to it, and the WIP limit applies in moveTicket.
+  const chatRefusal = async (state?: string) =>
+    chat && !(await isManager()) && state !== "in_progress" && state !== "blocked"
+      ? "In chat only your CEO or a manager can move tickets, except that you can start your own ticket (in_progress) or block it. Offer the owner to create a ticket for the work, or nudge your CEO."
+      : null;
   const noteRunTicket = runTicketNoter(scope, hooks);
 
   server.registerTool(
@@ -411,7 +416,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, lintOverride, fixesLive }) => {
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
-      const no = await chatRefusal();
+      const no = await chatRefusal(state);
       if (no) return fail(no);
       // The state note is read by the reviewer as trusted text: on an open review ticket only the
       // reviewer assigned to it may write one (BOS-86, round 9).
