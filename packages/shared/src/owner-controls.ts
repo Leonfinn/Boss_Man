@@ -97,6 +97,7 @@ export const OWNER_CONTROLS = {
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
     "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
+    "Tasks", "Less", "How the portal works",
   ],
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
