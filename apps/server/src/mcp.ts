@@ -501,10 +501,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "withdraw_decision",
     {
-      description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason. A question card or a plan card (once its run has ended) can be withdrawn. When a card is being re-checked (you were woken to confirm or withdraw it), use action confirm with checked, one line on what you checked against the live state, if it still holds: the flag clears and nothing is written on the card. Boss Man refuses a confirm for a card it can see is dead.",
-      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional() },
+      description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason (at least 10 characters) and what replaces the card in replacedBy, both required: card:<id> (a newer open card), ticket:<ref> with when (what brings the card back), or none (then the reason must say why, 30+ characters). If the card had reached the owner, Boss Man tells them with a note on Decisions and a quiet feed note. A question card or a plan card (once its run has ended) can be withdrawn. When a card is being re-checked (you were woken to confirm or withdraw it), use action confirm with checked, one line on what you checked against the live state, if it still holds: the flag clears and nothing is written on the card. Boss Man refuses a confirm for a card it can see is dead.",
+      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
     },
-    async ({ decisionId, reason, action, checked }) => {
+    async ({ decisionId, reason, action, checked, replacedBy, when }) => {
       if (!scope.agentId) return fail("Only an agent's run can withdraw a decision.");
       if (action === "confirm") {
         try {
@@ -515,8 +515,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           throw err;
         }
       }
+      // DR-058 B: a withdraw names why and what replaces the card, so the owner is told when it had reached them.
       try {
-        const r = await decisions.withdraw(decisionId, { agentId: scope.agentId }, reason);
+        const r = await decisions.withdraw(decisionId, { agentId: scope.agentId }, reason, { replacedBy, when });
         return r ? text(`Withdrew decision ${r.id}. Any ticket it blocked can move again.`) : fail("No open decision with that ID that you raised.");
       } catch (err) {
         if (err instanceof AnswerError) return fail(err.message);

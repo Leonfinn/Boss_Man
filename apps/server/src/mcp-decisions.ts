@@ -50,6 +50,9 @@ export function registerDecisionTools(
         reasonLink: z.string().max(400).optional(),
         changeId: z.string().uuid().optional(),
         reason: z.string().max(500).optional(),
+        /** withdraw (DR-058): what takes the card's place: card:<id>, ticket:<ref> with `when`, or none (the note must then say why, 30+ characters). */
+        replacedBy: z.string().max(80).optional(),
+        when: z.string().max(300).optional(),
         triedFirst: z.string().max(1000).optional(),
         adviceNeeded: z.string().max(1000).optional(),
         adviceDeny: z.string().max(1000).optional(),
@@ -217,9 +220,10 @@ export function registerDecisionTools(
       }
       if (input.action === "withdraw") {
         if (!isCeo || !scope.agentId) return fail("Only the CEO withdraws a card.");
-        if (!input.id || !input.note) return fail("Give the card's id and a note: the reason, at least 10 characters.");
+        if (!input.id) return fail("Give the card's id, a note (the reason, at least 10 characters) and replacedBy (card:<id>, ticket:<ref> with when, or none).");
+        // DR-058 B: both the reason (note) and what replaces the card are required, so the owner is told.
         try {
-          const r = await decisions.withdrawCard({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, note: input.note });
+          const r = await decisions.withdrawCard({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, note: input.note ?? "", replacement: { replacedBy: input.replacedBy, when: input.when } });
           return r ? text(`Withdrawn ${r.id}. The owner sees why in their audit list.`) : fail("That card has already been settled.");
         } catch (err) {
           if (err instanceof AnswerError) return fail(err.message);

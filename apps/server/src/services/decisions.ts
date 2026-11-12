@@ -3,7 +3,7 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
+import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
@@ -307,7 +307,9 @@ export const TODO_FAILED = "A step failed";
 export const APPROVE_HAND_APPLY = "Approve";
 
 /** Who ended a card without answering it, and why (BOS-149): the CEO clears a stale or duplicate card, or the product does. */
-export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
+/** The "replaced by" fields of a withdraw call, as the tool received them (DR-058 B). */
+export type Replacement = { replacedBy?: string; when?: string };
+export type Withdrawal ={ by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
 
 /**
  * Cards that answer an action rather than make an owner choice: a merge retry and Boss Man's own
@@ -1157,6 +1159,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
   let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
+  // DR-058: the feed note a withdrawn owner card sends; wired in app.ts. Without it the card still gets its notice.
+  let notifyFeed: ((n: NotifyInput) => Promise<unknown>) | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let secondOpinion: SecondOpinionHook | null = null;
@@ -1646,6 +1650,37 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (!ids.size) return false;
     const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
     return rows.length === ids.size && rows.every((r) => r.systemState === "done");
+  }
+
+  /**
+   * DR-058 A: what a withdrawal needs to tell the owner, read before the card closes (closing frees its ticket links).
+   * Null when the card never reached the owner: not an owner-tier card, or still with the CEO in its handover.
+   */
+  async function withdrawFacts(d: typeof decisions.$inferSelect) {
+    const ctx = d.context as DecisionContext & { ladder?: { rung?: string; ticketId?: string | null }; steps?: string[]; handSteps?: string[] };
+    if (d.tier !== "owner" || (ctx.ladder?.rung && ctx.ladder.rung !== "owner")) return null;
+    const ids = new Set<string>();
+    const own = (ctx as { ticketId?: unknown }).ticketId;
+    if (typeof own === "string") ids.add(own);
+    if (ctx.ladder?.ticketId) ids.add(ctx.ladder.ticketId);
+    for (const b of await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id))) ids.add(b.ticketId);
+    const rows = ids.size ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, systemState: tickets.systemState }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, [...ids])) : [];
+    return { ticket: rows[0] ? ticketRef(rows[0].prefix, rows[0].number) : null, stale: rows.length > 0 && rows.length === ids.size && rows.every((r) => r.systemState === "done"), steps: ctx.handSteps?.length ? ctx.handSteps : ctx.steps };
+  }
+
+  /** Leaves the withdrawn notice on a closed card and tells the feed (DR-058 C, D, E). Never fails the withdraw. */
+  async function noticeWithdrawn(d: typeof decisions.$inferSelect, facts: NonNullable<Awaited<ReturnType<typeof withdrawFacts>>>, w: { agentId: string; agent: string; reason: string; replacedBy: ReplacedBy }) {
+    try {
+      let newerLabel: string | undefined;
+      if (w.replacedBy.kind === "card") {
+        const [n] = await db.select({ question: decisions.question }).from(decisions).where(and(eq(decisions.id, w.replacedBy.id), eq(decisions.companyId, d.companyId)));
+        newerLabel = n?.question.split("\n")[0]?.slice(0, 120);
+      }
+      const notice = withdrawnNotice({ agent: w.agent, ticket: facts.ticket, reason: w.reason, replacedBy: w.replacedBy, ...(newerLabel ? { newerLabel } : {}), steps: facts.steps, now: now() });
+      await leaveWithdrawnNotice(db, d.id, { notice, agent: w.agent, agentId: w.agentId, stale: facts.stale }, { notify: notifyFeed ?? (async () => undefined), now });
+    } catch (err) {
+      log(`withdrawn notice for card ${d.id} failed: ${(err as Error).message}`);
+    }
   }
 
   /** Another open card of the same kind asks the same thing (BOS-149). */
@@ -2192,6 +2227,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setWakeHook(hook: WakeHook) {
       wake = hook;
+    },
+
+    setNotifyHook(hook: (n: NotifyInput) => Promise<unknown>) {
+      notifyFeed = hook;
     },
 
 
@@ -2839,7 +2878,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * info cards may be cleared directly, except merge cards, which must be stale or duplicate.
      * Returns null when it is already settled.
      */
-    async withdrawCard(input: { id: string; companyId: string; agentId: string; note: string }) {
+    async withdrawCard(input: { id: string; companyId: string; agentId: string; note: string; /** DR-058: what takes the card's place; the tool requires it, and with it a card that reached the owner leaves a notice. */ replacement?: Replacement }) {
       const note = input.note.replace(/\s+/g, " ").trim().slice(0, 500);
       if (note.length < 10) throw new AnswerError("Give a reason of at least 10 characters: the owner reads it in the audit list.");
       const [ceo] = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId), eq(agents.role, "ceo")));
@@ -2881,6 +2920,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
+      // DR-058 B, after the checks above so a card the CEO may not withdraw is refused for that reason first.
+      const rb = input.replacement ? parseReplacedBy({ reason: note, ...input.replacement }) : null;
+      if (rb && !rb.ok) throw new AnswerError(rb.error);
+      const facts = rb ? await withdrawFacts(d) : null;
       const closed = await db.transaction(async (tx) => {
         const [row] = await tx
           .update(decisions)
@@ -2893,6 +2936,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!closed) return null;
       await markDecisionNotificationRead(db, d.id, now());
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
+      if (facts && rb?.ok) await noticeWithdrawn(d, facts, { agentId: input.agentId, agent: ceo.name, reason: rb.reason, replacedBy: rb.replacedBy });
       // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
       // open card when there is one, so the owner's surviving question still holds it, and drop it
       // otherwise. A ticket is never blocked on a decision nobody can answer.
@@ -3442,7 +3486,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
-    async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
+    async withdraw(id: string, actor: { agentId: string | null }, reason?: string, replacement?: Replacement) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       // (BOS-996) A withdrawal changes the queue; clear the kept tally before anything reads it again.
       clearTallyCache();
@@ -3458,6 +3502,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const isPlanCard = (d.context as { plan?: boolean } | null)?.plan === true && (type === "question" || type === "permission");
       if (isPlanCard && (await holdsLiveRun(db, d.context))) throw new AnswerError("This plan card holds a live run that is waiting for the answer, so it can't be withdrawn until the run ends.");
       if (!isPlanCard && (d.kind !== "question" || type !== "question")) throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
+      // DR-058 B, after the checks above so a card that can't be withdrawn is refused for that reason first.
+      const rb = replacement ? parseReplacedBy({ reason, ...replacement }) : null;
+      if (rb && !rb.ok) throw new AnswerError(rb.error);
+      const facts = rb ? await withdrawFacts(d) : null;
       const closed = await db.transaction(async (tx) => {
         const [row] = await tx.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, recheckStage: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
         if (row) await revokeApproveTokens(tx as unknown as Db, id, now());
@@ -3469,6 +3517,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       for (const f of freed) await releaseIfFree(f.ticketId, false);
       await record(db, { companyId: d.companyId, agentId: actor.agentId, ticketId: freed[0]?.ticketId, kind: "decision_withdrawn", summary: `Withdrew "${d.question}"${reason ? `: ${reason}` : ""}`, at: now() });
+      if (facts && rb?.ok) {
+        const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, actor.agentId));
+        await noticeWithdrawn(d, facts, { agentId: actor.agentId, agent: who?.name ?? "An agent", reason: rb.reason, replacedBy: rb.replacedBy });
+      }
       return { id, withdrawn: true };
     },
 
