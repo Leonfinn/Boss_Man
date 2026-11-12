@@ -97,7 +97,8 @@ describe("finished-run history through MCP", () => {
     const [analyst] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Moony", role: "worker", agentKind: "claude", template: "data-analytics" }).returning();
     const [other] = await c.db.insert(companies).values({ name: "Other Co" }).returning();
     const at = new Date(Date.now() - 3_600_000);
-    await c.db.update(runs).set({ startedAt: at, endedAt: new Date(at.getTime() + 90_000), outcome: "done", model: "m1", inputTokens: 10 }).where(eq(runs.id, c.runId));
+    // The live run c.runId keeps the MCP tokens working (a token dies with its run), so the finished run is a separate row.
+    const [finished] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.worker.id, startedAt: at, endedAt: new Date(at.getTime() + 90_000), outcome: "done", model: "m1", inputTokens: 10 }).returning();
     await c.db.insert(runs).values({ companyId: other!.id, startedAt: at, endedAt: new Date(), outcome: "done" });
     const hist = (args: object) => ({ name: "runs", arguments: { action: "history", ...args } });
 
@@ -109,7 +110,7 @@ describe("finished-run history through MCP", () => {
       const m = await c.mcp(id);
       const rows = JSON.parse(textOf(await m.callTool(hist({}))));
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ id: c.runId, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null });
+      expect(rows[0]).toMatchObject({ id: finished!.id, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null });
       expect(Object.keys(rows[0]).sort()).toEqual(["agent", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
       await m.close();
     }
