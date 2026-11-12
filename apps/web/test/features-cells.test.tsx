@@ -73,11 +73,14 @@ describe("Features table cells (BOS-1257)", () => {
     stub([feature()]);
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
     await screen.findByRole("combobox", { name: "Reach for Gift cards" });
-    expect(screen.queryByText(/Visitors see the public summary/)).toBeNull();
+    // The approved P7 lead (BOS-1278) stays visible; the portal rules are behind the toggle.
+    expect(screen.getByText(/New features show on your feedback portal unless they look like security work/)).toBeTruthy();
+    expect(screen.queryByText(/Visitors only see a feature once it has a public summary/)).toBeNull();
     const toggle = screen.getByRole("button", { name: "How the portal works" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(toggle);
-    expect(screen.getByText(/Visitors see the public summary/)).toBeTruthy();
+    expect(screen.getByText(/Visitors only see a feature once it has a public summary/)).toBeTruthy();
+    expect(screen.getByText(/They never see the internal title or description/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Less" }).getAttribute("aria-expanded")).toBe("true");
     const head = document.querySelector("th .th-clamp");
     expect(head?.textContent).toBe("Reach");
