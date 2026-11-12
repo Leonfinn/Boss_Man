@@ -14,7 +14,7 @@ git -C "$t/origin" add -A; git -C "$t/origin" commit -qm one; one="$(git -C "$t/
 echo 2 >"$t/origin/f"; git -C "$t/origin" add -A; git -C "$t/origin" commit -qm two; two="$(git -C "$t/origin" rev-parse HEAD)"
 git clone -q "$t/origin" "$t/staging" 2>/dev/null; git -C "$t/staging" checkout -q "$one"
 mkdir -p "$t/staging/secrets"; echo k2 >"$t/staging/secrets/master.key"
-good() { printf 'POSTGRES_PASSWORD=stagingpw\nBOSSMAN_HOST_PORT=3200\nBOSSMAN_PORTAL_HOST_PORT=3201\nBOSSMAN_DATA=/srv/stg\nCOMPOSE_PROFILES=launcher\nCOMPOSE_PROJECT_NAME=boss-man-staging\nCOMPOSE_FILE=docker-compose.yml:deploy/staging.yml\n' >"$t/staging/.env"; }
+good() { printf 'POSTGRES_PASSWORD=stagingpw\nBOSSMAN_HOST_PORT=3200\nBOSSMAN_PORTAL_HOST_PORT=3201\nBOSSMAN_DATA=/srv/stg\nCOMPOSE_PROFILES=launcher\nCOMPOSE_PROJECT_NAME=boss-man-staging\nCOMPOSE_FILE=docker-compose.yml:deploy/staging.yml\nBOSSMAN_INSECURE_COOKIES=1\n' >"$t/staging/.env"; }
 cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
@@ -39,6 +39,10 @@ good; sed -i 's/stagingpw/prodpw/' "$t/staging/.env"; expect_refuse "POSTGRES_PA
 good; echo k1 >"$t/staging/secrets/master.key"; expect_refuse "master.key is identical"; echo k2 >"$t/staging/secrets/master.key"
 good; sed -i '/BOSSMAN_DATA/d' "$t/staging/.env"; expect_refuse "BOSSMAN_DATA"
 good; sed -i '/^COMPOSE_FILE/d' "$t/staging/.env"; expect_refuse "COMPOSE_FILE"
+# Plain http with Secure cookies: sign-in would loop back to login. A trusted HTTPS proxy is the other way out.
+good; sed -i '/^BOSSMAN_INSECURE_COOKIES/d' "$t/staging/.env"; expect_refuse "BOSSMAN_INSECURE_COOKIES=1"
+good; sed -i 's/^BOSSMAN_INSECURE_COOKIES=1/BOSSMAN_INSECURE_COOKIES=0/' "$t/staging/.env"; expect_refuse "BOSSMAN_INSECURE_COOKIES=1"
+good; sed -i 's/^BOSSMAN_INSECURE_COOKIES=1/BOSSMAN_TRUSTED_PROXIES=172.30.0.9/' "$t/staging/.env"; "$s" --check >/dev/null || fail "trusted proxy without insecure cookies was refused"
 
 # Stricter .env reading: "export", quotes and trailing comments still count.
 good; sed -i 's|^COMPOSE_PROJECT_NAME=.*|export COMPOSE_PROJECT_NAME="boss-man"  # oops|' "$t/staging/.env"; expect_refuse "production project"

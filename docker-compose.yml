@@ -108,7 +108,7 @@ services:
       BOSSMAN_LAUNCHER_URL: http://launcher:3105
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
       # Session cookies are Secure per request: over HTTPS through the trusted proxy below, not on plain
-      # LAN http. Setting this to 1 turns Secure off everywhere (older setups); you no longer need it.
+      # LAN http. With no trusted proxy set, cookies are always Secure, so a plain-http install (staging too) needs 1 here.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
       # Exact address(es) of the proxy whose X-Forwarded-* headers are believed (deploy/tailscale.yml). Empty = none.
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}

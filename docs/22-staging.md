@@ -53,13 +53,14 @@ Do this on the host that will run staging, with `docker` and `git`. Nothing here
    BOSSMAN_DOCKER_GID=<the group id above>
    BOSSMAN_RUNNER_MEMORY=2g
    COMPOSE_FILE=docker-compose.yml:deploy/staging.yml
+   BOSSMAN_INSECURE_COOKIES=1
    ```
-   `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `COMPOSE_FILE` makes every `docker compose` command in this folder use the staging overlay (staging image names, staging launcher stack), so even a hand-typed one can't build production's image tags; `--check` refuses without it. Do not run `scripts/deploy.sh` or `scripts/update-runner.sh` in this folder: they are production's and refuse here.
+   `BOSSMAN_INSECURE_COOKIES=1` lets you sign in over plain `http://`: without it the browser drops the session cookie and sign-in silently returns to the login page (`--check` refuses without it unless `BOSSMAN_TRUSTED_PROXIES` names an HTTPS proxy in front). `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `COMPOSE_FILE` makes every `docker compose` command in this folder use the staging overlay (staging image names, staging launcher stack), so even a hand-typed one can't build production's image tags; `--check` refuses without it. Do not run `scripts/deploy.sh` or `scripts/update-runner.sh` in this folder: they are production's and refuse here.
 5. Check the isolation rules without starting anything:
    ```
    scripts/deploy-staging.sh --check
    ```
-6. Deploy a commit (below), open `http://<BOSSMAN_BIND>:3200`, create the staging owner account, then create a staging company; the launcher starts its runner.
+6. Deploy a commit (below). Before you open the page: the staging owner account must be a made-up email and password, never your live Boss Man login. Then open `http://<BOSSMAN_BIND>:3200`, create the staging owner account, then create a staging company; the launcher starts its runner.
 
 ## Deploy a commit to staging (one step)
 
@@ -89,7 +90,7 @@ puts the last commit that came up healthy back (code only; the staging database 
 ## Smoke checklist (QA, about 10 minutes)
 
 1. Open the staging address. It loads over the LAN or Tailscale and is not reachable from outside.
-2. Sign in as the staging owner (create the account the first time).
+2. Sign in as the staging owner. The first time, create the account with a made-up email and password, never your live login. If sign-in returns to the login page with no error, `.env` lacks `BOSSMAN_INSECURE_COOKIES=1` (step 4).
 3. The board loads with no errors, and the side menu opens.
 4. Create a ticket and see it on the board.
 5. Create or open a staging company, check Settings → Runner shows its runner connected, assign the ticket and see the run start and finish.

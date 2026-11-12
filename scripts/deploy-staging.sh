@@ -55,6 +55,9 @@ guard_isolated() { # this folder
   # Every docker compose call in this folder (deploy.sh and update-runner.sh refuse here, but a hand-typed one would
   # not) must get the staging overlay, or it builds production's image tags and starts a launcher with no stack.
   [[ $(env_get "$here/.env" COMPOSE_FILE) == *deploy/staging.yml* ]] || die "Set COMPOSE_FILE=docker-compose.yml:deploy/staging.yml in $here/.env so every docker compose command here uses the staging overlay."
+  # Staging is plain http unless a trusted HTTPS proxy is set. Without one of these two the server marks the session
+  # cookie Secure, the browser drops it on http://, and sign-in silently bounces back to the login page (BOS-1169).
+  [[ -n $(env_get "$here/.env" BOSSMAN_TRUSTED_PROXIES) || $(env_get "$here/.env" BOSSMAN_INSECURE_COOKIES) == 1 ]] || die "Set BOSSMAN_INSECURE_COOKIES=1 in $here/.env: staging is plain http, and without it sign-in loops back to the login page."
   pw="$(env_get "$here/.env" POSTGRES_PASSWORD)"
   local others=() d
   for d in "$here"/../*/ ${BOSSMAN_PRODUCTION_DIRS:-}; do
