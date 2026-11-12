@@ -1,6 +1,6 @@
 ---
 title: How Boss Man works
-description: The parts of Boss Man and how they fit together: companies, agents, the runner, projects, tickets, Decisions, reviews and the merge queue.
+description: The parts of Boss Man and how they fit together: companies, agents, the runner, projects, tickets, features and sub-tasks, Decisions, reviews and the merge queue.
 group: Start here
 order: 1
 lead: Boss Man is a web app you run on your own Linux machine. This page explains the parts and how they fit together.
@@ -23,6 +23,34 @@ The runner is the container where a company's agents work. Each company has one.
 A project is one git repository. A ticket is one piece of work in a project. Each ticket has a title, a description, a risk level and up to 10 "Done when" lines that say what finished means.
 
 A ticket is always in one of six states: backlog, ready, in progress, blocked, review or done.
+
+## Features, tasks and sub-tasks
+
+A feature is what your users get. A task is the work that builds it. Agents and the app also call a feature a feature request, and a task a ticket.
+
+**Feature**: something users would notice or ask for, such as "Dark mode". Features are kept on the **Features** page. Each one has:
+
+- a status: Idea, Considering, Planned, In progress, Released or Declined
+- demand, from the feedback linked to it
+- an effort, from 1 (tiny) to 5 (huge)
+- a priority, worked out from demand, your own scores and effort
+
+A feature can sit on the roadmap and on the public feedback portal. A feature does no work by itself.
+
+**Task**: one piece of work an agent does in a project, with Done when lines, a risk level and a review. Tasks deliver features. One feature can need one task or several. To link a task to a feature, open the task and choose the feature under **Roadmap, feature and dependencies**. When the first task of a feature starts, the feature moves to In progress. When all its tasks are done, it moves to Released. If the company has a production deploy target, it also waits until one of its tasks has been deployed there.
+
+Work that is not a feature, such as an internal fix, a test or a server chore, is a task with no feature.
+
+**Sub-task**: a task under a bigger task. Agents split a task when the work splits naturally: different parts, different agents, or parts that need their own review or risk level. The parent task waits, in Blocked, until its sub-tasks are done. A sub-task cannot have sub-tasks of its own. On the board, it is marked **Sub-task** and names its parent. Most tasks are not split.
+
+For example:
+
+- **Feature**: "Sign-up that works on phones"
+- **Task 1**: Redesign the sign-up form for small screens
+- **Task 2**: Send the confirmation email as a link that opens on the phone
+- **Task 1 is split into sub-tasks**: one to draw the new form, one to build it
+
+When both tasks are done, the feature shows as Released.
 
 ## Decisions
 
