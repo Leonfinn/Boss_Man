@@ -40,7 +40,7 @@ export const OWNER_CONTROLS = {
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
-    "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
+    "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
     "Reassign to the one I picked", "Let the CEO decide", "Back to the options", "Write my own answer", "Use suggestion",
     "Send my answer", "Ask the CEO for advice",
     // An update card's ticket list (BOS-809): "+N more" opens it, "Show fewer" folds it back.
@@ -48,7 +48,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …"],
+  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
   Chat: ["Ask the CEO", "Send"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -171,7 +171,7 @@ export const OWNER_FIELDS = {
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
   ],
   Decisions: [
-    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for the agent (if you send it back)",
+    "Harness", "Provider", "Model", "Paid from", "What went wrong (if a step failed)", "Note for",
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
