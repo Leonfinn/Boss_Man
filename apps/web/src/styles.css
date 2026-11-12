@@ -178,7 +178,7 @@ p { margin: 0; }
 .decision .ref-chip { font-size: 12px; padding: 1px 8px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--ink); text-decoration: none; }
 .decision .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
 .decision .pill { text-transform: none; letter-spacing: 0; font-size: 12px; }
-.decision .strip { margin: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; }
+.decision .strip { display: block; margin: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; }
 .decision .strip.amber { background: var(--amber-soft); color: var(--amber-ink); }
 .decision .strip.red { background: var(--red-soft); color: var(--red-ink); }
 .decision .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 14px; }

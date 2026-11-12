@@ -1183,12 +1183,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             Boss Man's automatic check suggested {eff.rule}, but the CEO looked at this request and advises {eff.option}. Their reasons are above.
                           </p>
                         )}
-                        {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
-                          <div className="field">
-                            <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
-                            <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
-                          </div>
-                        )}
                         {d.context?.type === "workflow_change" && (
                           <>
                             <div className="field">
@@ -1291,6 +1285,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                     <p className="muted" style={{ fontSize: 13 }}>Type a reason above to Apply or Skip</p>
                                   )}
                                 </div>
+                                {/* The note keeps its place under the answers, and names the button that sends it (BOS-1236). */}
+                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
+                                  <div className="field">
+                                    <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
+                                    <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
+                                  </div>
+                                )}
                                 {!modelEdits[d.id] && d.kind === "question" && (
                                   <div className="card-foot">
                                     <button type="button" className="linkish" disabled={busy === d.id} onClick={() => editOwn(d.id, readDraft(draftOwn(d.id)))}>
