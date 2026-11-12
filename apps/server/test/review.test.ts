@@ -446,6 +446,22 @@ describe("server-owned check queue (BOS-316)", () => {
       expect(await cards(c)).toHaveLength(0);
     });
 
+    it("cancels the ticket's leftover running merge job when its merge starts again, leaving exactly one live job (BOS-1289)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      // The old process's job: still running, for a tree main has since moved past.
+      const [old] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), command: "pnpm test", state: "running", startedAt: new Date() }).returning();
+      const res = approve(c);
+      for (let i = 0; i < 40 && (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+      const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const live = rows.filter((r) => r.state === "queued" || r.state === "running");
+      expect(live).toHaveLength(1);
+      expect(live[0]!.tree).toBe(prepared.tree);
+      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled" });
+      await finishOpenJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+    });
+
     it("tries again with a fresh merge when main moved to a different tree", async () => {
       let finishes = 0;
       const c = (ctx = await setup({ answers: { merge: (m: { phase?: string }) => (m.phase === "prepare" ? prepared : ++finishes === 1 ? { status: "main_moved" } : { status: "merged", commit: prepared.commit }) } }));

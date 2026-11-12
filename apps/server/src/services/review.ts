@@ -254,6 +254,8 @@ export function reviewService(
     isLeader?: () => boolean;
     /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
     onMerged?: (ticketId: string) => Promise<unknown>;
+    /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
+    cancelCheck?: (jobId: string, reason: string) => Promise<unknown>;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -1704,6 +1706,12 @@ export function reviewService(
           if (prep.status !== "prepared") return prep;
                     for (const command of checks) {
             const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
+            // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
+            // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
+            if (!reused && deps.cancelCheck) {
+              const leftovers = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]), ne(checkJobs.id, job.id)));
+              for (const o of leftovers) await deps.cancelCheck(o.id, "This ticket's merge started again, so its earlier merge check was cancelled: a ticket never has two merge checks at once.").catch(() => undefined);
+            }
             // The merge-line record (BOS-769) takes the job's own start and end times; the poll only notices them.
             const line = { check: named(command), way: "queue" as const, jobId: job.id };
             await lineEvent(db, t, { event: "check_queued", ...line, ...(reused ? { reused: true } : {}) });

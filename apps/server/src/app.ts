@@ -883,6 +883,7 @@ export async function buildApp(opts: AppOptions) {
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     isLeader: () => leader.isLeader(),
+    cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
