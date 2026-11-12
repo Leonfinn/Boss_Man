@@ -144,6 +144,38 @@ describe("the validity table closes a dead card by itself (BOS-1193)", () => {
     expect((await cardOf(c, (await plan(c, fresh.id)).id)).question).not.toContain("amends");
   });
 
+  // BOS-1247: Claude's plan-mode card (ExitPlanMode, a permission card carrying the plan) is the path most agents use;
+  // submit_plan refuses an already-approved plan, so this is the only path that reaches the amend line.
+  async function planModeCard(c: S, ticketId: string, planText: string) {
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId, startedAt: new Date() });
+    const requestId = randomUUID();
+    await c.decisions.onPermissionRequest({ id: randomUUID(), companyId: c.company.id }, { type: "run.permission_request", runId, requestId, title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once", "reject_once"], detail: planText } as never);
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
+    return card!;
+  }
+
+  it("BOS-1247: a plan-mode card on an approved ticket says it amends the approved plan, and the approval and plan text stay", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("Amended by plan mode");
+    const approvedAt = new Date(Date.now() - 60_000);
+    await c.db.update(tickets).set({ planApprovedAt: approvedAt, plan: "first" }).where(eq(tickets.id, tk.id));
+    const card = await planModeCard(c, tk.id, "second");
+    expect((card.context as { plan?: boolean }).plan).toBe(true); // it is the plan-mode card, not a submitted plan
+    expect(card.question).toContain(`This amends the approved plan of ${approvedAt.toISOString()}`);
+    const [after] = await c.db.select({ at: tickets.planApprovedAt, plan: tickets.plan }).from(tickets).where(eq(tickets.id, tk.id));
+    expect(after!.at?.getTime()).toBe(approvedAt.getTime());
+    expect(after!.plan).toBe("first");
+  });
+
+  it("BOS-1247: a plan-mode card on a ticket with no approved plan has no amend line", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("First plan by plan mode");
+    const card = await planModeCard(c, tk.id, "first");
+    expect((card.context as { plan?: boolean }).plan).toBe(true);
+    expect(card.question).not.toContain("amends");
+  });
+
   it("BOS-1219: the owner's open 'Ask the CEO' request moves to the newer plan card", async () => {
     const c = (ctx = await setup());
     const tk = await c.ticket("Advice moves");
