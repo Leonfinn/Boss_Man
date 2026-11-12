@@ -25,6 +25,10 @@ Do this on the host that will run staging, with `docker` and `git`. Nothing here
    ```
    git clone <the same repository URL production uses> boss-man-staging
    ```
+   For a private repo, production reads it with a deploy key that is set inside production's checkout (`core.sshCommand`, [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)), not in your shell's own SSH setup, so a plain clone fails with `Permission denied (publickey)`. Clone with production's setting so staging's later fetches use the same read-only key (the same host, so it is still one key per host):
+   ```
+   git clone -c core.sshCommand="$(git -C <production folder> config core.sshCommand)" "$(git -C <production folder> remote get-url origin)" boss-man-staging
+   ```
 2. Make staging's own secrets (new key, new password):
    ```
    cd boss-man-staging && mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
