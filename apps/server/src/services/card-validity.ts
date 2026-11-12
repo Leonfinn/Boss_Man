@@ -102,6 +102,8 @@ export type CloseDeps = {
   /** Moves a ticket that waited on the card back to ready once nothing else holds it, and wakes its assignee; default moves it without the wake. */
   release?: (ticketId: string) => Promise<unknown>;
   now?: () => Date;
+  /** The card that replaced this one (BOS-1219), stored on the withdrawal so screens can name it without parsing the note. */
+  newer?: { id: string; author: string | null; at: string };
 };
 
 /** A ticket that waited only on closed cards, tickets and engagements goes back to ready (the same test as decisions.ts releaseIfFree). */
@@ -127,7 +129,7 @@ export async function closeCardBySystem(db: Db, d: { id: string; companyId: stri
   const closed = await db.transaction(async (tx) => {
     const [row] = await tx
       .update(decisions)
-      .set({ status: "withdrawn", answeredAt: at, dedupeKey: null, recheckStage: null, context: mergeContext({ withdrawn: { by: "system", note, at: at.toISOString() } }) })
+      .set({ status: "withdrawn", answeredAt: at, dedupeKey: null, recheckStage: null, context: mergeContext({ withdrawn: { by: "system", note, at: at.toISOString(), ...(deps.newer ? { newer: deps.newer } : {}) } }) })
       .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
       .returning({ id: decisions.id });
     if (row) await revokeApproveTokens(tx as unknown as Db, d.id, at);
