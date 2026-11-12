@@ -752,12 +752,14 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // BOS-1010: the earlier card was closed when the server update was approved, so answering it now says so (never a
       // silent refusal), and the reason is the trial.
       const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
-      expect(r.statusCode).toBe(404);
-      expect(r.json().error).toBe("not_open");
+      // BOS-1086: the card is no longer closed by a server update; answering it in the trial says so plainly.
+      expect(r.statusCode).toBe(422);
+      expect(JSON.stringify(r.json())).toContain("trial");
       // After the trial (the host's 900 s window), still on B: the runner card appears by itself (BOS-953: no margin).
+      // The press made inside the trial was queued (BOS-1086), so the update starts by itself: a request for the host, no card.
       vi.setSystemTime(new Date("2026-11-03T01:16:01Z"));
       await c.selfDeploy.sync();
-      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+      expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     });
 
     const runnerCards = async (c: Awaited<ReturnType<typeof setup>>, commit: string) => (await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === commit);
@@ -795,7 +797,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // After the host's 300 s window the hold is over and the button works again (BOS-953: the window itself, no margin).
       vi.setSystemTime(new Date("2026-11-03T01:06:30Z"));
       await c.selfDeploy.sync();
-      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().decisionId).toBeTruthy();
+      // The press made during the trial (above) was queued, so the update now starts by itself (BOS-1086).
+      expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     });
 
     it("keeps an older held runner update when a newer server update lands inside the window (BOS-401)", async () => {
@@ -864,7 +867,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // The hold ends at the host's 120 s window (BOS-953: no extra margin), not at the old 900 s.
       vi.setSystemTime(new Date("2026-11-03T01:03:01Z"));
       await c.selfDeploy.sync();
-      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+      // The press above was queued, so the update starts by itself at the end of the 120 s window (BOS-1086).
+      expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     });
 
     it("falls back to 15 minutes when an older host reports no trial length", async () => {
@@ -891,8 +895,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       expect(o.trial).toBeTruthy();
       expect(Date.parse(o.trial!.endsAt)).toBe(Date.parse("2026-11-03T01:16:00Z"));
       // BOS-1010: the trial is named plainly with the time it ends; the reply is never a silent refusal.
-      const msg = (await svc.updateRunners() as { error?: string }).error ?? "";
-      expect(msg).toContain("Runners can be updated from");
+      const msg = (await svc.updateRunners() as { message?: string }).message ?? "";
+      expect(msg).toContain("Runners will update at");
       expect(msg).toContain("15-minute trial");
     });
 
@@ -1561,15 +1565,12 @@ describe("the runner update card only when it can be acted on, and one at a time
     const [server] = await serverCards(c);
     expect(server).toBeTruthy();
     expect((await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
-    // The pass sees the approved request waiting for the host: the runner card is closed at once, with a plain reason.
+    // BOS-1086: the pass sees the approved request waiting for the host, and the runner card is NOT closed: the runners
+    // are built from the live version when the update starts, so the card stays valid (no close-and-re-raise churn).
     await hostTicks(c, "2026-11-09T18:27:00Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(0);
-    expect((await withdrawals(c)).join(" ")).toContain("A server update started");
-    // The card itself says why and that it will come back.
-    const [closed] = await c.db.select().from(decisions).where(eq(decisions.id, first!.id));
-    expect(closed!.status).toBe("withdrawn");
-    expect(JSON.stringify(closed!.context)).toContain("offered again for the new version once its trial ends");
+    expect(await runnerCards(c)).toHaveLength(1);
+    expect((await withdrawals(c)).join(" ")).not.toContain("A server update started");
     // The host runs it: the server update goes live at 18:28, in its 15-minute trial until 18:43.
     vi.setSystemTime(new Date("2026-11-09T18:28:03Z"));
     await rm(inbox(c));
@@ -1577,7 +1578,7 @@ describe("the runner update card only when it can be acted on, and one at a time
     await c.available({ deployed: C, tip: C, runnerChanged: true });
     await hostTicks(c, "2026-11-09T18:28:30Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(0); // the trial holds it
+    expect(await runnerCards(c)).toHaveLength(1); // the old card for B stays; the trial holds the one for C
     // Four minutes on the host rewrites host.json: the runner card is offered once the trial is over, by itself.
     vi.setSystemTime(new Date("2026-11-09T18:47:00Z"));
     await hostTicks(c, "2026-11-09T18:47:00Z");
@@ -1610,14 +1611,15 @@ describe("the runner update card only when it can be acted on, and one at a time
 
   it("raises no runner card while a server deploy is running", async () => {
     const c = await cardOpenForB();
-    // A deploy is running (the host says so): the open card is closed and nothing replaces it.
+    // A deploy is running (the host says so): the open card stays (BOS-1086) and nothing second is raised.
     await c.status({ id: "", result: "running", message: "Deploying…", target: "server", to_commit: C, started: "2026-11-09T18:26:00Z", ended: "" });
     await hostTicks(c, "2026-11-09T18:26:00Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(0);
-    // Pressing the button now is never a silent refusal: it says why there is nothing to press for yet.
+    expect(await runnerCards(c)).toHaveLength(1);
+    // Pressing the button now is never a refusal: it is queued and says why it waits.
     const r = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(r.statusCode).toBe(409);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().queued).toBe(true);
     expect(r.json().message).toContain("running now");
   });
 
@@ -1628,11 +1630,14 @@ describe("the runner update card only when it can be acted on, and one at a time
     await c.status({ id: "", result: "rejected", message: "Try again in 5 minute(s).", target: "server", ended: "2026-11-09T18:29:00Z" });
     await c.available({ deployed: B, tip: B });
     const r = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(r.statusCode).toBe(409);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().queued).toBe(true);
     expect(r.json().message).toMatch(/(?:wait|updated until)/i);
-    // Once the wait has passed the button works again.
+    // Once the wait has passed the queued update starts by itself (BOS-1086).
     vi.setSystemTime(new Date("2026-11-09T18:35:00Z"));
-    expect((await c.req("POST", "/api/self-deploy/update-runners")).json().decisionId).toBeTruthy();
+    await hostTicks(c, "2026-11-09T18:35:00Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
   });
 
   it("a later pass that sees a newer server version raises the card for the live version, never two", async () => {
@@ -1656,12 +1661,12 @@ describe("the runner update card only when it can be acted on, and one at a time
     await c.req("POST", "/api/self-deploy/update-runners");
     const [early] = await runnerCards(c);
     expect(target(early!)).toMatchObject({ commit: A });
-    // A server update to B is offered: the open runner card is closed at once (rule 2), and, once B's trial is over,
-    // the fresh card for B is raised by the trial-end path and names the live version.
+    // A server update to B is offered: the open runner card stays (BOS-1086), and, once B's trial is over, the fresh card
+    // for B is raised by the trial-end path, names the live version and replaces it.
     await c.available({ deployed: A, tip: B, runnerChanged: true, commits: [{ sha: B, subject: "Add rate limiting" }] });
     await hostTicks(c, "2026-11-03T01:00:30Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(0);
+    expect(await runnerCards(c)).toHaveLength(1);
     vi.setSystemTime(new Date("2026-11-03T01:01:00Z"));
     await c.status({ id: "", result: "deployed", message: "Switched in.", from_commit: A, to_commit: B, runner_changed: "true", ended: "2026-11-03T01:01:00Z" });
     await c.available({ deployed: B, tip: B, runnerChanged: true });
@@ -1669,8 +1674,8 @@ describe("the runner update card only when it can be acted on, and one at a time
     await rm(inbox(c), { force: true });
     await hostTicks(c, "2026-11-03T01:01:30Z");
     await c.selfDeploy.sync();
-    // The trial holds the runner card until it is over (01:16); nothing replaces the closed card meanwhile.
-    expect(await runnerCards(c)).toHaveLength(0);
+    // The trial holds the new runner card until it is over (01:16); the old one stays meanwhile.
+    expect(await runnerCards(c)).toHaveLength(1);
     vi.setSystemTime(new Date("2026-11-03T01:20:00Z"));
     // The host rewrites a file, so BOS-414's fingerprint changes and the pass runs; the trial ended at 01:16.
     await hostTicks(c, "2026-11-03T01:20:00Z");
@@ -1750,12 +1755,13 @@ describe("the runner update card only when it can be acted on, and one at a time
     // A server update's request is already waiting for the host (approved just before the press): the button can't work.
     await writeFile(inbox(c), JSON.stringify({ id: randomUUID(), target: "server", commit: C, requestedAt: new Date().toISOString(), approvedBy: "owner" }));
     const r = await c.req("POST", "/api/self-deploy/update-runners");
-    expect(r.statusCode).toBe(409);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().queued).toBe(true);
     expect(r.json().message).toContain("waiting for the host");
-    // The pass closes the open runner card at once, leaving nothing beside the server update.
+    // The pass leaves the open runner card alone (BOS-1086): closing and re-raising it is what starved the update.
     await hostTicks(c, "2026-11-09T18:26:00Z");
     await c.selfDeploy.sync();
-    expect(await runnerCards(c)).toHaveLength(0);
+    expect(await runnerCards(c)).toHaveLength(1);
   });
 
   it("clears leftover duplicate runner cards already open when this ships, keeping the one for the live version", async () => {
@@ -1772,5 +1778,181 @@ describe("the runner update card only when it can be acted on, and one at a time
     expect(cards).toHaveLength(1);
     expect(target(cards[0]!)).toMatchObject({ commit: B });
     expect((await withdrawals(c)).join(" ")).toContain("Replaced by a newer runner update for");
+  });
+});
+
+describe("runner updates queue instead of being refused (BOS-1086)", () => {
+  afterEach(() => vi.useRealTimers());
+  const target = (d: { context: unknown }) => d.context as { target: string; commit: string };
+  const runnerCards = async (c: Awaited<ReturnType<typeof setup>>) => (await c.open()).filter((d) => target(d).target === "runner");
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+
+  it("a newer server update card does not refuse the runner update (the 10 Nov complaint)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-10T17:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-10T17:00:00Z");
+    // B runs, the trial is long over, and main has moved on to C: an open server card for C.
+    await c.available({ deployed: B, tip: C });
+    await c.selfDeploy.sync();
+    expect((await c.open()).filter((d) => target(d).target === "server")).toHaveLength(1);
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(200);
+    expect(r.json().decisionId).toBeTruthy();
+    // The next pass leaves that runner card open beside the server card: a deploy waiting never closes it.
+    await hostTicks(c, "2026-11-10T17:01:00Z");
+    await c.selfDeploy.sync();
+    expect(await runnerCards(c)).toHaveLength(1);
+  });
+
+  it("a press during the trial is kept when something blocks at the trial's end, and the update starts once it clears", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-10T17:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-10T17:00:00Z");
+    await c.status({ id: randomUUID(), target: "server", result: "deployed", from_commit: A, to_commit: B, ended: "2026-11-10T17:01:00Z" });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    // Pressed inside the trial (ends 17:16): queued with the time, not refused.
+    const press = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(press.statusCode).toBe(200);
+    expect(press.json().queued).toBe(true);
+    expect(press.json().message).toContain("Runners will update at");
+    // At the trial's end a server request is waiting for the host: the runner update must wait, not vanish.
+    vi.setSystemTime(new Date("2026-11-10T17:16:30Z"));
+    await writeFile(inbox(c), JSON.stringify({ id: randomUUID(), target: "server", commit: C, requestedAt: new Date().toISOString(), approvedBy: "owner" }));
+    await hostTicks(c, "2026-11-10T17:16:30Z");
+    await c.selfDeploy.sync();
+    // The host took the server request; the runner update goes by itself.
+    await rm(inbox(c));
+    vi.setSystemTime(new Date("2026-11-10T17:17:30Z"));
+    await hostTicks(c, "2026-11-10T17:17:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+});
+
+describe("a queued runner update, its cancel and the deploys behind it (BOS-1086)", () => {
+  afterEach(() => vi.useRealTimers());
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+  /** B went live at 17:01 (trial to 17:16) and the owner pressed Build and update runners at once. */
+  async function queuedInTrial() {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-10T17:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-10T17:00:00Z");
+    await c.status({ id: randomUUID(), target: "server", result: "deployed", from_commit: A, to_commit: B, ended: "2026-11-10T17:01:00Z" });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const press = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(press.json().queued).toBe(true);
+    return c;
+  }
+
+  it("cancels the queued update when the server update is switched back, and says why", async () => {
+    const c = await queuedInTrial();
+    vi.setSystemTime(new Date("2026-11-10T17:05:00Z"));
+    await c.status({ id: randomUUID(), target: "server", result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-10T17:05:00Z" });
+    await c.available({ deployed: A, tip: B });
+    await hostTicks(c, "2026-11-10T17:05:00Z");
+    await c.selfDeploy.sync();
+    const o = await c.selfDeploy.overview();
+    expect(o.runnerQueue).toBeNull();
+    expect(o.queueCancelled?.why).toContain("switched back");
+    // Long after the old trial would have ended nothing is sent: the runners never update to a rolled-back version.
+    vi.setSystemTime(new Date("2026-11-10T17:30:00Z"));
+    await hostTicks(c, "2026-11-10T17:30:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+  });
+
+  it("lets the owner cancel the queued update", async () => {
+    const c = await queuedInTrial();
+    expect((await c.selfDeploy.overview()).runnerQueue).toMatchObject({ startsAt: expect.any(String) });
+    expect((await c.req("POST", "/api/self-deploy/cancel-runner-queue")).json().cancelled).toBe(true);
+    expect((await c.selfDeploy.overview()).runnerQueue).toBeNull();
+    vi.setSystemTime(new Date("2026-11-10T17:30:00Z"));
+    await hostTicks(c, "2026-11-10T17:30:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+  });
+
+  it("holds a deploy approved while the runner update is queued, then sends it once the runner update has run", async () => {
+    const c = await queuedInTrial();
+    // Main moves on to C; the owner approves the deploy inside the trial.
+    await c.available({ deployed: B, tip: C, commits: [{ sha: C, subject: "Tidy" }] });
+    await hostTicks(c, "2026-11-10T17:02:00Z");
+    await c.selfDeploy.sync();
+    const [server] = (await c.open()).filter((d) => (d.context as { target: string }).target === "server");
+    expect((await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    // It must not reach the host (it would restart the trial clock in front of the runner update).
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    expect((await c.selfDeploy.overview()).heldDeploy).toMatchObject({ id: server!.id, commit: C });
+    // The trial ends: the runner update goes first.
+    vi.setSystemTime(new Date("2026-11-10T17:16:30Z"));
+    await hostTicks(c, "2026-11-10T17:16:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner" });
+    // The host takes it and builds; the deploy still waits.
+    await rm(inbox(c));
+    await c.status({ id: randomUUID(), target: "runner", result: "running", message: "Building…", to_commit: B, started: "2026-11-10T17:17:00Z", ended: "" });
+    await hostTicks(c, "2026-11-10T17:17:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    // The image is built (the drain takes over from here): the deploy goes by itself.
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "New runner image ready.", to_commit: B, started: "2026-11-10T17:17:00Z", ended: "2026-11-10T17:20:00Z" });
+    await hostTicks(c, "2026-11-10T17:20:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ id: server!.id, target: "server", commit: C });
+    expect((await c.selfDeploy.overview()).heldDeploy).toBeNull();
+  });
+});
+
+describe("the combined button: deploy, then update runners after the trial (BOS-1086)", () => {
+  afterEach(() => vi.useRealTimers());
+  const inbox = (c: Awaited<ReturnType<typeof setup>>) => path.join(c.dir, "inbox", "request.json");
+  const hostTicks = (c: Awaited<ReturnType<typeof setup>>, at: string) => writeFile(path.join(c.dir, "outbox", "host.json"), JSON.stringify({ version: 1, name: "nas01", writtenAt: at, ownership: [] }));
+  async function approved() {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-10T17:00:00Z"));
+    const c = (ctx = await setup());
+    await hostTicks(c, "2026-11-10T17:00:00Z");
+    await c.available({ runnerChanged: true });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect(d!.options).toEqual(["Deploy", "Deploy, then update runners after the trial", "Not now"]);
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy, then update runners after the trial" })).statusCode).toBe(200);
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "server", commit: B });
+    await rm(inbox(c));
+    return { c, d: d! };
+  }
+
+  it("queues the runner update when the deploy lands, and starts it by itself when the trial ends", async () => {
+    const { c, d } = await approved();
+    await c.status({ id: d.id, target: "server", result: "deployed", from_commit: A, to_commit: B, ended: "2026-11-10T17:01:00Z", runner_changed: "true" });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    expect((await c.selfDeploy.overview()).runnerQueue).toMatchObject({ startsAt: expect.any(String) });
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
+    vi.setSystemTime(new Date("2026-11-10T17:16:30Z"));
+    await hostTicks(c, "2026-11-10T17:16:30Z");
+    await c.selfDeploy.sync();
+    expect(JSON.parse(await readFile(inbox(c), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
+  it("is cancelled, with the reason, when the deploy is switched back", async () => {
+    const { c, d } = await approved();
+    await c.status({ id: d.id, target: "server", result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-10T17:02:00Z" });
+    await c.available({ deployed: A, tip: B });
+    await c.selfDeploy.sync();
+    const o = await c.selfDeploy.overview();
+    expect(o.runnerQueue).toBeNull();
+    expect(o.queueCancelled?.why).toContain("switched back");
+    vi.setSystemTime(new Date("2026-11-10T17:40:00Z"));
+    await hostTicks(c, "2026-11-10T17:40:00Z");
+    await c.selfDeploy.sync();
+    await expect(readFile(inbox(c), "utf8")).rejects.toThrow();
   });
 });

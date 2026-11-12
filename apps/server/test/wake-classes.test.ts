@@ -79,6 +79,8 @@ describe("wake classes: the table", () => {
     "what it waited on finished",
     // The reason in the detail of the history row for a company set to fence Off at start (BOS-940), not a wake.
     "runner_cannot_fence",
+    // The status reason written on a wake the WIP limit refused (BOS-1180), not a wake reason.
+    "held by the WIP limit",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {

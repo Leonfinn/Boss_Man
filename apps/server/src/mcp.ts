@@ -3,6 +3,8 @@
 // change its own company's work. The tool set is kept small (R36); descriptions say when
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
+import { checkQueue } from "./services/check-queue.js";
+import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -61,6 +63,7 @@ import { registerRetro, registerWatchdog } from "./mcp-watchdog.js";
 import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
+import { registerMergeLineExport } from "./mcp-merge-line.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -201,6 +204,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
+  registerMergeLineExport(server, db, scope);
   return server;
 }
 
@@ -1035,10 +1039,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters.",
-      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) reads the whole redacted log of a failed check job of that ticket (the newest one without a jobId), kept 14 days; the bounce message names the jobId.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1061,6 +1065,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           if (err instanceof ReviewError) return fail(err.message);
           throw err;
         }
+      }
+      if (action === "check_log") {
+        // BOS-1228: the whole, redacted log of a failed check job of this company's ticket (the newest one without a jobId).
+        if (!ticketId) return fail("Give the ticketId of the ticket whose check failed.");
+        const kept = await checkQueue(db).readLog(scope.companyId, ticketId, jobId ?? null);
+        if (!kept) return fail(`No kept check log for that ${jobId ? "job" : "ticket"}. A log is kept for ${FULL_LOG_RETENTION_DAYS} days after a failed check; a passed, stopped or older check has none, and a runner older than this change sent only the log tail.`);
+        return text(`Full log of the ${kept.scope} check job ${kept.jobId}${kept.endedAt ? ` (ended ${kept.endedAt.toISOString()})` : ""}, redacted:\n\n${cut(kept.log, CAP, (m) => `continue with tickets check_log offset=${m}`, offset)}`);
       }
       if (action === "find") {
         const byRef = q ? REF.exec(q.trim()) : null;

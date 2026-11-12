@@ -182,7 +182,7 @@ export const runners = pgTable("runners", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
   bootId: text("boot_id"),
-  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  /** Kept for older databases: when a restart last pulled parked checks forward. No longer written (BOS-1075). */
   bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
@@ -388,7 +388,7 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
-    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    /** When a runner restart happened while this check was waiting (BOS-352, BOS-1075); the wake at its booked time says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
@@ -419,6 +419,8 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
+    wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
     /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
     stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
@@ -1059,6 +1061,21 @@ export const checkJobs = pgTable(
     index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
     index("check_jobs_project_tree").on(t.projectId, t.tree),
   ],
+);
+
+/**
+ * The whole log of a failed check job (BOS-1228), cut to FULL_LOG_MAX and redacted before it is stored. Kept apart from
+ * check_jobs so the queue rows stay small; deleted after FULL_LOG_RETENTION_DAYS (the check sweep) or with the job.
+ */
+export const checkJobLogs = pgTable(
+  "check_job_logs",
+  {
+    jobId: uuid("job_id").primaryKey().references(() => checkJobs.id, { onDelete: "cascade" }),
+    log: text("log").notNull(),
+    chars: integer("chars").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("check_job_logs_created").on(t.createdAt)],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */

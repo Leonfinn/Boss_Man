@@ -57,6 +57,7 @@ import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
+import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -246,7 +247,7 @@ export type DecisionContext =
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
    * by the owner copies them into `signedOff`, so a later round on the same commit reuses it (DR-013).
    */
-  | { type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } }
+  | ({ type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } } & Partial<SignoffFacts>)
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
@@ -712,6 +713,8 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
 
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
+/** BOS-1086: on a server card whose change needs a runner rebuild: deploy now, and queue the runner update for when the trial ends. */
+export const DEPLOY_AND_RUNNERS = "Deploy, then update runners after the trial";
 export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
@@ -975,7 +978,7 @@ export type LoopHooks = {
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
-export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, thenRunners?: boolean): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
@@ -996,6 +999,21 @@ const UNBLOCKED_QUESTION_MAX = 200;
 /** Past this, the wake carries a short line instead: the whole answer is on the ticket's conversation (BOS-951). */
 const UNBLOCKED_TOTAL_MAX = 800;
 const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conversation.";
+
+/**
+ * The plain state note for a ticket Boss Man frees from Blocked (BOS-1209), so it never keeps "waiting on the owner"
+ * after the owner answered. Names the answer when there is one.
+ */
+export async function releasedNote(db: Db, ticketId: string, answered?: { question: string; answer: string; keepNote?: boolean }) {
+  // A card linked to after-merge criteria carries the criterion record on the note (a "none" answer writes nothing): leave it.
+  if (answered?.keepNote) return undefined;
+  const [r] = await db.select({ name: agents.name, note: tickets.stateNote }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, ticketId));
+  // This answer already wrote its own line on the note (the owner's check of an after-merge criterion): keep it.
+  if (answered && r?.note?.includes(`Owner answered "${answered.question.split("\n")[0]!.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)}"`)) return undefined;
+  const cut = (s: string, n: number) => { const x = s.replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+  const what = answered ? `the owner answered "${cut(answered.question, 80)}" (${cut(answered.answer, 80)})` : "what it was waiting on is settled";
+  return `Ready: ${what}. Starts when ${r?.name ?? "its assignee"} has a free slot.`;
+}
 
 /**
  * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
@@ -1197,7 +1215,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
-  async function releaseIfFree(ticketId: string, wakeAssignee = true) {
+  async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
     const deps = await db
       .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
       .from(ticketDependencies)
@@ -1207,7 +1225,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .where(eq(ticketDependencies.blockedTicketId, ticketId));
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
-    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
+    const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
@@ -1215,7 +1233,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Checks an answer's extra input before anything changes. */
   async function validate(d: typeof decisions.$inferSelect, answer: string, extra: AnswerExtra) {
     const ctx = d.context as DecisionContext;
-    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS)) {
+    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS)) {
       if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
       await selfDeploy.check(ctx);
     }
@@ -1543,7 +1561,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .values({
         companyId: runner.companyId,
         kind: "approval",
-        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        question: t ? `Approve ${agent?.name ?? "An agent"}'s plan for "${t.title}"?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
         options: [APPROVE_PLAN, KEEP_PLANNING],
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
@@ -2433,6 +2451,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The ticket each card is about and where it stands, kept off the row so the queue's shape is
       // unchanged (BOS-551). A card whose ticket is back with an agent has nothing to do yet.
       const cardTicket = new Map<string, { state: string | null; agent: string | null }>();
+      // (BOS-1236) A sign-off card lists who reviewed the ticket and how its last quick check ended, as of now.
+      const signoffFactsOf = new Map<string, SignoffFacts>();
+      for (const { d } of open) {
+        const c = d.context as DecisionContext;
+        if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId, typeof c.files === "number" ? c.files : null));
+      }
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -2460,9 +2484,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
         const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
+        const facts = signoffFactsOf.get(d.id);
         const context = pushTicket && c.type === "permission" && c.explain
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
-          : d.context;
+          : facts && c.type === "risk_review"
+            ? { ...c, ...facts }
+            : d.context;
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
@@ -3193,9 +3220,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             update: ctx.update,
             doAfter: ctx.doAfter,
           });
-        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
-            await selfDeploy!.send(ctx, id);
+            await selfDeploy!.send(ctx, id, answer === DEPLOY_AND_RUNNERS);
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
@@ -3369,7 +3396,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         for (const f of freed) {
-          const t = await releaseIfFree(f.ticketId, false);
+          const t = await releaseIfFree(f.ticketId, false, { question: d.question, answer, keepNote: !!(ctx as { criterionIndexes?: number[] }).criterionIndexes?.length });
           if (t) unblocked.push(t);
         }
         const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));

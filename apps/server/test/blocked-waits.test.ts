@@ -121,6 +121,41 @@ describe("Blocked accepts every kind of wait (BOS-1171)", () => {
   });
 });
 
+describe("Blocked on an open card is freed when the card is answered (BOS-1209)", () => {
+  const plan = (c: Awaited<ReturnType<typeof setup>>, ticketId: string) =>
+    c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Plan?", options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", tier: "ceo", context: { type: "permission", plan: true, ticketId, runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID() } }).returning();
+
+  it("an unlinked card the agent blocked on gets a hold row, so the answer releases the ticket with a plain note", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress" });
+    const [d] = await plan(c, t.id);
+    expect(await c.block(await c.mcp(c.worker.id), t.id)).toContain("is now blocked");
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve plan" });
+    const r = await c.row(t.id);
+    expect(r.systemState).toBe("ready");
+    expect(r.stateNote).toMatch(/^Ready: the owner answered "Plan\?" \(Approve plan\)\. Starts when Engineer has a free slot\.$/);
+  });
+
+  it("the sweep frees a Blocked ticket nothing holds, but not one with a card, a date or an unreported after-merge check", async () => {
+    const c = await setup();
+    const old = new Date(Date.now() - 3_600_000);
+    const stranded = await c.ticket();
+    const withCard = await c.ticket();
+    const withDate = await c.ticket();
+    const merged = await c.ticket();
+    await c.put(stranded.id, { systemState: "blocked", stateChangedAt: old, stateNote: "Waiting on the owner." });
+    await c.put(withCard.id, { systemState: "blocked", stateChangedAt: old });
+    await plan(c, withCard.id);
+    await c.put(withDate.id, { systemState: "blocked", stateChangedAt: old, blockedUntil: new Date(Date.now() + 86_400_000) });
+    await c.put(merged.id, { systemState: "blocked", stateChangedAt: old, mergeCommit: "a".repeat(40), acceptanceCriteria: [{ text: "Panel shows the host", after: "merge" as const }] });
+    await c.sweeps.run();
+    expect((await c.row(stranded.id)).systemState).toBe("ready");
+    expect((await c.row(stranded.id)).stateNote).toMatch(/^Ready: nothing is holding it any more/);
+    for (const id of [withCard.id, withDate.id, merged.id]) expect((await c.row(id)).systemState).toBe("blocked");
+  });
+});
+
 describe("blocked tickets do not count toward the in-progress limits (BOS-1171)", () => {
   it("an agent with blocked tickets can still start new ones, and the count ignores them", async () => {
     const c = await setup();
