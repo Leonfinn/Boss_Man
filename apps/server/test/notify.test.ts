@@ -89,7 +89,20 @@ describe("notify (R86)", () => {
     await c.scheduler.tick();
     const start = c.starts().find((s) => s.agentId === c.alice.id)!;
     expect(start.workspace).toBeUndefined();
+    // BOS-1120: never the bare <root>/<agentId> folder, which can be a stale copy of an old ticket.
+    expect(start.cwd).toBe(`/ws/agents/${c.alice.id}`);
     expect(start.prompt).toContain(`started in ${start.cwd}, which is not a copy of the repo`);
+  });
+
+  // BOS-1120: whatever woke the run, one that has a ticket opens in that ticket's checkout with the same workspace as "assigned".
+  it.each(["assigned", "decision answered", "nudge", "check due"])("a %s wake with a ticket opens in the ticket's checkout", async (reason) => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/example/app.git" });
+    await c.scheduler.wake({ agentId: c.bob.id, ticketId: c.ticket.id, reason, note: "hello" });
+    await c.scheduler.tick();
+    const start = c.starts().find((s) => s.agentId === c.bob.id)!;
+    expect(start.cwd).toBe(`/ws/${c.ticket.id}`);
+    expect(start.workspace).toMatchObject({ projectId: c.project.id, ticketId: c.ticket.id, repoUrl: "https://github.com/example/app.git" });
   });
 
   it("steers a ticketless notice into a ticketless run", async () => {

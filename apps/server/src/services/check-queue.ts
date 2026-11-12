@@ -8,7 +8,8 @@
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { checkJobs, projects, settings } from "../db/schema.js";
+import { agents, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
+import { checkFailureFacts, ticketRef } from "@boss-man/shared";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
@@ -191,13 +192,14 @@ export function checkQueue(db: Db) {
    */
   async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
+    const facts = ok ? "" : checkFailureFacts(result.logTail);
     const [row] = await db
       .update(checkJobs)
       .set({
         state: ok ? "passed" : "failed",
         exitCode: result.exitCode,
         logTail: result.logTail.slice(-8192),
-        reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : `The check failed with exit code ${result.exitCode ?? "none"}.`,
+        reason: ok ? null : result.timedOut ? "The check ran past its time limit and was stopped." : typeof result.exitCode === "number" ? `The check failed with exit code ${result.exitCode}${facts ? ` (${facts})` : ""}.` : `The check was stopped before it reported${facts ? ` (${facts})` : ""}.`,
         endedAt: now,
       })
       .where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.commit, result.commit), sentTo(result.runnerId)))
@@ -259,5 +261,51 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: await slots(), running, queued, held, recent, main: mains.map((m) => ({ projectId: m.id, project: m.name, state: m.state, since: m.since, commit: m.commit })) };
   }
 
-  return { mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  /**
+   * Every live check of a company for the Merge queue's "Queued checks" tab (BOS-1174): running first, then waiting in
+   * serving order, then those a red main holds back. Read-only. `position` counts the waiting ones only.
+   */
+  async function list(companyId: string, now = new Date()) {
+    const limit = await slots();
+    const prefix = (await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId)))[0]?.p ?? null;
+    const live = await db
+      .select({ job: checkJobs, number: tickets.number, title: tickets.title, requester: agents.name })
+      .from(checkJobs)
+      .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
+      .leftJoin(agents, eq(agents.id, checkJobs.requestedBy))
+      .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, [...LIVE])));
+    const info = new Map(live.map((r) => [r.job.id, r]));
+    const minutes = (d: Date | null) => (d ? Math.max(0, Math.floor((now.getTime() - d.getTime()) / 60_000)) : 0);
+    const runningJobs = live.filter((r) => r.job.state === "running").sort((a, b) => (a.job.startedAt?.getTime() ?? 0) - (b.job.startedAt?.getTime() ?? 0));
+    // A check queued after the live read above is not in `info`: leave it out (it shows on the next refresh) instead of throwing in row().
+    const order = (await servable()).filter((j) => j.companyId === companyId && info.has(j.id));
+    const orderIds = new Set(order.map((j) => j.id));
+    const held = live.filter((r) => r.job.state === "queued" && !orderIds.has(r.job.id)).map((r) => r.job);
+    // "Slots busy" is per company: only this company's running jobs count against `limit`, since each company has its own runner slots.
+    const full = runningJobs.length >= limit;
+    const row = (j: CheckJob, position: number | null, heldBy: string | null) => {
+      const r = info.get(j.id)!;
+      return {
+        id: j.id,
+        ticketId: j.ticketId,
+        ref: ticketRef(prefix, r.number),
+        title: r.title,
+        kind: j.kind === "merge" ? ("merge" as const) : j.scope === "full" ? ("full" as const) : ("quick" as const),
+        requestedBy: j.kind === "merge" ? "the merge gate" : r.requester,
+        state: j.state === "running" ? ("running" as const) : ("waiting" as const),
+        position,
+        minutes: minutes(j.state === "running" ? j.startedAt : j.queuedAt),
+        fixesMain: j.fixesMain,
+        heldBy,
+      };
+    };
+    const rows = [
+      ...runningJobs.map((r) => row(r.job, null, null)),
+      ...order.map((j, i) => row(j, i + 1, full ? `all ${limit} check ${limit === 1 ? "slot is" : "slots are"} busy` : null)),
+      ...held.map((j) => row(j, null, "main is red, so this merge check waits until main is fixed")),
+    ];
+    return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
+  }
+
+  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

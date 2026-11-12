@@ -146,7 +146,7 @@ describe.skipIf(!browser)("merge queue held rows in a real browser (BOS-1078)", 
 
         // 2. Held by another card: the card's question and who raised it, never "signed this off".
         expect(hold.heldBy).toBe("card");
-        expect(hold.heldText).toMatch(/^Held by a card: .Should the new judge run before the pack is rebuilt\?., raised by Kit\./);
+        expect(hold.heldText).toMatch(/^Held by a card: ["“”]?Should the new judge run before the pack is rebuilt\?["“”]?, raised by Kit\./);
         expect(hold.text).not.toMatch(/signed this off/);
         expect(hold.href).toBe(`#/decisions/${HOLD_ID}`);
 

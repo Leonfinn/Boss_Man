@@ -121,6 +121,8 @@ export function notificationRoutes(
       .parse(req.query);
     return { items: await notes.list(q), unread: await notes.unread() };
   });
+  // The last 20 phone pushes, with why each was urgent and whether its card is still open (BOS-1097).
+  owner.get("/api/notifications/pushes", async () => ({ items: await notes.recentPushes(20) }));
   owner.post("/api/notifications/read", async (req) => {
     const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
     await notes.markRead(b.all ? "all" : (b.ids ?? []));

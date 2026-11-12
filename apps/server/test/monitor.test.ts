@@ -80,9 +80,20 @@ describe("schedule_check", () => {
     const me = await agent(ctx.co.ceo.id);
     const past = await me.callTool({ name: "schedule_check", arguments: { ticketId: t.id, note: "x", at: new Date(Date.now() - 60_000).toISOString() } });
     expect(textOf(past)).toMatch(/in the future/);
-    await ctx.work.updateTicket(t.id, { state: "blocked" });
-    expect(textOf(await schedule(me, t.id))).toMatch(/in progress or in review/);
+    await ctx.work.updateTicket(t.id, { state: "backlog" });
+    expect(textOf(await schedule(me, t.id))).toMatch(/in progress, in review or blocked/);
     expect((await row(t.id)).monitorAt).toBeNull();
+  });
+
+  it("works on a Blocked ticket and fires there (BOS-1171)", async () => {
+    const t = await working();
+    await ctx.work.updateTicket(t.id, { state: "blocked" });
+    const me = await agent(ctx.co.ceo.id);
+    expect(textOf(await schedule(me, t.id))).toMatch(/You will be woken/);
+    expect((await row(t.id)).monitorAt).not.toBeNull();
+    await due(t.id);
+    await ctx.scheduler.slow();
+    expect(await checkWakes(t.id)).toHaveLength(1);
   });
 });
 

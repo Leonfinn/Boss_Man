@@ -74,9 +74,10 @@ describe("ask the CEO for advice", () => {
         onAnswered={() => {}}
       />,
     );
-    expect(document.querySelector(".rec")?.textContent).toContain("Allow once");
-    expect(document.querySelector(".rec")?.textContent).not.toContain("Deny");
-    expect(screen.getByRole("button", { name: "Allow once" }).className).toContain("primary");
+    // (BOS-1236) The recommended answer is the filled button, named "…, recommended"; there is no separate box.
+    expect(document.querySelector(".rec")).toBeNull();
+    expect(screen.getByRole("button", { name: "Allow once, recommended" }).className).toContain("primary");
+    expect(screen.queryByRole("button", { name: "Deny, recommended" })).toBeNull();
     expect(screen.getByRole("button", { name: "Deny" }).className).not.toContain("primary");
     expect(screen.getByText(/automatic check suggested Deny, but the CEO/)).toBeTruthy();
   });
@@ -108,7 +109,7 @@ describe("ask the CEO for advice", () => {
   it("shows 'CEO is looking at this' greyed but still answerable", () => {
     render(<Decisions decisions={[decision({ context: { advice: { state: "asking", note: "What is A?" } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByRole("status").textContent).toMatch(/CEO is looking at this/);
-    expect(screen.getByRole("button", { name: "A" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^A\b/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Ask the CEO for advice" })).toBeNull();
   });
 

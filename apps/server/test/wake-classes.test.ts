@@ -50,6 +50,10 @@ describe("wake classes: the table", () => {
     "agent or company gone",
     "a ticket it waited on finished",
     "the owner wrote on this ticket",
+    // Why a card was flagged "may be out of date" (BOS-1161, stale-requests.ts), not a wake's reason.
+    "a ticket it is about merged",
+    "the runners were rebuilt",
+    "the ticket it is about changed state",
     "snoozed twice in a row and still tripping",
     "runner update",
     // Why a runner restarted (BOS-594), and the setting-change drain's label: not wakes.
@@ -75,6 +79,8 @@ describe("wake classes: the table", () => {
     "what it waited on finished",
     // The reason in the detail of the history row for a company set to fence Off at start (BOS-940), not a wake.
     "runner_cannot_fence",
+    // The status reason written on a wake the WIP limit refused (BOS-1180), not a wake reason.
+    "held by the WIP limit",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -178,7 +184,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
   const HOUR = 3_600_000;
 
   it("gives the next free slot to an 18-hour-old engagement wake ahead of newer scheduled wakes", async () => {
-    ctx = await setup({ instance: 1, company: 1 });
+    // The stale-wake drop (BOS-1136) is turned off here: this test is about ranking by age.
+    ctx = await setup({ instance: 1, company: 1, staleWakeMs: 1e12 });
     const busy = await ctx!.agent("Busy");
     const checker = await ctx!.agent("Checker");
     const watcher = await ctx!.agent("Watcher");
@@ -204,7 +211,8 @@ describe("wake classes: a held agent wake gains rank until it gets a slot (BOS-5
   });
 
   it("caps the age bonus: past it the oldest wake goes first, whatever its class or stored priority", async () => {
-    ctx = await setup({ instance: 1, company: 1 });
+    // The stale-wake drop (BOS-1136) is turned off here: this test is about ranking by age.
+    ctx = await setup({ instance: 1, company: 1, staleWakeMs: 1e12 });
     const a = await ctx!.agent("A");
     const b = await ctx!.agent("B");
     // 3 hours at priority 3 would be rank 15 without the cap, ahead of 18 hours at priority 2 (rank 10).
@@ -316,6 +324,7 @@ describe("wake classes: callers of wake() and notify()", () => {
   const DROP_RECORDED = "an agent-started wake: a drop is on the wake row, and the owner is alerted once";
   const CALLERS: Record<string, string> = {
     "app.ts": DROP_RECORDED + " (assigned, feedback, skill decided); owner and rule wakes are never dropped",
+    "routes/policy.ts": NEVER_DROPPED + " (the owner's rule request)",
     "routes/server-admin.ts": "the owner's wake-an-agent route: an owner wake is never dropped",
     "mcp.ts": DROP_RECORDED + " (hooks.wake: note request, ...)",
     "services/alert-ladder.ts": CHECKS_OUTCOME + " (a dropped rung is not counted as sent)",

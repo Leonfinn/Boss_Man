@@ -108,19 +108,22 @@ describe("after-merge checks wait for go-live", () => {
     const waiting = await ctx.row(id);
     expect(waiting.goLiveWait).toBe("server");
     expect(waiting.touchesRunner).toBe(false);
-    expect(waiting.systemState).toBe("in_progress");
+    // BOS-1171: it only waits for go-live, so it sits in Blocked and holds no in-progress slot.
+    expect(waiting.systemState).toBe("blocked");
     expect(await afterMergeWakes(id)).toEqual([]);
     // Nothing happens while the old commit runs.
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
     // The agent can neither ask the owner nor close it yet.
     const c = await ctx.agent(ctx.dev.id);
-    const card = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the panel show the host?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, criterion: 1, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false } }));
+    const card = textOf(await c.callTool({ name: "raise_decision", arguments: { question: "Does the panel show the host?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, criterion: 1, optionVerdicts: { Yes: "pass", No: "fail" }, triedFirst: "Looked at it myself; only the owner sees their server.", ownerMustDo: false } }));
     expect(card).toContain("isn't live yet");
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "1 pass" } }))).toContain("isn't live yet");
     // The deploy lands.
     await serverRuns(NEW);
     expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(1);
     expect((await ctx.row(id)).goLiveWait).toBeNull();
+    // Live: the checks are work now, so it leaves Blocked.
+    expect((await ctx.row(id)).systemState).toBe("in_progress");
     const wakeNotes = await afterMergeWakes(id);
     expect(wakeNotes).toHaveLength(1);
     expect(wakeNotes[0]!.note).toContain(LIVE.text);

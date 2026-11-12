@@ -93,7 +93,8 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
     const runs = (runsBy.get(x.id) ?? []).filter((r) => r.startedAt.getTime() <= t);
     const live = runs.some((r) => !r.endedAt || r.endedAt.getTime() > t);
 
-    if (x.bounces > s.reviewBounces) add("review_loop", { bounces: x.bounces });
+    // A review hold is on purpose (BOS-808): no bounce flag while it lasts (BOS-1167). The snapshot counts only send-backs after the last hold.
+    if (!x.held && x.bounces > s.reviewBounces) add("review_loop", { bounces: x.bounces });
 
     // Rule 2: waiting on the owner's decision. No agent is chased; the owner is reminded.
     const holds = (holdsBy.get(x.id) ?? []).filter((h) => !h.resolved);
