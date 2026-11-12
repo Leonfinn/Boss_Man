@@ -44,7 +44,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## F
 
-- **Feature**: Something users would notice or ask for, kept on the **Features** page with a status, demand, effort and priority. A feature does no work itself: tasks deliver it. Agents also call it a feature request. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
+- **Feature**: Something users would notice or ask for, kept on the **Features** page with a status, demand, effort and priority. A feature does no work itself: one or more tasks deliver it. Agents also call it a feature request. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Flag**: The notification level that shows on the Notifications page and as a browser notification. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **Funding source**: A named account that pays for agents, such as your Claude Max plan, added under **Settings > Funding**. Boss Man uses it to track cost and quota. ([Guide 3](/guides/first-company-and-ticket#7-what-pays-for-the-ceo))
 
@@ -118,7 +118,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 - **Tailnet**: Your private Tailscale network: the devices that can reach each other through Tailscale. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
 - **Tailscale**: An add-on that gives Boss Man an HTTPS address that only your own devices can reach. You need it for phone notifications. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
-- **Task**: One piece of work an agent does in a project, with a title, a description, a risk level and Done when lines. Tasks deliver features, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
+- **Task**: One piece of work an agent does in a project, with a title, a description, a risk level and Done when lines. One or more tasks deliver a feature, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Thinking**: How hard the model thinks before it answers, from **Default** and **Low** up to **Max**. Not every model offers every level. ([Guide 5](/guides/agents-and-models#choose-a-thinking-level))
 - **Ticket**: Another name for a task. See **Task**. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 

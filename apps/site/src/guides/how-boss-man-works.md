@@ -35,9 +35,9 @@ A feature is what your users get. A task is the work that builds it.
 - an effort, from 1 (tiny) to 5 (huge)
 - a priority, worked out from demand, your own scores and effort
 
-A feature can sit on the roadmap and on the public feedback portal. A feature does no work by itself. Agents sometimes call it a feature request.
+A feature can sit on the roadmap and on the public feedback portal. A feature does no work by itself: one or more tasks deliver it. Agents sometimes call it a feature request.
 
-**Task**: one piece of work an agent does in a project, with Done when lines, a risk level and a review. Tasks deliver features. One feature can need one task or several.
+**Task**: one piece of work an agent does in a project, with Done when lines, a risk level and a review. One or more tasks deliver a feature: a small feature needs one task, a bigger one needs several.
 
 To link a task to a feature, choose the feature under **Part of feature** when you add the task, or later on the task's page under **Roadmap, feature and dependencies**. When the first task of a feature starts, the feature moves to In progress. When all its tasks are done, it moves to Released. If the company has a production deploy target, it also waits until one of its tasks has been deployed there.
 
