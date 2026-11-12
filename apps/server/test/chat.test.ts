@@ -170,7 +170,7 @@ describe("owner chat", () => {
     expect(textOf(await client.callTool({ name: "update_ticket", arguments: { ticketId: rateId, title: "Rate-limit the login API", reason: "Owner asked in chat." } }))).toMatch(/updated/);
     expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: authId, state: "done", summary: "Shipped with the login work." } }))).toBe(`Ticket ${authId} is now done.`);
     const asWorker = await c.mcp(start.runId, c.worker.id);
-    expect(textOf(await asWorker.callTool({ name: "set_ticket_state", arguments: { ticketId: rateId, state: "done", summary: "x" } }))).toMatch(/only your CEO or a manager can move tickets\. Offer the owner to create a ticket/);
+    expect(textOf(await asWorker.callTool({ name: "set_ticket_state", arguments: { ticketId: rateId, state: "done", summary: "x" } }))).toMatch(/only your CEO or a manager can move tickets, except that you can start your own ticket.*Offer the owner to create a ticket/);
     await asWorker.close();
     await client.close();
 
@@ -386,6 +386,38 @@ describe("owner chat", () => {
     expect(again.resumeSessionId).toBeUndefined();
   });
 
+  it("gives an ordinary agent's chat the ticket tools for its own tickets, and the add-on guard (BOS-1300)", async () => {
+    const c = await setup();
+    const mine =(await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "About page", assigneeAgentId: c.worker.id })).json();
+    const theirs = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Other work", assigneeAgentId: c.ceo.id })).json();
+    await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, mine.id));
+    await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, theirs.id));
+    // A skill that needs Penpot, while the runner reports it as not working.
+    await c.db.update(runners).set({ addons: [{ id: "agent-browser", version: "1", ok: false }] });
+    const [{ id: skillId }] = (await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "Browse", description: "Look at pages.", body: "Use the browser." })).json();
+    expect((await c.req("PUT", `/api/companies/${c.company.id}/skills/${skillId}/addons`, { requires: ["agent-browser"] })).statusCode).toBe(200);
+    await c.req("PUT", `/api/companies/${c.company.id}/skills/${skillId}/agents`, { agentIds: [c.worker.id] });
+    await c.db.delete(wakes);
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "The words are in Penpot.", agentId: c.worker.id });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.worker.id)!;
+    expect(start.boardToolsOnly).toBeUndefined();
+    // The guard: the run says plainly at its start that the add-on skill is missing, and the server records it.
+    expect(start.prompt).toContain('NOT loaded in this run: "browse" (needs the agent-browser add-on)');
+    expect(c.errors.recent(10, c.company.id).map((e) => e.message).join("\n")).toContain("started without");
+
+    const client = await c.mcp(start.runId, c.worker.id);
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    for (const n of ["ticket_reply", "schedule_check", "clear_check", "attach_image", "tickets", "set_ticket_state"]) expect(names).toContain(n);
+    // Not the other run tools: no deploys, decisions or agent admin.
+    for (const n of ["deploy", "decisions", "raise_decision", "server_status", "runs"]) expect(names).not.toContain(n);
+    // It restarts its own Blocked ticket, but not another agent's, and not into review or done.
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: mine.id, state: "in_progress" } }))).toContain("in_progress");
+    expect((await client.callTool({ name: "set_ticket_state", arguments: { ticketId: theirs.id, state: "in_progress" } })).isError).toBe(true);
+    expect((await client.callTool({ name: "set_ticket_state", arguments: { ticketId: mine.id, state: "done", summary: "x" } })).isError).toBe(true);
+    await client.close();
+  });
+
   it("lets the owner message any agent directly, each in its own conversation, one run per agent", async () => {
     const c = await setup();
     await c.db.delete(wakes);
@@ -408,7 +440,10 @@ describe("owner chat", () => {
     const starts = c.sent.filter((x): x is Start => x.type === "run.start");
     expect(starts.map((x) => x.agentId).sort()).toEqual([c.ceo.id, c.worker.id].sort());
     const workerStart = starts.find((x) => x.agentId === c.worker.id)!;
-    expect(workerStart).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.worker.id}` });
+    // BOS-1300: an ordinary agent's chat has its working tools (no board-tools-only switch); the CEO's chat keeps it.
+    expect(workerStart).toMatchObject({ cwd: `/ws/chat/${c.company.id}/${c.worker.id}` });
+    expect(workerStart.boardToolsOnly).toBeUndefined();
+    expect(starts.find((x) => x.agentId === c.ceo.id)!.boardToolsOnly).toBe(true);
     expect(workerStart.prompt).toContain("You are Engineer, the worker of App Co. The owner is messaging you directly");
     expect(workerStart.prompt).toContain("Owner: What are you working on?");
     expect(workerStart.prompt).not.toContain("How is the beta going?");
