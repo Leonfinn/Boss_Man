@@ -1006,7 +1006,9 @@ const UNBLOCKED_POINTER = "The whole answer and note are on this ticket's conver
  * The plain state note for a ticket Boss Man frees from Blocked (BOS-1209), so it never keeps "waiting on the owner"
  * after the owner answered. Names the answer when there is one.
  */
-export async function releasedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
+export async function releasedNote(db: Db, ticketId: string, answered?: { question: string; answer: string; keepNote?: boolean }) {
+  // A card linked to after-merge criteria carries the criterion record on the note (a "none" answer writes nothing): leave it.
+  if (answered?.keepNote) return undefined;
   const [r] = await db.select({ name: agents.name, note: tickets.stateNote }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(eq(tickets.id, ticketId));
   // This answer already wrote its own line on the note (the owner's check of an after-merge criterion): keep it.
   if (answered && r?.note?.includes(`Owner answered "${answered.question.split("\n")[0]!.replace(/[.;,\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)}"`)) return undefined;
@@ -1215,7 +1217,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
-  async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string }) {
+  async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
     const deps = await db
       .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
       .from(ticketDependencies)
@@ -3319,7 +3321,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         for (const f of freed) {
-          const t = await releaseIfFree(f.ticketId, false, { question: d.question, answer });
+          const t = await releaseIfFree(f.ticketId, false, { question: d.question, answer, keepNote: !!(ctx as { criterionIndexes?: number[] }).criterionIndexes?.length });
           if (t) unblocked.push(t);
         }
         const rest = [...new Set(freed.map((f) => f.ticketId))].filter((tid) => !unblocked.some((u) => u.id === tid));
