@@ -6,10 +6,10 @@
 //  - while a project's main is red only jobs fixing main run (merge jobs of other tickets wait, they don't fail); pre-review jobs keep running;
 //  - a passed job on the same tree satisfies a request of equal or narrower scope, so the same tree is never checked twice;
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
-import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
-import { checkFailureFacts, ticketRef } from "@boss-man/shared";
+import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
+import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
@@ -32,6 +32,10 @@ export type CheckQueueMode = "server" | "legacy";
 
 const LIVE = ["queued", "running"] as const;
 const SCOPE_RANK: Record<string, number> = { quick: 0, full: 1 };
+/** A long job is a merge or a full-scope check (about 15 minutes); the rest are quick pre-review checks (2 to 5 minutes). */
+const isLong = (j: Pick<CheckJob, "kind" | "scope">) => j.kind === "merge" || j.scope === "full";
+/** DR-056: a quick check that has waited this long is served in queue-time order with the merges. */
+export const QUICK_AGE_MS = 10 * 60_000;
 
 export type EnqueueInput = {
   companyId: string;
@@ -139,15 +143,17 @@ export function checkQueue(db: Db) {
   }
 
   /** The queued jobs in serving order, leaving out those a red main holds back. */
-  async function servable(): Promise<CheckJob[]> {
+  async function servable(now = new Date()): Promise<CheckJob[]> {
     const queued = await db.select().from(checkJobs).where(eq(checkJobs.state, "queued"));
     const red = new Set((await db.select({ id: projects.id }).from(projects).where(eq(projects.mainState, "red"))).map((p) => p.id));
+    // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
+    const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS);
     return queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain))
       .sort(
         (a, b) =>
           Number(b.fixesMain) - Number(a.fixesMain) ||
-          Number(b.kind === "merge") - Number(a.kind === "merge") ||
+          Number(withMerges(b)) - Number(withMerges(a)) ||
           a.priority - b.priority ||
           a.queuedAt.getTime() - b.queuedAt.getTime() ||
           a.id.localeCompare(b.id),
@@ -157,15 +163,25 @@ export function checkQueue(db: Db) {
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
   async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
     const limit = await slots();
-    const candidates = (await servable()).filter((j) => !companyId || j.companyId === companyId);
+    const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"check_jobs_claim"}))`);
     const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
     const free = limit - n;
     if (free <= 0) return [];
+    // BOS-1264: with two or more slots, merge checks (15 minutes) may not take the last slot while a quick pre-review check
+    // (2 to 5 minutes) waits, or a full line of merges keeps every developer waiting 30 to 60 minutes. Merges that fix main are exempt.
+    // DR-056: long jobs (merge or full scope) count against the reserve; only a quick-scope job may use the reserved slot.
+    const [{ m }] = (await tx.select({ m: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), or(eq(checkJobs.kind, "merge"), eq(checkJobs.scope, "full")), companyId ? eq(checkJobs.companyId, companyId) : undefined))) as [{ m: number }];
+    let longRoom = limit >= 2 && candidates.some((j) => !isLong(j)) ? Math.max(0, limit - 1 - m) : Infinity;
     const claimed: CheckJob[] = [];
-    for (const j of candidates.slice(0, free)) {
+    for (const j of candidates) {
+      if (claimed.length >= free) break;
+      if (isLong(j)) {
+        if (longRoom <= 0 && !j.fixesMain) continue;
+        longRoom--;
+      }
       // Guarded on state so two callers can't both start the same job.
       const [row] = await tx
         .update(checkJobs)
@@ -190,7 +206,7 @@ export function checkQueue(db: Db) {
    * The runner's answer. Accepted only for a job that is still running and only for the commit that was checked,
    * so a late answer for a job that was re-queued or replaced is ignored. Returns the finished job, or null if ignored.
    */
-  async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean }, now = new Date()): Promise<CheckJob | null> {
+  async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean; fullLog?: string }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
     const facts = ok ? "" : checkFailureFacts(result.logTail);
     const [row] = await db
@@ -204,7 +220,37 @@ export function checkQueue(db: Db) {
       })
       .where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.commit, result.commit), sentTo(result.runnerId)))
       .returning();
+    // BOS-1228: a failed job keeps its whole log. The runner already cut and redacted it; the server does both again, because it
+    // does not trust what arrives (a runner older than this change sends none, and then only the tail exists).
+    if (row && !ok && result.fullLog) {
+      const { log } = prepareFullLog(result.fullLog);
+      await db.insert(checkJobLogs).values({ jobId, log, chars: log.length, createdAt: now }).onConflictDoNothing();
+    }
     return row ?? null;
+  }
+
+  /** A kept log, if it belongs to a job of this company's ticket. */
+  async function readLog(companyId: string, ticketId: string, jobId: string | null): Promise<{ jobId: string; log: string; chars: number; endedAt: Date | null; scope: string } | null> {
+    const [row] = await db
+      .select({ jobId: checkJobLogs.jobId, log: checkJobLogs.log, chars: checkJobLogs.chars, endedAt: checkJobs.endedAt, scope: checkJobs.scope })
+      .from(checkJobLogs)
+      .innerJoin(checkJobs, eq(checkJobs.id, checkJobLogs.jobId))
+      .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.ticketId, ticketId), jobId ? eq(checkJobLogs.jobId, jobId) : undefined))
+      .orderBy(desc(checkJobLogs.createdAt))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** Whether a job has a kept log, and how long it is. */
+  async function logChars(jobId: string): Promise<number | null> {
+    const [row] = await db.select({ chars: checkJobLogs.chars }).from(checkJobLogs).where(eq(checkJobLogs.jobId, jobId));
+    return row?.chars ?? null;
+  }
+
+  /** Kept logs older than the retention period are deleted. Returns how many. */
+  async function pruneLogs(now = new Date(), days = FULL_LOG_RETENTION_DAYS): Promise<number> {
+    const gone = await db.delete(checkJobLogs).where(lt(checkJobLogs.createdAt, new Date(now.getTime() - days * 86_400_000))).returning({ id: checkJobLogs.jobId });
+    return gone.length;
   }
 
   async function end(jobId: string, state: "stuck" | "cancelled", reason: string, now = new Date()): Promise<CheckJob | null> {
@@ -307,5 +353,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
   }
 
-  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

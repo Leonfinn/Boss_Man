@@ -2,6 +2,8 @@
 // so a bounce can name them instead of only an exit code. check-all and check-quick print one "FAIL  <step>"
 // line per failed step at column 0; vitest prints "FAIL  <file> > <suite> > <test>" (indented in a step's output).
 
+import { redactForModel } from "./second-opinion.js";
+
 // eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const TEST_LINE = /^\s*(?:FAIL|×)\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s*(?:>|›)\s*(.+?)\s*$/;
@@ -46,6 +48,31 @@ export function withCheckFacts(fullOutput: string, limit = 8192): string {
   if (!missing) return tail;
   const header = `[Earlier in the log: ${checkFailureFacts(fullOutput)}]\n`.slice(0, 1200);
   return header + fullOutput.slice(-(limit - header.length));
+}
+
+/** The full log of a failed check is kept (BOS-1228) up to this size; the first part and the last part stay, the middle goes. */
+export const FULL_LOG_MAX = 1_500_000;
+export const FULL_LOG_HEAD =256_000;
+/** How long a kept full log stays readable. */
+export const FULL_LOG_RETENTION_DAYS = 14;
+
+/** Cuts a log to the cap (head + tail with a marker) and removes secrets from what is kept. Redaction runs on the kept text only. */
+export function prepareFullLog(raw: string, max = FULL_LOG_MAX): { log: string; truncated: boolean } {
+  let log = raw;
+  let truncated = false;
+  if (log.length > max) {
+    const head = Math.min(FULL_LOG_HEAD, Math.floor(max / 6));
+    const marker = `\n[... ${log.length - max} characters cut from the middle of the log ...]\n`;
+    log = log.slice(0, head) + marker + log.slice(log.length - (max - head - marker.length));
+    truncated = true;
+  }
+  return { log: redactForModel(log), truncated };
+}
+
+/** The sentence a bounce adds so the author's agent can open the whole log. */
+export function fullLogPointer(jobId: string, ticketId: string, bytes: number | null): string {
+  const size = bytes ? ` (${Math.max(1, Math.round(bytes / 1024))} KB, kept ${FULL_LOG_RETENTION_DAYS} days)` : "";
+  return `Full log${size}: call the tickets tool with action check_log, ticketId ${ticketId} and jobId ${jobId}; it returns the log in parts of 40000 characters (pass offset to read on).`;
 }
 
 /** The plain sentence a bounce uses for a check that ended without a normal failure (never "exit code undefined"). */

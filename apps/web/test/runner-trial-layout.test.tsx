@@ -108,7 +108,7 @@ describe.skipIf(!browser)("Updates trial line fits the window (BOS-953)", () => 
       const m = (await page.evaluate(measure)) as Measure;
       expect(m.trialVisible).toBe(true);
       expect(m.waitVisible).toBe(true);
-      expect(m.trialText).toContain("Runners can be updated from");
+      expect(m.trialText).toContain("Press Build and update runners to queue the runner update");
       expect(m.waitText).toContain("You can deploy again from");
       expect(m.trialFits).toBe(true);
       expect(m.waitFits).toBe(true);

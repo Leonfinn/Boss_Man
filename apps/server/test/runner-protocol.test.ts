@@ -254,8 +254,9 @@ describe("runner env endpoint", () => {
   });
 });
 
-describe("runner restart wakes parked agents (BOS-352)", () => {
+describe("runner restart leaves parked checks at their booked time (BOS-352, BOS-1075)", () => {
   const monitorAtOf = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
+  const checkWakes = (id: string) => ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, id), eq(wakes.reason, "check due")));
   async function parked(n = 1) {
     const ceo = (await ctx.db.select().from(agents).where(eq(agents.companyId, ctx.companyId)))[0]!;
     // These tests are about parked checks, not the per-agent WIP limit (BOS-1029): "No limit" lets one agent hold all of them in progress.
@@ -265,7 +266,7 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
     for (let i = 0; i < n; i++) {
       const t = await ctx.built.work.createTicket(p.id, { title: `Ship ${i}`, assigneeAgentId: ceo.id });
       await ctx.built.work.updateTicket(t.id, { state: "in_progress" });
-      await ctx.built.work.setMonitor(t.id, { at: new Date(Date.now() + 45 * 60_000), note: "my check-all run" });
+      await ctx.built.work.setMonitor(t.id, { at: new Date(Date.now() + 120 * 60_000), note: "my check-all run" });
       out.push(t.id);
     }
     return out;
@@ -279,17 +280,28 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
     return r;
   }
 
-  it("pulls a pending check forward, with a note, when the runner restarts", async () => {
+  it("keeps a check booked 2 h ahead at its booked time across a restart, and fires it once when due", async () => {
     const first = await connect();
     const [id] = await parked();
+    const booked = (await monitorAtOf(id!)).monitorAt!.getTime();
+    expect(booked).toBeGreaterThan(Date.now() + 110 * 60_000);
+    const beforeStop = Date.now();
     first.conn.stop();
     const second = runner();
     second.conn.start();
-    const t = await waitFor(() => monitorAtOf(id!), (x) => !!x.monitorAt && x.monitorAt.getTime() < Date.now() + 5000);
+    // Wait for this restart's mark, not one the first boot may have left on a check parked during its hello.
+    const t = await waitFor(() => monitorAtOf(id!), (x) => !!x.monitorRestartAt && x.monitorRestartAt.getTime() > beforeStop);
+    expect(t.monitorAt!.getTime()).toBe(booked);
     expect(t.monitorRestartAt).not.toBeNull();
+    // A restart must not fire it early.
     await ctx.built.scheduler.slow();
-    const w = (await ctx.db.select().from(wakes).where(and(eq(wakes.ticketId, id!), eq(wakes.reason, "check due"))))[0]!;
-    expect(w.note).toMatch(/The runner restarted at .*any background check you started is gone\. Check its log and rerun only what you need\./);
+    expect(await checkWakes(id!)).toHaveLength(0);
+    // When its booked time comes, it fires once, still saying the runner restarted.
+    await ctx.db.update(tickets).set({ monitorAt: new Date(Date.now() - 1000) }).where(eq(tickets.id, id!));
+    await ctx.built.scheduler.slow();
+    const ws = await checkWakes(id!);
+    expect(ws).toHaveLength(1);
+    expect(ws[0]!.note).toMatch(/The runner restarted at .*any background check you started is gone\./);
     second.conn.stop();
   });
 
@@ -305,24 +317,25 @@ describe("runner restart wakes parked agents (BOS-352)", () => {
     first.conn.stop();
   });
 
-  it("pulls at most 20 forward, and a second restart straight after pulls none", async () => {
+  it("does not move any pending check across repeated restarts", async () => {
     const first = await connect();
     const ids = await parked(22);
+    const booked = new Map((await ctx.db.select().from(tickets)).map((x) => [x.id, x.monitorAt!.getTime()]));
+    const beforeStop = Date.now();
     first.conn.stop();
     const second = runner();
     second.conn.start();
-    await waitFor(() => ctx.db.select().from(tickets), (rows) => rows.filter((x) => x.monitorRestartAt).length === 20);
-    const pulled = (await ctx.db.select().from(tickets)).filter((x) => x.monitorRestartAt).length;
-    expect(pulled).toBe(20);
+    // Wait for this restart's mark, not one the first boot may have left on checks parked during its hello.
+    await waitFor(() => ctx.db.select().from(tickets), (rows) => rows.filter((x) => x.monitorRestartAt && x.monitorRestartAt.getTime() > beforeStop).length === 22);
     second.conn.stop();
-    // A restart loop: more parked checks, another new boot id within minutes.
-    await ctx.db.update(tickets).set({ monitorRestartAt: null });
+    // A restart loop: another new boot id within minutes leaves them at their booked times too.
+    const secondBoot = (await ctx.db.select().from(runners))[0]!.bootId;
     const third = runner();
     third.conn.start();
-    await waitFor(async () => (await ctx.db.select().from(runners))[0]!.bootId, (v) => !!v && v !== undefined);
-    await new Promise((r) => setTimeout(r, 500));
-    expect((await ctx.db.select().from(tickets)).filter((x) => x.monitorRestartAt)).toHaveLength(0);
-    expect(ids).toHaveLength(22);
+    await waitFor(async () => (await ctx.db.select().from(runners))[0]!.bootId, (v) => !!v && v !== secondBoot);
+    await ctx.built.scheduler.slow();
+    for (const id of ids) expect((await monitorAtOf(id)).monitorAt!.getTime()).toBe(booked.get(id));
+    for (const id of ids) expect(await checkWakes(id)).toHaveLength(0);
     third.conn.stop();
   });
 });

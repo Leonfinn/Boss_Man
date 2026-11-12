@@ -16,6 +16,20 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -
   exit 2
 fi
 
+# A fenced check job on a runner that predates the home-folder fix has a HOME that doesn't exist and can't be created. Chrome
+# (its crash handler and profile folder), git, npm and others then fail in whichever step needs them (BOS-1095: web tests, then
+# the shell tests' Chrome demo). When HOME isn't a writable folder, the whole run gets a home of its own under the temp folder,
+# with XDG folders, removed when the run ends. The child run inherits it, so this happens once, before any step.
+check_home=""
+if ! [ -d "${HOME:-}" ] || ! [ -w "$HOME" ]; then
+  # The temp folder first; a host whose default temp folder isn't writable falls back to this ticket's scratch folder.
+  check_home="$(mktemp -d 2>/dev/null || mktemp -d "${BOSSMAN_SCRATCH:-.}/check-home.XXXXXX")"
+  echo "check-all: HOME ${HOME:-unset} is not usable; this run uses $check_home"
+  export HOME="$check_home" XDG_CONFIG_HOME="$check_home/.config" XDG_CACHE_HOME="$check_home/.cache" XDG_DATA_HOME="$check_home/.local/share"
+  mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+  trap 'rm -rf "$check_home"' EXIT
+fi
+
 # Where finished runs are kept (result + full log), keyed by the git tree of the checked-out files, so a check that
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
@@ -64,7 +78,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   # The child leaves per-file test times here (vitest JSON reports, shell test times); record() folds them into $STORE/<tree>.test-times (BOS-654).
   times_dir="$(mktemp -d)"
-  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"' EXIT
+  trap 'rm -f "$log" "$began_file"; rm -rf "$times_dir"; [ -z "$check_home" ] || rm -rf "$check_home"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
   key=""
@@ -256,14 +270,34 @@ step build pnpm build
 # The web suite must not skip anything at the gate (CI's web-browser job applies the same rule): a missing build, browser or Vite
 # fails here instead of passing quietly. BOSSMAN_SCRATCH points at a throwaway folder so the opt-in screenshot tests run too.
 web_tests() {
-  local d=$1 report shots rc=0
+  local d=$1 report shots rc=0 out
   report="${BOSSMAN_CHECK_TIMES_DIR:+$BOSSMAN_CHECK_TIMES_DIR/vitest-web.json}"
   [ -n "$report" ] || report="$(mktemp)"
   shots="$(mktemp -d)"
-  BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" || rc=$?
+  out="$(mktemp)"
+  # Playwright is a global npm tool. A fenced check job on a runner that predates the NODE_PATH pass-through gets no NODE_PATH, so
+  # the real-browser tests skip (BOS-1095). With none set, use npm's own global folder when it exists; no host path is assumed.
+  if [ -z "${NODE_PATH:-}" ] && command -v npm >/dev/null 2>&1; then
+    gnm="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$gnm" ] && [ -d "$gnm/playwright" ]; then export NODE_PATH="$gnm"; fi
+  fi
+  # tee keeps the live output; the copy lets a failure repeat the "real-page:" reasons last, where the log tail shows them (BOS-1095).
+  # PIPESTATUS must be read straight after the pipeline (an "|| true" would make it describe "true", so a red suite passed).
+  set +e
+  env BOSSMAN_SCRATCH="$shots" pnpm --dir "$d" exec vitest run --reporter=default --reporter=json --outputFile.json="$report" 2>&1 | tee "$out"
+  rc=${PIPESTATUS[0]}
+  set -e
   rm -rf "$shots"
-  [ "$rc" -eq 0 ] || return "$rc"
-  node "$(dirname "$self")/check-no-skips.mjs" "$report"
+  if [ "$rc" -eq 0 ]; then
+    node "$(dirname "$self")/check-no-skips.mjs" "$report" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "check-all: web test reasons (real-page lines, env):"
+    grep -h "real-page:" "$out" | sort | uniq -c | head -20 || true
+    echo "check-all: HOME=${HOME:-unset} TMPDIR length=${#TMPDIR} user=$(id -un 2>/dev/null) uid=$(id -u)"
+  fi
+  rm -f "$out"
+  return "$rc"
 }
 for d in "${pkg_dirs[@]}"; do
   grep -q '"test"' "$d/package.json" || continue
