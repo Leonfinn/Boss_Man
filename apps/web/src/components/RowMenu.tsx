@@ -91,7 +91,7 @@ export function RowMenu({ label, heading, subheading, items }: { label: string; 
       </button>
       {open && (
         <>
-          <div className="row-menu-dim" aria-hidden="true" onClick={() => setOpen(false)} />
+          <div className="row-menu-dim" aria-hidden="true" onClick={(e) => { e.stopPropagation(); setOpen(false); }} />
           <div className="row-menu-list" id={id} role="menu" aria-label={label} ref={menu} onKeyDown={onMenuKey}>
             <div className="row-menu-head" aria-hidden="true">
               <strong>{heading}</strong>

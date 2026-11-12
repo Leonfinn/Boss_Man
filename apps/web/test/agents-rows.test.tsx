@@ -76,6 +76,17 @@ describe("agent rows (BOS-1256)", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/api/agents/a1/retire"))).toBe(true));
   });
 
+  it("tapping the dimmed page closes the menu without toggling the edit panel", async () => {
+    stub([{ ...base, id: "a1", name: "Bramble" }]);
+    const { container } = render(<Agents company={company} onChanged={() => {}} />);
+    const name = await screen.findByRole("button", { name: "Bramble" });
+    fireEvent.click(screen.getByRole("button", { name: "More for Bramble" }));
+    await screen.findByRole("menu");
+    fireEvent.click(container.querySelector(".row-menu-dim")!);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(name.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("says over the limit in words, shows Start when paused, and History alone when retired", async () => {
     stub([
       { ...base, id: "a1", name: "Rex", wipCount: 4, wipLimit: 3 },
