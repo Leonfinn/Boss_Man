@@ -46,11 +46,11 @@ describe("Features list: what visitors will see (BOS-997)", () => {
     expect(line.textContent).not.toContain("summary");
   });
 
-  it("falls back to the summary's first line and says it comes from the summary", async () => {
+  it("falls back to the summary's first line, without a second hint line on the row (BOS-1257)", async () => {
     stub([fromSummary]);
     render(<Features companies={[company]} companyId="c1" featureId={undefined} go={() => {}} />);
     expect(await screen.findByText((_, el) => el?.tagName === "SMALL" && el.textContent === "Visitors will see: Download reports as spreadsheets.")).toBeTruthy();
-    expect(screen.getByText("from the summary, no public title set")).toBeTruthy();
+    expect(screen.queryByText("from the summary, no public title set")).toBeNull();
   });
 
   it("shows no such line on a feature that is off the portal", async () => {
