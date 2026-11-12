@@ -418,6 +418,40 @@ describe("owner chat", () => {
     await client.close();
   });
 
+  it("every ticket run gets the agent's add-on skills and tool servers, whatever woke it, and says when one is left out (BOS-1300)", async () => {
+    const c = await setup();
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "About page", assigneeAgentId: c.worker.id })).json();
+    await c.db.update(runners).set({ addons: [{ id: "agent-browser", version: "1", ok: true }] });
+    const [{ id: skillId }] = (await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "Browse", description: "Look at pages.", body: "Use the browser." })).json();
+    await c.req("PUT", `/api/companies/${c.company.id}/skills/${skillId}/addons`, { requires: ["agent-browser"] });
+    await c.req("PUT", `/api/companies/${c.company.id}/skills/${skillId}/agents`, { agentIds: [c.worker.id] });
+    await c.req("POST", `/api/companies/${c.company.id}/mcp-servers`, { name: "tools", url: "https://tools.example/mcp", transport: "http" });
+    const wakeOnce = async (reason: string) => {
+      await c.db.delete(wakes);
+      c.sent.length = 0;
+      await c.scheduler.wake({ agentId: c.worker.id, ticketId: t.id, reason, note: `Woken: ${reason}.` });
+      await c.scheduler.tick();
+      return c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.worker.id)!;
+    };
+    // Scheduled check, nudge and the owner's restart each carry the skill and the tool servers, and none is board-only.
+    for (const reason of ["check due", "nudge", "woken by owner"]) {
+      const start = await wakeOnce(reason);
+      expect(start, reason).toBeDefined();
+      expect(start.boardToolsOnly, reason).toBeUndefined();
+      expect(start.skills?.map((s) => s.name), reason).toContain("browse");
+      expect(start.mcpServers?.map((s) => s.name), reason).toContain("tools");
+      expect(start.prompt, reason).not.toContain("NOT loaded");
+      await c.emit({ type: "run.ended", runId: start.runId, stopReason: "end_turn", error: null });
+      await c.settle();
+    }
+    // The runner stops reporting the add-on: the ticket run says so at its start and the server records it.
+    await c.db.update(runners).set({ addons: [{ id: "agent-browser", version: "1", ok: false }] });
+    const left = await wakeOnce("check due");
+    expect(left.skills?.map((s) => s.name) ?? []).not.toContain("browse");
+    expect(left.prompt).toContain('NOT loaded in this run: "browse" (needs the agent-browser add-on)');
+    expect(c.errors.recent(10, c.company.id).map((e) => e.message).join("\n")).toContain("started without");
+  });
+
   it("lets the owner message any agent directly, each in its own conversation, one run per agent", async () => {
     const c = await setup();
     await c.db.delete(wakes);
