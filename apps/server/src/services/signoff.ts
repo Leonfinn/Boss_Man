@@ -179,7 +179,7 @@ export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string;
       .values({
         companyId: t.companyId,
         kind: "approval",
-        question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?${earlier}`,
+        question: `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${earlier}`,
         options: [APPROVE_MERGE, "Send it back"],
         recommendedOption: APPROVE_MERGE,
         raisedByAgentId: o.reviewerAgentId,

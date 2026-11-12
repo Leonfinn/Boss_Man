@@ -57,6 +57,7 @@ import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
+import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -246,7 +247,7 @@ export type DecisionContext =
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
    * by the owner copies them into `signedOff`, so a later round on the same commit reuses it (DR-013).
    */
-  | { type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } }
+  | ({ type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } } & Partial<SignoffFacts>)
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
@@ -1558,7 +1559,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .values({
         companyId: runner.companyId,
         kind: "approval",
-        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        question: t ? `Approve ${agent?.name ?? "An agent"}'s plan for "${t.title}"?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
         options: [APPROVE_PLAN, KEEP_PLANNING],
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
@@ -2448,6 +2449,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The ticket each card is about and where it stands, kept off the row so the queue's shape is
       // unchanged (BOS-551). A card whose ticket is back with an agent has nothing to do yet.
       const cardTicket = new Map<string, { state: string | null; agent: string | null }>();
+      // (BOS-1236) A sign-off card lists who reviewed the ticket and how its last quick check ended, as of now.
+      const signoffFactsOf = new Map<string, SignoffFacts>();
+      for (const { d } of open) {
+        const c = d.context as DecisionContext;
+        if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId));
+      }
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -2475,9 +2482,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
         const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
+        const facts = signoffFactsOf.get(d.id);
         const context = pushTicket && c.type === "permission" && c.explain
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
-          : d.context;
+          : facts && c.type === "risk_review"
+            ? { ...c, ...facts }
+            : d.context;
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));

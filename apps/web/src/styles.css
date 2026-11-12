@@ -168,19 +168,37 @@ p { margin: 0; }
 .score-legend { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .score-legend .swatch { display: inline-block; width: 12px; height: 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: grid; grid-template-columns: 88px minmax(0, 1fr); }
+.decision { background: var(--card); border: 1px solid var(--line); border-radius: 10px; display: block; }
 /* The card a link opened (#/decisions/<id>, BOS-1078). */
 .decision.linked { border-color: var(--link); box-shadow: 0 0 0 2px var(--accent-soft); scroll-margin-top: 16px; }
-.decision .score { padding: 18px 0 18px 20px; display: flex; flex-direction: column; gap: 8px; }
-.decision .score b { font-family: var(--mono); font-size: 26px; font-weight: 500; line-height: 1; }
-.decision .parts { display: flex; flex-direction: column; gap: 3px; width: 48px; }
-.decision .parts span { height: 4px; border-radius: 2px; min-width: 4px; }
-.decision .body { padding: 18px 20px 18px 8px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.decision .body { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .decision h2 { font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
-.decision .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
-.decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
-.decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
+/* (BOS-1236) One head line: kind tag, ticket chip, who and how long ago; the pills sit on the right and wrap under on a phone. */
+.decision .head-line { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.decision .ref-chip { font-size: 12px; padding: 1px 8px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--ink); text-decoration: none; }
+.decision .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.decision .pill { text-transform: none; letter-spacing: 0; font-size: 12px; }
+.decision .strip { margin: 0; padding: 8px 12px; border-radius: 6px; font-size: 14px; }
+.decision .strip.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.decision .strip.red { background: var(--red-soft); color: var(--red-ink); }
+.decision .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 14px; }
+.decision .facts dt { color: var(--muted); }
+.decision .facts dd { margin: 0; overflow-wrap: anywhere; }
+.decision .plain-list { list-style: none; margin: 0; padding: 0; }
+.decision .plan-preview { font-size: 14px; }
+.decision .answer-label { margin: 4px 0 -2px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Each button with its effect line under it; the recommended one is filled and tagged on its line. */
+.decision .actions.stacked { flex-direction: column; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
+.decision .actions.stacked .answer { display: grid; grid-template-columns: minmax(150px, max-content) minmax(0, 1fr); gap: 4px 14px; align-items: center; }
+.decision .actions.stacked .answer .effect { margin: 0; font-size: 14px; color: var(--muted); }
+.decision .rec-tag { text-transform: uppercase; font-size: 10px; margin-left: 6px; }
+.decision .btn.primary .rec-tag { background: rgba(255, 255, 255, 0.22); color: #fff; }
+/* A question's own options: full-width rows, left-aligned, long text wrapping inside. */
+.decision .actions.wide { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+.decision .actions.wide .btn { width: 100%; text-align: left; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.decision .card-foot { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: 13px; }
+.decision .card-foot-note { margin: 0; font-size: 13px; }
 /* "Not enough detail?": the note and its button are one row on a wide card, the button reading as the
    field's send and lining up with Approve / Reject; on a narrow card the button drops under the field
    with the card's normal gap (BOS-756). */
@@ -188,12 +206,13 @@ p { margin: 0; }
 .decision .advice-row .field { flex: 1 1 240px; min-width: 0; }
 .decision .advice-row .actions { flex: none; }
 @media (max-width: 640px) { .decision .advice-row .field { flex-basis: 100%; } }
-@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
+@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; min-height: 44px; } .decision .pills { margin-left: 0; width: 100%; } .decision .actions.stacked .answer { grid-template-columns: minmax(0, 1fr); } .decision .body { padding: 14px 16px 16px; } }
 
 /* (BOS-809) Closed cards fold to one clipped line each inside the "Closed (N)" group, so the full-size
    card (and its narrow "A newer update card covers this one" column that wrapped one word per line) is
    gone. A line opens to reveal its kept steps in .closed-body, which keeps a readable minimum width. */
 .closed-covers .covered-line { list-style: none; cursor: pointer; display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.closed-covers .covered-line.wraps { white-space: normal; }
 .closed-covers .covered-line::-webkit-details-marker { display: none; }
 .closed-covers .covered-line::before { content: "▸ "; color: var(--muted); }
 .closed-covers details[open] > .covered-line::before { content: "▾ "; }
