@@ -41,6 +41,17 @@ describe("CheckJobs", () => {
     expect(f.sent).toHaveLength(0);
   });
 
+  it("passes the full log of a failed job on, and redacts the tail it sends (BOS-1228)", async () => {
+    const f = fake();
+    f.jobs.run({ jobId: J, projectId: P, commit: "abc1234", command: "x" });
+    f.finish({ ok: false, exitCode: 1, timedOut: false, output: "MY_API_KEY=hunter2fakevalue\nFAIL  step", ms: 5, fullLog: "the whole log" } as never);
+    await tick();
+    const done = f.sent.find((m) => m.type === "check.done") as Extract<RunnerMessage, { type: "check.done" }>;
+    expect(done.fullLog).toBe("the whole log");
+    expect(done.tail).not.toContain("hunter2fakevalue");
+    expect(done.tail).toContain("FAIL  step");
+  });
+
   it("a second check.run for the same job does not start it twice", () => {
     const f = fake();
     f.jobs.run({ jobId: J, projectId: P, commit: "abc1234", command: "x" });
