@@ -302,16 +302,16 @@ function AddFeature({ companyId, areas, onAdded }: { companyId: string; areas: A
     );
   };
   return (
-    <form onSubmit={submit} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }} aria-label="Add a feature">
-      <div className="field" style={{ flex: "2 1 240px" }}>
-        <label htmlFor="new-feature">New feature</label>
-        <input id="new-feature" required maxLength={200} placeholder="e.g. Export reports as CSV" value={title} onChange={(e) => setTitle(e.target.value)} />
+    <form onSubmit={submit} className="features-add" aria-label="Add a feature">
+      <div className="field" style={{ flex: "2 1 220px" }}>
+        <label htmlFor="new-feature" className="sr-only">New feature</label>
+        <input id="new-feature" required maxLength={200} placeholder="New feature, e.g. Export reports as CSV" value={title} onChange={(e) => setTitle(e.target.value)} />
       </div>
       {areas.length > 0 && (
         <div className="field">
-          <label htmlFor="new-feature-area">Area</label>
+          <label htmlFor="new-feature-area" className="sr-only">Area</label>
           <select id="new-feature-area" value={areaId} onChange={(e) => setAreaId(e.target.value)}>
-            <option value="">None</option>
+            <option value="">No area</option>
             {areas.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -374,11 +374,11 @@ function VisitorsWillSee({ f }: { f: Feature }) {
   if (!f.portal?.onPortal) return null;
   const seen = portalTitle(f.publicTitle, f.publicSummary);
   if (!seen) return null;
-  const fromSummary = !f.publicTitle?.trim();
+  // One line on the row (BOS-1257); the full text and where it comes from are in the tooltip.
+  const source = f.publicTitle?.trim() ? "" : " (from the summary, no public title set)";
   return (
     <span className="feature-visitors">
-      <small>Visitors will see: {seen}</small>
-      {fromSummary && <small className="muted">from the summary, no public title set</small>}
+      <small title={`Visitors will see: ${seen}${source}`}>Visitors will see: {seen}</small>
     </span>
   );
 }
@@ -404,7 +404,7 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   return (
     <>
     <tr>
-      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220, maxWidth: 340 }}>
+      <td className="feature-name" style={{ paddingLeft: sub ? 28 : undefined }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
             <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
@@ -556,6 +556,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [fold, setFold] = useState(readFeatureOpen);
   const [error, setError] = useState<string | null>(null);
   const patch = (id: string, body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(data.reload, (err: Error) => setError(err.message));
@@ -586,19 +587,26 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
       <header className="page-head">
         <div>
           <h1>Features</h1>
-          <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
-          <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+          <p className="sub">
+            What people have asked for and what to build next. New features go on the feedback portal by default.{" "}
+            <button type="button" className="link" style={{ padding: 0 }} aria-expanded={showHelp} aria-controls="features-portal-help" onClick={() => setShowHelp(!showHelp)}>
+              {showHelp ? "Less" : "How the portal works"}
+            </button>
           </p>
+          {showHelp && (
+            <p id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              Security-looking work is kept off. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+            </p>
+          )}
         </div>
       </header>
       {!company ? (
         <p>Create a company on the Kanban first.</p>
       ) : (
         <>
-          <section className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <section className="card features-toolbar">
             <AddFeature companyId={company.id} areas={areas} onAdded={(id) => go(`features/${company.id}/${id}`)} />
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", fontSize: 14 }}>
+            <div className="features-toolbar-tools">
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 Sort by
                 <select className="mini" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
@@ -611,6 +619,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
               </label>
+              {/* sort + toggles share the bar with New feature at desktop width (BOS-1257) */}
               {foldableIds.length > 0 && (
                 <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!allOpen)}>
                   {allOpen ? "Collapse all" : "Expand all"}
@@ -650,13 +659,13 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
               <table className="features">
                 <thead>
                   <tr>
-                    <th>Feature</th>
+                    <th className="feature-name">Feature</th>
                     <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
-                      <th key={x.id} className="num" title={`Weight ${x.weight}`}>
-                        {x.name}
+                      <th key={x.id} className="num" title={`${x.name} (weight ${x.weight})`}>
+                        <span className="th-clamp">{x.name}</span>
                       </th>
                     ))}
                     <th>Effort</th>
