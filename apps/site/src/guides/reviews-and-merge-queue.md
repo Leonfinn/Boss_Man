@@ -40,11 +40,38 @@ The card offers options such as **Send it back anyway** and **Stop work on it**.
 
 ## The merge queue
 
-Once every reviewer approves, the ticket moves to Approved, merging, and joins the merge queue. Open **Merge queue** in the sidebar. The **Merges** tab shows:
+Once every reviewer approves, the ticket moves to Approved, merging, and joins the merge queue. Open **Merge queue** in the sidebar.
 
-- **Running now**: the checks in progress
+The top of the page says what needs attention, as coloured labels you can choose:
+
+- **2 need you**: work that waits on your answer
+- **Main is red: 3 checks held**: the main branch is failing its check (see [Queued checks](#queued-checks))
+- **1 check failed**: a merge check failed and Boss Man is trying again
+- **1 stuck over an hour**: work that has not moved for over an hour
+
+If none of these apply, it says "Nothing needs you. Everything here is moving by itself."
+
+Each tab shows a count: **Merges** counts the work waiting to merge, and **Queued checks** counts the checks. The count turns amber when something on that tab needs you or is held.
+
+The **Merges** tab shows:
+
+- **Needs you**: only when something waits on you. Each item has a button straight to its card, such as **Open the sign-off** or **Open the stopped check**.
+- **Running now**: the checks in progress, and how many check slots are busy. A check running for over an hour is marked **over an hour**.
 - **Waiting to merge**: in the order they will go, urgent work first, then the longest wait
-- **Recently finished**: each marked merged or check failed
+- **Recently finished**: the last three, each marked **merged** or **check failed**. Choose **Show 2 more** (or however many there are) to see the rest.
+
+Each row in Waiting to merge has one state word:
+
+| Word | Meaning |
+|---|---|
+| **Needs you** | It waits on your answer, usually your sign-off. |
+| **Check failed** | Its merge check failed and Boss Man is trying again. |
+| **Stuck** | It has not moved for over an hour. |
+| **Checking** | Its check is running. |
+| **Held** | It waits on something else, such as another ticket, a card or the host. |
+| **Waiting** | It waits for its turn. |
+
+The row then says what is happening and who is acting. If a card holds the work, the row names the card and who raised it, with a link to open it.
 
 Boss Man runs the command you chose under **Before merging, Boss Man will** on each ticket. If it passes, Boss Man merges the branch or opens a pull request, as your project is set. If you chose **Nothing: merge after review only**, it merges straight after the review.
 
@@ -52,12 +79,14 @@ Boss Man runs the command you chose under **Before merging, Boss Man will** on e
 
 The **Queued checks** tab lists every check that is running or waiting on the company's runner, not only merge checks. Running checks come first, then waiting ones in the order they will start. Each row shows:
 
-- the ticket
+- its place in the line, and the ticket
+- **Running**, **Waiting** or **Held**
 - the kind: **merge check**, **quick check** (an agent checking its own work) or **full check**
-- **running**, or **waiting, place** and its number in the line
 - who asked for it, and how long it has run or waited
 
-A check marked **held** cannot start yet, and the row says why, for example "main is red". A check marked **fixes main** is for a ticket that repairs a failing main branch.
+When the main branch is failing its check (main is red), new checks are **Held** and cannot start. One red banner above the list says how many are held and, if a ticket that fixes main is queued, links to it. A check marked **fixes main** is for that ticket, and it still runs.
+
+When nothing is queued, the tab says "No checks queued" and how many slots are free.
 
 The line at the top says how many check slots are in use. You set the number under **Settings > Server and runner > Checks**, in **Checks at once**. The tab is read-only.
 
@@ -69,7 +98,7 @@ The ticket goes back to in progress, and the agent is told which command failed.
 
 ## Your sign-off
 
-For high and critical work, a card asks whether to merge after the reviewer approves. Choose **Approve and merge** or **Send it back**. The ticket also shows in the Your review lane on the board.
+For high and critical work, a card asks whether to merge after the reviewer approves. It lists the reviews, the last quick check and how many files changed ([Guide 4](/guides/board-and-decisions#the-sign-off-card)). Choose **Approve and merge** or **Send it back**. The ticket also shows in the Your review lane on the board, and under **Needs you** on the Merge queue page.
 
 ## After it goes live
 
