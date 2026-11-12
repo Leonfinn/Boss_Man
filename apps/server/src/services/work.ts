@@ -12,6 +12,7 @@ import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
+import { hiddenWhileRechecked } from "./card-validity.js";
 import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
@@ -295,9 +296,18 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
       );
       // Any other open question for the owner that a ticket waits on (raise_decision with blocksTicketId, loop alerts).
+      const openOwnerCards = decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question, staleAt: decisions.staleAt, recheckStage: decisions.recheckStage, context: decisions.context, raisedByAgentId: decisions.raisedByAgentId }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"), eq(decisions.tier, "owner"))) : [];
+      // BOS-1193 (DR-054): a card being re-checked is not the owner's to answer yet, so the ticket it holds is not "waiting on
+      // you" either; the Decisions list folds it away by the same rule. Urgent, live-run and merge/review cards stay.
+      const hiddenCards = await hiddenWhileRechecked(db, openOwnerCards);
+      const rechecking = new Map<string, string>();
+      if (hiddenCards.size) {
+        const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, openOwnerCards.filter((d) => hiddenCards.has(d.id) && d.raisedByAgentId).map((d) => d.raisedByAgentId!)))).map((a) => [a.id, a.name] as const));
+        for (const d of openOwnerCards) if (hiddenCards.has(d.id)) rechecking.set(d.id, (d.raisedByAgentId && names.get(d.raisedByAgentId)) || "the agent");
+      }
       const questions = new Map(
-        (decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"), eq(decisions.tier, "owner"))) : [])
-          .filter((d) => !signoffs.has(d.id))
+        openOwnerCards
+          .filter((d) => !signoffs.has(d.id) && !hiddenCards.has(d.id))
           .map((d) => [d.id, d.question] as const),
       );
       // A review no agent could take (the CEO did the work and nobody else can review it) waits on the owner too.
@@ -387,6 +397,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         // The card itself, so "Answer in Decisions" opens that exact card (BOS-1159).
         ownerQuestionId: askedId,
+        // The agent re-checking a card this ticket waits on (BOS-1193): the board says so instead of asking the owner to answer it.
+        recheckingBy: [...rechecking].find(([cardId]) => deps.some((d) => d.blockedTicketId === t.id && d.blockerDecisionId === cardId))?.[1] ?? null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,

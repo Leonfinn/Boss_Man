@@ -500,7 +500,7 @@ details > summary { cursor: pointer; font-size: 14px; }
 }
 /* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
 .page-head h1:focus { outline: none; }
-.set-scope { margin-left: 10px; vertical-align: middle; }
+.set-scope { margin-left: 10px; vertical-align: middle; white-space: nowrap; }
 .set-jump { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
 .set-jump ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .set-jump a { display: inline-flex; align-items: center; min-height: 32px; color: var(--accent-ink); }
@@ -520,6 +520,8 @@ details > summary { cursor: pointer; font-size: 14px; }
 @media (max-width: 899px) {
   /* "‹ Settings" at the top takes the page back to the menu (the menu is the phone's opening screen). */
   .set-back { display: inline-flex; }
+  /* A page shows only that back link, not the whole menu above it (BOS-1224); the bare #/settings menu is outside .set-layout. */
+  .set-layout .set-nav { display: none; }
   /* The menu is the phone's opening screen: each row carries its hint and a chevron. */
   .set-nav li > a { min-height: 56px; flex-wrap: wrap; }
   .set-item-label { flex: 0 0 100%; }

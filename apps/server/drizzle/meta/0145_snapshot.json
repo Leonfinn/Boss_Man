@@ -1,5 +1,5 @@
 {
-  "id": "aa667cdb-1b09-45fc-b022-0429faf4472f",
+  "id": "cbeeb911-550f-4d98-8979-8e66f82b2b76",
   "prevId": "6b26a7e9-5aa2-4e20-be83-c939c115d121",
   "version": "7",
   "dialect": "postgresql",
@@ -2198,6 +2198,43 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "recheck_stage": {
+          "name": "recheck_stage",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recheck_stage_at": {
+          "name": "recheck_stage_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rechecked_at": {
+          "name": "rechecked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rechecked_by_agent_id": {
+          "name": "rechecked_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recheck_note": {
+          "name": "recheck_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recheck_count": {
+          "name": "recheck_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         }
       },
       "indexes": {
@@ -2271,6 +2308,19 @@
           "tableTo": "agents",
           "columnsFrom": [
             "for_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "decisions_rechecked_by_agent_id_agents_id_fk": {
+          "name": "decisions_rechecked_by_agent_id_agents_id_fk",
+          "tableFrom": "decisions",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "rechecked_by_agent_id"
           ],
           "columnsTo": [
             "id"
@@ -9460,12 +9510,6 @@
         },
         "state_note_stale_at": {
           "name": "state_note_stale_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "wip_held_at": {
-          "name": "wip_held_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

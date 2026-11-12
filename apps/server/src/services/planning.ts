@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
+import { hiddenWhileRechecked } from "./card-validity.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -177,7 +178,9 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const eIds = rows.flatMap((r) => (r.blockerEngagementId ? [r.blockerEngagementId] : []));
       const es = eIds.length ? await db.select({ id: engagements.id, title: engagements.title, status: engagements.status }).from(engagements).where(inArray(engagements.id, eIds)) : [];
       const dIds = rows.flatMap((r) => (r.blockerDecisionId ? [r.blockerDecisionId] : []));
-      const ds = dIds.length ? await db.select({ id: decisions.id, question: decisions.question, status: decisions.status }).from(decisions).where(inArray(decisions.id, dIds)) : [];
+      const ds = dIds.length ? await db.select({ id: decisions.id, question: decisions.question, status: decisions.status, staleAt: decisions.staleAt, recheckStage: decisions.recheckStage, context: decisions.context }).from(decisions).where(inArray(decisions.id, dIds)) : [];
+      // A card being re-checked is not the owner's to answer yet (BOS-1193), so this ticket's page doesn't offer to answer it.
+      const hiddenCards = await hiddenWhileRechecked(db, ds);
       const t = (id: string) => ts.find((x) => x.id === id);
       return {
         waitsOn: rows
@@ -192,7 +195,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               return { dependencyId: r.id, kind: "engagement" as const, id: r.blockerEngagementId, title: e?.title ?? "", state: e?.status ?? "", open: e?.status !== "signed_off", link: `#/engagements/${r.blockerEngagementId}` };
             }
             const d = ds.find((x) => x.id === r.blockerDecisionId);
-            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open", link: `#/decisions/${r.blockerDecisionId}` };
+            return { dependencyId: r.id, kind: "decision" as const, id: r.blockerDecisionId!, title: d?.question ?? "", state: d?.status ?? "", open: d?.status === "open" && !hiddenCards.has(r.blockerDecisionId!), rechecking: hiddenCards.has(r.blockerDecisionId!), link: `#/decisions/${r.blockerDecisionId}` };
           }),
         blocks: rows
           .filter((r) => r.blockerTicketId === ticketId)

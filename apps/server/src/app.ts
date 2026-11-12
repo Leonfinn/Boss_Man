@@ -46,7 +46,8 @@ import { releaseLogService } from "./services/release-log.js";
 import { ownerSetupFacts } from "./services/owner-setup-check.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { alertClearing } from "./services/alert-clearing.js";
-import { runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { recheckDeadlines, runnerRebuilt, ticketStateChanged } from "./services/stale-requests.js";
+import { closeInvalidCards } from "./services/card-validity.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder, GOT_IT } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -703,8 +704,13 @@ export async function buildApp(opts: AppOptions) {
     mergeJam: () => mergeJam.run(),
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
-      const closed = await clearing.check();
-      await ticketStateChanged(db, { wake: (input) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number }), now: opts.now?.() }).catch((err) => app.log.error({ err }, "flagging cards after a ticket changed state failed"));
+      const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
+      let closed = await clearing.check();
+      // BOS-1193: the validity table runs over every open agent card (a dead one closes by itself, which also
+      // clears the leftovers older flagging left behind), then a stale one is flagged and its re-check clock moves.
+      closed += await closeInvalidCards(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now }).catch((err) => { app.log.error({ err }, "closing dead cards failed"); return 0; });
+      await ticketStateChanged(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "flagging cards after a ticket changed state failed"));
+      await recheckDeadlines(db, { wake: wakeAgent, now: opts.now?.() }).catch((err) => app.log.error({ err }, "moving cards on in their re-check failed"));
       return closed;
     },
     // A feature the roadmap commits to but nothing is working on (BOS-595): the sweep raises one CEO
