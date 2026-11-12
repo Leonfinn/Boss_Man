@@ -71,6 +71,42 @@ describe("check queue", () => {
     await s.close();
   });
 
+  it("a full-scope pre-review check counts as long and cannot sit in the quick reserve (DR-056)", async () => {
+    const s = await setup();
+    await s.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 3 });
+    const m1 = (await s.req({ tree: "m1" })).job;
+    const m2 = (await s.req({ tree: "m2" })).job;
+    const fullPre = (await s.req({ tree: "f1", kind: "pre_review", scope: "full" })).job;
+    const quick = (await s.req({ tree: "q1", kind: "pre_review", scope: "quick" })).job;
+    // Two long jobs run; the full pre-review is held and the quick check gets the reserved slot.
+    expect((await s.q.claimNext(null)).map((j) => j.id)).toEqual([m1.id, m2.id, quick.id]);
+    expect(fullPre.id).not.toBe(quick.id);
+    await s.close();
+  });
+
+  it("a quick check that has waited 10 minutes is served in queue-time order with the merges (DR-056)", async () => {
+    const s = await setup();
+    await s.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 3 });
+    const m1 = (await s.req({ tree: "m1" })).job; // oldest
+    const q1 = (await s.req({ tree: "q1", kind: "pre_review", scope: "quick" })).job;
+    const m2 = (await s.req({ tree: "m2" })).job; // queued after q1
+    const q2 = (await s.req({ tree: "q2", kind: "pre_review", scope: "quick" })).job;
+    const later = new Date(Date.now() + 11 * 60_000);
+    // All quick checks are 11 minutes old, so the order is m1, q1, m2, q2 (queue time): the 3 slots go to the first three.
+    expect((await s.q.claimNext(null, later)).map((j) => j.id)).toEqual([m1.id, q1.id, m2.id]);
+    expect(q2.id).toBeTruthy();
+    // Young quick checks (not yet 10 minutes) stay behind the merges.
+    const s2 = await setup();
+    await s2.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 3 });
+    await s2.req({ tree: "x1" }); // a merge already queued
+    const fresh = (await s2.req({ tree: "x2", kind: "pre_review", scope: "quick" })).job;
+    const order = (await s2.q.claimNext(null)).map((j) => j.id);
+    expect(order[order.length - 1]).toBe(fresh.id);
+    expect(m2.id).toBeTruthy();
+    await s2.close();
+    await s.close();
+  });
+
   it("a merge that fixes main is never held by the quick-check reserve", async () => {
     const s = await setup();
     await s.db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: 2 });
