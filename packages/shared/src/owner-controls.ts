@@ -176,6 +176,7 @@ export const OWNER_FIELDS = {
     "Why (shown on the Changes table, required)", "Wiki page that explains it (optional)",
     "Your answer, in your own words. It goes to …", "What's unclear (optional, one line)",
     "Every agent in this company",
+    "Your one-line reason, or the corrected lesson (needed for Edit)",
   ],
   Notifications: [
     "Company", "Quiet hours: pages and asks become flags, flags become notes", "From", "Until", "Time zone",
