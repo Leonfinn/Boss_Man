@@ -529,7 +529,7 @@ export function alertLadder(
         const ranOut = ladder.rung === "ceo" && d.kind === "permission" && !(d.context as { advice?: { state?: string } }).advice?.state;
         // BOS-1318: a team question that waited out its time with the CEO says so, keeping what the asking agent tried.
         const ctx = d.context as { type?: string; triedFirst?: string };
-        const teamQuestion = ladder.rung === "ceo" && d.kind === "question" && ctx.type === "question";
+        const teamQuestion = ladder.rung === "ceo" && d.kind === "question" && ctx.type === "question" && ladder.hops.length === 1 && ladder.hops[0]!.why === "a team question goes to the CEO first";
         const extra: Record<string, unknown> = ranOut ? { handoverRanOut: true } : teamQuestion ? { triedFirst: `${ctx.triedFirst ? `${ctx.triedFirst} ` : ""}Tried by the CEO first: it didn't settle this within ${minutes} minutes.` } : {};
         const to = await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`, extra);
         if (!to) continue;
