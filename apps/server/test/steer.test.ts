@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runs, wakes } from "../src/db/schema.js";
+import { agents, companies, decisions, runners, runs, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -88,6 +88,36 @@ describe("steering runs (R37)", () => {
     const list = JSON.parse(textOf(await asCeo.callTool({ name: "runs", arguments: { action: "list" } })));
     expect(list[0]).toMatchObject({ id: c.runId });
     await asCeo.close();
+  });
+});
+
+describe("finished-run history through MCP", () => {
+  it("gives the CEO and the Data & Analytics agent finished runs, refuses others, and stays in the company", async () => {
+    const c = (ctx = await setup());
+    const [analyst] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Moony", role: "worker", agentKind: "claude", template: "data-analytics" }).returning();
+    const [other] = await c.db.insert(companies).values({ name: "Other Co" }).returning();
+    const at = new Date(Date.now() - 3_600_000);
+    await c.db.update(runs).set({ startedAt: at, endedAt: new Date(at.getTime() + 90_000), outcome: "done", model: "m1", inputTokens: 10 }).where(eq(runs.id, c.runId));
+    await c.db.insert(runs).values({ companyId: other!.id, startedAt: at, endedAt: new Date(), outcome: "done" });
+    const hist = (args: object) => ({ name: "runs", arguments: { action: "history", ...args } });
+
+    const asWorker = await c.mcp(c.worker.id);
+    expect(textOf(await asWorker.callTool(hist({})))).toMatch(/Only your company's CEO or its Data & Analytics agent/);
+    await asWorker.close();
+
+    for (const id of [c.ceo.id, analyst!.id]) {
+      const m = await c.mcp(id);
+      const rows = JSON.parse(textOf(await m.callTool(hist({}))));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: c.runId, agent: "Engineer", model: "m1", outcome: "done", seconds: 90, inputTokens: 10, outputTokens: null });
+      expect(Object.keys(rows[0]).sort()).toEqual(["agent", "endedAt", "id", "inputTokens", "model", "origin", "outcome", "outputTokens", "seconds", "startedAt", "stopReason", "ticket"]);
+      await m.close();
+    }
+    const m = await c.mcp(analyst!.id);
+    expect(textOf(await m.callTool(hist({ from: "2020-01-01", to: "2020-03-01" })))).toBe("Ask for at most 14 days at a time.");
+    expect(textOf(await m.callTool(hist({ from: "2020-01-01", to: "2020-01-02" })))).toBe("[]");
+    expect(textOf(await m.callTool({ name: "runs", arguments: { action: "list" } }))).toBe("Only your company's CEO can steer runs.");
+    await m.close();
   });
 });
 
