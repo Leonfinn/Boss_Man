@@ -36,6 +36,6 @@ describe("reduced motion", () => {
     const block = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce) {\n  .loader"));
     expect(block).toMatch(/\.loader \{ animation: none; \}/);
     expect(block).toMatch(/\.loader-mark rect \{ animation: none; \}/);
-    expect(block).toMatch(/\.b1 \{ transform: scaleY\(0\.55\)/);
+    expect(block).toMatch(/\.loader-mark \.b1 \{ transform: scaleY\(0\.55\)/);
   });
 });
