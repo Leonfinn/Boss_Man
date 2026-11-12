@@ -452,12 +452,15 @@ describe("server-owned check queue (BOS-316)", () => {
       // The old process's job: still running, for a tree main has since moved past.
       const [old] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), command: "pnpm test", state: "running", startedAt: new Date() }).returning();
       const res = approve(c);
-      for (let i = 0; i < 40 && (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+      // Wait for the cancel itself (it lands a step after the new job appears), with a deadline.
+      const deadline = Date.now() + 20_000;
+      const oldState = async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, old!.id)))[0]?.state;
+      while (Date.now() < deadline && (await oldState()) !== "cancelled") await new Promise((r) => setTimeout(r, 50));
       const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
       const live = rows.filter((r) => r.state === "queued" || r.state === "running");
       expect(live).toHaveLength(1);
       expect(live[0]!.tree).toBe(prepared.tree);
-      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled" });
+      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled", reason: expect.stringContaining("newer commit") });
       await finishOpenJob(c, { state: "passed", exitCode: 0 });
       expect((await res).json()).toMatchObject({ outcome: "merged" });
     });

@@ -1710,7 +1710,7 @@ export function reviewService(
             // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
             if (!reused && deps.cancelCheck) {
               const leftovers = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]), ne(checkJobs.id, job.id)));
-              for (const o of leftovers) await deps.cancelCheck(o.id, "This ticket's merge started again, so its earlier merge check was cancelled: a ticket never has two merge checks at once.").catch(() => undefined);
+              for (const o of leftovers) await deps.cancelCheck(o.id, SUPERSEDED_TEXT).catch(() => undefined);
             }
             // The merge-line record (BOS-769) takes the job's own start and end times; the poll only notices them.
             const line = { check: named(command), way: "queue" as const, jobId: job.id };
