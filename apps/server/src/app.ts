@@ -410,7 +410,7 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
-    log: (m) => app.log.error(m),
+    log: (m, companyId) => (companyId ? app.log.error({ companyId }, m) : app.log.error(m)),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
   });
@@ -756,6 +756,9 @@ export async function buildApp(opts: AppOptions) {
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
     resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
+    // Approved work held on a fix goes on once the fix is merged and live (BOS-1173); a repeat round on passed code is withdrawn.
+    releaseHolds: () => review.releaseHolds(),
+    withdrawRepeatRounds: (judged) => review.withdrawRepeatRounds(judged),
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
     branchClash: (ticketId) => review.branchClash(ticketId),
@@ -773,7 +776,8 @@ export async function buildApp(opts: AppOptions) {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
-    onReview: (t) => scheduler.onTicketReview(t.id, null),
+    // Back in review on code its last round already passed: that round stands, no new one (BOS-1173).
+    onReview: async (t) => ((await review.keptRound(t.id).catch(() => false)) ? undefined : scheduler.onTicketReview(t.id, null)),
     onFeature: (id) => feedback.syncFeature(id),
     // The board's "Approved, merging" cards say where their merge is (BOS-667). `review` is built below; this runs per request.
     runningMerges: () => review.runningMerges(),
@@ -883,6 +887,7 @@ export async function buildApp(opts: AppOptions) {
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     isLeader: () => leader.isLeader(),
+    cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
@@ -967,7 +972,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -2162,5 +2167,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue };
+  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

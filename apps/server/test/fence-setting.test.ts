@@ -263,6 +263,17 @@ describe("no agent run goes unfenced unless the owner chose Off (BOS-373)", () =
     expect(c.commands.find((s) => s.boardToolsOnly)).toBeDefined();
   });
 
+  it("holds the owner's chat with a worker, which has file and shell tools (BOS-1300)", async () => {
+    const c = (ctx = await setup(["fence"]));
+    const [worker] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Wendy", role: "worker", agentKind: "claude" }).returning();
+    await c.report("unavailable");
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Can you look at the logs?", agentId: worker!.id })).statusCode).toBe(201);
+    await c.req("POST", "/api/scheduler/tick");
+    expect(c.commands.find((s) => s.agentId === worker!.id)).toBeUndefined();
+    const [held] = await c.db.select({ status: wakes.status, statusReason: wakes.statusReason }).from(wakes).where(and(eq(wakes.agentId, worker!.id), isNull(wakes.runId)));
+    expect(held).toMatchObject({ status: "queued", statusReason: FENCE_HELD });
+  });
+
   it("starts fenced again by itself once the runner can fence", async () => {
     const c = (ctx = await setup(["fence"]));
     await c.report("unavailable");

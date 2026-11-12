@@ -57,6 +57,7 @@ import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
+import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import type { Addon, AddonFacts } from "./addons.js";
@@ -77,6 +78,7 @@ import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
 import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -248,7 +250,7 @@ export type DecisionContext =
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
    * by the owner copies them into `signedOff`, so a later round on the same commit reuses it (DR-013).
    */
-  | { type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } }
+  | ({ type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } } & Partial<SignoffFacts>)
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
@@ -715,6 +717,8 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
 
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
+/** BOS-1086: on a server card whose change needs a runner rebuild: deploy now, and queue the runner update for when the trial ends. */
+export const DEPLOY_AND_RUNNERS = "Deploy, then update runners after the trial";
 export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
@@ -978,7 +982,7 @@ export type LoopHooks = {
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
-export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, thenRunners?: boolean): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
@@ -1233,7 +1237,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Checks an answer's extra input before anything changes. */
   async function validate(d: typeof decisions.$inferSelect, answer: string, extra: AnswerExtra) {
     const ctx = d.context as DecisionContext;
-    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS)) {
+    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS)) {
       if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
       await selfDeploy.check(ctx);
     }
@@ -1561,7 +1565,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .values({
         companyId: runner.companyId,
         kind: "approval",
-        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        question: t ? `Approve ${agent?.name ?? "An agent"}'s plan for "${t.title}"?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
         options: [APPROVE_PLAN, KEEP_PLANNING],
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
@@ -1738,8 +1742,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput, agentId: run?.agentId ?? null };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
       const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      // BOS-1300: an ordinary agent's owner chat has its working tools, so it goes through the company's rules like its ticket runs.
+      // The CEO, Scrum Master and personal assistant chats stay board-only.
+      const [chatAgent] = asking?.purpose === "chat" && asking.agentId ? await db.select({ role: agents.role, duty: agents.duty }).from(agents).where(eq(agents.id, asking.agentId)) : [];
+      const boardOnlyChat = asking?.purpose === "chat" && (!chatAgent || runCapabilities(chatAgent, true).boardToolsOnly);
       const { outcome, rule, position } =
-        asking?.purpose === "chat"
+        boardOnlyChat
           ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
@@ -2451,6 +2459,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The ticket each card is about and where it stands, kept off the row so the queue's shape is
       // unchanged (BOS-551). A card whose ticket is back with an agent has nothing to do yet.
       const cardTicket = new Map<string, { state: string | null; agent: string | null }>();
+      // (BOS-1236) A sign-off card lists who reviewed the ticket and how its last quick check ended, as of now.
+      const signoffFactsOf = new Map<string, SignoffFacts>();
+      for (const { d } of open) {
+        const c = d.context as DecisionContext;
+        if (c.type === "risk_review" && c.ticketId) signoffFactsOf.set(d.id, await signoffFacts(db, c.ticketId, typeof c.files === "number" ? c.files : null));
+      }
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -2478,9 +2492,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const c = d.context as DecisionContext;
         const push = c.type === "permission" ? c.explain?.push : undefined;
         const pushTicket = push?.ticketId ? info.get(push.ticketId) : undefined;
+        const facts = signoffFactsOf.get(d.id);
         const context = pushTicket && c.type === "permission" && c.explain
           ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
-          : d.context;
+          : facts && c.type === "risk_review"
+            ? { ...c, ...facts }
+            : d.context;
         return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
@@ -3211,9 +3228,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             update: ctx.update,
             doAfter: ctx.doAfter,
           });
-        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
-            await selfDeploy!.send(ctx, id);
+            await selfDeploy!.send(ctx, id, answer === DEPLOY_AND_RUNNERS);
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));

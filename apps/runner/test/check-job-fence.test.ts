@@ -44,15 +44,45 @@ function setup(jobFence: { level: FenceLevel; pnpmStore?: string }, prefix = "bm
 
 describe.skipIf(level === "unavailable")("fenced check job", () => {
   it("can't read a secret outside its folder, gets its own HOME, and leaves no HOME behind", async () => {
-    const secretDir = tmp(".bm-fj-secret-", process.env.HOME ?? tmpdir());
+    // The secret must sit outside the job's folder. HOME is the usual place, but a check job whose runner is still
+    // the old code has a HOME that doesn't exist yet: create it, and fall back to the temp folder if that fails.
+    let secretBase = process.env.HOME ?? tmpdir();
+    try {
+      mkdirSync(secretBase, { recursive: true });
+    } catch {
+      secretBase = tmpdir();
+    }
+    const secretDir = tmp(".bm-fj-secret-", secretBase);
     writeFileSync(path.join(secretDir, "token"), "TOPSECRET");
     const { root, commit, ws } = setup({ level });
     const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `cat ${secretDir}/token; echo home=$HOME`, 60_000);
+    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `cat ${secretDir}/token; echo home=$HOME; test -d "$HOME" && echo homeexists=yes; touch "$HOME/probe" && echo homewritable=yes`, 60_000);
+    // BOS-1095: HOME must exist when the job starts (the gate bounced branches with "HOME folder missing").
+    expect(r.output).toContain("homeexists=yes");
+    expect(r.output).toContain("homewritable=yes");
     expect(r.output).not.toContain("TOPSECRET");
     expect(r.output).toContain(`home=${path.join(root, "check-jobs-home", jobId)}`);
     expect(existsSync(path.join(root, "check-jobs-home", jobId))).toBe(false);
     expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(false);
+  });
+});
+
+describe("check job finds the global browser tools (BOS-1095)", () => {
+  it("gets NODE_PATH and PLAYWRIGHT_BROWSERS_PATH, and can read the folders they name", async () => {
+    // The real-browser web tests need `require("playwright")` (a global npm tool, found through NODE_PATH). Without
+    // it they skipped inside the gate and BOS-1071 failed every merge on the skips.
+    const globalModules = tmp("bm-fj-global-");
+    mkdirSync(path.join(globalModules, "playwright"));
+    writeFileSync(path.join(globalModules, "playwright", "index.js"), "module.exports = { chromium: 'found' };\n");
+    const browsers = tmp("bm-fj-browsers-");
+    writeFileSync(path.join(browsers, "marker"), "browsers-here");
+    const { commit, root } = setup({ level });
+    const ws = new Workspaces(root, { ...process.env, NODE_PATH: globalModules, PLAYWRIGHT_BROWSERS_PATH: browsers }, undefined, undefined, { level });
+    const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const r = await ws.runCommitCheck({ projectId, jobId, commit }, `node -e 'console.log("pw=" + require("playwright").chromium)'; echo browsers=$PLAYWRIGHT_BROWSERS_PATH; cat "$PLAYWRIGHT_BROWSERS_PATH/marker"`, 60_000);
+    expect(r.output).toContain("pw=found");
+    expect(r.output).toContain(`browsers=${browsers}`);
+    expect(r.output).toContain("browsers-here");
   });
 });
 
@@ -64,9 +94,10 @@ describe("unfenced check job (BOS-655)", () => {
     const unfenced = new Workspaces(root, process.env, undefined, gate, { level: "unavailable", pnpmStore: store });
     const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const home = path.join(root, "check-jobs-home", jobId);
-    const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
+    const r = await unfenced.runCommitCheck({ projectId, jobId, commit }, 'echo "home=$HOME"; test -d "$HOME" && echo homeexists=yes; echo "tmp=$TMPDIR"; echo "store=$npm_config_store_dir"; touch "$TMPDIR/x"', 60_000);
     expect(r.ok).toBe(true);
     expect(r.output).toContain(`home=${home}`);
+    expect(r.output).toContain("homeexists=yes");
     expect(r.output).toContain(`tmp=${path.join(root, "jt", shortTmpName(jobId))}`);
     expect(existsSync(path.join(root, "jt", shortTmpName(jobId)))).toBe(false);
     // BOS-1087: a socket under the job's TMPDIR must fit in sun_path (107 bytes). The test root is longer than a real

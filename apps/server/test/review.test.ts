@@ -262,6 +262,17 @@ describe("approval lands in the background (B)", () => {
     expect(stopped).toContain("was stopped before it reported");
     expect(stopped).not.toMatch(/undefined|null/);
   });
+
+  // BOS-1228: the bounce says where the whole log is and how to open it; no pointer when none was kept.
+  it("names the kept full log in a failed-check bounce", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const jobId = "11111111-2222-4333-8444-555555555555";
+    const ticketId = "66666666-7777-4888-8999-000000000000";
+    const withLog = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x", keptLog: { jobId, ticketId, chars: 300_000 } } }, ctx);
+    expect(withLog).toContain(`tickets tool with action check_log, ticketId ${ticketId} and jobId ${jobId}`);
+    expect(withLog).toMatch(/293 KB, kept 14 days/);
+    expect(landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x" } }, ctx)).not.toContain("check_log");
+  });
 });
 
 describe("landing an approved ticket (R46, R47)", () => {
@@ -433,6 +444,25 @@ describe("server-owned check queue (BOS-316)", () => {
       await finishOpenJob(c, { state: "passed", exitCode: 0 });
       expect((await second).json()).toMatchObject({ outcome: "merged" });
       expect(await cards(c)).toHaveLength(0);
+    });
+
+    it("cancels the ticket's leftover running merge job when its merge starts again, leaving exactly one live job (BOS-1289)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      // The old process's job: still running, for a tree main has since moved past.
+      const [old] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), command: "pnpm test", state: "running", startedAt: new Date() }).returning();
+      const res = approve(c);
+      // Wait for the cancel itself (it lands a step after the new job appears), with a deadline.
+      const deadline = Date.now() + 20_000;
+      const oldState = async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, old!.id)))[0]?.state;
+      while (Date.now() < deadline && (await oldState()) !== "cancelled") await new Promise((r) => setTimeout(r, 50));
+      const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const live = rows.filter((r) => r.state === "queued" || r.state === "running");
+      expect(live).toHaveLength(1);
+      expect(live[0]!.tree).toBe(prepared.tree);
+      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled", reason: expect.stringContaining("newer commit") });
+      await finishOpenJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
     });
 
     it("tries again with a fresh merge when main moved to a different tree", async () => {

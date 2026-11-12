@@ -3,6 +3,8 @@
 // change its own company's work. The tool set is kept small (R36); descriptions say when
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
+import { checkQueue } from "./services/check-queue.js";
+import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -45,6 +47,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import type { paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, type watchdogService } from "./services/watchdog.js";
+import { runCapabilities } from "./services/run-capabilities.js";
 import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
@@ -668,16 +671,40 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "runs",
     {
       description:
-        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId).",
+        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId). action history (CEO and Data & Analytics agent, read-only): finished runs of your company, newest first, with agent, ticket, model, start, end, seconds, outcome, stop reason and tokens; give from and to (ISO dates, at most 14 days apart; to defaults to now, from to 7 days before to) and limit (default 100, at most 500).",
       inputSchema: {
-        action: z.enum(["list", "message", "stop"]),
+        action: z.enum(["list", "message", "stop", "history"]),
+        from: z.string().max(40).optional(),
+        to: z.string().max(40).optional(),
+        limit: z.number().int().min(1).max(500).optional(),
         runId: z.string().uuid().optional(),
         message: z.string().max(20_000).optional(),
         interrupt: z.boolean().optional(),
       },
     },
     async (input) => {
-      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (input.action === "history") {
+        if (me?.role !== "ceo" && me?.template !== "data-analytics") return fail("Only your company's CEO or its Data & Analytics agent can read finished runs.");
+        const to = input.to ? new Date(input.to) : new Date();
+        const from = input.from ? new Date(input.from) : new Date(to.getTime() - 7 * 86_400_000);
+        if (Number.isNaN(to.getTime()) || Number.isNaN(from.getTime())) return fail("from and to must be dates, such as 2026-11-01 or 2026-11-01T00:00:00Z.");
+        if (from >= to) return fail("from must be before to.");
+        if (to.getTime() - from.getTime() > 14 * 86_400_000) return fail("Ask for at most 14 days at a time.");
+        const rows = await db
+          .select({ id: runsTable.id, agent: agents.name, number: tickets.number, origin: runsTable.origin, model: runsTable.model, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, stopReason: runsTable.stopReason, inputTokens: runsTable.inputTokens, outputTokens: runsTable.outputTokens })
+          .from(runsTable)
+          .leftJoin(agents, eq(agents.id, runsTable.agentId))
+          .leftJoin(tickets, eq(tickets.id, runsTable.ticketId))
+          .where(and(eq(runsTable.companyId, scope.companyId), sql`${runsTable.endedAt} is not null`, sql`${runsTable.startedAt} >= ${from}`, sql`${runsTable.startedAt} < ${to}`))
+          .orderBy(desc(runsTable.startedAt))
+          .limit(input.limit ?? 100);
+        const ref = await refsOf(db, scope.companyId);
+        return text(JSON.stringify(rows.map(({ number, origin, ...r }) => {
+          const t = ref({ number });
+          return { ...r, ticket: number == null ? null : t.ref, origin: number == null ? origin : null, seconds: r.endedAt ? Math.round((r.endedAt.getTime() - r.startedAt.getTime()) / 1000) : null };
+        })));
+      }
       if (me?.role !== "ceo") return fail("Only your company's CEO can steer runs.");
       try {
         if (input.action === "list") return text(JSON.stringify(await runs.active(scope.companyId)));
@@ -1037,10 +1064,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "tickets",
     {
       description:
-        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters.",
-      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters; check_log (ticketId, optional jobId, optional offset) reads the whole redacted log of a failed check job of that ticket (the newest one without a jobId), kept 14 days; the bounce message names the jobId.",
+      inputSchema: { action: z.enum(["find", "read", "file", "check_log"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional(), jobId: z.string().uuid().optional() },
     },
-    async ({ action, q, state, ticketId: given, path, offset }) => {
+    async ({ action, q, state, ticketId: given, path, offset, jobId }) => {
       const asRef = given ? REF.exec(given) : null;
       const ref = await refsOf(db, scope.companyId);
       const idStartsWith = (p: string) => sql`${tickets.id}::text like ${`${p.toLowerCase()}%`}`;
@@ -1063,6 +1090,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           if (err instanceof ReviewError) return fail(err.message);
           throw err;
         }
+      }
+      if (action === "check_log") {
+        // BOS-1228: the whole, redacted log of a failed check job of this company's ticket (the newest one without a jobId).
+        if (!ticketId) return fail("Give the ticketId of the ticket whose check failed.");
+        const kept = await checkQueue(db).readLog(scope.companyId, ticketId, jobId ?? null);
+        if (!kept) return fail(`No kept check log for that ${jobId ? "job" : "ticket"}. A log is kept for ${FULL_LOG_RETENTION_DAYS} days after a failed check; a passed, stopped or older check has none, and a runner older than this change sent only the log tail.`);
+        return text(`Full log of the ${kept.scope} check job ${kept.jobId}${kept.endedAt ? ` (ended ${kept.endedAt.toISOString()})` : ""}, redacted:\n\n${cut(kept.log, CAP, (m) => `continue with tickets check_log offset=${m}`, offset)}`);
       }
       if (action === "find") {
         const byRef = q ? REF.exec(q.trim()) : null;
@@ -1283,15 +1317,25 @@ const NUDGE_DESCRIPTION =
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
 /** Run tools the owner chat replaces with its own version (BOS-224). */
 const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
+/** The run tools a non-CEO agent's owner chat adds (BOS-1300): replying on a ticket, booking and clearing its own checks, and attaching a picture. */
+const CHAT_WORKER_RUN_TOOLS: ReadonlySet<string> = new Set(["ticket_reply", "schedule_check", "clear_check", "attach_image"]);
 
 /**
  * The owner chat's tools (v1.1): the board, plus the CEO's own run tools (BOS-224). Tickets it
  * makes are the owner's, not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean) {
+function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean, workerTools = false) {
   const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
   const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), db, scope.runId, scope.companyId);
+  // BOS-1300: an ordinary agent's chat also gets the ticket tools its runs have for its own tickets: reply, and book or clear a check.
+  // Each of those already limits itself to the caller's company and (checks, moves) to the caller's own tickets.
+  if (workerTools) {
+    const originalRegister = server.registerTool.bind(server);
+    server.registerTool = ((name: string, config: never, cb: never) => (CHAT_WORKER_RUN_TOOLS.has(name) ? originalRegister(name, config, cb) : undefined)) as never;
+    registerRunTools(server, db, services, scope, hooks, CHAT_SKIP, false);
+    server.registerTool = originalRegister as never;
+  }
   // The CEO gets the same tools in its chat as in its runs, except create_ticket and nudge, which
   // have chat versions below (BOS-224). Another agent's chat keeps the board tools only: its runs
   // may be deliberately restricted (BOS-58), and a chat must not widen them. No tool here edits
@@ -1460,7 +1504,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
-          ? buildChatServer(db, services, scope, hooks, ceo)
+          ? buildChatServer(db, services, scope, hooks, ceo, me ? runCapabilities(me, true).chatTools === "worker" : false)
           : me?.duty === SCRUM_MASTER_DUTY
             ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent, false)
             : buildServer(db, services, scope, hooks, undefined, retroAgent, ceo);
