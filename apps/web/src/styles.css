@@ -854,7 +854,17 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (max-width: 640px) {
   /* One header row: the mark, the company picker and a menu button (BOS-245). */
   /* The bar takes its natural height on every page; the full-height rule is for the side menu only (BOS-1213). */
-  .side { min-height: 0; padding: 6px 12px 8px; gap: 6px; }
+  /* BOS-1275: the logo, the company picker and Menu share one bar; the opened menu drops below on its own row. */
+  .side { min-height: 0; padding: 8px 12px; gap: 8px; flex-direction: row; flex-wrap: wrap; align-items: center; position: relative; }
+  .side .brand { flex: none; padding: 0; }
+  .side .brand img { width: 28px; height: 28px; }
+  .side-bar { flex: 1; min-width: 0; }
+  .side .nav-groups { flex: 0 0 100%; }
+  /* The company menu spans the whole bar, 12px in from each side; long names are cut with an ellipsis. */
+  .side-bar .switcher { position: static; }
+  .side .switcher-menu { left: 12px; right: 12px; top: calc(100% - 2px); }
+  .side .switcher-menu li button, .side .switcher-add { min-width: 0; }
+  .side .switcher-menu li button > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The bar and the page wrap onto two rows; without this the window's spare height is shared between the rows and the bar grows (BOS-1213). Chat keeps its own stretch above. */
   .app { align-content: flex-start; }
   .side .brand span { display: none; }
