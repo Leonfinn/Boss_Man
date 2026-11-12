@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
+import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
@@ -407,9 +408,11 @@ export function StopAllWork() {
   const paused = hold.data?.paused;
   return (
     <Section id="stop-all-h" title="Stop all work">
-      <p className="muted" style={{ fontSize: 14 }}>
-        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
-      </p>
+      <MoreAbout lead="Stops every company from starting new agent runs until you press Resume.">
+        <li>Runs already going are not cut off. They finish by themselves. To end one now, use the Runs page.</li>
+        <li>Wake-ups and messages wait in line, and start when you resume.</li>
+        <li>While work is stopped, every page shows a banner at the top. Press Resume on it to start work again.</li>
+      </MoreAbout>
       {paused === true ? (
         <p style={{ fontSize: 14 }} data-testid="stop-all-on">
           <span className="tag red">On</span> All work is stopped.

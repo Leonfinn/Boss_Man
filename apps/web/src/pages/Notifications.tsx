@@ -4,6 +4,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
+import { MoreAbout } from "../components/MoreAbout";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
@@ -211,9 +212,13 @@ function SettingsForm() {
       <h2 id="notify-settings-h" style={{ fontSize: 17, fontWeight: 600 }}>
         How you're told
       </h2>
-      <p className="muted" style={{ fontSize: 14 }}>
-        Notes stay in this feed. Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Quiet hours and each agent's hourly cap lower a notification's level instead of dropping it.
-      </p>
+      <MoreAbout lead="Choose how loudly Boss Man tells you about things, and whether it reaches your phone.">
+        <li>Notes stay in this feed.</li>
+        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" in the sidebar.</li>
+        <li>In quiet hours, each notification is one step quieter: pages and asks become flags, and flags become notes.</li>
+        <li>Once an agent reaches its hourly number, the rest it sends that hour become notes.</li>
+        <li>Nothing is dropped: every notification still lands in this feed.</li>
+      </MoreAbout>
 
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 10 }}>
         <label style={check}>
