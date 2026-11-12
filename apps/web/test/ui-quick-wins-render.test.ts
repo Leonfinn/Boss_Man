@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { afterAll, describe, expect, it } from "vitest";
+import { launch } from "./real-page";
 
 // Real-browser checks for UI quick wins Q1-Q4 (BOS-1123): the sidebar count is readable, every plain
 // field shares one style, the Agents approval dropdown and its help text fit a phone, and a disabled
@@ -19,24 +19,8 @@ type Browser = {
   close: () => Promise<void>;
 };
 
-async function launch(): Promise<Browser | null> {
-  let chromium: { launch: (opts?: { executablePath?: string }) => Promise<Browser> };
-  try {
-    chromium = createRequire(import.meta.url)("playwright").chromium;
-  } catch {
-    return null;
-  }
-  for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
-    try {
-      return await chromium.launch(executablePath ? { executablePath } : {});
-    } catch {
-      // try the next one
-    }
-  }
-  return null;
-}
-
-const browser = await launch();
+// The shared launcher passes the flags the fenced check job needs (BOS-1095) and logs why a launch failed.
+const browser = (await launch()) as Browser | null;
 // Skipped only on a dev machine with no browser. At the merge gate it must run, so a missing browser fails there.
 if (!browser && process.env.BOSSMAN_MERGE_CHECK) {
   throw new Error("ui-quick-wins-render: no chromium/playwright found at the merge gate; this test must run there");
