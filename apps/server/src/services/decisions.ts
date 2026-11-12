@@ -713,6 +713,8 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
 
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
+/** BOS-1086: on a server card whose change needs a runner rebuild: deploy now, and queue the runner update for when the trial ends. */
+export const DEPLOY_AND_RUNNERS = "Deploy, then update runners after the trial";
 export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
@@ -976,7 +978,7 @@ export type LoopHooks = {
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
-export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, thenRunners?: boolean): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
@@ -1231,7 +1233,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Checks an answer's extra input before anything changes. */
   async function validate(d: typeof decisions.$inferSelect, answer: string, extra: AnswerExtra) {
     const ctx = d.context as DecisionContext;
-    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS)) {
+    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS)) {
       if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
       await selfDeploy.check(ctx);
     }
@@ -3218,9 +3220,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             update: ctx.update,
             doAfter: ctx.doAfter,
           });
-        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
-            await selfDeploy!.send(ctx, id);
+            await selfDeploy!.send(ctx, id, answer === DEPLOY_AND_RUNNERS);
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));

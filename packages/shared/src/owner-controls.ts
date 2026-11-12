@@ -121,7 +121,7 @@ export const OWNER_CONTROLS = {
   ],
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
-    "Deploy latest", "Build and update runners", "Save", "Cancel the update", "Update runners (finish runs first)",
+    "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
     // Ask every running agent to stop cleanly before an update (BOS-929).
