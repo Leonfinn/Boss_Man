@@ -95,4 +95,25 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     expect(slotFree(coord)).toBe(true);
     expect(existsSync(path.join(coord, "queue"))).toBe(true);
   });
+
+  // BOS-1228: a failed job keeps the start and end of its whole log (middle cut, secrets removed); a pass keeps none.
+  it("keeps a cut, redacted full log for a failed job and none for a passing one", async () => {
+    const { root, coord, env, commit } = setup();
+    mkdirSync(path.join(coord, "queue"), { recursive: true });
+    const ws = new Workspaces(root, env, coord);
+    // Fake secret, made up for this test.
+    const noisy = `echo START-LINE; echo MY_API_KEY=hunter2fakevalue; yes 'ordinary noise line' | head -c 3000000; echo END-LINE; exit 1`;
+    const bad = await ws.runCommitCheck({ projectId, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit }, noisy, 120_000, {});
+    expect(bad.ok).toBe(false);
+    expect(bad.output.length).toBeLessThanOrEqual(8192);
+    expect(bad.fullLog!.length).toBeLessThan(1_600_000);
+    expect(bad.fullLog!.length).toBeGreaterThan(1_000_000);
+    expect(bad.fullLog).toContain("START-LINE");
+    expect(bad.fullLog!.trimEnd().endsWith("END-LINE")).toBe(true);
+    expect(bad.fullLog).toMatch(/characters cut from the middle/);
+    expect(bad.fullLog).not.toContain("hunter2fakevalue");
+    const good = await ws.runCommitCheck({ projectId, jobId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", commit }, "echo fine", 60_000, {});
+    expect(good.ok).toBe(true);
+    expect(good.fullLog).toBeUndefined();
+  });
 });

@@ -1063,6 +1063,21 @@ export const checkJobs = pgTable(
   ],
 );
 
+/**
+ * The whole log of a failed check job (BOS-1228), cut to FULL_LOG_MAX and redacted before it is stored. Kept apart from
+ * check_jobs so the queue rows stay small; deleted after FULL_LOG_RETENTION_DAYS (the check sweep) or with the job.
+ */
+export const checkJobLogs = pgTable(
+  "check_job_logs",
+  {
+    jobId: uuid("job_id").primaryKey().references(() => checkJobs.id, { onDelete: "cascade" }),
+    log: text("log").notNull(),
+    chars: integer("chars").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("check_job_logs_created").on(t.createdAt)],
+);
+
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
 export const retros = pgTable(
   "retros",
