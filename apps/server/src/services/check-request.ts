@@ -7,8 +7,12 @@ import type { Db } from "../db/client.js";
 import { runners, tickets } from "../db/schema.js";
 import { checkQueue, type CheckScope } from "./check-queue.js";
 import { checkPriority } from "./check-gate.js";
+import { record } from "./activity.js";
 
 export class CheckRequestError extends Error {}
+
+/** Activity kind of a request_check answered by an existing job (a pass on the same tree, or the ticket's live job). */
+export const CHECK_REUSED_KIND = "check_reused";
 
 export type CheckRequestDeps = {
   /** Ask the company's runner for the ticket's diff (workspace.diff). */
@@ -51,6 +55,17 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
         priority: checkPriority(t),
         requestedBy: input.agentId,
       });
+      if (reused) {
+        // A reused request makes no check_jobs row, so this is the only trace of it for the check-line export (BOS-1309).
+        // No agent on the row, so per-agent activity counts never see it; the brief skips the kind. Never fails the request.
+        await record(db, {
+          companyId: input.companyId,
+          ticketId: t.id,
+          kind: CHECK_REUSED_KIND,
+          summary: `Check request answered by ${reused === "passed" ? "an earlier pass" : "a check already in line"} (${job.scope})`,
+          detail: { reused, scope, outcome: job.state },
+        }).catch(() => {});
+      }
       const uncommitted = d.files.length && d.head ? " Anything you have not committed is not in this check." : "";
       if (reused === "passed") return `Already answered: the same code (commit ${job.commit.slice(0, 8)}) passed a ${job.scope} check, so nothing was queued.${uncommitted}`;
       const st = await queue.status(input.companyId);
