@@ -58,9 +58,10 @@ const wakeLog = () => {
 /** An ExitPlanMode-shaped plan card (kind approval, type permission) whose run is alive or ended. */
 async function exitPlanCard(c: S, ticketId: string, runEnded: boolean) {
   const runId = randomUUID();
+  const [tk] = await c.db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
   await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId, startedAt: new Date(Date.now() - 3_600_000), ...(runEnded ? { endedAt: new Date() } : {}) });
   const [d] = await c.db.insert(decisions).values({
-    companyId: c.company.id, kind: "approval", question: "Engineer's plan: approve it to start building?", options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", raisedByAgentId: c.worker.id,
+    companyId: c.company.id, kind: "approval", question: `Approve Engineer's plan for "${tk!.title}"?`, options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", raisedByAgentId: c.worker.id,
     context: { type: "permission", runnerId: randomUUID(), runId, requestId: randomUUID(), plan: true, ticketId, planText: "x" },
   }).returning();
   return d!;
