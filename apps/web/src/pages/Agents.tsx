@@ -746,7 +746,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             {a.starred && !a.retiredAt && <Star size={14} className="agent-star" aria-label="Starred" fill="currentColor" />}
             {jobOf(a) !== a.name && <span className="muted agent-job">{jobOf(a)}</span>}
             <span className={`pill ${tone || "grey"} ${a.status}`}>
-              <span className="pill-mark" aria-hidden="true">{a.status === "paused" ? "❚❚" : ""}</span>
+              <span className="pill-mark" aria-hidden="true" />
               {label}
             </span>
           </div>
