@@ -632,9 +632,10 @@ describe("QA (BOS-248): token lifetime edges and isolation between cards", () =>
 
   it("one card's link answers only that card", async () => {
     const c = await setup();
-    const a = await c.ask({ question: "Question A?" });
+    // Two different asks. Near-identical wording would be one repeated question, and the older card would close (BOS-1193).
+    const a = await c.ask({ question: "Use deSEC for DNS?" });
     const { token: ta } = await c.sync();
-    const b = await c.ask({ question: "Question B?" });
+    const b = await c.ask({ question: "Rotate the backup encryption passphrase now?" });
     const { token: tb } = await c.sync();
     expect(ta).not.toBe(tb);
     expect((await c.tap({ token: ta })).json().outcome).toBe("approved");

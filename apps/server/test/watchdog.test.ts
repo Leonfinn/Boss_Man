@@ -755,6 +755,93 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect(await loops()).toBe(1);
   });
 
+  it("BOS-1199: the backtest replays review holds like the live rule", async () => {
+    await ctx.switchOn();
+    const mk = async (title: string) => {
+      const t = await ctx.ticket({ title, stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      for (const mins of [500, 400, 300, 200]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+      return t;
+    };
+    const held = await mk("Held all along");
+    await ctx.db.insert(reviewHolds).values({ ticketId: held.id, reason: "hold", createdAt: ctx.ago(550) });
+    const released = await mk("Released later");
+    await ctx.db.insert(reviewHolds).values({ ticketId: released.id, reason: "hold", status: "released", createdAt: ctx.ago(550), closedAt: ctx.ago(60) });
+    const bouncing = await mk("Never held");
+    for (const mins of [50, 40, 30]) await ctx.db.insert(ticketReviews).values({ ticketId: released.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const loops = (id: string) => bt.flags.filter((f) => f.ticketId === id && f.rule === "review_loop");
+    expect(loops(held.id)).toHaveLength(0);
+    // Flags only on the send-backs after the release, not the four before it.
+    expect(loops(released.id)).toHaveLength(1);
+    expect(new Date(loops(released.id)[0]!.firstAt).getTime()).toBeGreaterThanOrEqual(ctx.ago(50).getTime());
+    expect(loops(bouncing.id)).toHaveLength(1);
+  });
+
+  // QA gap tests for BOS-1167 (BOS-1200). Every time is ctx.ago(): the test clock, never a separate "now".
+  describe("review_loop and review holds (BOS-1167, QA)", () => {
+    const sendBacks = async (ticketId: string, minsAgo: number[]) => {
+      for (const m of minsAgo) await ctx.db.insert(ticketReviews).values({ ticketId, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(m) });
+    };
+    const loops = async (ticketId: string) => (await ctx.db.select().from(watchdogFlags).where(and(eq(watchdogFlags.ticketId, ticketId), eq(watchdogFlags.rule, "review_loop"), eq(watchdogFlags.status, "open")))).length;
+
+    it("a bouncing ticket that never had a hold is still flagged", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Bouncy, never held", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await sendBacks(t.id, [500, 400, 300, 200]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("a hold that was cancelled (pass withdrawn) ends like a released one: earlier send-backs stop counting", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Hold cancelled", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await sendBacks(t.id, [500, 400, 300, 200]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Hold", status: "cancelled", closedAt: ctx.ago(100) });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [50, 40, 30]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("a send-back at the very moment the hold ended does not count; one a minute later does", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Edge of the hold", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Hold", status: "released", closedAt: ctx.ago(100) });
+      await sendBacks(t.id, [100, 100, 100, 100]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [99, 98, 97, 96]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("two holds in a row: only send-backs after the LAST one count", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Held twice", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(900) });
+      await sendBacks(t.id, [800, 790]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "First", status: "released", closedAt: ctx.ago(700) });
+      // Four send-backs between the two holds: they would flag if the first hold's end were used.
+      await sendBacks(t.id, [600, 590, 580, 570]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Second", status: "released", closedAt: ctx.ago(300) });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [50, 40, 30]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("an open second hold silences the flag even when send-backs follow the first hold", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Re-held", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(900) });
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "First", status: "released", closedAt: ctx.ago(700) });
+      await sendBacks(t.id, [600, 590, 580, 570]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Second", status: "open" });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+    });
+  });
+
   it("the backtest hands a review loop off again in the sweep where it is sent back once more", async () => {
     await ctx.switchOn({ reviewHours: 6 });
     const t = await ctx.ticket({ title: "Bouncy", stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });

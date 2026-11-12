@@ -105,6 +105,7 @@ describe("clearsWhen on raise_decision (BOS-1161)", () => {
     const { id } = await ask(c, { question: "Shall I wait for the deploy with the first fix?", clearsWhen: { serverHasCommit: SHA_B.slice(0, 12) } });
     expect(id).toBeTruthy();
     expect(await closer(c, SHA_A).check()).toBe(0); // the server runs the older merge
+    expect((await cardOf(c, id!)).status).toBe("open"); // stays open, and the sweep did not throw
     expect(await closer(c, null).check()).toBe(0); // unknown live commit never clears
     expect(await closer(c, SHA_B).check()).toBe(1);
     expect(JSON.stringify((await cardOf(c, id!)).context)).toMatch(/server running now contains/);
@@ -189,7 +190,7 @@ describe("a new plan card supersedes the older ones for the ticket (BOS-1161)", 
 
     const old = await cardOf(c, older.id);
     expect(old.status).toBe("withdrawn");
-    expect((old.context as { withdrawn: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: `superseded by ${newer.id}` });
+    expect((old.context as { withdrawn: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringContaining(`Superseded by card ${newer.id} (newer plan from `) });
     expect((await cardOf(c, newer.id)).status).toBe("open");
     expect((await cardOf(c, other.id)).status).toBe("open"); // only plan cards are superseded
   });

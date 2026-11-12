@@ -83,7 +83,9 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Old work");
     const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "A stale question", options: ["A", "B"], recommended: "A", blocksTicketId: t.id, triedFirst: "Looked into this already and it needs a decision" });
-    await c.work.updateTicket(t.id, { state: "done", overLimit: true });
+    // Finished behind the card's back (no state-change event), so the CEO's own withdraw path is what runs. Finishing it through
+    // the normal path closes the card by itself now (BOS-1193, card-recheck.test.ts).
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
 
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "short" } }))).toBe(true);
@@ -254,7 +256,8 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Held twice");
     const first = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
-    const second = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
+    // Raised by another agent: the same agent asking again would have closed the first card by itself (BOS-1193).
+    const second = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card that asks the same thing." } }))).toBe(false);
     expect((await row(first.id)).status).toBe("withdrawn");
