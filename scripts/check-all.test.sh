@@ -141,8 +141,10 @@ if command -v flock >/dev/null; then
   budget BOSSMAN_CHECK_THREADS=3 | grep -qx "got 3 3 3 3" || fail "set budget not passed on: $(budget BOSSMAN_CHECK_THREADS=3)"
   budget BOSSMAN_CHECK_THREADS=3 GOMAXPROCS=1 | grep -qx "got 3 1 3 3" || fail "a caller's GOMAXPROCS is not kept"
   echo 3 >"$t/tproof"
-  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 node "$here/check-threads.mjs")
-  budget | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget)"
+  # BOS-1261: free memory caps the budget and moves with the runner's load, so both readings get the same fixed amount
+  # (1 TiB: the CPU rule alone decides). The test still checks that the slot count in the proof file reaches the budget.
+  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 BOSSMAN_CHECK_FREE_MEMORY=1099511627776 node "$here/check-threads.mjs")
+  budget BOSSMAN_CHECK_FREE_MEMORY=1099511627776 | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget BOSSMAN_CHECK_FREE_MEMORY=1099511627776)"
   rm -f "$t/tproof"
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
