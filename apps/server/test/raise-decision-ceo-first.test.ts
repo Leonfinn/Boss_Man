@@ -185,6 +185,21 @@ describe("the handover to the owner (BOS-1318)", () => {
     expect(phoneApprovable(handed, false)).toBe(false);
   });
 
+  it("a card already open at deploy (owner tier, no ownerOnly, no ladder) stays with the owner, the sweep leaves it, the CEO can't settle it, the owner can", async () => {
+    const [old] = await ctx.db.insert(decisions).values({
+      companyId: ctx.companyId, kind: "question", tier: "owner", status: "open", question: "Old housekeeping question?", options: ["Yes", "No"], recommendedOption: "Yes",
+      context: { type: "question" }, raisedByAgentId: ctx.dev.id,
+    }).returning();
+    ctx.advance(600);
+    await ctx.alerts.sweep();
+    const same = await row(old!.id);
+    expect(same.tier).toBe("owner");
+    expect(ctxOf(same).ladder).toBeUndefined();
+    expect(ceoAnswerRefusal(same, "Yes")).toMatch(/owner/);
+    await ctx.decisions.answer(old!.id, "Yes", {});
+    expect((await row(old!.id)).status).toBe("answered");
+  });
+
   it("the ladder records why the CEO has it", async () => {
     const d = await row(idOf(textOf(await ask(ctx.dev.id))));
     expect(ctxOf(d).ladder?.rung).toBe("ceo");
