@@ -6,6 +6,9 @@ import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
+import { checkLimitReconciler } from "./services/check-limit.js";
+import { checkQueue } from "./services/check-queue.js";
+import { getHold } from "./services/maintenance.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
@@ -45,6 +48,13 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
   },
 });
 
+const checkQueueSvc = checkQueue(db);
+const checkLimit = checkLimitReconciler({
+  slots: () => checkQueueSvc.slots(),
+  launch: launcher,
+  holdActive: async () => !!(await getHold(db)),
+  startDrain: () => maintenance.start({ kind: "settings" }),
+});
 const bg = createBackground(
   [
     // Scheduling passes; run ends and new wakes also prompt one.
@@ -65,7 +75,7 @@ const bg = createBackground(
     // Deploy tag moves (DR-033) that a restart or a leader change cut off: picked up again; the runner's lease makes a repeat harmless. // leader-only
     { name: "deploy tags", everyMs: Number(env.BOSSMAN_DEPLOY_TAGS_MS ?? 60_000), run: () => deploys.resumeTags() },
     // The safety net for cards closed outside the decisions service: a feed read never writes (BOS-413).
-    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: () => notes.markAnsweredRead() },
+    { name: "notification read sweep", everyMs: Number(env.BOSSMAN_NOTIFY_SWEEP_MS ?? 60_000), run: async () => { await notes.markAnsweredRead(); await notes.clearSettledPushes(); } },
     // The Scrum Master watchdog's rule checks (BOS-58): no model; wakes the Scrum Master only when a rule trips. Off per company until the owner switches it on.
     { name: "watchdog", everyMs: Number(env.BOSSMAN_WATCHDOG_MS ?? 5 * 60_000), run: () => watchdog.run() },
     // Workflow retros (docs/19): wakes the retro agent every 20 finished tickets or 7 days, whichever comes first. No model here.
@@ -84,6 +94,8 @@ const bg = createBackground(
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
+    // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
+    { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
     { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },

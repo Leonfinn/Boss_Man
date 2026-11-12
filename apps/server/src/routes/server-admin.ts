@@ -94,6 +94,9 @@ export function serverAdminRoutes(
       : r;
   });
 
+  // BOS-1086: take back a queued runner update.
+  owner.post("/api/self-deploy/cancel-runner-queue", async () => selfDeploy.cancelRunnerQueue());
+
   // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
   owner.post("/api/self-deploy/restart", async (_req, reply) => {
     const r = await selfDeploy.restartServer();

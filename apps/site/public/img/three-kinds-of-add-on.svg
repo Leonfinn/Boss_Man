@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 460" width="1160" height="460" role="img" aria-labelledby="ka-title ka-desc">
+  <title id="ka-title">Three kinds of add-on: skills, tool servers and runner add-ons, with where each comes from, who approves it and where it runs</title>
+  <desc id="ka-desc">Skills come from a GitHub link, are written in Boss Man or are uploaded, and the CEO can propose them. The Security Reviewer checks every proposed skill and the owner decides. A skill runs inside the agent's session. Tool servers are servers you already run: only the owner adds one, with its web address and a token kept in the secret store. They run on their own server, outside Boss Man, and the agent's runner calls them over the network, with permission cards for their tools. Runner add-ons come from Boss Man's own short list, agent-browser and webkit, each pinned to one version. The owner turns one on by putting its name in RUNNER_ADDONS and running the runner update; a new add-on joins the list only through a reviewed code change. They are built into the runner image, checked when it is built, and used from the agent's session. A skill that needs an add-on is left out of a run until that add-on shows as Working.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="ka-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="1160" height="460" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">Three kinds of extra. Each is added, approved and run in a different way.</text>
+
+  <!-- skills -->
+  <rect x="0" y="40" width="360" height="330" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="40" width="360" height="34" rx="10" fill="#17202c"/><rect x="0" y="62" width="360" height="12" fill="#17202c"/>
+  <text x="14" y="63" class="d" font-size="16" fill="#eef2f6">Skills</text>
+  <text x="346" y="63" class="b" font-size="12" text-anchor="end" fill="#c3cbd6">instructions for agents</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="100" class="bb" fill="#3d4757">WHERE IT COMES FROM</text>
+    <text x="14" y="120">A GitHub link, written in Boss Man,</text>
+    <text x="14" y="138">or uploaded. The CEO can propose one.</text>
+    <text x="14" y="176" class="bb" fill="#3d4757">WHO APPROVES IT</text>
+    <text x="14" y="196">The Security Reviewer checks it,</text>
+    <text x="14" y="214">then you decide. Every proposed skill</text>
+    <text x="14" y="232">goes through both.</text>
+    <text x="14" y="270" class="bb" fill="#3d4757">WHERE IT RUNS</text>
+    <text x="14" y="290">Inside the agent's session. Its files</text>
+    <text x="14" y="308">are loaded when the agent's run starts.</text>
+    <text x="14" y="346" class="bb">Some skills need a runner add-on.</text>
+  </g>
+
+  <!-- tool servers -->
+  <rect x="400" y="40" width="360" height="330" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="400" y="40" width="360" height="34" rx="10" fill="#17202c"/><rect x="400" y="62" width="360" height="12" fill="#17202c"/>
+  <text x="414" y="63" class="d" font-size="16" fill="#eef2f6">Tool servers</text>
+  <text x="746" y="63" class="b" font-size="12" text-anchor="end" fill="#c3cbd6">extra tools for agents</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="414" y="100" class="bb" fill="#3d4757">WHERE IT COMES FROM</text>
+    <text x="414" y="120">A server you already run or use.</text>
+    <text x="414" y="138">You give Boss Man its web address.</text>
+    <text x="414" y="176" class="bb" fill="#3d4757">WHO APPROVES IT</text>
+    <text x="414" y="196">Only you add one, with a token kept</text>
+    <text x="414" y="214">in the secret store. Each tool it offers</text>
+    <text x="414" y="232">still asks for permission when used.</text>
+    <text x="414" y="270" class="bb" fill="#3d4757">WHERE IT RUNS</text>
+    <text x="414" y="290">On its own server, outside Boss Man.</text>
+    <text x="414" y="308">The agent's runner calls it over the</text>
+    <text x="414" y="326">network.</text>
+  </g>
+
+  <!-- runner add-ons -->
+  <rect x="800" y="40" width="360" height="330" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <rect x="800" y="40" width="360" height="34" rx="10" fill="#c8282f"/><rect x="800" y="62" width="360" height="12" fill="#c8282f"/>
+  <text x="814" y="63" class="d" font-size="16" fill="#ffffff">Runner add-ons</text>
+  <text x="1146" y="63" class="b" font-size="12" text-anchor="end" fill="#ffffff">tools built into the runner</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="814" y="100" class="bb" fill="#3d4757">WHERE IT COMES FROM</text>
+    <text x="814" y="120">Boss Man's own short list: agent-</text>
+    <text x="814" y="138">browser and webkit, one version each.</text>
+    <text x="814" y="176" class="bb" fill="#3d4757">WHO APPROVES IT</text>
+    <text x="814" y="196">You turn one on in .env, then update</text>
+    <text x="814" y="214">the runner. A new one joins the list</text>
+    <text x="814" y="232">only through a reviewed code change.</text>
+    <text x="814" y="270" class="bb" fill="#3d4757">WHERE IT RUNS</text>
+    <text x="814" y="290">Built into the runner image and tested</text>
+    <text x="814" y="308">there. Agents use it from their session.</text>
+    <text x="814" y="326">Settings shows Working or Not working.</text>
+  </g>
+
+  <!-- link from add-ons to skills -->
+  <path d="M980 372 V412 H180 V374" stroke="#c8282f" stroke-width="2.5" fill="none" marker-end="url(#ka-ar)"/>
+  <rect x="270" y="384" width="620" height="62" rx="8" fill="#ffffff" stroke="#c8282f" stroke-width="2"/>
+  <text x="580" y="410" class="bb" font-size="14" text-anchor="middle" fill="#c8282f">A skill that needs an add-on waits for it.</text>
+  <text x="580" y="430" class="b" font-size="13" text-anchor="middle" fill="#17202c">Until the add-on shows Working, that skill is left out of the agent's runs.</text>
+</svg>

@@ -64,6 +64,8 @@ export type DeployWait = {
   /** "approve": Boss Man sends the request when quiet. "hand": a hand-applied update; nothing is sent, the owner is told when it is quiet. */
   origin: "approve" | "hand";
   override?: boolean;
+  /** The owner pressed the combined button (BOS-1086): the runner update follows this deploy. */
+  thenRunners?: boolean;
   sentAt?: string;
   windowUntil?: string;
   handoverSince?: string;
@@ -76,7 +78,7 @@ export type DeployWaitDeps = {
   checksRunning: () => Promise<number>;
   /** Runs going now, across every company. */
   openRuns: () => Promise<number>;
-  send: (ctx: { target: "server"; commit: string }, decisionId: string, opts: { override?: boolean }) => Promise<unknown>;
+  send: (ctx: { target: "server"; commit: string }, decisionId: string, opts: { override?: boolean; thenRunners?: boolean }) => Promise<unknown>;
   takeBack: (decisionId: string) => Promise<boolean>;
   /** Our own request (by id) is still in the host's inbox. */
   requestWaiting: (decisionId: string) => Promise<boolean>;
@@ -221,7 +223,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
     // the real result. A stop before the write is found by the sent phase (LOST_SEND_MS) and goes back to waiting.
     await save(next);
     try {
-      await deps.send({ target: "server", commit: w.commit }, w.decisionId, { override });
+      await deps.send({ target: "server", commit: w.commit }, w.decisionId, { override, thenRunners: w.thenRunners });
     } catch (err) {
       await save(w);
       throw err;
@@ -247,11 +249,11 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
      * waits); otherwise the wait starts and the owner is told what it waits for. A send failure throws, with no
      * wait left behind, so the decision reopens as before. // leader-only
      */
-    async begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand" }): Promise<DeployWait> {
+    async begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand"; thenRunners?: boolean }): Promise<DeployWait> {
       const have = await get();
       if (have) return have;
       const t = now();
-      const w: DeployWait = { decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, approvedAt: t.toISOString(), phase: "waiting", deadline: new Date(t.getTime() + WAIT_MINUTES * 60_000).toISOString(), minutes: WAIT_MINUTES, origin: input.origin ?? "approve" };
+      const w: DeployWait = { decisionId: input.decisionId, commit: input.commit, fromCommit: input.fromCommit, approvedAt: t.toISOString(), phase: "waiting", deadline: new Date(t.getTime() + WAIT_MINUTES * 60_000).toISOString(), minutes: WAIT_MINUTES, origin: input.origin ?? "approve", ...(input.thenRunners ? { thenRunners: true } : {}) };
       const q = await measure();
       if (q.ready && w.origin === "approve") {
         await save({ ...w, quiet: q });

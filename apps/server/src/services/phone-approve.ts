@@ -99,7 +99,7 @@ export function phoneApprovable(d: Decision, isBlocker: boolean): boolean {
   if (!options.includes(d.recommendedOption)) return false;
   const summary = summaryOf(d);
   if (!summary || cleanSummary(summary) !== summary || summary.length > SUMMARY_MAX) return false;
-  if (d.status !== "open" || d.tier !== "owner" || d.forAgentId || d.staleAt) return false;
+  if (d.status !== "open" || d.tier !== "owner" || d.forAgentId || (d.staleAt && d.recheckStage !== "lapsed")) return false;
   return true;
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks check-all.sh's retry logic with a stub in place of the real checks (BOSSMAN_CHECK_BODY).
-# shellcheck disable=SC2016  # the stub bodies are meant to expand later, inside the child
+# shellcheck disable=SC2016,SC2030,SC2031  # stub bodies expand later, inside the child; web_tests cases set env in their own subshells
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
@@ -28,6 +28,8 @@ run() {
 
 run 0 1 "success" 'echo x >>"$COUNT"'
 run 3 3 "EAGAIN retried, final rc kept" 'echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3'
+run 3 3 "agent that could not start under load retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t start claude-code-acp: x (EAGAIN)"; exit 3'
+run 3 1 "a plain run-ended error is not retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t set up the agent'"'"'s skills"; exit 3'
 run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
@@ -139,8 +141,11 @@ if command -v flock >/dev/null; then
   budget BOSSMAN_CHECK_THREADS=3 | grep -qx "got 3 3 3 3" || fail "set budget not passed on: $(budget BOSSMAN_CHECK_THREADS=3)"
   budget BOSSMAN_CHECK_THREADS=3 GOMAXPROCS=1 | grep -qx "got 3 1 3 3" || fail "a caller's GOMAXPROCS is not kept"
   echo 3 >"$t/tproof"
-  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 node "$here/check-threads.mjs")
-  budget | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget)"
+  # BOS-1261: free memory caps the budget and moves with the runner's load, so both readings get the same fixed amount
+  # (6 GiB: split over 3 slots it gives 1 worker, over 1 slot the cap of 4, on any host with 3+ CPUs, so a slot count that is
+  # not passed on fails the test even where the CPU rule alone gives 4 either way).
+  want=$(env -u BOSSMAN_CHECK_THREADS BOSSMAN_CHECK_SLOTS=3 BOSSMAN_CHECK_FREE_MEMORY=6442450944 node "$here/check-threads.mjs")
+  budget BOSSMAN_CHECK_FREE_MEMORY=6442450944 | grep -qx "got $want $want $want $want" || fail "3-slot budget is not $want: $(budget BOSSMAN_CHECK_FREE_MEMORY=6442450944)"
   rm -f "$t/tproof"
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
   lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
@@ -556,4 +561,58 @@ OLD
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
+# web_tests (BOS-1095): a failing vitest must make the step fail, and a passing one must not. A stub pnpm stands in for vitest.
+# The function is lifted out of check-all.sh so the real text is tested, not a copy.
+wt="$t/web-tests"; mkdir -p "$wt/bin"
+awk '/^web_tests\(\) \{/{p=1} p{print} p&&/^\}/{exit}' "$here/check-all.sh" >"$wt/fn.sh"
+[ -s "$wt/fn.sh" ] || fail "web_tests: function not found in check-all.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "stub vitest output"; exit "${STUB_VITEST_RC:-0}"' >"$wt/bin/pnpm"; chmod +x "$wt/bin/pnpm"
+web_case() { # web_case <label> <stub vitest exit> <want rc>
+  local rc=0
+  (set -euo pipefail; export PATH="$wt/bin:$PATH" STUB_VITEST_RC=$2 BOSSMAN_CHECK_TIMES_DIR="$wt"
+   self="$wt/check-all.sh"; : >"$self"
+   # shellcheck disable=SC1091
+   . "$wt/fn.sh"; web_tests "$wt" >"$wt/out" 2>&1) || rc=$?
+  [ "$rc" -eq "$3" ] || fail "web_tests $1: rc $rc, want $3: $(cat "$wt/out")"
+}
+cp "$here/check-no-skips.mjs" "$wt/check-no-skips.mjs"
+printf '%s' '{"numPassedTests":1,"testResults":[]}' >"$wt/vitest-web.json"
+web_case "passing vitest" 0 0
+web_case "failing vitest" 1 1
+# With no NODE_PATH, web_tests must hand vitest npm's global folder (when it holds playwright); a set NODE_PATH stays as it is.
+mkdir -p "$wt/gnm/playwright" "$wt/bin2"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "NODE_PATH seen: ${NODE_PATH:-none}"' >"$wt/bin2/pnpm"
+printf '%s\n' '#!/usr/bin/env bash' "echo \"$wt/gnm\"" >"$wt/bin2/npm"
+chmod +x "$wt/bin2/pnpm" "$wt/bin2/npm"
+(set -euo pipefail; unset NODE_PATH; export PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out2" 2>&1) || fail "web_tests NODE_PATH fallback: $(cat "$wt/out2")"
+grep -q "NODE_PATH seen: $wt/gnm" "$wt/out2" || fail "web_tests: no NODE_PATH fallback: $(cat "$wt/out2")"
+(set -euo pipefail; export NODE_PATH=/keep/me PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out3" 2>&1) || fail "web_tests keep NODE_PATH: $(cat "$wt/out3")"
+grep -q "NODE_PATH seen: /keep/me" "$wt/out3" || fail "web_tests: overwrote NODE_PATH: $(cat "$wt/out3")"
+# A HOME that does not exist (a fenced job on an old runner) must not reach the browser tests: they get a home of their own,
+# which is removed afterwards. A usable HOME is left alone.
+#
+# The fallback now sits at the top of check-all.sh so every step has it (BOS-1095: the shell tests' Chrome demo failed too).
+# The block is lifted out of the script and run with a missing and a usable HOME.
+awk '/^check_home=""$/{p=1} p{print} p&&/^fi$/{exit}' "$here/check-all.sh" >"$wt/home-block.sh"
+[ -s "$wt/home-block.sh" ] || fail "HOME fallback block not found in check-all.sh"
+home_case() { # home_case <label> <HOME value>; prints "HOME=.. XDG=.. exists=.." after the block, then whether the folder is gone after exit
+  (set -euo pipefail; export HOME="$2"; unset XDG_CONFIG_HOME
+   # shellcheck disable=SC1090,SC1091
+   . "$wt/home-block.sh"
+   echo "HOME=$HOME XDG=${XDG_CONFIG_HOME:-none} dir=$([ -d "$HOME/.config" ] && echo yes || echo no)") >"$wt/home-$1" 2>&1 || fail "HOME case $1: $(cat "$wt/home-$1")"
+}
+home_case missing "$wt/no-such-home"
+tail -n 1 "$wt/home-missing" | grep -q "HOME=$wt/no-such-home" && fail "unusable HOME kept: $(cat "$wt/home-missing")"
+tail -n 1 "$wt/home-missing" | grep -q "XDG=.*/.config dir=yes" || fail "no home/XDG folders for a missing HOME: $(cat "$wt/home-missing")"
+fb="$(tail -n 1 "$wt/home-missing" | sed 's/^HOME=\([^ ]*\) .*/\1/')"
+[ ! -e "$fb" ] || fail "fallback HOME not removed at exit: $fb"
+mkdir -p "$wt/good-home"
+home_case good "$wt/good-home"
+tail -n 1 "$wt/home-good" | grep -q "HOME=$wt/good-home XDG=none" || fail "a usable HOME was replaced: $(cat "$wt/home-good")"
 echo "check-all.test.sh: ok"

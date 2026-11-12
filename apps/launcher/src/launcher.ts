@@ -205,10 +205,17 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
      */
     setChecks(slots: number) {
       if (!Number.isInteger(slots) || slots < 1 || slots > 16) throw new LauncherError(400, "Slots must be a whole number from 1 to 16.");
-      const file = path.join(cfg.dataRoot, CHECKS_FILE);
-      writeFileSync(`${file}.tmp`, JSON.stringify({ slots }), { mode: 0o600 });
-      renameSync(`${file}.tmp`, file);
+      // The number is taken first: the launcher container's root is read-only and only companies/ is mounted, so the file
+      // may not be writable. The server sends the setting again every minute (BOS-1152), so a launcher that cannot
+      // remember it across a restart still ends up on the right number.
       cfg.requestedSlots = slots;
+      try {
+        const file = path.join(cfg.dataRoot, CHECKS_FILE);
+        writeFileSync(`${file}.tmp`, JSON.stringify({ slots }), { mode: 0o600 });
+        renameSync(`${file}.tmp`, file);
+      } catch (e) {
+        console.warn(JSON.stringify({ at: new Date().toISOString(), msg: "could not save Checks at once; the server will send it again after a restart", error: String((e as Error)?.message ?? e) }));
+      }
       return this.plannedChecks();
     },
 

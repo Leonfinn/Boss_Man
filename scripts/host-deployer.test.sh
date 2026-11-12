@@ -149,9 +149,13 @@ if(!g||g.envFound!==true||JSON.stringify(g.lines)!==JSON.stringify([["git.exampl
 hasnt "$D/outbox/host.json" 'old.example.lan'
 hasnt "$D/outbox/host.json" 'abc123'
 hasnt "$D/outbox/host.json" 'design tool'
+# DR-052: the .env the stack starts with is reported as its full path (the checkout's, where Compose reads it), and
+# not at all when there is none, so the server never has to guess it.
+has "$D/outbox/host.json" "\"env\": {\"file\": \"$(cd "$T/src" && pwd)/.env\"}"
 rm -f "$T/src/.env"
 host
 has "$D/outbox/host.json" '"netguardEnv": {"envFound": false, "lines": []}'
+hasnt "$D/outbox/host.json" '"env": {'
 # The repo probe is cached for an hour: a second run does not repeat it.
 cp "$D/state/repo-probe" "$T/probe1"; sleep 1.1; host; cmp -s "$D/state/repo-probe" "$T/probe1" || fail "repo probe was repeated within the hour"
 # BOS-986: a probe that fails reports one short, secret-free line saying why, and it is cached with the result.

@@ -1,0 +1,1 @@
+ALTER TABLE "agent_notes" ADD COLUMN "review_by" date;

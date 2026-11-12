@@ -2,7 +2,7 @@
 // The queue itself (order, slots, reuse, reasons) is check-queue.ts; this file only moves jobs between it and the runner,
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 import { and, eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import { fullLogPointer, type RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
@@ -32,7 +32,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
 
   async function ended(job: CheckJob) {
     if (job.requestedBy && deps.wake) {
-      const tail = job.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "";
+      const kept = job.state === "failed" ? await queue.logChars(job.id).catch(() => null) : null;
+      const where = kept ? `\n\n${fullLogPointer(job.id, job.ticketId, kept)}` : "";
+      const tail = (job.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "") + where;
       await Promise.resolve(deps.wake(job.requestedBy, { ticketId: job.ticketId, reason: "check_result", note: `${verdict(job)}${tail}`, priority: 2 })).catch(() => {});
     }
     await Promise.resolve(deps.onEnded?.(job)).catch(() => {});
@@ -63,8 +65,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   return {
     pump,
 
-    async onDone(runnerId: string, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string }) {
-      const job = await queue.complete(msg.jobId, { runnerId, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut });
+    async onDone(runnerId: string, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
+      const job = await queue.complete(msg.jobId, { runnerId, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
       // The runner may forget the result once the server has seen the job end, whether or not this answer counted.
       deps.send(runnerId, { type: "check.ack", jobId: msg.jobId });
       if (job) await ended(job);
@@ -85,6 +87,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
 
     /** Periodic: running jobs with no output for too long become stuck (and are stopped on the runner); everyone is told why. */
     async sweep(now = new Date()) {
+      await queue.pruneLogs(now).catch(() => 0); // BOS-1228: kept logs older than the retention period go
       const stuck = await queue.sweepStuck(now);
       for (const job of stuck) {
         if (job.runnerId) deps.send(job.runnerId, { type: "check.cancel", jobId: job.id });

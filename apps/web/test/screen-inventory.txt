@@ -110,20 +110,21 @@ reads:
 ## #/merge-queue
 sections: 
   - Merge queue
-  - Recently finished
-  - Running now
-  - Waiting to merge
+  - Needs you
 reads: 
+  - /api/companies/:id/check-queue
   - /api/companies/:id/merge-queue
 
 ## #/notifications
 sections: 
   - How you're told
   - Notifications
+  - Recent phone pushes
   - Set up your phone
 reads: 
   - /api/notification-settings
   - /api/notifications
+  - /api/notifications/pushes
 
 ## #/plan
 sections: 
@@ -352,7 +353,6 @@ reads:
 ## #/wiki
 sections: 
   - Company brief
-  - Page not found
   - Wiki
 reads: 
   - /api/companies/:id/brief

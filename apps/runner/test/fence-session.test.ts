@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
-import { claudeProjectSlug, levelFor, probeLandlock, runnerFence, type FenceLevel } from "../src/fence.js";
+import { claudeProjectSlug, levelFor, probeLandlock, runnerFence, shortTmpName, type FenceLevel } from "../src/fence.js";
 import { SessionManager } from "../src/session-manager.js";
 import { gateStoreDir } from "../src/store.js";
 import { Workspaces } from "../src/workspace.js";
@@ -93,7 +93,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel; works
   const endedEvent = events.find((e) => e.type === "run.ended") as { error?: string | null } | undefined;
   if (!existsSync(path.join(work, "reach.json"))) throw new Error(`the probe wrote nothing in ${work}: ${endedEvent?.error ?? "no error"}`);
   const reach = JSON.parse(readFileSync(path.join(work, "reach.json"), "utf8")) as Reach;
-  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runTmp: path.join(root, "runner-data", "run-tmp", runId), runId, coordDir, ticketId, sharedStore, gateStore };
+  return { reach, events, outside, sharedHome, home: path.join(agentsRoot, agentId), runTmp: path.join(root, "runner-data", "run-tmp", shortTmpName(runId)), runId, coordDir, ticketId, sharedStore, gateStore };
 }
 
 describe.skipIf(!live)("a fenced run", () => {
@@ -270,7 +270,7 @@ describe.skipIf(!live)("the shared memory link", () => {
     mkdirSync(elsewhere);
     writeFileSync(path.join(elsewhere, "keep.txt"), "keep");
     mkdirSync(path.join(root, "run-tmp"), { recursive: true });
-    symlinkSync(elsewhere, path.join(root, "run-tmp", runId));
+    symlinkSync(elsewhere, path.join(root, "run-tmp", shortTmpName(runId)));
     const events: RunnerEvent[] = [];
     let done!: () => void;
     const ended = new Promise<void>((r) => (done = r));
@@ -287,7 +287,7 @@ describe.skipIf(!live)("the shared memory link", () => {
     await ended;
     expect(events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
     const reach = JSON.parse(readFileSync(path.join(cwd, "reach.json"), "utf8")) as Reach;
-    expect(reach.env.TMPDIR).toBe(path.join(root, "run-tmp", runId));
+    expect(reach.env.TMPDIR).toBe(path.join(root, "run-tmp", shortTmpName(runId)));
     expect(reach.wroteTmp).toBe(true);
     expect(readdirSync(elsewhere)).toEqual(["keep.txt"]);
   });

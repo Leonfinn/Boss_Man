@@ -135,6 +135,10 @@ describe("watchdog rules (BOS-58)", () => {
     expect(evaluate({ tickets: [ticket({ bounces: 4 })], runs: [], holds: [] }, s, NOW)[0]!.detail.bounces).toBe(4);
   });
 
+  it("BOS-1167: a ticket under a review hold is not flagged as a review loop", () => {
+    expect(rules([ticket({ bounces: 5, held: true })])).toEqual([]);
+  });
+
   it("rule 1: a ticket held by another ticket is not flagged; the holder is, with how many it holds", () => {
     const blocked = ticket({ id: "b", state: "blocked", stateChangedAt: ago(2000) });
     const holder = ticket({ id: "h", stateChangedAt: ago(130) });
