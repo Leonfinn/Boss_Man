@@ -12,6 +12,7 @@ import { agents, companies, decisions, ownerChatMessages, projects, runs, ticket
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
+import { runCapabilities } from "./run-capabilities.js";
 
 export const CHAT_REASON = "owner_chat";
 
@@ -20,7 +21,7 @@ export const CHAT_REASON = "owner_chat";
  * tools, and the ticket tools for its own tickets), not just the board. The CEO, the Scrum Master and a personal assistant keep
  * their narrower chat.
  */
-export const chatHasWorkTools = (agent: { role: string; duty: string | null }) => agent.role !== "ceo" && agent.duty !== "assistant" && agent.duty !== "scrum_master";
+export const chatHasWorkTools = (agent: { role: string; duty: string | null }) => runCapabilities(agent, true).chatTools === "worker";
 const HISTORY = 30;
 /** A `#/tickets/<id>` link in a reply, which the run must have created or read (BOS-758). */
 const TICKET_LINK = /#\/tickets\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;

@@ -47,6 +47,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import type { paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, type watchdogService } from "./services/watchdog.js";
+import { runCapabilities } from "./services/run-capabilities.js";
 import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
@@ -1503,7 +1504,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
-          ? buildChatServer(db, services, scope, hooks, ceo, !ceo && me?.duty !== SCRUM_MASTER_DUTY)
+          ? buildChatServer(db, services, scope, hooks, ceo, me ? runCapabilities(me, true).chatTools === "worker" : false)
           : me?.duty === SCRUM_MASTER_DUTY
             ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent, false)
             : buildServer(db, services, scope, hooks, undefined, retroAgent, ceo);

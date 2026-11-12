@@ -6,7 +6,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
-import { CHAT_REASON, chatHasWorkTools } from "./chat.js";
+import { CHAT_REASON } from "./chat.js";
+import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
@@ -1051,7 +1052,8 @@ export function schedulerService(
     const [previous] = w.resumeRunId && agent.agentKind === "claude" ? await db.select({ acpSessionId: runs.acpSessionId }).from(runs).where(eq(runs.id, w.resumeRunId)) : [];
     // The agent's skills (R71) and tool servers go with every run, whatever woke it. The owner chat is the one exception: the board-only chats
     // (CEO, Scrum Master, PA) have no built-in tools to use them. An ordinary agent's chat has the same set as its ticket runs (BOS-1300).
-    const withTools = !chat || chatHasWorkTools(agent);
+    const caps = runCapabilities(agent, !!chat);
+    const withTools = caps.skillsAndToolServers;
     let { give: skillSet, withheld } = withTools && agent.agentKind === "claude" ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
     // A skill held back on the stored add-on report is checked once more against the runner now: a report that is stale or was never taken
     // would otherwise drop the skill (Penpot) from a run that could have used it (BOS-1300).
@@ -1096,7 +1098,7 @@ export function schedulerService(
       fundingSourceId: onSource ?? agent.fundingSourceId,
       cwd: chat ? chat.cwd(w.companyId, w.agentId) : runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply }),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
-      ...((chat && !withTools) || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
+      ...(caps.boardToolsOnly ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
       // A plan-first ticket starts in plan mode until its plan is approved (R40). Plan mode is the assignee's: a reviewer is never put in it (BOS-371).
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
