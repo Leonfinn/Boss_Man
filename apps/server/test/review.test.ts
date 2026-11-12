@@ -245,6 +245,34 @@ describe("approval lands in the background (B)", () => {
     expect(landingText({ outcome: "conflicts", detail: { files: ["a.ts"] } }, ctx)).toBe("Approved, but not merged: the work conflicts with main in a.ts. It's gone back to Engineer to sort out.");
     expect(landingText({ outcome: "uncommitted", detail: { files: ["b.ts"] } }, ctx)).toContain("isn't saved to the branch yet (b.ts)");
   });
+
+  // BOS-1220: a failed check always names what failed; never "exit code undefined".
+  it("names the failed step and test, and never prints an undefined exit code", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const output = "PASS  merge check\nFAIL  related tests (exit 1)\n       FAIL  test/foo.test.ts > foo > does the thing\ncheck-quick: FAILED\n";
+    const failed = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output } }, ctx);
+    expect(failed).toContain('exit code 1; step that failed: "related tests (exit 1)"');
+    expect(failed).toContain("first failing test: test/foo.test.ts > foo > does the thing");
+    // The migration-number bounce is also verify_failed and has no exit code or log.
+    const migration = landingText({ outcome: "verify_failed", detail: { why: ["0123 is taken by main"] } }, ctx);
+    expect(migration).not.toMatch(/undefined/);
+    expect(migration).toContain("migration number is already taken (0123 is taken by main)");
+    // A check stopped before it reported (null exit code) says so plainly.
+    const stopped = landingText({ outcome: "verify_failed", detail: { exitCode: null, output: "" } }, ctx);
+    expect(stopped).toContain("was stopped before it reported");
+    expect(stopped).not.toMatch(/undefined|null/);
+  });
+
+  // BOS-1228: the bounce says where the whole log is and how to open it; no pointer when none was kept.
+  it("names the kept full log in a failed-check bounce", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const jobId = "11111111-2222-4333-8444-555555555555";
+    const ticketId = "66666666-7777-4888-8999-000000000000";
+    const withLog = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x", keptLog: { jobId, ticketId, chars: 300_000 } } }, ctx);
+    expect(withLog).toContain(`tickets tool with action check_log, ticketId ${ticketId} and jobId ${jobId}`);
+    expect(withLog).toMatch(/293 KB, kept 14 days/);
+    expect(landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x" } }, ctx)).not.toContain("check_log");
+  });
 });
 
 describe("landing an approved ticket (R46, R47)", () => {
@@ -496,7 +524,8 @@ describe("server-owned check queue (BOS-316)", () => {
   it("does not restart the merge while an owner sign-off is still open", async () => {
     const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
     await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
-    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Sign off?", recommendedOption: "yes" }).returning();
+    // A real sign-off card (BOS-1078: only a card that gates the merge holds it, not any card linked to the ticket).
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Sign off?", recommendedOption: "yes", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "CEO" } }).returning();
     await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
     await expect(c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id })).rejects.toThrow(/waiting on the owner/);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");

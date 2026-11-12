@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, asc, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddonReport, isInfiniteModel, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
@@ -10,10 +10,6 @@ import { recordRestart, type HelloRestart, type LastRestart } from "./runner-res
 import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
-
-/** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
-const RESTART_PULL_MAX = 20;
-const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
 
 /** How many times one event may fail with an unexplained (uncoded) error before it is stored, marked and acked (BOS-606). */
 const MAX_APPLY_ATTEMPTS = 3;
@@ -463,14 +459,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>, imageCommit?: string) {
       // An older runner sends none: keep what we last knew rather than blanking it. A new image with no
       // commit (built outside a checkout) clears the old one, so a stale commit never vouches for it (BOS-764).
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: imageCommit?.toLowerCase() ?? null, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+      const [before] = await db.select({ commit: runners.imageCommit }).from(runners).where(eq(runners.id, runner.id));
+      const next = imageCommit?.toLowerCase() ?? null;
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, imageCommit: next, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+      // BOS-1161: a hello that brings a different image commit is a finished rebuild; the caller flags the cards it makes moot.
+      return { imageChanged: !!next && next !== (before?.commit ?? null) };
     },
 
     /**
      * A runner said hello with its boot id (BOS-352). A new id means the process restarted, which
-     * silently kills any background check an agent started, so the checks parked on a schedule_check
-     * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
-     * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
+     * silently kills any background check an agent started. The checks parked on a schedule_check
+     * keep their booked time (BOS-1075): pulling them forward here fired every pending check on
+     * every restart, so a deploy check booked for later went off seven times in a day. Mark them
+     * instead, so the wake at its own time still says the runner restarted; runs cut off are
+     * resumed by the recovery sweep. A reconnect (same id) changes nothing.
      */
     async bootSeen(runner: Runner, bootId: string | undefined, hello: Omit<HelloRestart, "bootId"> = {}): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
@@ -479,24 +481,19 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       // A runner with no boot id on record (new, or older than BOS-352) can't be told apart from a reconnect.
       if (runner.bootId) restartedAt.set(runner.id, at.getTime());
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
-      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the wakes below.
+      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the marking below.
       try {
         const last = await recordRestart(db, runner, { bootId, ...hello }, { firstBoot: !runner.bootId, at });
         if (runner.bootId) for (const l of [...restartListeners]) void Promise.resolve(l(runner, last)).catch(() => {});
       } catch {
         /* the restart still happened; only its reason is lost */
       }
-      if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
       const pending = await db
-        .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
+        .select({ id: tickets.id })
         .from(tickets)
-        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)))
-        .orderBy(asc(tickets.monitorAt))
-        .limit(RESTART_PULL_MAX);
+        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)));
       if (!pending.length) return 0;
-      await db.update(runners).set({ bootPulledAt: at }).where(eq(runners.id, runner.id));
-      await db.update(tickets).set({ monitorAt: at, monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
-      for (const p of pending) await record(db, { companyId: runner.companyId, agentId: p.assigneeAgentId, ticketId: p.id, kind: "monitor", summary: "The runner restarted: the scheduled check was brought forward", at });
+      await db.update(tickets).set({ monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
       return pending.length;
     },
 

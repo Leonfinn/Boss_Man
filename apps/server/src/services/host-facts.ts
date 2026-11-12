@@ -44,6 +44,9 @@ const HostRecord = z.object({
   /** BOS-990: sha256 of the script the deployer runs from, and of the copy in the checkout (the live version). Empty = unreadable. */
   deployer: z.object({ scriptSha: z.string().regex(/^[0-9a-f]{64}$/).or(z.literal("")).default(""), repoSha: z.string().regex(/^[0-9a-f]{64}$/).or(z.literal("")).default("") }).optional().catch(undefined),
   compose: z.object({ files: z.array(z.string()).default([]), bluegreen: z.boolean().default(false), liveColour: z.string().default("") }).optional().catch(undefined),
+  /** DR-052: the .env file the stack is started with, as the deployer knows it (never worked out on the server from
+   * the src folder: that is right on one host and not on every host). Absent from an older deployer. */
+  env: z.object({ file: z.string().regex(/^\/[A-Za-z0-9_./-]{1,300}$/) }).optional().catch(undefined),
   network: z.object({ addresses: z.array(z.string()).default([]), ports: z.record(z.string(), z.string()).default({}) }).optional().catch(undefined),
   /** The ntfy add-on's own https address (NTFY_BASE_URL), the one the phone app subscribes at. Absent: not reported. */
   ntfy: z.object({
@@ -98,6 +101,23 @@ const csv = (a: string[]) => a.join(",");
 export type StoppedContainer = { name: string; status: string; exit: string; since: string };
 /** The containers reported as not running, each named: what the panel needs to say which ones and why. */
 export const STOPPED_CONTAINERS_KEY = "check.container_status.stopped.names";
+/** A folder or file name that is safe to put in a command the owner pastes as it is: no spaces, quotes or `$`. */
+const PLAIN_PATH = /^[A-Za-z0-9_./-]{1,300}$/;
+/**
+ * DR-052: the docker compose prefix for this host (`{{host.compose.cmd}}`), so a step says
+ * `{{host.compose.cmd}} restart <service>` and never builds paths by hand. It is what the host deployer itself
+ * runs: `docker compose` from the checkout (paths.src), which is where Compose reads the project's .env, with the
+ * reported compose files (COMPOSE_FILE) named with -f, since the owner's shell may not have COMPOSE_FILE set.
+ * Built only from facts the host reported; missing or unsafe (a space, a quote) means no fact, never a guess.
+ */
+export function composeCommand(r: Pick<HostRecord, "paths" | "compose">): string | null {
+  const src = r.paths?.src;
+  if (!src || !src.startsWith("/") || !PLAIN_PATH.test(src)) return null;
+  const files = r.compose?.files ?? [];
+  if (files.some((f) => !PLAIN_PATH.test(f))) return null;
+  return [`cd ${src} && docker compose`, ...files.map((f) => `-f ${f}`)].join(" ");
+}
+
 /** The host's record flattened into dotted keys with string values. Only allowlisted fields exist in the record,
  * so only allowlisted keys come out; a value is never longer than a short string. */
 export function flattenHostRecord(r: HostRecord): Record<string, string> {
@@ -111,6 +131,9 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
   if (r.paths) { o["paths.install"] = r.paths.install; o["paths.src"] = r.paths.src; o["paths.deployer"] = r.paths.deployer; }
   if (r.deployer) { if (r.deployer.scriptSha) o["deployer.scriptSha"] = r.deployer.scriptSha; if (r.deployer.repoSha) o["deployer.repoSha"] = r.deployer.repoSha; }
   if (r.compose) { o["compose.files"] = csv(r.compose.files); o["compose.bluegreen"] = String(r.compose.bluegreen); o["compose.liveColour"] = r.compose.liveColour; }
+  if (r.env) o["env.file"] = r.env.file;
+  const cmd = composeCommand(r);
+  if (cmd) o["compose.cmd"] = cmd;
   if (r.network) {
     o["network.addresses"] = csv(r.network.addresses);
     for (const [k, v] of Object.entries(r.network.ports)) o[`network.port.${k}`] = v;
@@ -247,8 +270,11 @@ export function hostFactsService(deps: { dir?: string; log?: (msg: string) => vo
   /** BOS-990: the deployer script's fingerprints from the host's last report. null = no report at all; an empty
    * `scriptSha` = the host reported but its deployer is too old to say what script it runs. */
   async function deployerScript(): Promise<{ scriptSha: string; repoSha: string; reportedAt: string } | null> {
-    const r = await read();
-    return r ? { scriptSha: r.deployer?.scriptSha ?? "", repoSha: r.deployer?.repoSha ?? "", reportedAt: r.writtenAt } : null;
+    // BOS-1057: read the same record the "This host" facts come from (sync keeps the last report when host.json is
+    // missing or unreadable right now), so the line shows whenever the facts do instead of vanishing as "none".
+    const rec = await sync();
+    if (!rec.reportedAt) return null;
+    return { scriptSha: rec.facts["deployer.scriptSha"]?.value ?? "", repoSha: rec.facts["deployer.repoSha"]?.value ?? "", reportedAt: rec.reportedAt };
   }
 
   return { read, hosts, serverHost, deployerScript, load, sync, confirm, value, valuesFor, reportedAddons, netguardEnv };

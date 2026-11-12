@@ -67,8 +67,8 @@ export async function refsOf(db: Db, companyId: string) {
   return <T extends { number: number | null }>({ number, ...r }: T) => ({ ref: ticketRef(c?.prefix, number), ...r });
 }
 
-export const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, ...r }: T) => {
-  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, lastActivityAt: r.lastActivityAt }, new Date());
+export const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null; stateNoteStaleReason?: string | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, stateNoteStaleReason, ...r }: T) => {
+  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, stateNoteStaleReason, lastActivityAt: r.lastActivityAt }, new Date());
   return note ? { ...r, stateNote: note } : r;
 };
 

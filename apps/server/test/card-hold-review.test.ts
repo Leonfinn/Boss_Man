@@ -88,9 +88,27 @@ describe("an owner card on handed-in work (BOS-919)", () => {
     });
   }
 
-  it("the merge waits while the card is open, and goes ahead once it is answered", async () => {
+  it("a plain question or owner to-do on a ticket in review does not hold its merge (BOS-1078)", async () => {
     const t = await ctx.ticket({ systemState: "review" });
-    const card = await ctx.raise(t.id);
+    const question = await ctx.raise(t.id);
+    const todo = await ctx.decisions.raise({ companyId: ctx.co.company.id, agentId: ctx.co.ceo.id, question: "Rotate the deploy key", options: ["Done", "Not yet"], recommended: "Done", blocksTicketId: t.id, triedFirst: "No host access", ownerMustDo: true, steps: ["Open Settings → Secrets and rotate the deploy key."] });
+    // Both stay linked to the ticket (the board shows them in Your review)...
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id))).toHaveLength(2);
+    // Both are open in the owner's queue: not holding the merge is not the same as being closed.
+    const open = await ctx.db.select({ id: decisions.id }).from(decisions).where(eq(decisions.status, "open"));
+    expect(open.map((d) => d.id)).toEqual(expect.arrayContaining([question.id, todo.id]));
+    // ...but neither holds the merge: the gate goes past them (this bare project has no board, so it fails later on).
+    const r = await ctx.review.landOnce(t.id, "the owner").catch((e: unknown) => e);
+    expect(r).not.toBeInstanceOf(ReviewHeldError);
+    expect(String((r as Error)?.message ?? "")).not.toMatch(/card .* is still open/);
+    // Once the ticket is finished (BOS-1193) the plain question closes by itself; the owner's to-do outlives the merge.
+    const after = await ctx.db.select({ id: decisions.id }).from(decisions).where(eq(decisions.status, "open"));
+    expect(after.map((d) => d.id)).toContain(todo.id);
+  });
+
+  it("a card raised with holdsMerge holds the merge while open, and the merge goes ahead once it is answered", async () => {
+    const t = await ctx.ticket({ systemState: "review" });
+    const card = await ctx.decisions.raise({ companyId: ctx.co.company.id, agentId: ctx.co.ceo.id, question: "Which payment provider?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: t.id, holdsMerge: true, triedFirst: "Compared both providers" });
     await expect(ctx.review.landOnce(t.id, "the owner")).rejects.toBeInstanceOf(ReviewHeldError);
     // A wait, not a failure: land() raises no merge-stuck card for it.
     await expect(ctx.review.land(t.id, "the owner")).rejects.toThrow(/card .* is still open/);

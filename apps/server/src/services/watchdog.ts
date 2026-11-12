@@ -7,7 +7,7 @@ import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notI
 import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
-import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
+import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
@@ -77,7 +77,7 @@ export type WatchdogDeps = {
    * The idle-capacity rules (BOS-659) read both; absent, those rules do nothing.
    */
   capacity?: (companyId: string) => Promise<{ busy: number; limit: number }>;
-  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
+  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string; /** Feed and browser only, never the phone (BOS-1097). */ noPush?: boolean }) => Promise<unknown>;
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
@@ -328,15 +328,16 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       else withOwner.add(id!);
     }
     if (stalls.length) for (const r of await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(inArray(reviewRequests.id, stalls))) withOwner.add(r.ticketId);
-    const bounces = new Map(
-      (
-        await db
-          .select({ ticketId: ticketReviews.ticketId, n: sql<number>`count(*)::int` })
-          .from(ticketReviews)
-          .where(and(inArray(ticketReviews.ticketId, ids), eq(ticketReviews.verdict, "changes_requested")))
-          .groupBy(ticketReviews.ticketId)
-      ).map((r) => [r.ticketId, r.n]),
-    );
+    // Send-backs count only from when the ticket's last review hold ended (BOS-1167): a hold is a deliberate stop.
+    const holdEnds = new Map<string, number>();
+    for (const h of await db.select({ ticketId: reviewHolds.ticketId, closedAt: reviewHolds.closedAt }).from(reviewHolds).where(and(inArray(reviewHolds.ticketId, ids), isNotNull(reviewHolds.closedAt))))
+      holdEnds.set(h.ticketId, Math.max(holdEnds.get(h.ticketId) ?? 0, h.closedAt!.getTime()));
+    const bounces = new Map<string, number>();
+    for (const r of await db
+      .select({ ticketId: ticketReviews.ticketId, createdAt: ticketReviews.createdAt })
+      .from(ticketReviews)
+      .where(and(inArray(ticketReviews.ticketId, ids), eq(ticketReviews.verdict, "changes_requested"))))
+      if (r.createdAt.getTime() > (holdEnds.get(r.ticketId) ?? 0)) bounces.set(r.ticketId, (bounces.get(r.ticketId) ?? 0) + 1);
     const runRows = await db
       .select({ id: runs.id, ticketId: runs.ticketId, agentId: runs.agentId, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
       .from(runs)
@@ -866,7 +867,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         await recordMove({ companyId, kind: "record_urgent_page", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Record only: would have paged the owner that one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")}). Nothing was sent.` });
         continue;
       }
-      await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions" });
+      await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions",
+        // BOS-1097: holding up tickets is not urgency. This page names no card, so the phone could never clear it once the card was answered: feed and browser only.
+        noPush: true });
       await log({ companyId, kind: "urgent_alert", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Boss Man paged the owner: one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")})` });
     }
   }

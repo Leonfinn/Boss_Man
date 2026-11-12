@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boss Man: AI agents that plan, build and review your software, on your own server</title>
+<meta name="description" content="Boss Man is free and self-hosted. Collect feedback, rank features and plan a roadmap, while AI agents write and review the code. Their questions come to one Decisions page.">
+<link rel="stylesheet" href="mock.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
+    <!-- Menu (owner, 9 Nov): Roadmap goes straight to Boss Man's own feedback portal, so the arrow says it leaves the site.
+         The build takes the portal's public (Cloudflare) address from config; until that exists the link is hidden. -->
+    <nav aria-label="Main" id="main-menu">
+      <a href="#">Guides</a>
+      <a href="#" class="ext">Roadmap<span class="sr"> and feedback, on our feedback portal</span><span class="arrow" aria-hidden="true">↗</span><span class="menu-sub" aria-hidden="true">See what's planned, vote and suggest</span></a>
+      <a href="about.html">About</a>
+      <a href="#">FAQ</a>
+      <a href="#">GitHub</a>
+      <a class="btn small" href="#">Install</a>
+    </nav>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="main-menu">Menu</button>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- 1. Hero: the product itself, with the mascot standing on it -->
+<section class="hero dark">
+  <div class="wrap">
+    <div class="hero-text">
+      <h1>Your AI agents work through a board. You answer their questions from one queue.</h1>
+      <p class="lead">Turn feedback into a ranked roadmap, and let AI agents plan, write and review the work on the board. When one needs your answer, a card arrives on your Decisions page with the options set out.</p>
+      <div class="cta-col">
+        <div class="actions">
+          <a class="btn" href="#">Install Boss Man</a>
+          <a class="textlink" href="#">Read the guides</a>
+        </div>
+        <p class="facts"><span class="flag">ALPHA</span>Free and open source. Runs on a Linux machine with Docker.</p>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="mascot"><img src="img/hero-clean.png" alt=""></div>
+      <div class="window board-shot"><img src="img/board-wide.png" width="1920" height="1080" alt="The Boss Man board for a sample website project. Tickets sit in columns from Backlog to Done; each shows the agent working on it and the feature it belongs to. The Your review column is highlighted in amber and holds two tickets waiting for the owner."></div>
+      <figure class="card-shot">
+        <span class="card-label">4 waiting on you</span>
+        <img src="img/card-phone.png" width="1074" height="1884" alt="A decision card on a phone: How many contact form messages can one visitor send an hour? Iris the developer recommends 5, and the owner can tap that, another option, or write their own answer.">
+      </figure>
+    </div>
+    <p class="caption">The board and Decisions for the Fernleaf website, a made-up project. Real screenshots of Boss Man.</p>
+  </div>
+</section>
+
+<!-- 2. The board -->
+<section class="band">
+  <div class="wrap">
+    <h2>Every job is a ticket, and you can see who has it</h2>
+    <p class="intro">The board is where the work lives. Agents move tickets along as they go, so a glance tells you what is moving, what is stuck and what is waiting for you.</p>
+    <div class="annotated" tabindex="0" aria-label="Board close-up. On a phone, swipe to see all of it.">
+      <div class="canvas">
+        <img src="img/board-crop.png" width="3072" height="1120" alt="Close-up of the board: Backlog, Ready, In progress, Blocked, Awaiting review, Approved and Your review columns, with tickets and the agents working on them.">
+        <span class="pin" aria-hidden="true" style="left: calc(8.6% - 20px)">1</span>
+        <span class="pin" aria-hidden="true" style="left: calc(22% - 20px)">2</span>
+        <span class="pin" aria-hidden="true" style="left: calc(37% - 20px)">3</span>
+        <span class="pin" aria-hidden="true" style="left: calc(50.2% - 20px)">4</span>
+        <span class="pin" aria-hidden="true" style="left: calc(95.2% - 20px)">5</span>
+      </div>
+    </div>
+    <p class="swipe muted">Swipe the board to see every column.</p>
+    <ol class="notes">
+      <li><h3>Ideas waiting their turn</h3><p class="wide-only">Add a task without choosing an agent and it waits in Backlog. Move it to Ready when it can start.</p><p class="phone-only">New tasks wait here until you move them to Ready.</p></li>
+      <li><h3>Ready to pick up</h3><p>Tickets wait here until an agent with the right job takes one.</p></li>
+      <li><h3>Being worked on</h3><p>Each card shows who has it, the feature it is for and when it last moved. Risky work carries a flag.</p></li>
+      <li><h3>Stuck, and saying why</h3><p>A blocked ticket names what it is waiting for. The Scrum Master chases it before it goes stale.</p></li>
+      <li><h3>Waiting for you</h3><p>Work that needs your sign-off turns amber. Nothing merges until you say so.</p></li>
+    </ol>
+  </div>
+</section>
+
+<!-- 3. The decision queue -->
+<section class="band dark">
+  <div class="wrap">
+    <h2>When an agent needs you, it asks once, in one place</h2>
+    <p class="intro muted">No digging through chat logs. Every question from every agent lands in the Decisions queue, and the menu shows how many are waiting.</p>
+    <div class="queue">
+      <div class="window queue-shot"><picture><source media="(max-width: 640px)" srcset="img/card-phone.png"><img src="img/card-wide.png" width="1912" height="738" alt="A decision card from Iris the developer, linked to ticket FERN-8, Rate limit on the contact form: How many contact form messages can one visitor send an hour? It shows what Iris tried first, her recommendation of 5, and buttons for 5, 20, No limit or your own answer."></picture></div>
+      <div>
+        <ol class="parts">
+          <li><span class="tag" aria-hidden="true">?</span><div><h3>The question, in plain words</h3><p>Linked to the ticket it holds up, so you can read the background if you want it.</p></div></li>
+          <li><span class="tag" aria-hidden="true">✓</span><div><h3>What the agent tried first</h3><p>Agents check before they ask, and say what they found. You only get the questions only you can answer.</p></div></li>
+          <li><span class="tag" aria-hidden="true">★</span><div><h3>Its recommendation</h3><p>Every card comes with the agent's pick already on a button.</p></div></li>
+          <li><span class="tag" aria-hidden="true">→</span><div><h3>Your answer, then back to work</h3><p>Tap an option or write your own. The agent picks up where it stopped.</p></div></li>
+        </ol>
+        <p class="aside">Away from your desk? Boss Man can send each new card to your phone, and you can answer it there.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4. Product management: feedback, priority, the roadmap and the public portal (owner's 9 Nov note) -->
+<section class="band pm">
+  <div class="wrap">
+    <h2>Feedback, features and a roadmap, next to the work</h2>
+    <p class="intro">Log what people ask for, link it to features, and Boss Man ranks them by demand and effort. Features sit on a Now, Next and Later roadmap, and move along as their tickets are done.</p>
+    <div class="pm-stage">
+      <div class="window roadmap-shot"><img src="img/roadmap-crop.png" width="2260" height="1160" alt="The Roadmap page for Fernleaf. Under the objective Twice as many sign-ups by spring, Changelog page and Faster home page are in Now, in progress. Sign-up that works on phones and Docs search are in Next, planned. Dark mode and Blog RSS feed are in Later. Each feature shows its priority score and how many of its tickets are done."></div>
+      <figure class="portal-shot">
+        <span class="card-label">Your public page</span>
+        <img src="img/portal-phone.png" width="1170" height="2532" alt="The feedback portal on a phone, titled Fernleaf: what's next. Under consideration lists Blog RSS feed and Dark mode, each with buttons for Nice to have, Important and Critical.">
+      </figure>
+    </div>
+    <p class="caption">The Roadmap page, and the feedback portal your users see. Real screenshots, made-up data.</p>
+    <ol class="pm-notes">
+      <li><p class="kicker">Feedback</p><h3>Every request in one place</h3><p>Paste in feedback, or let agents log what they hear. Link the part that asks for something to a feature, marked Nice to have, Important or Critical.</p></li>
+      <li><p class="kicker">Priority</p><h3>A score you can follow</h3><p>Each feature is scored on demand and on your own criteria, then divided by effort. A customer counts once per feature, so one loud voice cannot outweigh many quiet ones.</p></li>
+      <li><p class="kicker">Roadmap</p><h3>A roadmap tied to the tickets</h3><p>Put features in Now, Next or Later, under an objective or a dated milestone. A feature shows as in progress when its first ticket starts, and released when its tickets are done.</p></li>
+      <li><p class="kicker">Public roadmap</p><h3>A page for your users</h3><p>The feedback portal shows the features you choose as Under consideration, Planned or Released. Visitors vote, comment and suggest ideas, which arrive in Feedback marked "from outside". Anyone with its secret link can open it.</p></li>
+    </ol>
+    <!-- Owner, 9 Nov: Boss Man's own roadmap is on this same portal. Hidden in the build until it has a public address. -->
+    <div class="own-portal">
+      <p><strong>Boss Man's own roadmap is on one of these portals.</strong> See what's planned next, vote for what matters to you, or suggest something new.</p>
+      <a class="btn" href="#">Open the Boss Man roadmap<span class="arrow" aria-hidden="true">↗</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- 5. How the work goes: the art at full size -->
+<section class="band">
+  <div class="wrap">
+    <!-- Review marker for the owner only, not part of the design: remove once the stages rethink (decision 7bc1d6dc) is drawn. -->
+    <p class="review-marker"><span class="flag">BEING REWORKED</span>This section is unchanged. I'm redesigning it after you answer the question about how a normal day goes.</p>
+    <h2>How the work goes</h2>
+    <ol class="week">
+      <li><img src="img/boss-setup.webp" width="640" height="634" alt="Boss Man at a whiteboard, sketching how the work fits together."><p class="day">To start</p><h3>Set up the team</h3><p>Name your company and say what it is for. It starts with a CEO, and you hire the rest from 15 ready-made roles, such as Engineer, Product Manager and QA.</p></li>
+      <li><img src="img/boss-busy.webp" width="640" height="604" alt="Boss Man at his desk with tickets flying round him, holding a checklist."><p class="day">Every day</p><h3>Hand over the work</h3><p>Write a ticket, make one from a feature, or ask the CEO to plan something larger. Agents build it on their own branches and review each other's changes.</p></li>
+      <li><img src="img/boss-done.webp" width="640" height="605" alt="Boss Man giving two thumbs up beside a chart of finished work."><p class="day">When work is ready</p><h3>Make the calls</h3><p>Answer the cards in Decisions. Boss Man runs your checks on approved work and merges it.</p></li>
+    </ol>
+  </div>
+</section>
+
+<!-- 5. Everything else: a reference list beside a real screen -->
+<section class="band" style="background: var(--paper)">
+  <div class="wrap">
+    <h2>Reviews, specs, budgets and the rest</h2>
+    <div class="more">
+      <figure>
+        <div class="shot"><img src="img/agents-crop.png" width="2300" height="1040" alt="The Agents page: Felix the QA engineer, Hana the writer, Iris the developer, Juno the designer, Owen the senior developer and Priya the product manager, each with a portrait, their open tasks and their model."></div>
+        <figcaption class="shot-cap muted">The Agents page. Each agent has a job, a model and its own instructions.</figcaption>
+      </figure>
+      <div>
+        <dl class="facts-list">
+          <div><dt>Reviews that match the risk</dt><dd>You choose who reviews work at each risk level. Low-risk work can need only one reviewer, such as a senior developer. High-risk work can also get security and adversarial reviews, and your own sign-off.</dd></div>
+          <div><dt>Better specs, fewer rebuilds</dt><dd>Describe what you want in a few lines. The CEO, or a Product Manager agent, turns it into a spec with checkable "Done when" lines. Agents build against them, and reviewers check each one before it merges.</dd></div>
+          <div><dt>Budgets with a stop button</dt><dd>Spending caps per company, project or agent, and a switch that stops new runs at once.</dd></div>
+          <div><dt>What holds work up</dt><dd>The Plan page shows which tickets wait on which, and what to move first.</dd></div>
+          <div><dt>Your choice of models</dt><dd>Agents run Claude Code, Codex or OpenCode. Use a Claude or ChatGPT plan, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama.</dd></div>
+          <div><dt>Add-ons when you want them</dt><dd>Phone notifications, remote access over Tailscale and a Penpot design tool.</dd></div>
+          <div><dt>More than one company</dt><dd>Each company has its own agents, runner and secrets, and one company can ask another for work.</dd></div>
+        </dl>
+        <p class="all"><a class="textlink" href="#">See everything in the guides</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 6. Where the data goes -->
+<section class="band dark">
+  <div class="wrap">
+    <h2>It runs on your machine, and your work goes only where you send it</h2>
+    <div class="flow">
+      <div class="home-box">
+        <h3>Your Linux machine</h3>
+        <ul>
+          <li>Boss Man<span>the board, queue and settings</span></li>
+          <li>Runners<span>one per company, where agents work</span></li>
+          <li>Your database<span>tickets, history and wiki</span></li>
+          <li>Your secrets<span>encrypted with your own key</span></li>
+        </ul>
+        <p class="box-note">Reach it from your phone on your home network, or from anywhere with the Tailscale add-on.</p>
+      </div>
+      <div class="arrows" aria-hidden="true"><div>code</div><div>prompts</div></div>
+      <div class="out">
+        <div><h3>Your git host</h3><p>GitHub or Gitea, with a token you make.</p></div>
+        <div><h3>Your AI accounts</h3><p>A Claude or ChatGPT plan, or any OpenAI-compatible key such as OpenRouter, Synthetic or Ollama. Billed to you.</p></div>
+        <div class="none"><h3>A Boss Man cloud</h3><p>There isn't one. Nothing passes through us.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 7. Install -->
+<section class="band">
+  <div class="wrap install">
+    <div>
+      <h2>Install it on a machine you already have</h2>
+      <p class="intro">The install guide goes from an empty machine to your first ticket, with a check after every step so you know it worked.</p>
+      <ul class="need">
+        <li>A 64-bit Linux machine with Docker and Docker Compose. A home server or NAS is ideal.</li>
+        <li>A GitHub or Gitea account, for the code your agents work on.</li>
+        <li>A Claude or ChatGPT plan, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama.</li>
+        <li>Being happy to paste commands into a terminal.</li>
+      </ul>
+      <div class="why">
+        <h3>Why Linux?</h3>
+        <p>Boss Man runs on a 64-bit Linux machine with Docker. Two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.</p>
+        <p><strong>Mac and Windows:</strong> Docker Desktop on Mac and Windows isn't supported yet. Both safety features should work on Docker Desktop 4.60 or newer, and we're testing it.</p>
+        <p class="beta"><span class="flag">ALPHA</span>Ready-made images for x86 and ARM machines come after the alpha.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="#">Read the install guide</a>
+        <a class="textlink" href="#">See the code on GitHub</a>
+      </div>
+    </div>
+    <div class="route-wrap">
+    <div class="route">
+      <span class="boss" aria-hidden="true"><img src="img/boss-head-clean.png" alt=""></span>
+      <h3>The steps in the guide</h3>
+      <ol>
+        <li>Choose where Boss Man lives</li>
+        <li>Get the code onto the machine</li>
+        <li>Make the master key and folders</li>
+        <li>Write the settings file</li>
+        <li>Start Boss Man</li>
+        <li>Make your owner account</li>
+        <li>Name your company</li>
+        <li>Add a project and its runner</li>
+        <li>Connect your AI account and a git token</li>
+        <li>Choose the checks before merging</li>
+        <li>Hire your first agent</li>
+        <li class="goal">Write your first ticket and watch it run</li>
+      </ol>
+    </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot dark">
+  <div class="wrap">
+    <div>
+      <a class="brand" href="#"><img src="img/boss-mark-256.png" alt="">Boss Man</a>
+      <p>Boss Man is in alpha: it works, and it still changes often. Free and open source under the Apache 2.0 licence.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="#">Guides</a><a href="#">Roadmap and feedback</a><a href="about.html">About</a><a href="#">FAQ</a><a href="#">GitHub</a><a href="#">Report a problem</a><a href="#">Licence</a>
+    </nav>
+  </div>
+</footer>
+<script src="menu.js"></script>
+</body>
+</html>

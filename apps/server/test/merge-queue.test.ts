@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, tickets } from "../src/db/schema.js";
+import { checkJobs, checkResults, companies, decisions, reviewRequests, settings, ticketDependencies, ticketReviews, tickets } from "../src/db/schema.js";
 import { failingLine, failingStep, mergeQueueService } from "../src/services/merge-queue.js";
 import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY } from "../src/services/check-queue.js";
 
@@ -85,6 +85,81 @@ describe("merge queue screen (BOS-587)", () => {
     const data = await queue(c);
     expect(data.waiting.find((r: { ticketId: string }) => r.ticketId === sign.id)).toMatchObject({ state: "waiting_for_sign_off", actor: "owner" });
     expect(data.waiting.find((r: { ticketId: string }) => r.ticketId === wait.id)).toMatchObject({ state: "waiting_for_slot" });
+  });
+
+  describe("the card that holds a merge (BOS-1078)", () => {
+    const newTicket = async (c: Awaited<ReturnType<typeof setup>>, title: string, risk: "low" | "high" = "low") => {
+      const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string; number: number };
+      await c.db.update(tickets).set({ systemState: "review", risk }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+      return t;
+    };
+    const ask = (c: Awaited<ReturnType<typeof setup>>, ticketId: string, question: string, holdsMerge?: boolean) =>
+      c.decisions.raise({ companyId: c.company.id, agentId: null, question, options: ["Yes", "No"], recommended: "Yes", blocksTicketId: ticketId, triedFirst: "Looked into it first", ...(holdsMerge ? { holdsMerge } : {}) });
+
+    it("a plain question or owner to-do on the ticket doesn't hold it: it waits for a check slot", async () => {
+      const c = (ctx = await setup());
+      const t = await newTicket(c, "Linked to a plain card");
+      await ask(c, t.id, "Is the copy on the page right?");
+      const row = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+      expect(row).toMatchObject({ state: "waiting_for_slot", decisionId: null });
+      expect(row.card ?? null).toBeNull();
+    });
+
+    it("a card marked as holding the merge is named: its question, who raised it, and its id", async () => {
+      const c = (ctx = await setup());
+      const t = await newTicket(c, "Held on purpose");
+      const d = await ask(c, t.id, "Which payment provider?\nWe compared two.", true);
+      const row = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+      expect(row).toMatchObject({ state: "waiting_for_decision", decisionId: d.id, actor: "owner", signedOffAt: null });
+      expect(row.card).toMatchObject({ id: d.id, kind: "hold", question: "Which payment provider?", raisedBy: null, staleHint: null });
+      expect(row.label).toBe(`held by Boss Man's card: "Which payment provider?"`);
+    });
+
+    it("signed off and held by another card: says the sign-off is done, and when", async () => {
+      const c = (ctx = await setup());
+      const t = await newTicket(c, "Signed off already", "high");
+      // The owner's own approval, given after this round's review: the sign-off is done.
+      await c.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "the owner", verdict: "approved" });
+      const d = await ask(c, t.id, "Rotate the deploy key first?", true);
+      // A plain to-do on the same ticket is not what the row names.
+      await ask(c, t.id, "Please check the page after the merge");
+      const row = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+      expect(row).toMatchObject({ state: "waiting_for_decision", decisionId: d.id });
+      expect(row.card).toMatchObject({ id: d.id, kind: "hold", question: "Rotate the deploy key first?" });
+      expect(typeof row.signedOffAt).toBe("string");
+      expect(row.next).toMatch(/^Your sign-off is done; /);
+    });
+
+    it("the owner's sign-off is named first, ahead of any other card", async () => {
+      const c = (ctx = await setup());
+      const t = await newTicket(c, "Needs the sign-off", "high");
+      await ask(c, t.id, "Rotate the deploy key first?", true);
+      const [s] = await c.db
+        .insert(decisions)
+        .values({ companyId: c.company.id, kind: "approval", question: "Merge it, or send it back?", options: ["Approve and merge"], recommendedOption: "Approve and merge", tier: "owner", dedupeKey: `risk-review:${t.id}`, context: { type: "risk_review", ticketId: t.id } })
+        .returning({ id: decisions.id });
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: s!.id });
+      const row = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+      expect(row).toMatchObject({ state: "waiting_for_sign_off", decisionId: s!.id });
+      expect(row.card).toMatchObject({ id: s!.id, kind: "sign_off" });
+    });
+
+    it("a holding card that names a ticket now done is flagged as probably stale", async () => {
+      const c = (ctx = await setup());
+      const done = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "The ticket it asked for" })).json() as { id: string; number: number };
+      await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, done.id));
+      const [co] = await c.db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, c.company.id));
+      const t = await newTicket(c, "Held by an old card");
+      await ask(c, t.id, `Should this wait for ${co!.prefix}-${done.number}?`, true);
+      const row = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
+      expect(row.card.staleHint).toBe(`It names ${co!.prefix}-${done.number}, which is done now, so it may no longer be needed.`);
+      // By id prefix too, as agents often write it.
+      const t2 = await newTicket(c, "Held by an id");
+      await ask(c, t2.id, `Waiting on ${done.id.slice(0, 8)} to land`, true);
+      const row2 = (await queue(c)).waiting.find((r: { ticketId: string }) => r.ticketId === t2.id);
+      expect(row2.card.staleHint).toMatch(/which is done now/);
+    });
   });
 
   it("flags a ticket waiting over an hour as stuck for age, with its minutes over 60", async () => {

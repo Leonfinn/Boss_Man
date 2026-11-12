@@ -182,7 +182,7 @@ export const runners = pgTable("runners", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
   bootId: text("boot_id"),
-  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  /** Kept for older databases: when a restart last pulled parked checks forward. No longer written (BOS-1075). */
   bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
@@ -388,7 +388,7 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
-    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    /** When a runner restart happened while this check was waiting (BOS-352, BOS-1075); the wake at its booked time says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
@@ -397,6 +397,9 @@ export const tickets = pgTable(
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
     ownerSetup: text("owner_setup"),
+    /** The CEO's reason for letting these setup steps past a card-check finding (DR-052, lintOverride). Set with the
+     * steps and cleared whenever they change without one, so it only ever covers the text it was given for. */
+    ownerSetupOverride: text("owner_setup_override"),
     /** The owner setup card raised when this went live (DR-011), so it's withdrawn on a switch-back and never doubled. */
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
@@ -416,6 +419,10 @@ export const tickets = pgTable(
     lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
+    /** When the agent's WIP limit first held this ticket in Ready (BOS-1180). A field, not note text, so a state note can't erase it; cleared when the ticket leaves Ready. */
+    wipHeldAt: timestamp("wip_held_at", { withTimezone: true }),
+    /** What the owner did that made it so (BOS-1192), e.g. `the owner answered "Approve BOS-1095?"`. */
+    stateNoteStaleReason: text("state_note_stale_reason"),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -473,6 +480,21 @@ export const decisions = pgTable("decisions", {
   /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
   staleAt: timestamp("stale_at", { withTimezone: true }),
   staleReason: text("stale_reason"),
+  /**
+   * Where a flagged card is in its re-check (BOS-1193, DR-054): "author" (the agent that raised it has 30 minutes),
+   * "ceo" (the CEO has a further 30), or "lapsed" (neither confirmed it, so it is back with the owner and says so).
+   * Null when the card is not being re-checked. The card stays `open` throughout, so holds and answers keep working.
+   */
+  recheckStage: text("recheck_stage"),
+  /** When the card entered its current re-check stage; the deadline for the stage counts from here. */
+  recheckStageAt: timestamp("recheck_stage_at", { withTimezone: true }),
+  /** When the last re-check confirmed the card still holds; events older than this don't flag it again. */
+  recheckedAt: timestamp("rechecked_at", { withTimezone: true }),
+  /** The agent that confirmed it, and the one line on what they checked (kept for the card's history, never on its face). */
+  recheckedByAgentId: uuid("rechecked_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  recheckNote: text("recheck_note"),
+  /** How many times a re-check confirmed this card; a card confirmed twice and flagged again within a day goes straight to the CEO. */
+  recheckCount: integer("recheck_count").notNull().default(0),
 },
   // The open queue is read on the dashboard, brief and ladder, and the notifications sweep scans status (BOS-407).
   // Every hot read also names the company, so the two go together (BOS-546); status alone still serves the sweeps that cross companies.
@@ -1041,6 +1063,21 @@ export const checkJobs = pgTable(
   ],
 );
 
+/**
+ * The whole log of a failed check job (BOS-1228), cut to FULL_LOG_MAX and redacted before it is stored. Kept apart from
+ * check_jobs so the queue rows stay small; deleted after FULL_LOG_RETENTION_DAYS (the check sweep) or with the job.
+ */
+export const checkJobLogs = pgTable(
+  "check_job_logs",
+  {
+    jobId: uuid("job_id").primaryKey().references(() => checkJobs.id, { onDelete: "cascade" }),
+    log: text("log").notNull(),
+    chars: integer("chars").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("check_job_logs_created").on(t.createdAt)],
+);
+
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
 export const retros = pgTable(
   "retros",
@@ -1161,6 +1198,12 @@ export const notifications = pgTable(
     decisionId: uuid("decision_id").unique().references(() => decisions.id, { onDelete: "cascade" }),
     pushedAt: timestamp("pushed_at", { withTimezone: true }),
     pushError: text("push_error"),
+    /** Why this one counted as urgent enough for the phone (BOS-1097); null when it never pushed. */
+    pushReason: text("push_reason"),
+    /** When the push was cleared from the phone after its card settled (BOS-1097). */
+    pushClearedAt: timestamp("push_cleared_at", { withTimezone: true }),
+    /** Why a clear did not happen, e.g. the ntfy server is too old to clear (BOS-1097). */
+    pushClearNote: text("push_clear_note"),
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
@@ -1284,6 +1327,8 @@ export const agentNotes = pgTable(
     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    /** Optional day (YYYY-MM-DD) after which the note shows "review due" (BOS-1170). */
+    reviewBy: date("review_by", { mode: "string" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

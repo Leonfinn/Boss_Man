@@ -13,6 +13,53 @@ const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> 
   ask: { label: "Ask", tone: "amber", help: "Needs an answer" },
 };
 
+type PhonePush = { id: string; title: string; body: string | null; link: string; company: string | null; pushedAt: string; reason: string | null; state: "open" | "with_ceo" | "settled" | "notice"; clearedAt: string | null; clearNote: string | null };
+const PUSH_STATE: Record<PhonePush["state"], string> = { open: "Still open", with_ceo: "Back with the CEO", settled: "Settled", notice: "A notice" };
+
+/** The last 20 phone pushes: when, which card, why it counted as urgent, and whether it is still open (BOS-1097). */
+function RecentPhonePushes() {
+  const pushes = usePoll((signal) => api<{ items: PhonePush[] }>("/api/notifications/pushes", { signal }), 30_000, "phone-pushes");
+  const items = pushes.data?.items ?? [];
+  const tooOld = items.some((p) => p.clearNote?.startsWith("unsupported"));
+  return (
+    <section aria-labelledby="recent-pushes-h" style={{ marginBottom: 24 }}>
+      <h2 id="recent-pushes-h" style={{ fontSize: 17, fontWeight: 600 }}>
+        Recent phone pushes
+      </h2>
+      <p className="muted" style={{ fontSize: 13 }}>
+        The last 20 messages sent to your phone, and why each counted as urgent. Plans, sign-offs and after-merge checks only push if the CEO marks them urgent.
+      </p>
+      {tooOld && (
+        <p className="muted" role="note" style={{ fontSize: 13 }}>
+          Your ntfy server is too old to take a settled card's message off your phone (it needs version 2.14 or newer), so those stay there until you swipe them away.
+        </p>
+      )}
+      {pushes.data && !items.length && <p className="muted">Nothing has been sent to your phone yet.</p>}
+      {items.length > 0 && (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((p) => (
+            <li key={p.id} className="card" style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <strong style={{ fontWeight: 600 }}>{p.body ?? p.title}</strong>
+                <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>
+                  {p.company ? `${p.company} · ` : ""}
+                  {when(p.pushedAt)}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 13 }}>
+                <span className={`tag ${p.state === "open" ? "amber" : ""}`}>{PUSH_STATE[p.state]}</span>
+                {p.clearedAt && <span className="muted">Cleared from your phone</span>}
+                <span className="muted">Why: {p.reason ?? "not recorded"}</span>
+                <a href={p.link}>See the evidence</a>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
   return (
     <li className="card" style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px 16px", opacity: n.readAt ? 0.7 : 1 }}>
@@ -233,7 +280,7 @@ function SettingsForm() {
               </select>
             </div>
             <p className="muted" style={{ fontSize: 14, margin: 0 }}>
-              Urgent means a decision that holds up work only you can answer, a deploy that carries the fix for a live problem, a "server unusable" page, or the test button. Urgent pushes go at the top priority (5), which breaks through Do Not Disturb on Android. With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
+              Urgent means a deploy that carries the fix for a live problem, a page such as "server unusable", a card the CEO marked urgent because you must act now, or the test button. A card that only holds up a ticket does not push, and a settled card is cleared from your phone if your ntfy server is 2.14 or newer. Urgent pushes go at the top priority (5), which can break through Do Not Disturb on Android once you switch that on in ntfy (see the note by the test button). With All decisions, routine ones go at the normal priority (3). Everything stays on the Decisions and Notifications pages either way.
             </p>
             <label style={check}>
               <input type="checkbox" checked={form.pushLevels.includes("flag")} onChange={(e) => set({ pushLevels: e.target.checked ? [...form.pushLevels, "flag"] : form.pushLevels.filter((x) => x !== "flag") })} />
@@ -311,6 +358,19 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
+      {saved?.ntfy && (
+        <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
+          On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
+          <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
+            Phone notifications guide: iPhone
+          </a>
+        </p>
+      )}
+      {saved?.ntfy && (
+        <p className="muted" data-testid="phone-android-note" style={{ fontSize: 14, margin: 0 }}>
+          On Android, urgent pushes only break through Do Not Disturb after you turn on "Override Do Not Disturb" once for ntfy's max-priority channel: ntfy app → Settings → Notifications → the max-priority channel → Override Do Not Disturb. Test once with Do Not Disturb on.
+        </p>
+      )}
       {saved?.ntfy && saved.phoneTest && (
         <p role="status" data-testid="phone-test-status" style={{ fontSize: 14 }}>
           {saved.phoneTest.confirmedAt
@@ -460,6 +520,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} set={setFilters} />}
       {active && (

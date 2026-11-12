@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks check-all.sh's retry logic with a stub in place of the real checks (BOSSMAN_CHECK_BODY).
-# shellcheck disable=SC2016  # the stub bodies are meant to expand later, inside the child
+# shellcheck disable=SC2016,SC2030,SC2031  # stub bodies expand later, inside the child; web_tests cases set env in their own subshells
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
@@ -28,6 +28,8 @@ run() {
 
 run 0 1 "success" 'echo x >>"$COUNT"'
 run 3 3 "EAGAIN retried, final rc kept" 'echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3'
+run 3 3 "agent that could not start under load retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t start claude-code-acp: x (EAGAIN)"; exit 3'
+run 3 1 "a plain run-ended error is not retried (BOS-965)" 'echo x >>"$COUNT"; echo "Error: The run ended with an error: Couldn'"'"'t set up the agent'"'"'s skills"; exit 3'
 run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
 run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
 run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
@@ -49,7 +51,7 @@ run 0 1 "merge gate runs even if the marker is set" 'echo x >>"$COUNT"' "$here/.
 scratch_case() { # scratch_case <label> <scratch dir> <stub body> <expected rc>
   local label=$1 dir=$2 body=$3 want=$4 rc=0
   mkdir -p "$dir"
-  (cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$dir" BOSSMAN_TICKET=11111111-1111-4111-8111-111111111111 BOSSMAN_CHECK_BODY="$body" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
+  (cd "$here/.." && env CHECK_ALL_LOCK="$t/scl" CHECK_ALL_PAIR_PROOF="$t/scp" BOSSMAN_CHECK_STORE=off BOSSMAN_SCRATCH="$dir" BOSSMAN_TICKET="${BOSSMAN_TICKET_FOR_CASE:-11111111-1111-4111-8111-111111111111}" BOSSMAN_CHECK_BODY="$body" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
   [ "$rc" = "$want" ] || fail "$label: rc $rc, want $want: $(cat "$t/out")"
 }
 scratch_case "scratch: a passing run" "$t/scratch.own" 'echo a step of output' 0
@@ -63,12 +65,24 @@ grep -q "(exit 3)" "$t/scratch.own/check-all.log" || fail "scratch: a failure's 
 grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scratch: the previous run's log is not kept: $(ls "$t"/scratch.own)"
 # A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
 mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
-keep="/tmp/bossman-scratch-11111111-1111-4111-8111-111111111111.log"
-if [ ! -w "$t/scratch.denied" ]; then
-  rm -f "$keep"
+# A ticket id of its own for this run, so no leftover or parallel run shares the /tmp file name.
+tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$$" "$RANDOM" "$RANDOM" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
+keep="/tmp/bossman-scratch-$tid.log"
+# -w says yes for a fenced /tmp that still refuses a write, so probe with a real write.
+if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && rm -f "/tmp/bossman-probe-$tid"; then
+  BOSSMAN_TICKET_FOR_CASE=$tid
   scratch_case "scratch: a run that can't write it" "$t/scratch.denied" 'echo through the temp folder' 0
   grep -q "through the temp folder" "$keep" || fail "scratch: no /tmp log for a fenced run: $(cat "$t/out")"
   grep -q "check-all: finished .* (exit 0)" "$keep" || fail "scratch: the /tmp log is not marked finished"
+  rm -f "$keep"
+  # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its log is kept under another name.
+  : >"$keep"; chmod 444 "$keep"
+  if [ ! -w "$keep" ]; then
+    scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
+    # shellcheck disable=SC2144
+    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log || fail "scratch: no fallback log beside a taken name: $(cat "$t/out")"
+    rm -f /tmp/bossman-scratch-"$tid".*.log
+  fi
   rm -f "$keep"
 fi
 chmod 755 "$t/scratch.denied"
@@ -544,4 +558,58 @@ OLD
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
+# web_tests (BOS-1095): a failing vitest must make the step fail, and a passing one must not. A stub pnpm stands in for vitest.
+# The function is lifted out of check-all.sh so the real text is tested, not a copy.
+wt="$t/web-tests"; mkdir -p "$wt/bin"
+awk '/^web_tests\(\) \{/{p=1} p{print} p&&/^\}/{exit}' "$here/check-all.sh" >"$wt/fn.sh"
+[ -s "$wt/fn.sh" ] || fail "web_tests: function not found in check-all.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "stub vitest output"; exit "${STUB_VITEST_RC:-0}"' >"$wt/bin/pnpm"; chmod +x "$wt/bin/pnpm"
+web_case() { # web_case <label> <stub vitest exit> <want rc>
+  local rc=0
+  (set -euo pipefail; export PATH="$wt/bin:$PATH" STUB_VITEST_RC=$2 BOSSMAN_CHECK_TIMES_DIR="$wt"
+   self="$wt/check-all.sh"; : >"$self"
+   # shellcheck disable=SC1091
+   . "$wt/fn.sh"; web_tests "$wt" >"$wt/out" 2>&1) || rc=$?
+  [ "$rc" -eq "$3" ] || fail "web_tests $1: rc $rc, want $3: $(cat "$wt/out")"
+}
+cp "$here/check-no-skips.mjs" "$wt/check-no-skips.mjs"
+printf '%s' '{"numPassedTests":1,"testResults":[]}' >"$wt/vitest-web.json"
+web_case "passing vitest" 0 0
+web_case "failing vitest" 1 1
+# With no NODE_PATH, web_tests must hand vitest npm's global folder (when it holds playwright); a set NODE_PATH stays as it is.
+mkdir -p "$wt/gnm/playwright" "$wt/bin2"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "NODE_PATH seen: ${NODE_PATH:-none}"' >"$wt/bin2/pnpm"
+printf '%s\n' '#!/usr/bin/env bash' "echo \"$wt/gnm\"" >"$wt/bin2/npm"
+chmod +x "$wt/bin2/pnpm" "$wt/bin2/npm"
+(set -euo pipefail; unset NODE_PATH; export PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out2" 2>&1) || fail "web_tests NODE_PATH fallback: $(cat "$wt/out2")"
+grep -q "NODE_PATH seen: $wt/gnm" "$wt/out2" || fail "web_tests: no NODE_PATH fallback: $(cat "$wt/out2")"
+(set -euo pipefail; export NODE_PATH=/keep/me PATH="$wt/bin2:$PATH" BOSSMAN_CHECK_TIMES_DIR="$wt"
+ self="$wt/check-all.sh"; : >"$self"
+ # shellcheck disable=SC1091
+ . "$wt/fn.sh"; web_tests "$wt" >"$wt/out3" 2>&1) || fail "web_tests keep NODE_PATH: $(cat "$wt/out3")"
+grep -q "NODE_PATH seen: /keep/me" "$wt/out3" || fail "web_tests: overwrote NODE_PATH: $(cat "$wt/out3")"
+# A HOME that does not exist (a fenced job on an old runner) must not reach the browser tests: they get a home of their own,
+# which is removed afterwards. A usable HOME is left alone.
+#
+# The fallback now sits at the top of check-all.sh so every step has it (BOS-1095: the shell tests' Chrome demo failed too).
+# The block is lifted out of the script and run with a missing and a usable HOME.
+awk '/^check_home=""$/{p=1} p{print} p&&/^fi$/{exit}' "$here/check-all.sh" >"$wt/home-block.sh"
+[ -s "$wt/home-block.sh" ] || fail "HOME fallback block not found in check-all.sh"
+home_case() { # home_case <label> <HOME value>; prints "HOME=.. XDG=.. exists=.." after the block, then whether the folder is gone after exit
+  (set -euo pipefail; export HOME="$2"; unset XDG_CONFIG_HOME
+   # shellcheck disable=SC1090,SC1091
+   . "$wt/home-block.sh"
+   echo "HOME=$HOME XDG=${XDG_CONFIG_HOME:-none} dir=$([ -d "$HOME/.config" ] && echo yes || echo no)") >"$wt/home-$1" 2>&1 || fail "HOME case $1: $(cat "$wt/home-$1")"
+}
+home_case missing "$wt/no-such-home"
+tail -n 1 "$wt/home-missing" | grep -q "HOME=$wt/no-such-home" && fail "unusable HOME kept: $(cat "$wt/home-missing")"
+tail -n 1 "$wt/home-missing" | grep -q "XDG=.*/.config dir=yes" || fail "no home/XDG folders for a missing HOME: $(cat "$wt/home-missing")"
+fb="$(tail -n 1 "$wt/home-missing" | sed 's/^HOME=\([^ ]*\) .*/\1/')"
+[ ! -e "$fb" ] || fail "fallback HOME not removed at exit: $fb"
+mkdir -p "$wt/good-home"
+home_case good "$wt/good-home"
+tail -n 1 "$wt/home-good" | grep -q "HOME=$wt/good-home XDG=none" || fail "a usable HOME was replaced: $(cat "$wt/home-good")"
 echo "check-all.test.sh: ok"

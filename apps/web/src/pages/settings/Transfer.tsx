@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, type Company, type FundingSource } from "../../api";
 import { usePoll } from "../../hooks";
 import { toBase64 } from "../Skills";
+import { ReadOnlyText } from "../../components/ReadOnlyText";
 import { Section, useAction } from "./shared";
 
 type ImportPreview = {
@@ -114,7 +115,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
                 <li key={a.name}>
                   <strong>{a.name}</strong>: {a.title ?? a.role}, {a.agentKind}
                   {a.model ? `, ${a.model}` : ""}
-                  {a.instructions && <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{a.instructions}</pre>}
+                  {a.instructions && <ReadOnlyText text={a.instructions} label={`${a.name}'s instructions`} />}
                 </li>
               ))}
             </ul>

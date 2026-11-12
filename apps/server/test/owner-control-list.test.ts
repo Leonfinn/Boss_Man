@@ -103,6 +103,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Feedback.tsx": "Feedback",
   // Funding, Rules and Secrets are pages of their own, shown as tabs of Settings.
   "pages/Funding.tsx": "Funding",
+  "pages/MergeQueue.tsx": "Merge queue",
   "pages/Notifications.tsx": "Notifications",
   "pages/Plan.tsx": "Plan",
   "pages/Portal.tsx": "Feedback portal",
@@ -167,6 +168,8 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
   "pages/Settings.tsx>Funding": "Funding",
   "pages/Settings.tsx>ProjectBudgets": "Funding",
+  "pages/Settings.tsx>FundingCards": "Funding",
+  "pages/Settings.tsx>BudgetLimits": "Funding",
   "pages/Settings.tsx>CompanyReviews": "Reviews",
   "pages/Settings.tsx>TicketPrefix": "Team and CEO",
   "pages/Settings.tsx>GoalCheck": "Reviews",
@@ -197,6 +200,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   Decisions: ["Copy"],
   // The sign-off button: its label is a variable that depends on how the project lands work (BOS-471).
   Ticket: ["Approve", "Approve and open a pull request", "Approve and merge"],
+  // The two tabs are drawn by one helper (tabButton) that adds the count, so their text is a variable (BOS-1239).
+  "Merge queue": ["Merges", "Queued checks"],
 };
 
 function skipString(s: string, i: number): number {

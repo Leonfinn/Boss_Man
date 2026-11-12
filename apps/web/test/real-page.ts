@@ -8,6 +8,7 @@
 // the shapes below are the bits of its API the tests use. Vite and Playwright are skipped, not
 // failed, where they are not installed (the runner and CI have both).
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 
 export type Page = Awaited<ReturnType<Browser["newPage"]>>;
 export type Browser = {
@@ -16,18 +17,39 @@ export type Browser = {
 };
 export type Server = { resolvedUrls: { local: string[] }; close: () => Promise<void> };
 
+// A skip with no reason is hard to chase (BOS-1095: the fenced check job skipped these and the
+// gate log said nothing). Say why on stderr whenever the browser or Vite is not available.
+const why = (what: string, e?: unknown) => {
+  // Playwright's first line ("Target page, context or browser has been closed") hides Chromium's own stderr, which follows
+  // in the message ([pid][err] lines). Keep those lines (not the long command line), folded to one line, so a log shows the cause.
+  const lines = e instanceof Error ? e.message.split("\n").filter((l) => l.trim() && !/<launching>|<launched>|Call log:|Browser logs:/.test(l)) : [];
+  const msg = e instanceof Error ? lines.slice(0, 6).join(" | ").slice(0, 700) : e === undefined ? "" : String(e);
+  process.stderr.write(`real-page: ${what}${msg ? `: ${msg}` : ""} (TMPDIR length ${(process.env.TMPDIR ?? "").length}, HOME ${process.env.HOME ?? "unset"})\n`);
+};
+
 export async function launch(): Promise<Browser | null> {
   let chromium: { launch: (opts?: { executablePath?: string; args?: string[] }) => Promise<Browser> };
   try {
     chromium = createRequire(import.meta.url)("playwright").chromium;
-  } catch {
+  } catch (e) {
+    why("playwright not loadable", e);
     return null;
   }
   for (const executablePath of ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", undefined]) {
-    try {
-      return await chromium.launch(executablePath ? { executablePath, args: ["--no-sandbox"] } : { args: ["--no-sandbox"] });
-    } catch {
-      // try the next one
+    // A launch that dies while the machine is busy (many test files start Chromium at once, beside other jobs) can work a moment
+    // later; a missing executable never will, so that one is not retried.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        // --disable-dev-shm-usage: Docker's default /dev/shm is 64 MB, which parallel Chromium launches exhaust.
+        // --disable-crash-reporter + --crash-dumps-dir: in the fenced job Chromium's crashpad handler dies with
+        // "--database is required" (no crash folder it can resolve), taking the browser with it (BOS-1095 gate log).
+        const args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-crash-reporter", `--crash-dumps-dir=${tmpdir()}`];
+        return await chromium.launch(executablePath ? { executablePath, args } : { args });
+      } catch (e) {
+        why(`chromium launch failed (${executablePath ?? "playwright default"}, try ${attempt})`, e);
+        if (/doesn't exist/.test(String((e as Error)?.message))) break;
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
     }
   }
   return null;
@@ -37,15 +59,20 @@ export async function startVite(): Promise<Server | null> {
   let vite: typeof import("vite");
   try {
     vite = await import("vite");
-  } catch {
+  } catch (e) {
+    why("vite not importable", e);
     return null;
   }
   try {
     const server = await vite.createServer({ configFile: new URL("../vite.config.ts", import.meta.url).pathname, server: { port: 0, host: "127.0.0.1" }, logLevel: "silent" });
     await server.listen();
-    if (!server.resolvedUrls?.local[0]) return null;
+    if (!server.resolvedUrls?.local[0]) {
+      why("vite listening but no local url");
+      return null;
+    }
     return { resolvedUrls: { local: server.resolvedUrls.local }, close: async () => { await server.close(); } };
-  } catch {
+  } catch (e) {
+    why("vite failed to start", e);
     return null;
   }
 }

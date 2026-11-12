@@ -204,7 +204,7 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page), the launcher and netguard. The launcher starts netguard beside every runner, so it must be built too:
+Build the server (it includes the web page), the launcher and netguard. The network guard (netguard) is not a service of its own: the launcher starts one small guard container beside every runner, so its image must be built too (name it, as below). Your Docker dashboard may show "update check failed" on the runner and guard containers; that is expected and harmless (the images are built here, not pulled), and you update them with Build and update runners:
 
 ```sh
 docker compose build server launcher netguard

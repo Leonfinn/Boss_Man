@@ -71,7 +71,7 @@ describe("plan-first tickets (R40)", () => {
     await c.db.delete(wakes);
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p1", title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once", "allow_always", "reject_once"], detail: PLAN });
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
-    expect(d).toMatchObject({ tier: "ceo", question: `Engineer's plan for "Add rate limiting": approve it to start building?`, options: ["Approve plan", "Keep planning"] });
+    expect(d).toMatchObject({ tier: "ceo", question: `Approve Engineer's plan for "Add rate limiting"?`, options: ["Approve plan", "Keep planning"] });
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.plan).toBe(PLAN);
     // The CEO is woken to answer it.
     expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, reason: "ceo reply" })]);
@@ -206,7 +206,7 @@ describe("risk tiers (R48)", () => {
     expect(r).toMatchObject({ verdict: "approved", outcome: "owner_review" });
     expect(c.sent.some((x) => x.type === "workspace.merge")).toBe(false);
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
-    expect(d!.question).toBe(`CEO approved "Add rate limiting", which is rated high risk. Merge it, or send it back?`);
+    expect(d!.question).toBe(`Merge "Add rate limiting"? CEO approved it, and it is rated high risk.`);
 
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve and merge" });
     expect(commands).toEqual(["export BOSSMAN_FULL_CHECK_NEXT=1; pnpm test", "pnpm test:e2e"]);
