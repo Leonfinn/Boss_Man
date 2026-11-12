@@ -50,7 +50,10 @@ export class WikiError extends Error {
   }
 }
 
-/** "2026 agent landscape!" → "2026-agent-landscape". */
+/**
+ * "2026 agent landscape!" → "2026-agent-landscape". The ends are trimmed after the cut to 80, so a
+ * long title cut just after a word never leaves a slug ending in "-" (BOS-1324: DR-058 got two pages).
+ */
 export function slugify(title: string) {
   return (
     title
@@ -59,9 +62,13 @@ export function slugify(title: string) {
       .replace(/[^\w\s-]/g, "")
       .replace(/[\s_-]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 80) || "page"
+      .slice(0, 80)
+      .replace(/-+$/, "") || "page"
   );
 }
+
+/** A given address in its stored form: each part through slugify (" Research/Agent-landscape- " → "research/agent-landscape"). */
+export const normalSlug = (slug: string) => slug.trim().split("/").map(slugify).join("/");
 
 /** " research / Competitors/ " → "Research/Competitors" style: trimmed, no empty folders, at most 6 deep. */
 export function cleanFolder(folder: string) {
@@ -80,6 +87,23 @@ export function pageSlug(folder: string, name: string) {
 
 /** The folder a bare address implies, for agents that pass only a slug: "research/agent-landscape" → "research". */
 const folderOf = (slug: string) => slug.split("/").slice(0, -1).join("/");
+
+/**
+ * The page a given slug names: the page at exactly that address if there is one (a page saved before
+ * slugs lost a trailing "-"), else the page at the slug's stored form (normalSlug). Read, write, append,
+ * history, restore and delete all find their page here, so they can't disagree about which page "x-"
+ * is: before BOS-1324 a write to "x-" tidied it to "x" and overwrote that page while a read of "x-"
+ * showed another one. `lock` takes the row FOR UPDATE (append).
+ */
+async function findPage(conn: Db, companyId: string, slug: string, lock = false) {
+  const at = async (s: string) => {
+    const q = conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, s)));
+    return (await (lock ? q.for("update") : q))[0];
+  };
+  const given = slug.trim();
+  const norm = normalSlug(given);
+  return (await at(given)) ?? (norm !== given ? await at(norm) : undefined);
+}
 
 /** A heading's span in a page body. start..end is the section with its subsections; start..ownEnd is its own text. */
 export type Section = { path: string; heading: string; level: number; start: number; ownEnd: number; end: number };
@@ -406,7 +430,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
   }
 
   async function page(companyId: string, slug: string) {
-    const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug)));
+    const p = await findPage(db, companyId, slug);
     if (!p) throw new WikiError(404, "There's no wiki page with that name.");
     return p;
   }
@@ -613,11 +637,10 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     async append(companyId: string, input: { slug: string; entry: string; heading?: string; position?: AppendPosition; title?: string; ticketId?: string | null; isCeo?: boolean } & Author) {
       if (!input.entry.trim()) throw new WikiError(400, "Give the entry to add.");
       if (input.entry.length > MAX_ENTRY) throw new WikiError(400, `An entry can be at most ${MAX_ENTRY.toLocaleString("en-GB")} characters; a log entry is usually a line or two.`);
-      const slug = input.slug.split("/").map(slugify).join("/");
       const position = input.position ?? "top";
       const r = await db.transaction(async (tx) => {
         // SELECT … FOR UPDATE: another append to this page waits here and then reads the row it saved.
-        const [p] = await tx.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))).for("update");
+        const p = await findPage(tx, companyId, input.slug, true);
         if (!p) throw new WikiError(404, "There's no wiki page with that name.");
         const body = appendToBody(p.body, input.entry, input.heading, position);
         const title = input.title?.trim() || p.title;
@@ -760,8 +783,9 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       if (refusal) throw new WikiError(403, refusal);
     }
     const bySlug = async (slug: string) => (await conn.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug))))[0];
-    const given = input.slug?.trim() ? input.slug.split("/").map(slugify).join("/") : null;
-    let existing = given ? await bySlug(given) : undefined;
+    let existing = input.slug?.trim() ? await findPage(conn, companyId, input.slug) : undefined;
+    // A new page's address: the given slug in its stored form. An existing page keeps its own.
+    const given = existing ? existing.slug : input.slug?.trim() ? normalSlug(input.slug) : null;
     const folder = input.folder !== undefined ? cleanFolder(input.folder) : (existing?.folder ?? (given ? folderOf(given) : ""));
     let slug: string;
     if (existing) {
