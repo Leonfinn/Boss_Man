@@ -18,8 +18,9 @@ good() { printf 'POSTGRES_PASSWORD=stagingpw\nBOSSMAN_HOST_PORT=3200\nBOSSMAN_PO
 cat >"$t/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
+[[ -n ${FAKE_FAIL:-} && $* == *"$FAKE_FAIL"* ]] && { echo "fake docker: failed" >&2; exit 1; }
 case "$*" in
-  *"ps -q"*) echo cid ;; "inspect -f"*) cat "$FAKE_HEALTH" ;; "image inspect"*) exit 0 ;;
+  *"ps -q"*) echo cid ;; "inspect -f"*) cat "$FAKE_HEALTH" ;; "image inspect"*) exit "${FAKE_NO_IMAGE:-0}" ;;
 esac
 FAKE
 chmod +x "$t/bin/docker"
@@ -101,4 +102,14 @@ echo healthy >"$t/health"
 "$s" "$two" >/dev/null || fail "deploy after a failed one"
 "$s" --rollback >/dev/null || fail "rollback 2"
 [[ $(git -C "$t/staging" rev-parse HEAD) == "$four" ]] || fail "rollback landed on $(git -C "$t/staging" rev-parse HEAD), not the last healthy commit"
+# A failed image build stops before anything starts (BOS-1169: the runner image's apt-get failed on the owner's host
+# and the script still started db, launcher and server), and the failed commit is not recorded as healthy.
+for f in "build server" "build runner-app-co"; do
+  : >"$FAKE_LOG"
+  if FAKE_FAIL="$f" FAKE_NO_IMAGE=1 "$s" "$two" >"$t/fail.out" 2>&1; then fail "deploy went on after a failed '$f'"; fi
+  ! grep -q " up -d" "$FAKE_LOG" || fail "started the stack after a failed '$f': $(cat "$FAKE_LOG")"
+  grep -q "nothing was started" "$t/fail.out" || fail "failed '$f' message: $(cat "$t/fail.out")"
+  [[ $(cat "$t/staging/.git/staging-healthy-commit") == "$four" ]] || fail "failed '$f' recorded as healthy"
+done
+grep -q "build runner-app-co" "$FAKE_LOG" || fail "runner build case never reached the runner build"
 echo "deploy-staging.test.sh: ok"

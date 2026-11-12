@@ -69,6 +69,12 @@ scripts/deploy-staging.sh <commit, branch or tag>
 ```
 It refuses to run if this folder shares anything with another install it can see (project name, ports, `POSTGRES_PASSWORD`, `BOSSMAN_DATA`, `master.key`), checks out exactly that commit, builds, starts the stack, waits for the server to be healthy and prints the address. A branch name means the remote's branch (`origin/<name>`), and the line "Deploying <ref> = <hash>" shows what was picked. Only after the new commit is healthy does it remember the last good commit for rollback. Running it again for the same commit is safe. `--dry-run` shows the steps first. If the runner code changed it builds the staging runner image and has staging's own launcher recreate the staging runners; there is nothing to click in Settings. If production lives in a folder that is not beside this one, the script refuses because it has nothing to compare against; pass `BOSSMAN_PRODUCTION_DIRS=/path/to/production` so a shared password or copied key is caught (or `BOSSMAN_ISOLATION_NO_PEERS=1` if this host truly has no other Boss Man install). Two runs at once are refused: a lock in the folder's `.git` lets only one deploy proceed. `deploy.sh` and `update-runner.sh` also refuse in any folder whose `COMPOSE_FILE` includes `deploy/staging.yml`, even if `.env` sets no project name.
 
+If any image build fails, the script stops before starting anything ("An image build failed ... nothing was started") and the staging that was running, if any, is left as it was. The builds download packages (Debian's apt, npm), so a build error such as `Could not resolve 'deb.debian.org'` means Docker's builds on this host had no working DNS at that moment. To tell a one-off from a standing fault, run this on the host; it does a throwaway build that only looks up that name:
+```
+printf 'FROM debian:bookworm-slim\nRUN getent hosts deb.debian.org\n' | docker build --no-cache --progress=plain - 2>&1 | tail -n 4
+```
+An address in the output means DNS works in builds now: run the deploy again. An error every time means Docker's builds can't reach a name server: check `grep nameserver /etc/resolv.conf` on the host (Docker can't use a `127.x` resolver from inside a build) and, if needed, set `"dns"` in `/etc/docker/daemon.json`. Restarting Docker for that restarts production too, so pick a quiet moment.
+
 ## Rollback
 
 ```
