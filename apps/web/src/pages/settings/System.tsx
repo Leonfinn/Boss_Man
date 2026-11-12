@@ -3,6 +3,7 @@ import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
 import { when } from "../Runs";
+import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
 
@@ -401,7 +402,7 @@ export function PrivateDetails() {
   const [text, setText] = useState("");
   const d = view.data;
   if (!d) return null;
-  const kinds = Object.entries(d.counts).map(([k, n]) => `${n} ${k}`).join(", ");
+  const kinds = Object.entries(d.counts ?? {}).map(([k, n]) => `${n} ${k}`).join(", ");
   return (
     <Section id="private-details-h" title="Private details to block">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -411,7 +412,7 @@ export function PrivateDetails() {
         {d.total === 0 ? "Nothing listed yet." : `${d.total} entr${d.total === 1 ? "y" : "ies"} saved (${kinds}). Saving a new list replaces it.`}
       </p>
       <label htmlFor="private-details-text">New list (replaces the saved one; leave empty and save to clear it)</label>
-      <textarea id="private-details-text" rows={6} value={text} onChange={(e) => setText(e.target.value)} autoComplete="off" spellCheck={false} style={{ width: "100%", maxWidth: 520, fontFamily: "monospace" }} />
+      <DraftTextarea draftKey={null} noDraft="holds the owner's real home details, which must not be kept in the browser" id="private-details-text" rows={6} value={text} onChange={setText} autoComplete="off" spellCheck={false} style={{ width: "100%", maxWidth: 520, fontFamily: "monospace" }} />
       <div>
         <button
           type="button"
