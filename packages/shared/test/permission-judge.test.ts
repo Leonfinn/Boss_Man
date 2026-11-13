@@ -16,7 +16,27 @@ const BOS377_DENY = new Set(("14b1242b 2183ea06 2d9be3ef 32866b0f 3399d6d6 4872d
 // Deny on purpose; the CEO's decision on the ticket supersedes the earlier Allow.
 const BOS706_DENY = new Set("c0d5b751 aee48980 e1d1491d 597127c8".split(" "));
 const want = (c: Case): string => (BOS377_DENY.has(c.id.slice(0, 8)) || BOS706_DENY.has(c.id.slice(0, 8)) ? "deny" : c.expected);
-const agree = (cs: Case[]) => cs.filter((c) => run(c) === want(c)).length;
+// Speed tests time the hostile line against a plain line of the same length, run in turn on the same machine (best of a few runs
+// each), instead of a fixed number of ms: a fixed limit tuned on a dev machine failed at the merge gate (111 ms against 100) and
+// on GitHub's slower runners. A loaded machine slows both sides together, so the ratio holds; a scan that went quadratic costs
+// 40x or more on these inputs (see "stays fast on a 10,000-char line"), well past the limit. Only the quick tests read it.
+const SLOWDOWN_LIMIT = 30;
+function slowdown(run: (cmd: string) => unknown, cmd: string): number {
+  const plain = "echo ".repeat(Math.ceil(cmd.length / 5));
+  const time = (c: string) => {
+    const t = performance.now();
+    run(c);
+    return performance.now() - t;
+  };
+  let hostile = Infinity;
+  let base = Infinity;
+  for (let i = 0; i < 5; i++) {
+    hostile = Math.min(hostile, time(cmd));
+    base = Math.min(base, time(plain));
+  }
+  return hostile / Math.max(base, 0.05); // the floor keeps a timer-resolution baseline from inflating the ratio
+}
+const agree = (cs: Case[]) =>cs.filter((c) => run(c) === want(c)).length;
 
 describe("rules judge against the BOS-329 cases", () => {
   it("agrees with the CEO on the eval set (weighted like the study, >= 90%)", () => {
@@ -1103,9 +1123,7 @@ describe("rules judge: unquoteFlags stays linear on hostile input (BOS-697 round
     ["rm " + "$'a'".repeat(200) + "(", "$'...' run"],
     ["rm " + "\\a".repeat(4_000) + "(", "very long backslash-escape run"],
   ])("finishes fast on a %s", (cmd, _label) => {
-    const t = Date.now();
-    judge(cmd);
-    expect(Date.now() - t).toBeLessThan(100);
+    expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
   });
 });
 
@@ -1185,9 +1203,8 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       "rm " + "\\/".repeat(4_000) + "(",
       "sh -c " + "'\"".repeat(1_000) + "(",
     ]) {
-      const t = Date.now();
-      judge(cmd);
-      expect(Date.now() - t).toBeLessThan(100);
+      // A ratio against a plain line of the same length (see slowdown): it still catches the scan going quadratic.
+      expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
     }
   });
 
