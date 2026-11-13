@@ -110,7 +110,7 @@ export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
 const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Number(process.env.BOSSMAN_MERGE_RETARGET_MS) : 60_000;
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
 export const MERGE_RETARGET_KEY = "merge_retarget";
-const CHECK_JOB_POLL_MS =Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
+const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
@@ -1888,7 +1888,8 @@ export function reviewService(
               await started(cur);
               // BOS-1344: still waiting for a slot. When main moved, the job takes the new merged tree before it starts, so the check
               // never begins on a tree that is already stale. A failed refresh (conflict, migration) is left to the normal round.
-              if (cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await retargetOn())) {
+              // Only the round's first command: a later one would push a tree an earlier command never ran on (finish then says main_moved).
+              if (command === checks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await retargetOn())) {
                 lastRefresh = Date.now();
                 const fresh = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS).catch(() => null);
                 if (fresh?.status === "prepared" && fresh.tree !== cur.tree) {

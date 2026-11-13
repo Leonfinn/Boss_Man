@@ -12,7 +12,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { checkJobs, settings, tickets } from "../src/db/schema.js";
+import { checkJobs, projects, settings, tickets } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let shared: Awaited<ReturnType<typeof sharedDatabase>>;
@@ -116,6 +116,28 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
     // Finish is the safety net: the old tree is refused as main_moved, and the landing prepares again on its own.
     await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, job.id));
     await c.waitFor(async () => c.state.finishTree === OLD.tree);
+    await c.db.update(checkJobs).set({ state: "cancelled", reason: "test over", endedAt: new Date() }).where(eq(checkJobs.state, "queued"));
+    await res;
+  });
+
+  it("does not move the deep check's job after the project check passed on the old tree", async () => {
+    const c = await setup();
+    await c.db.update(projects).set({ deepVerifyCommand: "pnpm test:e2e" });
+    await c.db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, c.ticket.id));
+    const res = approveAndWait(c.req, c.ticket.id);
+    const first = await c.jobOf();
+    expect(first.command).toContain("pnpm test");
+    await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, first.id));
+    const secondQueued = await c.waitFor(async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).length === 2);
+    expect(secondQueued).toBe(true);
+    const second = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find((j) => j.id !== first.id)!;
+    expect(second.command).toBe("pnpm test:e2e");
+    c.state.mainMoved = true;
+    // Give the refresh several intervals: it must stay away, or finish would push a tree the project check never ran on.
+    await new Promise((r) => setTimeout(r, 300));
+    const [after] = await c.db.select().from(checkJobs).where(eq(checkJobs.id, second.id));
+    expect(after!.tree).toBe(OLD.tree);
+    expect(after!.commit).toBe(second.commit);
     await c.db.update(checkJobs).set({ state: "cancelled", reason: "test over", endedAt: new Date() }).where(eq(checkJobs.state, "queued"));
     await res;
   });
