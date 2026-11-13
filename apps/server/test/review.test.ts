@@ -339,7 +339,7 @@ describe("landing an approved ticket (R46, R47)", () => {
 describe("server-owned check queue (BOS-316)", () => {
     const approve = (c: Awaited<ReturnType<typeof setup>>) => approveAndWait(c.req, c.ticket.id);
     const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
-    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
+    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40), branchSha: "b".repeat(40) };
     const mergeAnswers = (c: { phase?: string }) => (c.phase === "prepare" ? prepared : { status: "merged", commit: prepared.commit });
     // Plays the dispatcher: ends the first queued/running merge job with the given state.
     const finishJob = async (c: Awaited<ReturnType<typeof setup>>, patch: Record<string, unknown>) => {

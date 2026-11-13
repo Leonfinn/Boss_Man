@@ -148,7 +148,7 @@ describe("the merge line's timeline (BOS-769)", () => {
   });
 
   it("takes a queued check's wait, start and end from its job in the server check queue", async () => {
-    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
+    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40), branchSha: "b".repeat(40) };
     const c = await setup({ merge: (x: { phase?: string }) => (x.phase === "prepare" ? prepared : { status: "merged", commit: prepared.commit }) });
     await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
     const res = approveAndWait(c.req, c.ticket.id);

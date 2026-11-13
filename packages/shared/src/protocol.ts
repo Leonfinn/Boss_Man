@@ -197,7 +197,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(), /** BOS-1413: the branch head the reviews and sign-off covered; a branch at any other commit is not merged (branch_moved). */ pin: z.string().min(7).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -378,7 +378,9 @@ export type Uncommitted = { status: "uncommitted"; files: string[]; foreign?: st
 
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
+  | { status: "prepared"; commit: string; tree: string; targetSha: string; /** BOS-1413: the branch commit the merge was built from; a runner without it can't be pinned. */ branchSha?: string; renamed?: MigrationRenamed[] }
+  /** BOS-1413: the branch is not at the pinned head (a commit came in after the approval). Nothing was built, kept or pushed. */
+  | { status: "branch_moved"; head: string; pinned: string }
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
