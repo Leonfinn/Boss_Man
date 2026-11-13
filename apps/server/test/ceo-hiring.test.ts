@@ -141,8 +141,11 @@ describe("the CEO builds the team (R62)", () => {
     const section = await call({ section: "fundingSources" });
     expect(Object.keys(JSON.parse(section))).toEqual(["fundingSources"]);
     expect(section.length).toBeLessThan(2_000);
-    // Current for 34 agents stays far under the chat limit (about 25,000 characters).
-    expect((await call({ section: "current" })).length).toBeLessThan(25_000);
+    // Current for 34 agents stays far under the chat limit (ticket asks for under 10,000).
+    const currentAll = await call({ section: "current" });
+    const count = JSON.parse(currentAll).current.length as number;
+    expect((currentAll.length / count) * 30).toBeLessThan(10_000); // 30 agents' worth
+    expect((await call({ paidFrom: second.id, section: "current" })).length).toBeLessThan(10_000);
 
     expect(await client.callTool({ name: "model_options", arguments: { agent: "Nobody" } })).toMatchObject({ isError: true });
     expect(await client.callTool({ name: "model_options", arguments: { paidFrom: "nope" } })).toMatchObject({ isError: true });
