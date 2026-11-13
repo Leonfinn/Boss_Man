@@ -81,7 +81,7 @@ export const OWNER_CONTROLS = {
   Runs: ["End all running runs", "Ending"],
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
-  "Merge queue": ["Merges", "Queued checks", "Show …"],
+  "Merge queue": ["Merges", "Queued checks", "Show …", "Move to front"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: [
     "Refresh",
