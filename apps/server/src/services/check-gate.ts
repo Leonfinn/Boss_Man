@@ -3,17 +3,39 @@
 // a setting, read on every grant, so changing it takes effect without a restart. The default is host-neutral.
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { settings } from "../db/schema.js";
+import { agents, settings } from "../db/schema.js";
 
 export const MERGE_CHECK_LIMIT_KEY = "merge_check_limit";
 export const DEFAULT_MERGE_CHECK_LIMIT = 2;
 export const MAX_MERGE_CHECK_LIMIT = 16;
 
-/** Tickets that jump the queue: owner-marked urgent work, and arch fixes (the gate's own repairs). */
-export function checkPriority(t: { urgent?: boolean | null; title?: string | null }): number {
+/**
+ * Whether an agent's job title puts it in the background lane (BOS-1403). The assignee's title ("Background Developer")
+ * is used, not the ticket's "(Background lane)" suffix: the suffix is typed by hand and can be missing or copied.
+ */
+export function isBackgroundLaneTitle(agentTitle: string | null | undefined): boolean {
+  return /\bbackground\b/i.test(agentTitle ?? "");
+}
+
+/**
+ * Where a ticket's check starts in the line: 0 for owner-marked urgent work and arch fixes (the gate's own repairs), 1 for
+ * ordinary tickets, 2 for background-lane tickets, which go last (BOS-1403). It only orders the start; every merge still runs
+ * its full check, and a lane ticket with nothing ahead of it starts at once. The owner's Move to front sorts above all of this.
+ */
+export function checkPriority(t: { urgent?: boolean | null; title?: string | null; background?: boolean | null }): number {
   if (t.urgent) return 0;
   if (/^\s*arch fix\b/i.test(t.title ?? "")) return 0;
-  return 1;
+  return t.background ? 2 : 1;
+}
+
+/** checkPriority for a ticket row, looking up the assignee's job title for the lane. */
+export async function ticketCheckPriority(db: Db, t: { urgent?: boolean | null; title?: string | null; assigneeAgentId?: string | null }): Promise<number> {
+  let background = false;
+  if (t.assigneeAgentId) {
+    const [a] = await db.select({ title: agents.title }).from(agents).where(eq(agents.id, t.assigneeAgentId));
+    background = isBackgroundLaneTitle(a?.title);
+  }
+  return checkPriority({ urgent: t.urgent, title: t.title, background });
 }
 
 type Waiter = { priority: number; seq: number; alone: boolean; grant: () => void; cancelled: boolean };
