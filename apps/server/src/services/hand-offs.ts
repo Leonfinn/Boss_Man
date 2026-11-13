@@ -37,7 +37,7 @@ export function handOffPhrase(...texts: (string | null | undefined)[]): { label:
   return null;
 }
 
-export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
+export const FOLLOW_UP_HELP = "followUps: work you are handing on, one entry each {title, assignee (an agent's name, or \"CEO\"), why}. Boss Man opens each as a ticket in the same project (and feature), linked to this one, and wakes the assignee. Only the CEO or a manager can assign a follow-up to a colleague; from anyone else a named colleague is kept as a suggested assignee and the ticket goes to the CEO. Opened only on a real change of state. Use it whenever the summary or a reply says someone else will do something next. noFollowUpReason: when nothing is handed on although the wording sounds like it (up to 240 characters).";
 
 export const followUpsSchema = z.array(z.object({ title: z.string().trim().min(1).max(200), assignee: z.string().trim().min(1).max(100), why: z.string().trim().min(1).max(1500) })).max(20);
 export type FollowUpInput = z.infer<typeof followUpsSchema>[number];
@@ -52,28 +52,40 @@ export async function handOffRefusal(db: Db, ticketId: string, summary: string |
 }
 
 /** Looks the assignees up before the move, so a wrong name refuses early. Returns agent ids in order, or an error. */
-export async function resolveFollowUpAssignees(db: Db, companyId: string, followUps: FollowUpInput[]): Promise<{ ids: string[] } | { error: string }> {
+export async function resolveFollowUpAssignees(db: Db, companyId: string, followUps: FollowUpInput[], isManager: boolean): Promise<{ ids: string[]; suggested: (string | null)[] } | { error: string }> {
   const team = await db.select({ id: agents.id, name: agents.name, role: agents.role, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
   const ids: string[] = [];
+  const suggested: (string | null)[] = [];
+  const ceo = team.find((x) => x.role === "ceo");
   for (const f of followUps) {
-    const a = /^ceo$/i.test(f.assignee) ? team.find((x) => x.role === "ceo") : team.find((x) => x.name.toLowerCase() === f.assignee.toLowerCase());
+    const a = /^ceo$/i.test(f.assignee) ? ceo : team.find((x) => x.name.toLowerCase() === f.assignee.toLowerCase());
     if (!a) return { error: `No active agent called ${f.assignee} in your company (use "CEO" for the CEO). Valid names: ${team.map((x) => x.name).join(", ")}.` };
     if (a.paused) return { error: `${a.name} is paused, so they would not pick up "${f.title}". Pick someone else.` };
-    ids.push(a.id);
+    // Same rule as create_ticket (delegateTarget): only the CEO or a manager assigns work to a colleague. Anyone else's
+    // follow-up goes to the CEO to triage, with the named colleague kept as a suggestion (BOS-1361 security review).
+    if (!isManager && a.role !== "ceo") {
+      if (!ceo) return { error: "Your company has no CEO to triage this follow-up." };
+      ids.push(ceo.id);
+      suggested.push(a.name);
+    } else {
+      ids.push(a.id);
+      suggested.push(null);
+    }
   }
-  return { ids };
+  return { ids, suggested };
 }
 
 /** Opens each follow-up as a ready ticket in the closing ticket's project and feature, with a link each way. */
-export async function openFollowUps(db: Db, work: Work, ticketId: string, followUps: FollowUpInput[], assigneeIds: string[], byAgentId: string | null) {
+export async function openFollowUps(db: Db, work: Work, ticketId: string, followUps: FollowUpInput[], assigneeIds: string[], byAgentId: string | null, opts: { isManager: boolean; suggested: (string | null)[] }) {
   const [row] = await db.select({ t: tickets, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId));
   if (!row) return [];
   const { t, prefix } = row;
   const ref = ticketRef(prefix, t.number) ?? `"${t.title}"`;
   const opened: { id: string; ref: string; title: string; assignee: string }[] = [];
   for (const [i, f] of followUps.entries()) {
-    const body = [`**Why:** ${f.why}`, "", `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, "", "Opened by Boss Man from the closing ticket's followUps (BOS-1361)."].join("\n");
-    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: true, assigneeAgentId: assigneeIds[i]!, featureId: t.featureId, createdByAgentId: byAgentId });
+    const suggestion = opts.suggested[i] ? [`**Suggested assignee:** ${opts.suggested[i]} (named by the closing agent; the CEO decides).`, ""] : [];
+    const body = [`**Why:** ${f.why}`, "", ...suggestion, `Handed on by ${ref} ("${t.title}") when it closed: [${ref}](#/tickets/${t.id}).`, "", "Opened by Boss Man from the closing ticket's followUps (BOS-1361)."].join("\n");
+    const made = await work.createTicket(t.projectId, { title: f.title, body, risk: t.risk ?? "medium", state: "ready", overLimit: opts.isManager, assigneeAgentId: assigneeIds[i]!, featureId: t.featureId, createdByAgentId: byAgentId });
     const [numbered] = await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, made.id));
     const newRef = ticketRef(prefix, numbered?.number) ?? `"${made.title}"`;
     const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, assigneeIds[i]!));

@@ -424,7 +424,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
     },
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, lintOverride, fixesLive, followUps, noFollowUpReason }) => {
       if (followUps?.length && state !== "review" && state !== "done") return fail("followUps goes with state review or done.");
-      const followUpWho = followUps?.length ? await resolveFollowUpAssignees(db, scope.companyId, followUps) : null;
+      const followUpManager = followUps?.length ? await managerIn(db, scope) : false;
+      const followUpWho = followUps?.length ? await resolveFollowUpAssignees(db, scope.companyId, followUps, followUpManager) : null;
       if (followUpWho && "error" in followUpWho) return fail(followUpWho.error);
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
@@ -583,8 +584,10 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           ? `\n\nAn after-merge check failed, so Boss Man opened the follow-up ${f.ref} (#/tickets/${f.id}) "${f.title}", assigned to ${f.assignee ?? "the CEO"}, and told the CEO. Don't create another one.`
           : `\n\nAn after-merge check failed, but Boss Man couldn't open its follow-up ticket. Create it with create_ticket: a description of what failed, a risk and an assignee, and this ticket's link.`;
       }
-      if (followUps?.length && followUpWho && "ids" in followUpWho) {
-        const opened = await openFollowUps(db, work, ticketId, followUps, followUpWho.ids, scope.agentId).catch(() => null);
+      // Only on a real state change: repeating a move must not open the same follow-ups again.
+      if (followUps?.length && sameState) followUp += "\n\nThe ticket was already in that state, so no follow-ups were opened.";
+      if (followUps?.length && !sameState && followUpWho && "ids" in followUpWho) {
+        const opened = await openFollowUps(db, work, ticketId, followUps, followUpWho.ids, scope.agentId, { isManager: followUpManager, suggested: followUpWho.suggested }).catch(() => null);
         followUp += opened
           ? `\n\nBoss Man opened ${opened.length === 1 ? "the follow-up" : "the follow-ups"}: ${opened.map((o) => `${o.ref} (#/tickets/${o.id}) "${o.title}" for ${o.assignee}`).join("; ")}. Don't create them again.`
           : `\n\nThe move worked, but Boss Man couldn't open the follow-ups. Create them with create_ticket.`;

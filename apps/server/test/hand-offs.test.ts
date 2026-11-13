@@ -170,6 +170,36 @@ describe("set_ticket_state done with hand-off wording", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.stateNote).toContain(`#/tickets/${made.id}`);
   });
 
+  it("a developer naming a colleague does not assign or wake them: the follow-up goes to the CEO with a suggestion", async () => {
+    const other = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Other" })).json() as { id: string };
+    const t = await ctx.ticket();
+    const c = await ctx.agent(ctx.dev.id);
+    const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Wrote the page.", followUps: [{ title: "Look at infra", assignee: "Other", why: "Please check." }] } });
+    expect((r as { isError?: boolean }).isError).toBeFalsy();
+    const made = (await ctx.db.select().from(tickets)).find((x) => x.title === "Look at infra")!;
+    expect(made.assigneeAgentId).toBe(ctx.co.ceo.id);
+    expect(made.assigneeAgentId).not.toBe(other.id);
+    expect(made.body).toContain("Suggested assignee:** Other");
+  });
+
+  it("the CEO can assign a follow-up straight to a colleague", async () => {
+    const other = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Other" })).json() as { id: string };
+    const t = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id });
+    const c = await ctx.agent(ctx.co.ceo.id);
+    const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Wrote the page.", followUps: [{ title: "CEO routes to a colleague", assignee: "Other", why: "Please check." }] } });
+    expect((r as { isError?: boolean }).isError).toBeFalsy();
+    expect((await ctx.db.select().from(tickets)).find((x) => x.title === "CEO routes to a colleague")!.assigneeAgentId).toBe(other.id);
+  });
+
+  it("repeating the same move opens no second set of follow-ups", async () => {
+    const t = await ctx.ticket();
+    const c = await ctx.agent(ctx.dev.id);
+    const args = { ticketId: t.id, state: "done", summary: "Wrote the page.", followUps: [{ title: "Once only", assignee: "CEO", why: "x" }] };
+    await c.callTool({ name: "set_ticket_state", arguments: args });
+    await c.callTool({ name: "set_ticket_state", arguments: args });
+    expect((await ctx.db.select().from(tickets)).filter((x) => x.title === "Once only")).toHaveLength(1);
+  });
+
   it("a wrong assignee name refuses the move before anything changes", async () => {
     const t = await ctx.ticket();
     const c = await ctx.agent(ctx.dev.id);
