@@ -10,7 +10,7 @@ import { agents, companies, milestones, objectives, projects, tickets } from "./
 import { record } from "./services/activity.js";
 import { WorkError } from "./services/work.js";
 import { ageText, describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
-import { fail, managerIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
+import { fail, planningIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
 /** The roadmap tool, in ticket runs and the owner chat alike. */
@@ -19,7 +19,7 @@ export function registerRoadmap(server: McpServer, db: Db, work: Services["work"
     "roadmap",
     {
       description:
-        "For CEOs and managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
+        "For CEOs, managers and product managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
       inputSchema: {
         action: z.enum(["list", "add_objective", "add_milestone", "set"]),
         title: z.string().trim().min(1).max(200).optional(),
@@ -34,7 +34,7 @@ export function registerRoadmap(server: McpServer, db: Db, work: Services["work"
       },
     },
     async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, reason }) => {
-      if (!(await managerIn(db, scope))) return fail("Only your company's CEO or a manager can change the roadmap.");
+      if (!(await planningIn(db, scope))) return fail("Only your company's CEO, a manager or a product manager can change the roadmap.");
       if (action === "list") {
         const tree = await work.objectivesTree(scope.companyId);
         return text(JSON.stringify(tree.map((o) => ({ id: o.id, title: o.title, priority: o.priority, projectId: o.projectId, milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })) }))));
