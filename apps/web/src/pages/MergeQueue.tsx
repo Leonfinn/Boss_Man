@@ -276,7 +276,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; heldBy: string | null };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; heldBy: string | null; heldByMain: boolean };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -301,7 +301,7 @@ function MainRedBanner({ held, rows }: { held: number; rows: CheckRow[] }) {
 
 /** The "Queued checks" tab (BOS-1174): every check running or waiting in the server's check queue. Read-only. */
 export function QueuedChecks({ data }: { data: CheckQueueData }) {
-  const held = data.rows.filter((r) => r.heldBy).length;
+  const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
   return (
     <section>
@@ -325,7 +325,7 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
                 <span className="mq-wait">for {waited(r.minutes)}</span>
               </div>
               <p className="mq-line">
-                <span className={`tag ${r.state === "running" ? "blue" : r.heldBy ? "amber" : "grey"}`}>{r.state === "running" ? "Running" : r.heldBy ? "Held" : "Waiting"}</span>
+                <span className={`tag ${r.state === "running" ? "blue" : r.heldByMain ? "amber" : "grey"}`}>{r.state === "running" ? "Running" : r.heldByMain ? "Held" : "Waiting"}</span>
                 {r.fixesMain && <span className="tag green"> fixes main</span>}{" "}
                 {upFirst(KIND[r.kind])}
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
@@ -354,7 +354,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const needsYou = data ? data.waiting.filter((r) => r.actor === "owner") : [];
   const failed = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state === "check_failed_retrying").length : 0;
   const stuck = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck).length : 0;
-  const heldChecks = cq ? cq.rows.filter((r) => r.heldBy).length : 0;
+  const heldChecks = cq ? cq.rows.filter((r) => r.heldByMain).length : 0;
   const base = `#/merge-queue/${companyId}`;
 
   const pick = (t: Tab) => go(t === "checks" ? `merge-queue/${companyId}/checks` : `merge-queue/${companyId}`);

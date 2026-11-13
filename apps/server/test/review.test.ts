@@ -446,6 +446,25 @@ describe("server-owned check queue (BOS-316)", () => {
       expect(await cards(c)).toHaveLength(0);
     });
 
+    it("cancels the ticket's leftover running merge job when its merge starts again, leaving exactly one live job (BOS-1289)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      // The old process's job: still running, for a tree main has since moved past.
+      const [old] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), command: "pnpm test", state: "running", startedAt: new Date() }).returning();
+      const res = approve(c);
+      // Wait for the cancel itself (it lands a step after the new job appears), with a deadline.
+      const deadline = Date.now() + 20_000;
+      const oldState = async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, old!.id)))[0]?.state;
+      while (Date.now() < deadline && (await oldState()) !== "cancelled") await new Promise((r) => setTimeout(r, 50));
+      const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const live = rows.filter((r) => r.state === "queued" || r.state === "running");
+      expect(live).toHaveLength(1);
+      expect(live[0]!.tree).toBe(prepared.tree);
+      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled", reason: expect.stringContaining("newer commit") });
+      await finishOpenJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+    });
+
     it("tries again with a fresh merge when main moved to a different tree", async () => {
       let finishes = 0;
       const c = (ctx = await setup({ answers: { merge: (m: { phase?: string }) => (m.phase === "prepare" ? prepared : ++finishes === 1 ? { status: "main_moved" } : { status: "merged", commit: prepared.commit }) } }));
@@ -817,6 +836,22 @@ describe("server-owned check queue (BOS-316)", () => {
     c.answers.merge = { status: "uncommitted", files: ["draft.ts"] };
     expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
     expect((await c.db.select().from(wakes))[0]!.note).toMatch(/aren't committed: draft\.ts\. Commit your work/);
+  });
+
+  it("never asks the author to commit main's files showing in the copy: the CEO hears, the ticket stays in review (BOS-1231)", async () => {
+    const c = (ctx = await setup({ answers: { merge: { status: "uncommitted", files: ["packages/shared/test/plan.test.ts"], foreign: ["apps/server/src/main.ts", "apps/launcher/src/launcher.ts"] } } }));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
+    const sent = await c.db.select().from(wakes);
+    expect(sent.filter((w) => w.agentId === c.worker.id)).toEqual([]);
+    expect(sent.filter((w) => w.agentId === c.ceo.id)).toEqual([expect.objectContaining({ reason: "copy not clean", ticketId: c.ticket.id })]);
+    expect(sent.find((w) => w.agentId === c.ceo.id)!.note).toContain("apps/server/src/main.ts");
+    const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(t.pullRequestNote).toContain("never touched");
+    // The same reason again (the sweep's retry) doesn't wake the CEO a second time.
+    await c.db.delete(wakes);
+    await approve(c);
+    expect(await c.db.select().from(wakes)).toEqual([]);
   });
 
   it("tells the agent to change approach when the same check failure comes back a third time (R50)", async () => {

@@ -28,9 +28,13 @@ async function setup(names: string[]) {
   const alertsRaised: AlertInput[] = [];
   let t = Date.now();
   let hold = false;
-  const launcherState: { wanted: Set<string> | null | "down" } = { wanted: null };
+  const launcherState: { wanted: Set<string> | null | "down"; fault: string | null | "throws" } = { wanted: null, fault: null };
   const watch = runnerWatchService(db, {
     isConnected: (id) => up.has(id),
+    guardFault: async () => {
+      if (launcherState.fault === "throws") throw new Error("launcher down");
+      return launcherState.fault;
+    },
     holdOn: async () => hold,
     wantedCompanies: async () => {
       if (launcherState.wanted === "down") throw new Error("launcher down");
@@ -71,6 +75,49 @@ describe("runner watch (BOS-467)", () => {
     expect(still!.status).toBe("open");
     expect(still!.dedupeKey).toBe(runnerOfflineKey(s.rows[2]!.id));
     expect(s.notes.some((n) => n.title === "Beta's runner is back")).toBe(true);
+  });
+
+  // BOS-382 slice B: a runner the launcher keeps paused because its network guard won't start is offline for a reason pressing Start can't fix.
+  it("names the guard as the reason when the launcher keeps the runner paused, once, and stays quiet before the threshold", async () => {
+    const s = await setup(["Alpha"]);
+    s.launcherState.fault = "The network guard for alpha didn't load its rules in time.";
+    await s.watch.step();
+    s.up.delete(s.rows[0]!.id);
+    s.advance(60_000);
+    await s.watch.step();
+    s.advance(OFFLINE_REPORT_MS - 120_000);
+    await s.watch.step();
+    expect(s.notes.filter((n) => n.level === "page")).toHaveLength(0); // under the offline threshold: quiet
+    expect(s.alertsRaised).toHaveLength(0);
+    s.advance(OFFLINE_REPORT_MS);
+    await s.watch.step();
+    await s.watch.step();
+    const pages = s.notes.filter((n) => n.level === "page" && n.title === "Alpha's runner is offline");
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toContain("paused on purpose, with its work kept");
+    expect(pages[0]!.body).toContain("didn't load its rules in time");
+    expect(pages[0]!.body).not.toContain("Reconnect runner");
+    expect(s.alertsRaised).toHaveLength(1);
+    expect(s.alertsRaised[0]!.question).toContain("network guard will not start");
+  });
+
+  it("keeps the usual advice when the runner is not held for its guard, or the launcher cannot say", async () => {
+    for (const fault of [null, "throws"] as const) {
+      const s = await setup(["Alpha"]);
+      s.launcherState.fault = fault;
+      await s.watch.step();
+      s.up.delete(s.rows[0]!.id);
+      s.advance(60_000);
+      await s.watch.step();
+      s.advance(OFFLINE_REPORT_MS);
+      await s.watch.step();
+      const pages = s.notes.filter((n) => n.level === "page");
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.body).toContain("Reconnect runner");
+      expect(pages[0]!.body).not.toContain("paused on purpose");
+      await close?.();
+      close = undefined;
+    }
   });
 
   it("says a deploy is healthy only once every runner is back, and names who is missing", async () => {

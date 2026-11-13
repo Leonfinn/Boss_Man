@@ -25,6 +25,7 @@ import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, checkAsk, FIXES_LIVE_MAX, fix
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
+import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
@@ -47,6 +48,7 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { restoreSignoffCard, signoffHistory, signoffLine, signoffState } from "./services/signoff.js";
 import type { paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, type watchdogService } from "./services/watchdog.js";
+import { runCapabilities } from "./services/run-capabilities.js";
 import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
@@ -401,7 +403,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
       if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {
@@ -1316,15 +1318,25 @@ const NUDGE_DESCRIPTION =
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
 /** Run tools the owner chat replaces with its own version (BOS-224). */
 const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
+/** The run tools a non-CEO agent's owner chat adds (BOS-1300): replying on a ticket, booking and clearing its own checks, and attaching a picture. */
+const CHAT_WORKER_RUN_TOOLS: ReadonlySet<string> = new Set(["ticket_reply", "schedule_check", "clear_check", "attach_image"]);
 
 /**
  * The owner chat's tools (v1.1): the board, plus the CEO's own run tools (BOS-224). Tickets it
  * makes are the owner's, not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean) {
+function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean, workerTools = false) {
   const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   // Wrapped before any tool registers, or the registrars below keep the plain one (BOS-758).
   const server = traceCalls(new McpServer({ name: "bossman", version: "0.1.0" }), db, scope.runId, scope.companyId);
+  // BOS-1300: an ordinary agent's chat also gets the ticket tools its runs have for its own tickets: reply, and book or clear a check.
+  // Each of those already limits itself to the caller's company and (checks, moves) to the caller's own tickets.
+  if (workerTools) {
+    const originalRegister = server.registerTool.bind(server);
+    server.registerTool = ((name: string, config: never, cb: never) => (CHAT_WORKER_RUN_TOOLS.has(name) ? originalRegister(name, config, cb) : undefined)) as never;
+    registerRunTools(server, db, services, scope, hooks, CHAT_SKIP, false);
+    server.registerTool = originalRegister as never;
+  }
   // The CEO gets the same tools in its chat as in its runs, except create_ticket and nudge, which
   // have chat versions below (BOS-224). Another agent's chat keeps the board tools only: its runs
   // may be deliberately restricted (BOS-58), and a chat must not widen them. No tool here edits
@@ -1493,7 +1505,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope, { registerSharedTools, registerViewImage, registerBoard, registerListMyWork })
         : run?.purpose === "chat"
-          ? buildChatServer(db, services, scope, hooks, ceo)
+          ? buildChatServer(db, services, scope, hooks, ceo, me ? runCapabilities(me, true).chatTools === "worker" : false)
           : me?.duty === SCRUM_MASTER_DUTY
             ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent, false)
             : buildServer(db, services, scope, hooks, undefined, retroAgent, ceo);

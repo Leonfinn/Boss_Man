@@ -99,6 +99,25 @@ async function launch(): Promise<any | null> {
   return null;
 }
 
+/** Wait until the page's drawn height has stopped changing, so sections that load their own answers (showing
+ *  "Loading…" first) have grown to their real size. A growth after the click would move the jump target off screen
+ *  at the foldable size (BOS-1319). Deadline-bounded; a page still changing falls through to the check that follows. */
+async function waitForStableHeight(page: any, holdMs = 300, timeout = 10_000): Promise<void> {
+  await page
+    .waitForFunction(
+      (hold: number) => {
+        const w = window as unknown as { __h?: { h: number; since: number } };
+        const h = document.documentElement.scrollHeight;
+        const t = Date.now();
+        if (!w.__h || w.__h.h !== h) w.__h = { h, since: t };
+        return t - w.__h.since >= hold;
+      },
+      holdMs,
+      { timeout, polling: 100 },
+    )
+    .catch(() => undefined);
+}
+
 /** Each page and the section headings the old → new map puts on it (headings as the app shows them). */
 const MAP: Record<string, string[]> = {
   funding: ["Funding sources", "Budgets"],
@@ -169,15 +188,38 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
           expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
           for (const target of hrefs) {
-            await page.locator(`.set-jump a[href="#${target}"]`).click();
-            await new Promise((r) => setTimeout(r, 900));
+            // Bring the section into view and confirm it settles there (BOS-1319). A single click + "is it in view
+            // once" is not enough: the page can still be growing (a section above shows "Loading…" until its own
+            // answer arrives), so the smooth scroll may have been aimed at a shorter layout and the section drifts
+            // off screen afterwards. Wait for the page to stop changing, and if the section is not in view after
+            // that, click its jump link again (what a reader would do) — retrying until a deadline. A final miss
+            // falls through to the assertion below, which reports where the section actually is.
+            const link = page.locator(`.set-jump a[href="#${target}"]`);
+            const deadline = Date.now() + 10_000;
+            let inView = "missing";
+            do {
+              await link.click();
+              await page
+                .waitForFunction(
+                  (t: string) => {
+                    const el = document.getElementById(t);
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.bottom > 0 && r.top < window.innerHeight;
+                  },
+                  target,
+                  { timeout: 5_000, polling: 50 },
+                )
+                .catch(() => undefined);
+              await waitForStableHeight(page);
+              inView = await page.evaluate((t: string) => {
+                const el = document.getElementById(t);
+                if (!el) return "missing";
+                const r = el.getBoundingClientRect();
+                return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
+              }, target);
+            } while (inView !== "ok" && Date.now() < deadline);
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
-            const inView = await page.evaluate((t: string) => {
-              const el = document.getElementById(t);
-              if (!el) return "missing";
-              const r = el.getBoundingClientRect();
-              return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
-            }, target);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
             // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
             if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
