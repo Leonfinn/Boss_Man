@@ -120,7 +120,7 @@ const ORDER_PROSE = /\b(?:after|waits?\s+on|waiting\s+on|once)\s+([A-Za-z][A-Za-
  * link to it. `linkedNumbers` are the numbers it already waits on. Returns "" when nothing is missing; never a refusal.
  */
 export function unlinkedOrderWarning(texts: ReadonlyArray<string | null | undefined>, linkedNumbers: ReadonlySet<number>): string {
-  const missing = new Set<string>();
+  const missing = new Set<string>(); // lost on restart, harmless because it is a per-call local, gone when the function returns
   for (const t of texts) {
     if (!t) continue;
     for (const m of t.matchAll(ORDER_PROSE)) {
@@ -142,7 +142,7 @@ const REF_IN_TEXT = /\b[A-Za-z][A-Za-z0-9]{0,9}-(\d{1,9})\b/g;
  * stands with no reference near it, `ownTicketId` (the ticket the reply is on). "not urgent" is not a claim.
  */
 export function urgentClaims(body: string): { numbers: number[]; unnamed: boolean } {
-  const numbers = new Set<number>();
+  const numbers = new Set<number>(); // lost on restart, harmless because it is a per-call local, gone when the function returns
   let unnamed = false;
   const refs = [...body.matchAll(REF_IN_TEXT)];
   for (const m of body.matchAll(URGENT_WORD)) {
