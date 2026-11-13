@@ -48,18 +48,26 @@ describe("check dispatcher", () => {
 
   it("hands the owner's private-details list to the runner with the job (BOS-979), and still runs without one", async () => {
     const s = await setup("server", async () => "ip\t192.0.2.77");
-    await s.req("sl1");
+    await s.req("sl1", { kind: "merge" });
     await s.d.pump();
     expect(s.sent[0]!.command.scanList).toBe("ip\t192.0.2.77");
     const none = await setup("server", async () => null);
-    await none.req("sl2");
+    await none.req("sl2", { kind: "merge" });
     await none.d.pump();
     expect(none.sent[0]!.command).not.toHaveProperty("scanList");
     const broken = await setup("server", async () => Promise.reject(new Error("no key")));
-    await broken.req("sl3");
+    await broken.req("sl3", { kind: "merge" });
     await broken.d.pump();
     expect(broken.sent[0]!.command.type).toBe("check.run");
     expect(broken.sent[0]!.command).not.toHaveProperty("scanList");
+  });
+
+  it("does not hand the list to an agent-requested check (BOS-1043: no guessing oracle)", async () => {
+    const s = await setup("server", async () => "ip\t192.0.2.77");
+    await s.req("sl4"); // kind pre_review
+    await s.d.pump();
+    expect(s.sent[0]!.command.type).toBe("check.run");
+    expect(s.sent[0]!.command).not.toHaveProperty("scanList");
   });
 
   it("gives a full job a longer time limit than a quick one", async () => {
