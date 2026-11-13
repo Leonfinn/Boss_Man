@@ -21,7 +21,7 @@ const RECHECK_STEPS = [
   "Check the live state first: their latest answers, what's deployed, and whether the tickets involved are done. Then do exactly one:",
   "- It still holds: withdraw_decision with action confirm and checked (one line on what you checked). Nothing is written on the card.",
   "- It needs changing: raise one corrected card with raise_decision replaces <this card's id>; the old one closes as superseded.",
-  "- It is no longer needed: withdraw_decision (action withdraw, with a reason).",
+  "- It is no longer needed: withdraw_decision (action withdraw, with a reason and replacedBy: card:<id>, ticket:<ref> with when, or none).",
 ];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

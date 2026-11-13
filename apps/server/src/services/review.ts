@@ -17,7 +17,7 @@ import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
-import { checkGate, checkPriority } from "./check-gate.js";
+import { checkGate, ticketCheckPriority } from "./check-gate.js";
 import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
@@ -1804,6 +1804,7 @@ export function reviewService(
       };
       // BOS-313 (F6): with the setting on, the checks run on the merge commit that will be pushed, inside the merge itself.
       // BOS-316 (DR-003): in server mode the merged result is checked by a job in the check queue, not inside the merge request.
+      const checkPrio = await ticketCheckPriority(db, t); // BOS-1403: urgent/arch fix 0, ordinary 1, background lane 2
       const serverChecks = landing !== "pull_request" && checks.length > 0 && (await queue.mode()) === "server";
       const checkMerged = !serverChecks && landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
       for (const command of checkMerged || serverChecks ? [] : checks) {
@@ -1812,7 +1813,7 @@ export function reviewService(
         const runCheck = (alone: boolean) =>
           whileActive(() => {
             phases.set(ticketId, "queued");
-            return timedCheck(named(command), "gate", (w) => gate.run(checkPriority(t), alone, w), checkVerdict, () => {
+            return timedCheck(named(command), "gate", (w) => gate.run(checkPrio, alone, w), checkVerdict, () => {
               phases.set(ticketId, "checking");
               return (async () => {
                 const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
@@ -1887,7 +1888,7 @@ export function reviewService(
         for (const command of queuedChecks) {
           {
             let prep = ref.prep;
-            const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
+            const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPrio });
             // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
             // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
             if (!reused && deps.cancelCheck) {
@@ -1995,7 +1996,8 @@ export function reviewService(
           train.seedOrder([...new Set(live.map((r) => r.ticketId).filter((id): id is string => !!id))]);
         }
         const pl = await queue.place(ticketId);
-        const at = { priority: checkPriority(t) === 0 || pl.front ? 0 : 1, place: (pl.at ?? new Date()).getTime() };
+        // BOS-1403 tiers: urgent/fix 0, ordinary 1, background lane 2; a ticket at the front of the line counts as 0.
+        const at = { priority: pl.front ? 0 : checkPrio, place: (pl.at ?? new Date()).getTime() };
         const pause = () => new Promise((resolve) => setTimeout(resolve, CHECK_JOB_POLL_MS));
         const inReview = async () => {
           const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
@@ -2158,7 +2160,7 @@ export function reviewService(
         : await whileActive(() =>
             (checkMerged
               ? (w: () => Promise<MergeResult>) =>
-                  timedCheck(checks.map(named).join(" && "), "merged", (x) => gate.run(checkPriority(t), false, x), (r) => (r.status === "merged" ? true : r.status === "check_failed" ? checkVerdict(r.result) : null), w)
+                  timedCheck(checks.map(named).join(" && "), "merged", (x) => gate.run(checkPrio, false, x), (r) => (r.status === "merged" ? true : r.status === "check_failed" ? checkVerdict(r.result) : null), w)
               : (w: () => Promise<MergeResult>) => w())(() => ask<MergeResult>(
               (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})`, ...(checkMerged ? { checks } : {}) }),
               // The runner may check up to three merged results, one after another.

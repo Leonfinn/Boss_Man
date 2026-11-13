@@ -417,6 +417,8 @@ export async function buildApp(opts: AppOptions) {
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
   });
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
+  // DR-058: a withdrawn owner card tells the feed (a quiet note) as well as Decisions.
+  decisionsSvc.setNotifyHook((n) => notes.notify(n));
   const maintenance = maintenanceService(db, {
     fleet: async () => (launch.enabled ? launch.fleet() : []),
     rollback: (slug) => launch.rollback(slug),
