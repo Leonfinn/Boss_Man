@@ -3,7 +3,7 @@
 // which questions it may answer at all, and what happens when it shouldn't. Anything it can't
 // stand behind goes to the CEO, and the owner is told so.
 import { formatDate } from "@boss-man/shared";
-import { and, desc, eq, gt, inArray, isNull, lte, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, like, lte, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, ownerChatMessages, paAnswers, runs, tickets } from "../db/schema.js";
 import { CHAT_REASON } from "./chat.js";
@@ -13,6 +13,9 @@ export const JUDGEMENT = [/\bwhy\b/, /\bshould/, /\brecommend/, /\bwhat('s| is)?
 export const REASK_MS = 10 * 60_000;
 export const HOLDING = "Passing this to the CEO.";
 export const ASK_CEO = "[Ask the CEO]";
+/** BOS-1392: how much of the owner's recent conversation an escalation brief carries. */
+export const BATCH_MESSAGES = 5;
+export const BATCH_CHARS = 4000;
 
 export type Cite = { kind: "ticket" | "decision" | "run"; id: string };
 const normal = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -42,25 +45,69 @@ export function paService(
 ) {
   const now = deps.now ?? (() => new Date());
 
-  /** The owner's last message that this run was asked, and whether it has an outcome yet. */
+  /**
+   * The owner's last message that this run was asked, and whether it has an outcome yet. `earlier` is every other message the
+   * run claimed that has no outcome yet (BOS-1392): two sent before the run started are answered by one run, and each needs a row.
+   */
   async function question(runId: string) {
-    const [msg] = await db.select().from(ownerChatMessages).where(and(eq(ownerChatMessages.runId, runId), eq(ownerChatMessages.role, "owner"))).orderBy(desc(ownerChatMessages.createdAt)).limit(1);
-    const [done] = msg ? await db.select({ id: paAnswers.id }).from(paAnswers).where(eq(paAnswers.chatMessageId, msg.id)) : [];
-    return { msg, done };
+    const claimed = await db.select().from(ownerChatMessages).where(and(eq(ownerChatMessages.runId, runId), eq(ownerChatMessages.role, "owner"))).orderBy(desc(ownerChatMessages.createdAt));
+    const msg = claimed[0];
+    const rows = claimed.length ? await db.select({ id: paAnswers.chatMessageId }).from(paAnswers).where(inArray(paAnswers.chatMessageId, claimed.map((m) => m.id))) : [];
+    const answered = new Set(rows.map((r) => r.id));
+    return { msg, done: msg && answered.has(msg.id) ? { id: msg.id } : undefined, earlier: claimed.slice(1).filter((m) => !answered.has(m.id)) };
+  }
+
+  const clock = async (d: Date) => formatDate("en-GB", d, { timeZone: (await deps.timeZone?.()) ?? "UTC", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+  /** The owner's messages in this thread since the last posted answer or CEO reply, oldest first, within the caps (BOS-1392). */
+  async function batch(msg: Msg) {
+    const thread = msg.agentId ? eq(ownerChatMessages.agentId, msg.agentId) : isNull(ownerChatMessages.agentId);
+    const [boundary] = await db
+      .select({ at: ownerChatMessages.createdAt })
+      .from(ownerChatMessages)
+      .where(and(eq(ownerChatMessages.companyId, msg.companyId), thread, eq(ownerChatMessages.role, "assistant"), ne(ownerChatMessages.text, HOLDING), lte(ownerChatMessages.createdAt, msg.createdAt)))
+      .orderBy(desc(ownerChatMessages.createdAt))
+      .limit(1);
+    const rows = await db
+      .select()
+      .from(ownerChatMessages)
+      .where(and(eq(ownerChatMessages.companyId, msg.companyId), thread, eq(ownerChatMessages.role, "owner"), lte(ownerChatMessages.createdAt, msg.createdAt), ...(boundary ? [gt(ownerChatMessages.createdAt, boundary.at)] : [])))
+      .orderBy(desc(ownerChatMessages.createdAt));
+    // Newest first until the caps are spent; the latest always gets in, cut to the budget.
+    const kept: Msg[] = [];
+    let budget = BATCH_CHARS;
+    for (const m of [msg, ...rows.filter((r) => r.id !== msg.id)]) {
+      if (kept.length >= BATCH_MESSAGES || budget <= 0) break;
+      kept.push({ ...m, text: m.text.slice(0, budget) });
+      budget -= m.text.length;
+    }
+    return kept.reverse();
   }
 
   /** Records the outcome, tells the owner it's with the CEO, and wakes the CEO with a brief. */
-  async function escalate(msg: Msg, why: string, found: string, cites: Cite[]) {
+  async function escalate(msg: Msg, why: string, found: string, cites: Cite[], earlier: Msg[] = []) {
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, msg.companyId), eq(agents.role, "ceo")));
+    const thread = msg.agentId ? eq(ownerChatMessages.agentId, msg.agentId) : isNull(ownerChatMessages.agentId);
+    // An earlier escalation from this thread that the CEO hasn't answered yet: this is a follow-up to it, whatever the PA's own label says.
+    const [open] = await db
+      .select({ at: ownerChatMessages.createdAt })
+      .from(paAnswers)
+      .innerJoin(ownerChatMessages, eq(ownerChatMessages.id, paAnswers.chatMessageId))
+      .where(and(eq(paAnswers.companyId, msg.companyId), thread, like(paAnswers.outcome, "escalated:%"), isNull(paAnswers.ceoRepliedAt), ne(paAnswers.chatMessageId, msg.id), lte(ownerChatMessages.createdAt, msg.createdAt)))
+      .orderBy(asc(ownerChatMessages.createdAt))
+      .limit(1);
+    const owners = await batch(msg);
+    const asked = owners.length > 1 ? ["The owner's messages, oldest first:", ...(await Promise.all(owners.map(async (m) => `- ${await clock(m.createdAt)}${m.id === msg.id ? " (latest)" : ""}: ${m.text}`)))] : [`The owner asked: ${msg.text}`];
     const brief = [
       "Your PA is passing this on from the owner.",
-      `The owner asked: ${msg.text}`,
+      ...(open ? [`Follow-up to the owner's message at ${await clock(open.at)} that you haven't answered yet; read them together: this may be the answer to that question or more detail on it.`] : []),
+      ...asked,
       `What the PA found: ${found || "nothing it could stand behind"}${cites.length ? ` (cites: ${cites.map((c) => `${c.kind} ${c.id}`).join(", ")})` : ""}`,
-      `Why it escalated: ${why}`,
+      `Why it escalated: ${open && /no explicit question/i.test(why) ? "the PA saw no question in it, but it follows one you haven't answered" : why}`,
       "Answer the owner directly; your reply is shown in their chat with the PA too.",
     ].join("\n");
     const [copy] = ceo ? await db.insert(ownerChatMessages).values({ companyId: msg.companyId, agentId: ceo.id, role: "owner", text: brief }).returning({ id: ownerChatMessages.id }) : [];
-    await db.insert(paAnswers).values({ companyId: msg.companyId, chatMessageId: msg.id, question: msg.text, cites, outcome: `escalated:${why}`, ceoMessageId: copy?.id ?? null });
+    for (const m of [...earlier, msg]) await db.insert(paAnswers).values({ companyId: msg.companyId, chatMessageId: m.id, question: m.text, cites, outcome: `escalated:${why}`, ceoMessageId: copy?.id ?? null });
     await db.insert(ownerChatMessages).values({ companyId: msg.companyId, agentId: msg.agentId, role: "assistant", text: HOLDING });
     if (ceo) await deps.notify(ceo.id, { reason: CHAT_REASON, priority: 4 });
   }
@@ -89,12 +136,12 @@ export function paService(
   return {
     /** pa_reply: posts the answer with its label, or escalates. */
     async reply(runId: string, input: { text: string; cites: Cite[]; confidence: "high" | "low" }) {
-      const { msg, done } = await question(runId);
+      const { msg, done, earlier } = await question(runId);
       if (!msg) return { posted: false, note: "There's no owner message waiting for an answer." };
       if (done) return { posted: false, note: "That question already has an outcome." };
       const why = await refusal(runId, msg, input.cites, input.confidence);
       if (why) {
-        await escalate(msg, why, input.text, input.cites);
+        await escalate(msg, why, input.text, input.cites, earlier);
         return { posted: false, note: `Not posted: ${why}. The question went to the CEO and the owner was told. Do not answer it yourself.` };
       }
       const [me] = await db.select({ model: agents.model }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
@@ -108,14 +155,16 @@ export function paService(
       const posted = `${input.text}\n\n${label}`;
       await db.insert(ownerChatMessages).values({ companyId: msg.companyId, agentId: msg.agentId, role: "assistant", text: posted, runId });
       await db.insert(paAnswers).values({ companyId: msg.companyId, chatMessageId: msg.id, question: msg.text, reply: input.text, cites: input.cites, outcome: "posted", sampled: (deps.random ?? Math.random)() < (deps.auditRate ?? 0.1) });
+      // The same reply answers the messages sent before it in this run: each gets its own outcome, but only the newest is sampled.
+      for (const m of earlier) await db.insert(paAnswers).values({ companyId: m.companyId, chatMessageId: m.id, question: m.text, reply: input.text, cites: input.cites, outcome: "posted", sampled: false });
       return { posted: true, note: "Posted to the owner." };
     },
 
     /** pa_escalate: the PA hands the question over itself. */
     async escalate(runId: string, summary: string) {
-      const { msg, done } = await question(runId);
+      const { msg, done, earlier } = await question(runId);
       if (!msg || done) return { ok: false };
-      await escalate(msg, "the PA asked the CEO", summary, []);
+      await escalate(msg, "the PA asked the CEO", summary, [], earlier);
       return { ok: true };
     },
 
@@ -144,8 +193,8 @@ export function paService(
       searched.delete(runId);
       const [r] = await db.select({ duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       if (r?.duty !== "assistant") return;
-      const { msg, done } = await question(runId);
-      if (msg && !done) await escalate(msg, error ? `the PA's run failed: ${error.slice(0, 200)}` : "the PA ended without answering", "", []);
+      const { msg, done, earlier } = await question(runId);
+      if (msg && !done) await escalate(msg, error ? `the PA's run failed: ${error.slice(0, 200)}` : "the PA ended without answering", "", [], earlier);
     },
   };
 }

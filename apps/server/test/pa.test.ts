@@ -209,6 +209,80 @@ describe("the CEO's PA (R87)", () => {
     expect((await ceoThread(c)).at(-1)).toMatchObject({ role: "assistant", text: "It's on track.\n\nNo changes made in this reply." });
   });
 
+  it("briefs a follow-up with the earlier unanswered message, and one CEO reply closes both (BOS-1392)", async () => {
+    const c = await setup();
+    const first = await c.ask("Can you look at issue 147?");
+    await first.client.callTool({ name: "pa_escalate", arguments: { summary: "Needs the issue text." } });
+    await c.emit({ type: "run.ended", runId: first.start.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    const second = await c.ask("Here it is: the checkout page shows a blank total.");
+    await second.client.callTool({ name: "pa_escalate", arguments: { summary: "No explicit question." } });
+    const brief = (await ceoThread(c)).at(-1)!.text;
+    expect(brief).toMatch(/^Follow-up to the owner's message at \d\d:\d\d that you haven't answered yet; read them together/m);
+    expect(brief).toMatch(/- \d\d:\d\d: Can you look at issue 147\?\n- \d\d:\d\d \(latest\): Here it is: the checkout page shows a blank total\./);
+
+    expect(await c.db.select().from(paAnswers)).toHaveLength(2);
+  });
+
+  it("does not mark a follow-up once the CEO has answered the earlier message (BOS-1392)", async () => {
+    const c = await setup();
+    const first = await c.ask("Can you look at issue 147?");
+    await first.client.callTool({ name: "pa_escalate", arguments: { summary: "Needs the issue text." } });
+    await c.emit({ type: "run.ended", runId: first.start.runId, stopReason: "end_turn", error: null });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const ceoRun = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.ceo.id)!;
+    await c.emit({ type: "run.update", runId: ceoRun.runId, update: { kind: "agent_message", text: "Send me the text." } });
+    await c.settle();
+    const second = await c.ask("Anything else open?");
+    await second.client.callTool({ name: "pa_escalate", arguments: { summary: "Judgement." } });
+    const brief = (await ceoThread(c)).at(-1)!.text;
+    expect(brief).not.toContain("Follow-up to");
+    expect(brief).toContain("The owner asked: Anything else open?");
+  });
+
+  it("gives every owner message one run claimed an outcome (BOS-1392)", async () => {
+    const c = await setup();
+    await c.req("POST", c.chatUrl, { text: "What is open?", agentId: c.pa.id });
+    await c.req("POST", c.chatUrl, { text: "And what is late?", agentId: c.pa.id });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.pa.id)!;
+    const client = await c.mcp(start.runId, c.pa.id);
+    await client.callTool({ name: "pa_escalate", arguments: { summary: "Both at once." } });
+    const rows = await c.db.select().from(paAnswers);
+    expect(rows.map((r) => r.question).sort()).toEqual(["And what is late?", "What is open?"]);
+    expect(rows.every((r) => r.outcome === "escalated:the PA asked the CEO")).toBe(true);
+    expect(new Set(rows.map((r) => r.ceoMessageId)).size).toBe(1);
+    const brief = (await ceoThread(c)).at(-1)!.text;
+    expect(brief).toContain("What is open?");
+    expect(brief).toContain("(latest): And what is late?");
+
+    // One CEO reply closes both messages' escalations.
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const ceoRun = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.ceo.id)!;
+    await c.emit({ type: "run.update", runId: ceoRun.runId, update: { kind: "agent_message", text: "Two open, none late." } });
+    await c.settle();
+    expect((await c.db.select().from(paAnswers)).every((r) => r.ceoRepliedAt)).toBe(true);
+  });
+
+  it("keeps a brief of ten long messages under the cap, with the latest in (BOS-1392)", async () => {
+    const c = await setup();
+    for (let i = 0; i < 9; i++) await c.req("POST", c.chatUrl, { text: `message ${i} ${"x".repeat(1500)}`, agentId: c.pa.id });
+    await c.req("POST", c.chatUrl, { text: `latest ${"y".repeat(1500)}`, agentId: c.pa.id });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.pa.id)!;
+    await (await c.mcp(start.runId, c.pa.id)).callTool({ name: "pa_escalate", arguments: { summary: "Many." } });
+    const brief = (await ceoThread(c)).at(-1)!.text;
+    expect(brief).toContain("(latest): latest ");
+    expect(brief.match(/^- /gm)!.length).toBeLessThanOrEqual(5);
+    expect(brief.length).toBeLessThan(4000 + 800);
+    // Every message still has its outcome, even those too old for the brief.
+    expect(await c.db.select().from(paAnswers)).toHaveLength(10);
+  });
+
   it("fails open: a failed PA run goes to the CEO", async () => {
     const c = await setup();
     const { start } = await c.ask("What is open?");

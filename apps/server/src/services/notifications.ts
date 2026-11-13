@@ -460,6 +460,24 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       return Number(row?.n ?? 0);
     },
 
+    /** Unread notices by level and by company ("none" for no company), across everything (BOS-1277). */
+    async unreadCounts() {
+      const rows = await db
+        .select({ level: notifications.level, companyId: notifications.companyId, n: count() })
+        .from(notifications)
+        .where(isNull(notifications.readAt))
+        .groupBy(notifications.level, notifications.companyId);
+      const level: Record<string, number> = {};
+      const company: Record<string, number> = {};
+      for (const r of rows) {
+        const n = Number(r.n);
+        level[r.level] = (level[r.level] ?? 0) + n;
+        const key = r.companyId ?? "none";
+        company[key] = (company[key] ?? 0) + n;
+      }
+      return { level, company };
+    },
+
     /** A read never writes (BOS-413). This is the once-a-minute sweep that catches cards closed outside the decisions service. */
     markAnsweredRead: readAnswered,
 
