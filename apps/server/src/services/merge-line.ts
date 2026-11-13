@@ -42,9 +42,9 @@ export type MergeLineEvent =
   | { event: "attempt"; by: string }
   | { event: "check_queued"; check: string; way: CheckWay; jobId?: string; reused?: boolean; train?: { place: number; ahead: number } }
   /** Merge train (BOS-1366): prepared again on a new base. ahead_left / ahead_changed / main_moved. */
-  | { event: "restacked"; why: "ahead_left" | "ahead_changed" | "main_moved"; restacks: number }
+  | { event: "restacked"; why: "ahead_left" | "ahead_changed" | "main_moved" | "cap"; restacks: number }
   /** Merge train: a failed check that stood got its one re-run on the same tree; `passed` says how the re-run went (a flaky pass). */
-  | { event: "rerun"; check: string; passed: boolean | null }
+  | { event: "rerun"; check: string; passed: boolean | null; failedJobId?: string }
   | { event: "check_started"; check: string; way: CheckWay; jobId?: string }
   | { event: "check_ended"; check: string; way: CheckWay; jobId?: string; passed: boolean | null; why?: string }
   | { event: "hold_started"; hold: HoldReason; note?: string; carried?: Array<{ ticketId: string; title: string }>; decisionId?: string | null }
@@ -56,7 +56,10 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   approved: (e) => `Merge line: approved by ${e.by}`,
   attempt: (e) => `Merge line: merge attempt started (${e.by})`,
   check_queued: (e) => `Merge line: check waiting for a slot${e.reused ? " (reused an earlier result)" : ""}${e.train ? ` (merge train, place ${e.train.place})` : ""}`,
-  restacked: (e) => `Merge line: merge train restacked (${e.why === "main_moved" ? "main moved outside the train" : e.why === "ahead_left" ? "a ticket ahead left the train" : "a ticket ahead was prepared again"})`,
+  restacked: (e) =>
+    e.why === "cap"
+      ? `Merge line: left the merge train after ${e.restacks} restacks; it tries again later`
+      : `Merge line: merge train restacked (${e.why === "main_moved" ? "main moved outside the train" : e.why === "ahead_left" ? "a ticket ahead left the train" : "a ticket ahead was prepared again"})`,
   rerun: (e) => `Merge line: failed check run once more${e.passed === true ? ": passed (a flaky failure)" : e.passed === false ? ": failed again" : ""}`,
   check_started: () => "Merge line: check started",
   check_ended: (e) => `Merge line: check ${e.passed === true ? "passed" : e.passed === false ? "failed" : "did not finish"}`,

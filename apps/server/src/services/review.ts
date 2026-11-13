@@ -1958,7 +1958,9 @@ export function reviewService(
         }
         return { status: "passed" };
       };
-      type ServerMergeEnd = MergeResult | Stuck | { status: "job_superseded" } | { status: "left_review" };
+      type ServerMergeEnd = MergeResult | Stuck | { status: "job_superseded" } | { status: "left_review" } | { status: "handed_over" };
+      // Merge train: the check that failed once, then passed its one re-run (a flaky test), named on the landing's result.
+      let flakyCheck: string | null = null;
       // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
       const serverMerge = async (): Promise<ServerMergeEnd> => {
         for (let round = 0; round < 3; round++) {
@@ -2003,10 +2005,18 @@ export function reviewService(
           const p = train.place(ticketId);
           return p ? { place: p.place, ahead: p.ahead.length } : undefined;
         };
+        // False once the cap is reached: the caller returns main_moved, `finally` gives up the seat (the members behind restack
+        // without it and carry on) and land()'s back-off tries this ticket again later (Brains' build point 3).
         const restack = async (why: RestackWhy): Promise<boolean> => {
           const ok = train.restack(ticketId);
-          await lineEvent(db, t, { event: "restacked", why, restacks: train.list().find((m) => m.ticketId === ticketId)?.restacks ?? 0 });
+          const restacks = train.list().find((m) => m.ticketId === ticketId)?.restacks ?? 0;
+          await lineEvent(db, t, { event: "restacked", why: ok ? why : "cap", restacks });
           return ok;
+        };
+        // A copy that is no longer in charge (blue/green hand-over, BOS-1289) stops: the server in charge rebuilds its own train.
+        const gone = async (): Promise<ServerMergeEnd | null> => {
+          if (deps.isLeader && !deps.isLeader()) return { status: "handed_over" };
+          return (await inReview()) ? null : { status: "left_review" };
         };
         let headOnly = false;
         try {
@@ -2019,7 +2029,10 @@ export function reviewService(
                 await lineEvent(db, t, { event: "hold_started", hold: "train", note: headOnly ? "waiting to land on main alone, after the merge train ahead" : "waiting for a place in the merge train" });
               }
               await pause();
-              if (!(await inReview())) return { status: "left_review" };
+              {
+                const stop = await gone();
+                if (stop) return stop;
+              }
               // The owner turned the train off meanwhile: land the way it did before.
               if (!(await queue.train())) {
                 train.leave(ticketId);
@@ -2032,7 +2045,10 @@ export function reviewService(
               let b = train.baseFor(ticketId);
               while (b.wait || (badBase !== null && b.base === badBase)) {
                 await pause();
-                if (!(await inReview())) return { status: "left_review" };
+                {
+                const stop = await gone();
+                if (stop) return stop;
+              }
                 b = train.baseFor(ticketId);
               }
               const prep = await prepare(b.base ?? undefined);
@@ -2066,7 +2082,10 @@ export function reviewService(
                 let verdict = train.failure(ticketId);
                 while (verdict === "wait") {
                   await pause();
-                  if (!(await inReview())) return { status: "left_review" };
+                  {
+                const stop = await gone();
+                if (stop) return stop;
+              }
                   verdict = train.failure(ticketId);
                 }
                 if (verdict === "restack") {
@@ -2078,8 +2097,10 @@ export function reviewService(
                 const infra = r.result.timedOut || (r.result as { noAnswer?: boolean }).noAnswer || checkNeverFinished(r.result) !== null;
                 if (infra || !train.rerun(ticketId)) return r;
                 const failedCheck = named(r.command);
+                const failedJob = r.result.keptLog?.jobId;
                 r = await round();
-                await lineEvent(db, t, { event: "rerun", check: failedCheck, passed: r.status === "passed" ? true : r.status === "check_failed" ? false : null });
+                await lineEvent(db, t, { event: "rerun", check: failedCheck, passed: r.status === "passed" ? true : r.status === "check_failed" ? false : null, ...(failedJob ? { failedJobId: failedJob } : {}) });
+                if (r.status === "passed") flakyCheck = failedCheck;
                 if (r.status === "passed") await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check \`${failedCheck}\` failed, then passed when run again on the same tree: a flaky failure. It is counted in the merge-line record. Nothing to do.` });
               }
               if (r.status === "restack") {
@@ -2092,7 +2113,10 @@ export function reviewService(
               let why = train.stale(ticketId);
               while (!why && !train.isHead(ticketId)) {
                 await pause();
-                if (!(await inReview())) return { status: "left_review" };
+                {
+                const stop = await gone();
+                if (stop) return stop;
+              }
                 why = train.stale(ticketId);
               }
               if (why) {
@@ -2122,10 +2146,12 @@ export function reviewService(
       const trainMode =
         serverChecks &&
         queuedChecks.length > 0 &&
+        // Only the server in charge builds a train (BOS-1289); a standby's landing keeps today's path.
+        (!deps.isLeader || deps.isLeader()) &&
         (await queue.train()) &&
         deps.runners.can(runner.id, "merge-base") &&
         (await db.select({ s: projects.mainState }).from(projects).where(eq(projects.id, t.projectId)))[0]?.s !== "red";
-      const m1: MergeResult | PushResult | Stuck | { status: "job_superseded" } | { status: "left_review" } = serverChecks
+      const m1: MergeResult | PushResult | ServerMergeEnd = serverChecks
         ? await whileActive(trainMode ? trainMerge : serverMerge)
         : pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
@@ -2141,6 +2167,7 @@ export function reviewService(
           );
       // Merge train: the ticket left review while it waited in or for the train; nothing was pushed.
       if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while it waited in the merge train, so it was not merged." } };
+      if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited in the merge train; the server now in charge restarts it." } };
       const m0 = m1;
       // Replaced by a newer request of this ticket: that one is the live check and raises its own card if it fails, so no card here.
       if (m0.status === "job_superseded") {
@@ -2226,7 +2253,8 @@ export function reviewService(
         if (rider) await lineEvent(db, rider, { event: "merged", commit: m.commit });
         await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
       }
-      return { ...mine, delivered: mine.delivered, detail: mine.detail };
+      // Merge train: a check that failed once and passed its re-run lands, but says so (Brains' build point 1).
+      return { ...mine, delivered: mine.delivered, detail: flakyCheck && mine.detail && typeof mine.detail === "object" ? { ...(mine.detail as object), flaky: `The merge check \`${flakyCheck}\` failed once and passed when run again on the same tree: a flaky test.` } : mine.detail };
     },
 
     /**

@@ -36,6 +36,8 @@ export type TrainMember = {
 
 /** Why a member has to prepare again: the member ahead left or changed, or main moved outside the train. */
 export type RestackWhy = "ahead_left" | "ahead_changed" | "main_moved";
+/** As recorded on the merge line: a restack, or the cap reached (the member gave up its seat for land()'s back-off). */
+export type RestackRecord = RestackWhy | "cap";
 
 /** What a member's failed check means right now (attribution, DR-059): wait for those ahead, restack without them, or it stands. */
 export type FailureVerdict = "wait" | "restack" | "stands";
@@ -49,7 +51,7 @@ export class MergeTrain {
   /** Seated members, head first. */
   private members: TrainMember[] = [];
   /** Joined but not seated yet. */
-  private waiting = new Map<string, { priority: number; place: number; seq: number; headOnly: boolean }>();
+  private waiting = new Map<string, { priority: number; place: number; seq: number; headOnly: boolean; passed: number }>();
   private seq = 0;
   /** Prepared commits of members that left without landing (or re-prepared): a head based on one is stale. */
   private lost = new Set<string>();
@@ -81,12 +83,12 @@ export class MergeTrain {
   /**
    * A landing that reached the merge (past every hold) asks for a place. Joining twice keeps the first place. `headOnly`: a
    * ticket whose merge on the tickets ahead wasn't clean (a conflict with one that may never land) is seated only as the head,
-   * on main alone, where its result is the real one. Until the train ahead has drained it holds the line behind it, so the
-   * order stays (a clash is rare; skipping it could starve it).
+   * on main alone, where its result is the real one. It keeps its place; later tickets may take free seats past it a few
+   * times (see admit), then it holds the line until the train ahead has drained.
    */
   join(ticketId: string, at: { priority: number; place: number; headOnly?: boolean }) {
     if (this.index(ticketId) >= 0 || this.waiting.has(ticketId)) return;
-    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++, headOnly: !!at.headOnly });
+    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++, headOnly: !!at.headOnly, passed: 0 });
   }
 
   /** Seats waiting tickets while seats are free; true when this ticket has a seat. Members are never pushed out by a later arrival. */
@@ -100,14 +102,31 @@ export class MergeTrain {
     while (this.members.length < seats && this.waiting.size) {
       if (this.seed && (this.now() >= this.seed.until || this.seed.order.every((id) => !this.wanted(id)))) this.seed = null;
       let next: string | undefined;
-      if (this.seed) {
+      const order = this.queue();
+      // A merge-line fix (priority 0) never waits for the restart hold (Brains' build point 5).
+      const fix = order.find((id) => this.waiting.get(id)!.priority === 0 && !this.waiting.get(id)!.headOnly);
+      if (this.seed && !fix) {
         // Old order first: the first seeded ticket not seated yet. If it hasn't re-joined, nobody is seated until it does (or time's up).
         next = this.seed.order.find((id) => this.index(id) < 0 && this.wanted(id));
         if (!next || !this.waiting.has(next)) return;
-      } else next = this.queue()[0];
-      if (!next) return;
+      } else {
+        // A head-only ticket is seated when the train is empty. Others may pass it meanwhile (it keeps its place), but each only
+        // `seats` times: then it holds the line until the train drains, so it can't be starved (Brains' build point 2).
+        for (const id of order) {
+          const w = this.waiting.get(id)!;
+          if (!w.headOnly || !this.members.length) {
+            next = id;
+            break;
+          }
+          if (w.passed >= seats) break;
+        }
+        if (!next) return;
+        for (const id of order) {
+          if (id === next) break;
+          this.waiting.get(id)!.passed++;
+        }
+      }
       const w = this.waiting.get(next)!;
-      if (w.headOnly && this.members.length) return;
       this.waiting.delete(next);
       this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false });
       this.seenSince.add(next);

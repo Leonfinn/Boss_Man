@@ -23,18 +23,26 @@ describe("merge train: seats and order", () => {
     expect(tr.list().map((m) => m.ticketId)).toEqual(["b", "u"]);
   });
 
-  it("seats a head-only ticket (a clash with a member ahead) only once the train ahead has drained, holding those behind it", () => {
-    const tr = train(3);
+  it("seats a head-only ticket (a clash with a member ahead) as the head only; later tickets pass it a few times, then it holds the line", () => {
+    const tr = train(2);
     tr.join("a", { priority: 1, place: 1 });
     expect(tr.seated("a")).toBe(true);
     tr.join("h", { priority: 1, place: 2, headOnly: true });
-    tr.join("z", { priority: 1, place: 3 });
-    expect(tr.seated("h")).toBe(false);
-    expect(tr.seated("z")).toBe(false);
+    // Later tickets take free seats past it (it keeps its place: still first in the queue)...
+    tr.join("y", { priority: 1, place: 3 });
+    expect(tr.seated("y")).toBe(true);
+    expect(tr.queue()).toEqual(["h"]);
     tr.landed("a");
+    tr.join("z", { priority: 1, place: 4 });
+    expect(tr.seated("z")).toBe(true); // passed twice now: seats = 2
+    tr.landed("y");
+    tr.join("w", { priority: 1, place: 5 });
+    // ...but no more: it waits for the train to drain, and w waits behind it.
+    expect(tr.seated("w")).toBe(false);
+    tr.landed("z");
     expect(tr.seated("h")).toBe(true);
     expect(tr.isHead("h")).toBe(true);
-    expect(tr.seated("z")).toBe(true);
+    expect(tr.seated("w")).toBe(true);
   });
 
   it("joining twice keeps the first place", () => {
@@ -97,12 +105,18 @@ describe("merge train: bases and staleness", () => {
     expect(tr.stale("b")).toBeNull();
   });
 
-  it("caps restacks per landing so nothing loops for ever", () => {
+  it("caps restacks per landing; the member then gives up its seat and the one behind carries on without it", () => {
     const tr = train();
-    tr.join("a", { priority: 1, place: 1 });
+    for (const [id, place] of [["a", 1], ["b", 2]] as const) tr.join(id, { priority: 1, place });
     tr.seated("a");
     for (let i = 0; i < TRAIN_RESTACK_CAP; i++) expect(tr.restack("a")).toBe(true);
+    prep(tr, "a", "main0", "A9");
+    prep(tr, "b", "A9", "B1");
     expect(tr.restack("a")).toBe(false);
+    tr.leave("a"); // serverMerge's finally
+    expect(tr.isHead("b")).toBe(true);
+    expect(tr.stale("b")).toBe("ahead_left");
+    expect(tr.baseFor("b")).toEqual({ wait: false, base: null });
   });
 });
 
@@ -157,12 +171,21 @@ describe("merge train: restart (BOS-1289)", () => {
     const clock = { t: 0 };
     const tr = train(3, clock);
     tr.seedOrder(["x", "y"]);
-    tr.join("new", { priority: 0, place: 0 }); // even an urgent newcomer waits for the old train
+    tr.join("new", { priority: 1, place: 0 }); // a newcomer earlier in line still waits for the old train
     tr.join("y", { priority: 1, place: 5 });
     expect(tr.seated("y")).toBe(false); // x was ahead of y and hasn't re-joined yet
     tr.join("x", { priority: 1, place: 9 });
     expect(tr.seated("y")).toBe(true);
     expect(tr.list().map((m) => m.ticketId)).toEqual(["x", "y", "new"]);
+  });
+
+  it("never holds a merge-line fix (priority 0) for the restart's old order", () => {
+    const tr = train(3, { t: 0 });
+    tr.seedOrder(["x", "y"]);
+    tr.join("fix", { priority: 0, place: 99 });
+    expect(tr.seated("fix")).toBe(true);
+    tr.join("other", { priority: 1, place: 1 });
+    expect(tr.seated("other")).toBe(false); // ordinary tickets still wait for x and y
   });
 
   it("stops waiting for a seeded ticket after the deadline, or once it has left", () => {

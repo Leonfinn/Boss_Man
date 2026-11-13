@@ -224,6 +224,9 @@ describe("merge train landings (BOS-1366)", () => {
     expect(c.runs.get("B")).toBe(1);
     expect(await c.events(a, "rerun")).toEqual([expect.objectContaining({ passed: true })]);
     expect(await c.events(b, "restacked")).toEqual([]);
+    // The flaky pass is visible on the ticket, not just in the numbers.
+    const lines = (await c.db.select({ summary: activity.summary }).from(activity).where(eq(activity.ticketId, a))).map((r) => r.summary);
+    expect(lines.some((s) => /flaky failure/.test(s ?? ""))).toBe(true);
   });
 
   it("a clash with a ticket ahead doesn't send the one behind back: it waits to land on main alone, which is the real answer", async () => {
@@ -256,6 +259,23 @@ describe("merge train landings (BOS-1366)", () => {
     stop();
     expect(c.git.has(c.git.main).sort()).toEqual(["A", "B", "X"]);
     expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A", "B"]);
+  });
+
+  it("turning the switch off mid-train: members already in it still land on their exact base, a new arrival takes today's path", async () => {
+    const c = await setup();
+    const [a, b, d] = [await c.ticket("A"), await c.ticket("B"), await c.ticket("C")];
+    await approveInOrder(c, [a, b]);
+    expect(await c.waitFor(async () => (await c.db.select().from(checkJobs)).length === 2)).toBe(true);
+    await c.db.update(settings).set({ value: false }).where(eq(settings.key, "merge_train"));
+    await c.approve(d);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "C"))).toBe(true);
+    const stop = c.runJobs(() => false);
+    expect([await c.outcome(a), await c.outcome(b), await c.outcome(d)]).toEqual(["merged", "merged", "merged"]);
+    stop();
+    const finishes = c.git.seen.filter((s) => s.phase === "finish");
+    expect(finishes.filter((s) => s.ticket !== "C").every((s) => !!s.expectBase)).toBe(true);
+    expect(c.git.seen.filter((s) => s.ticket === "C").some((s) => s.base || s.expectBase)).toBe(false);
+    expect(c.git.has(c.git.main).sort()).toEqual(["A", "B", "C"]);
   });
 
   it("with the switch off, or a runner without merge-base, merges as before: no base or expectBase is ever sent", async () => {
