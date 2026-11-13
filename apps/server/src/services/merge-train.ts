@@ -10,7 +10,7 @@
  * costs a round of checks, never a wrong push. That is why the train is rebuilt after a restart rather than stored (no migration).
  *
  * Words used here:
- * - seat: a place in the train. Up to `seats()` members (the check_slots setting): one check slot each.
+ * - seat: a place in the train. Up to `seats()` members (the check_slots setting, read at each landing): one check slot each.
  * - base: the commit a member was prepared on: main's tip for the head, the member ahead's prepared commit for the others.
  * - stale: a member whose base is no longer right: the member ahead re-prepared or left, or (the head) its base was a member's
  *   commit that never landed. A stale member prepares again on its new base (a same tree reuses its passed check for free).
@@ -49,7 +49,7 @@ export class MergeTrain {
   /** Seated members, head first. */
   private members: TrainMember[] = [];
   /** Joined but not seated yet. */
-  private waiting = new Map<string, { priority: number; place: number; seq: number }>();
+  private waiting = new Map<string, { priority: number; place: number; seq: number; headOnly: boolean }>();
   private seq = 0;
   /** Prepared commits of members that left without landing (or re-prepared): a head based on one is stale. */
   private lost = new Set<string>();
@@ -78,10 +78,15 @@ export class MergeTrain {
     this.seenSince = new Set();
   }
 
-  /** A landing that reached the merge (past every hold) asks for a place. Joining twice keeps the first place. */
-  join(ticketId: string, at: { priority: number; place: number }) {
+  /**
+   * A landing that reached the merge (past every hold) asks for a place. Joining twice keeps the first place. `headOnly`: a
+   * ticket whose merge on the tickets ahead wasn't clean (a conflict with one that may never land) is seated only as the head,
+   * on main alone, where its result is the real one. Until the train ahead has drained it holds the line behind it, so the
+   * order stays (a clash is rare; skipping it could starve it).
+   */
+  join(ticketId: string, at: { priority: number; place: number; headOnly?: boolean }) {
     if (this.index(ticketId) >= 0 || this.waiting.has(ticketId)) return;
-    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++ });
+    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++, headOnly: !!at.headOnly });
   }
 
   /** Seats waiting tickets while seats are free; true when this ticket has a seat. Members are never pushed out by a later arrival. */
@@ -102,6 +107,7 @@ export class MergeTrain {
       } else next = this.queue()[0];
       if (!next) return;
       const w = this.waiting.get(next)!;
+      if (w.headOnly && this.members.length) return;
       this.waiting.delete(next);
       this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false });
       this.seenSince.add(next);
@@ -236,16 +242,20 @@ export class MergeTrain {
 /** One train per project, on the server in charge. Cleared only by a restart (the train is rebuilt, never stored). */
 const trains = new Map<string, MergeTrain>();
 
-export function trainFor(projectId: string, seats: () => number, now?: () => number): MergeTrain {
-  let t = trains.get(projectId);
-  if (!t) {
-    t = new MergeTrain({ seats, ...(now ? { now } : {}) });
-    trains.set(projectId, t);
-  }
-  return t;
+const seatCounts = new Map<string, number>();
+
+/** The project's train; `seats` (check_slots, read by the caller) applies from now on. `created`: first use since the server started. */
+export function trainFor(projectId: string, seats: number): { train: MergeTrain; created: boolean } {
+  seatCounts.set(projectId, seats);
+  const had = trains.get(projectId);
+  if (had) return { train: had, created: false };
+  const train = new MergeTrain({ seats: () => seatCounts.get(projectId) ?? 1 });
+  trains.set(projectId, train);
+  return { train, created: true };
 }
 
 /** Tests only: forget every train, as a restart does. */
 export function resetTrains() {
   trains.clear();
+  seatCounts.clear();
 }

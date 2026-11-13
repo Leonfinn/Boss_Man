@@ -14,6 +14,8 @@ import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 
 export const CHECK_SLOTS_KEY = "check_slots";
+/** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
+export const MERGE_TRAIN_KEY = "merge_train";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
 export const DEFAULT_CHECK_SLOTS = 1;
 /** Why a queued job was cancelled when a newer request of the same ticket replaced it: not a failure, the newer job is the live one. */
@@ -95,6 +97,24 @@ export function checkQueue(db: Db) {
     });
   }
 
+  /**
+   * BOS-1328: a ticket's place in the merge line: the earliest queue time of its merge jobs still live or ended in the last
+   * PLACE_KEEP_MS (failed or stuck ones never count, so a fixed branch queues as new), plus its "move to front" (BOS-1384).
+   * The merge train (BOS-1366) seats tickets by the same place.
+   */
+  async function mergePlace(db: Db, ticketId: string): Promise<{ at: Date | null; front: { at: Date; by: string | null } | null }> {
+    const since = Date.now() - PLACE_KEEP_MS;
+    const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
+      // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
+      (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
+    );
+    let at: Date | null = null;
+    let front: { at: Date; by: string | null } | null = null;
+    for (const j of earlier) if (!at || j.queuedAt < at) at = j.queuedAt;
+    for (const j of earlier) if (j.frontAt && (!front || j.frontAt > front.at)) front = { at: j.frontAt, by: j.frontBy };
+    return { at, front };
+  }
+
   async function enqueueIn(db: Db, input: EnqueueInput): Promise<EnqueueResult> {
     const scope = input.scope ?? "full";
     // A pass on the same tree with an equal or wider scope answers the request, whatever kind asked for it.
@@ -128,16 +148,7 @@ export function checkQueue(db: Db) {
     // count, and failed or stuck ones never do, so a fixed branch queues as new.
     let inheritedAt: Date | null = null;
     let inheritedFront: { at: Date; by: string | null } | null = null;
-    if (input.kind === "merge") {
-      const since = Date.now() - PLACE_KEEP_MS;
-      const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
-        // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
-        (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
-      );
-      for (const j of earlier) if (!inheritedAt || j.queuedAt < inheritedAt) inheritedAt = j.queuedAt;
-      // BOS-1384: a "move to front" goes with the place in line.
-      for (const j of earlier) if (j.frontAt && (!inheritedFront || j.frontAt > inheritedFront.at)) inheritedFront = { at: j.frontAt, by: j.frontBy };
-    }
+    if (input.kind === "merge") ({ at: inheritedAt, front: inheritedFront } = await mergePlace(db, input.ticketId));
     if (stale.length)
       await db
         .update(checkJobs)
@@ -409,5 +420,17 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
   }
 
-  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  /** The owner's merge train switch (BOS-1366, DR-059): off unless set to true. */
+  async function train(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_TRAIN_KEY));
+    return row?.value === true || row?.value === "true";
+  }
+
+  async function setTrain(on: boolean): Promise<void> {
+    await db.insert(settings).values({ key: MERGE_TRAIN_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+  }
+
+  const place = (ticketId: string) => mergePlace(db, ticketId);
+
+  return { list, mode, slots, setMode, setSlots, train, setTrain, place, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }
