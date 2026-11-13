@@ -118,8 +118,8 @@ const bg = createBackground(
 let resumeMergesSince: Date | null = null;
 // BOS-1399: why this server took charge, for the merge-line "takeover" rows. SIGUSR2 is the deployer's switch.
 let takeoverCauseNow: { cause: TakeoverCause; commit: string | null; recorded?: Set<string> } = { cause: "restart", commit: null };
-let promotions = 0;
-let signalled = false;
+let promotions = 0; // shortcut: lost on restart, harmless because a fresh process is always its first promotion (cause "restart" or "deployer_switch").
+let signalled = false; // shortcut: lost on restart, harmless because it only marks a SIGUSR2 promotion in flight and is reset right after.
 leader.onPromote(async () => {
   resumeMergesSince = new Date();
   const commit = env.BOSSMAN_COMMIT || null;
