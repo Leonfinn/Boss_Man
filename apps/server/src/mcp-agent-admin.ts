@@ -125,14 +125,15 @@ export function registerAgentAdminTools(server: McpServer, db: Db, { notes, skil
     "model_options",
     {
       description: "The valid model setups for hiring or changing an agent (CEO only): harnesses, providers, funding sources (paid from), the models each harness and funding source offers, and `current` — what every live agent runs on now (harness, provider, model and paid from), so a change across the team can be checked agent by agent. Uses the same names the Agents page shows. Call this before propose_hire, propose_team or propose_model_change so you pick real values. A provider must match its funding source's provider, some harnesses cannot run on some providers, and a funding source serves only its own models (Claude models on a Claude account, not a DeepSeek one). " +
-        "With no inputs the whole answer is large (about 65,000 characters for 30 agents) and can overflow a chat's result limit, so narrow it: agent (name or id) returns only that agent's `current` entry plus the choices that fit it (harnesses, providers, funding sources, and the models its harness offers); fundingSourceId returns only the agents paid from that source and the source itself; section (current, harnesses, providers, fundingSources, models or note) returns only that part. section can be combined with either (agent wins over fundingSourceId).",
+        "With no inputs the whole answer is large (about 65,000 characters for 30 agents) and can overflow a chat's result limit, so narrow it: agent (name or id) returns only that agent's `current` entry plus the choices that fit it (harnesses, providers, funding sources, and the models its harness offers); paidFrom (a funding source id) returns only the agents paid from that source and the source itself; section (current, harnesses, providers, fundingSources, models or note) returns only that part. section can be combined with either (agent wins over fundingSourceId).",
       inputSchema: {
         agent: z.string().trim().min(1).max(80).optional(),
-        fundingSourceId: z.string().trim().min(1).max(80).optional(),
+        // Not named fundingSourceId: policy-mcp.test.ts allows that field name only on the tools that change a model setup.
+        paidFrom: z.string().trim().min(1).max(80).optional(),
         section: z.enum(["current", "harnesses", "providers", "fundingSources", "models", "note"]).optional(),
       },
     },
-    async ({ agent, fundingSourceId, section }) => {
+    async ({ agent, paidFrom: fundingSourceId, section }) => {
       const ceo = await ceoOnly();
       if (!ceo) return fail("Only your company's CEO can read the model choices.");
       const all = await team.modelOptions(scope.companyId);

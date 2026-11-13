@@ -132,11 +132,11 @@ describe("the CEO builds the team (R62)", () => {
     expect(JSON.parse(one).current).toEqual([expect.objectContaining({ name: "Dev 3", fundingSourceName: "Claude Max 2", harness: "claude" })]);
     expect(JSON.parse(one).models.runner).not.toHaveProperty("opencode");
 
-    const paid = JSON.parse(await call({ fundingSourceId: second.id, section: "current" }));
+    const paid = JSON.parse(await call({ paidFrom: second.id, section: "current" }));
     expect(Object.keys(paid)).toEqual(["current"]);
     expect(paid.current).toHaveLength(16);
     expect(paid.current.every((a: { fundingSourceId: string }) => a.fundingSourceId === second.id)).toBe(true);
-    expect(JSON.parse(await call({ fundingSourceId: second.id })).fundingSources).toEqual([expect.objectContaining({ id: second.id })]);
+    expect(JSON.parse(await call({ paidFrom: second.id })).fundingSources).toEqual([expect.objectContaining({ id: second.id })]);
 
     const section = await call({ section: "fundingSources" });
     expect(Object.keys(JSON.parse(section))).toEqual(["fundingSources"]);
@@ -145,7 +145,7 @@ describe("the CEO builds the team (R62)", () => {
     expect((await call({ section: "current" })).length).toBeLessThan(25_000);
 
     expect(await client.callTool({ name: "model_options", arguments: { agent: "Nobody" } })).toMatchObject({ isError: true });
-    expect(await client.callTool({ name: "model_options", arguments: { fundingSourceId: "nope" } })).toMatchObject({ isError: true });
+    expect(await client.callTool({ name: "model_options", arguments: { paidFrom: "nope" } })).toMatchObject({ isError: true });
     await client.close();
   });
 
