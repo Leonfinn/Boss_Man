@@ -10,6 +10,7 @@ import { decisions, deploys, deployTargets, engagements, ticketDependencies, tic
 import { issueRunToken } from "../src/mcp.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { ownerActed, STALE_REASON } from "../src/services/stale-requests.js";
+import { workService } from "../src/services/work.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -191,6 +192,18 @@ describe("stale requests (BOS-123)", () => {
     await c.decisions.answer(second.id, "No");
     [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+  });
+
+  it("stamps a fresh note and the activity time from one instant, so a clock that ticks mid-write leaves it fresh (BOS-1343)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    // A clock that advances on every read: if the write reads it twice, the activity time lands after the note's.
+    let clock = new Date("2026-11-13T10:00:00Z");
+    const work = workService(c.db, { now: () => (clock = new Date(clock.getTime() + 3)) });
+    await work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
+    const [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteAt!.getTime()).toBe(row!.lastActivityAt.getTime());
+    expect(stateNoteLine({ stateNote: row!.stateNote, stateNoteAt: row!.stateNoteAt, stateNoteStaleAt: row!.stateNoteStaleAt, lastActivityAt: row!.lastActivityAt }, new Date("2026-11-13T10:05:00Z"))).not.toContain("(may be out of date)");
   });
 
   it("does not refuse a fresh question because of an unrelated permission answer on the ticket", async () => {

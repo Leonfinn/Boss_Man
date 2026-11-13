@@ -678,6 +678,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Every state change, and the write of the other fields with it, goes through moveTicket (DR-047): the
       // column, the WIP limit, the no-code reopen rule (BOS-532), the history line, the merge line's "left"
       // event (BOS-769), and the done, review and feature steps after a real change.
+      // One instant for the whole write (BOS-1343): the note's time and the activity time come from one read,
+      // so a fresh note never reads as stale because the clock ticked between the two.
+      const at = now();
       const { ticket: updated } = await moveTicket(db, ticketId, target, {
         by: patch.byAgentId,
         expectedVersion: expected,
@@ -689,9 +692,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         reviewRound: patch.reviewRound ?? "keep",
         columnId: patch.columnId,
         projectId: dest?.id,
-        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}) },
+        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: at, stateNoteStaleAt: null } : {}) },
         hooks,
-        now: now(),
+        now: at,
       });
       if (dest) {
         const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));
