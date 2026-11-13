@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,7 +10,11 @@ import { normalSlug, pageSlug, slugify, wikiService } from "../src/services/wiki
 // BOS-1324: a long title made a slug ending in "-", and a write to it landed on the slug without the "-"
 // (overwriting another page) while a read showed the "-" page. DR-058 ended up as two pages.
 
-const migration = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle/0149_trim_wiki_slug_dash.sql");
+// Found by name, not number: the merge gate renumbers the migration when main takes its number first.
+const drizzleDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../drizzle");
+const migrationFile = readdirSync(drizzleDir).find((f) => /^\d{4}_trim_wiki_slug_dash\.sql$/.test(f));
+if (!migrationFile) throw new Error("the trim_wiki_slug_dash migration is missing from drizzle/");
+const migration = path.join(drizzleDir, migrationFile);
 const by = { agentId: null, runId: null };
 
 let close: (() => Promise<void>) | undefined;
@@ -85,7 +89,7 @@ describe('read and write agree on which page "x-" is', () => {
   });
 });
 
-describe("migration 0149: pages whose slug ends in -", () => {
+describe("migration trim_wiki_slug_dash: pages whose slug ends in -", () => {
   const run = async (db: Awaited<ReturnType<typeof setup>>["db"]) => {
     for (const s of readFileSync(migration, "utf8").split("--> statement-breakpoint")) await db.execute(sql.raw(s));
   };
