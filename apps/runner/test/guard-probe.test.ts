@@ -73,6 +73,20 @@ describe("probe right after a runner swap (BOS-1362)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it("a gateway that accepts the connect is still absent, never on", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bm-guard-"));
+    const server = net.createServer((s) => s.destroy());
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      writeFileSync(path.join(dir, "route"), HEADER + LOOPBACK_GW);
+      const report = await probeGuardWhenReady({ routeFile: path.join(dir, "route"), port, pollMs: 10, waitMs: 1000 });
+      expect(report).toMatchObject({ state: "absent", reason: "connect to the gateway succeeded" });
+    } finally {
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("still says absent when the network never arrives", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "bm-guard-"));
     try {
