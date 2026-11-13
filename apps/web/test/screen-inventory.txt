@@ -123,6 +123,7 @@ sections:
   - Set up your phone
 reads: 
   - /api/notification-settings
+  - /api/notification-settings/phone-login/:id
   - /api/notifications
   - /api/notifications/pushes
 

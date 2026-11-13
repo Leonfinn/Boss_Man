@@ -1056,6 +1056,114 @@ mv "$T/bin/docker.real" "$T/bin/docker"
 [[ $(status result) == rolled_back ]] || fail "db restarted during the swap: $(cat "$D/outbox/status.json")"
 has "$D/outbox/status.json" "whole-stack check found"; live_is blue
 
+# ================= BOS-1004: "Create phone login" (inbox/phone-login.json), fake docker, fake ntfy =================
+# The deployer makes the phone's read-only ntfy user inside the ntfy container and returns the password sealed to the
+# public key in the request. The password must be in no file the deployer writes and on no command line.
+unset COMPOSE_FILE
+PL="$T/pl"; PLW="$PL/world"; PLLOG="$PL/docker.log"; PD="$PL/deployer"
+mkdir -p "$PL/bin" "$PLW" "$PD/inbox" "$PD/outbox"; : >"$PLLOG"; : >"$PLW/users"
+sed "s#^export PATH=.*#export PATH=$PL/bin:\$PATH#" "$here/host-deployer.sh" >"$PL/hd.sh"; chmod +x "$PL/hd.sh"
+printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$T/src" >"$PD/host.conf"; chmod 600 "$PD/host.conf"
+cat >"$PL/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+# A pretend ntfy container: users in a file, passwords kept apart so the test can compare them. Logs arguments only.
+echo "docker $*" >>"$PLLOG"
+if [[ $1 == ps ]]; then printf '%s' "${PL_CIDS-abc123def456}" | tr ' ' '\n' | grep . || true; exit 0; fi
+[[ $1 == exec && $2 == -e && $3 == NTFY_PASSWORD ]] || { echo "fake docker: unhandled: $*" >&2; exit 98; }
+shift 3; cid=$1; shift; [[ $1 == ntfy ]] || exit 98; shift
+if [[ -n ${PL_FAIL:-} && $1 == "$PL_FAIL" ]]; then echo "boom: the password is ${NTFY_PASSWORD:-none}" >&2; exit 1; fi
+case "$1 $2" in
+  "user list") printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
+  "user add") [[ $3 == --role=user && ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; echo "$4" >>"$PLW/users"; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$4" ;;
+  "user change-pass") [[ ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$3" ;;
+  access*) [[ $3 == read-only || $4 == read-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
+  *) echo "fake ntfy: unhandled: $*" >&2; exit 98 ;;
+esac
+FAKE
+chmod +x "$PL/bin/docker"
+export PLLOG PLW
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$PL/key.pem" 2>/dev/null
+pubb64() { openssl pkey -in "$1" -pubout -outform DER 2>/dev/null | base64 -w0; }
+PUB="$(pubb64 "$PL/key.pem")"
+plreq() { # action user topic pubkey [id]: write a request the way the server does; sets PLID
+  PLID="${5:-$(node -e 'console.log(crypto.randomUUID())')}"
+  printf '{"id":"%s","action":"%s","user":"%s","topic":"%s","pubkey":"%s"}\n' "$PLID" "$1" "$2" "$3" "$4" >"$PD/inbox/phone-login.json"
+  rm -f "$PD/state/last-phone-login"
+}
+plhost() { BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (phone login)"; }; }
+plx() { grep -c '^docker exec' "$PLLOG" || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect don't count)
+plres() { jget "$PD/outbox/phone-login.json" "$1"; }
+unseal() { jget "$PD/outbox/phone-login.json" sealed | base64 -d | openssl pkeyutl -decrypt -inkey "$PL/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256; }
+no_plaintext() { # the password must be in nothing the deployer or the log wrote, nor on any command line
+  [[ -n $1 ]] || fail "empty password"
+  ! grep -rqF -- "$1" "$PD" "$PLLOG" "$T/out" "$T/hook.out" 2>/dev/null || fail "the password is in the clear in: $(grep -rlF -- "$1" "$PD" "$PLLOG" "$T/out" 2>/dev/null)"
+}
+# PL1. Create: the user is added with the role and access fixed here, and the password comes back sealed only.
+plreq create phone-read alerts "$PUB"; plhost
+[[ $(plres result) == created && $(plres id) == "$PLID" ]] || fail "PL1: $(cat "$PD/outbox/phone-login.json")"
+[[ ! -e $PD/inbox/phone-login.json ]] || fail "PL1: the request was left in the inbox"
+pw1="$(unseal)"; [[ $pw1 =~ ^[A-Za-z0-9]{24}$ && $pw1 == "$(cat "$PLW/pw.phone-read")" ]] || fail "PL1: the sealed password does not decrypt to the one ntfy was given"
+no_plaintext "$pw1"
+has "$PLLOG" "docker exec -e NTFY_PASSWORD abc123def456 ntfy user add --role=user phone-read"
+has "$PLLOG" "docker exec -e NTFY_PASSWORD abc123def456 ntfy access phone-read alerts read-only"
+has "$PD/state/phone-login.log" " $PLID created phone-read"
+# PL2. The same create again: the user exists, nothing changes, nothing is sealed.
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == exists && -z $(plres sealed) ]] || fail "PL2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "change-pass"; [[ $(cat "$PLW/pw.phone-read") == "$pw1" ]] || fail "PL2: the password changed"
+# PL3. Reset: a new password, access applied again, and an old request id is never run twice.
+plreq reset phone-read alerts "$PUB"; ID3=$PLID; : >"$PLLOG"; plhost
+[[ $(plres result) == reset ]] || fail "PL3: $(cat "$PD/outbox/phone-login.json")"
+pw3="$(unseal)"; [[ $pw3 != "$pw1" && $pw3 == "$(cat "$PLW/pw.phone-read")" ]] || fail "PL3: reset did not change the password"
+no_plaintext "$pw3"; no_plaintext "$pw1"
+has "$PLLOG" "ntfy user change-pass phone-read"; has "$PLLOG" "ntfy access phone-read alerts read-only"
+plreq reset phone-read alerts "$PUB" "$ID3"; : >"$PLLOG"; plhost
+hasnt "$PLLOG" "change-pass" # the same id again is ignored
+[[ $(plres id) == "$ID3" ]] || fail "PL3: a replay overwrote the answer"
+# PL4. Reset of a user that is not there.
+cp "$PLW/users" "$PLW/users.keep"; : >"$PLW/users"
+plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == missing ]] || fail "PL4: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "change-pass"
+cp "$PLW/users.keep" "$PLW/users"
+# PL4b. Only phone-read: an existing admin (or any other) user is never reset, and docker is not touched.
+echo owner-admin >>"$PLW/users"
+plreq reset owner-admin alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == rejected ]] || fail "PL4b: $(cat "$PD/outbox/phone-login.json")"; [[ $(plx) == 0 ]] || fail "PL4b: the container was used: $(cat "$PLLOG")"
+# PL5. Bad fields are refused before docker is touched: user, reserved user, topic, key (bad, tiny, not RSA), action.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:1024 -out "$PL/small.pem" 2>/dev/null
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$PL/ec.pem" 2>/dev/null
+for bad in "create Bad_User alerts $PUB" "create ab alerts $PUB" "create admin alerts $PUB" "create bossman-publish alerts $PUB" "create phone-two alerts $PUB" "reset phone-reader alerts $PUB" "create phone-read al/erts $PUB" "create phone-read alerts.x $PUB" \
+  "create phone-read alerts bm90LWEta2V5" "create phone-read alerts $(pubb64 "$PL/small.pem")" "create phone-read alerts $(pubb64 "$PL/ec.pem")" "delete phone-read alerts $PUB"; do
+  # shellcheck disable=SC2086 # the words are split on purpose
+  plreq $bad; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plres id) == "$PLID" ]] || fail "PL5 ($bad): $(cat "$PD/outbox/phone-login.json")"
+  [[ $(plx) == 0 ]] || fail "PL5 ($bad): the container was used: $(cat "$PLLOG")"
+done
+# A request with an extra field, a symlink or junk is ignored without any answer for it.
+printf '{"id":"%s","action":"create","user":"phone-read","topic":"a","pubkey":"%s","extra":"x"}\n' "$(node -e 'console.log(crypto.randomUUID())')" "$PUB" >"$PD/inbox/phone-login.json"; : >"$PLLOG"; plhost
+[[ ! -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL5: an extra field was accepted"
+ln -s /etc/hostname "$PD/inbox/phone-login.json"; plhost; [[ ! -e $PD/inbox/phone-login.json && ! -L $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL5: a symlink was followed"
+# PL6. Rate limit: a second request inside 30 s is refused.
+plreq reset phone-read alerts "$PUB"; plhost; plreq reset phone-read alerts "$PUB"; date +%s >"$PD/state/last-phone-login"; : >"$PLLOG"; plhost
+if [[ $(plres result) == rejected ]] && has "$PD/outbox/phone-login.json" "30 seconds" && [[ $(plx) == 0 ]]; then :; else fail "PL6: $(cat "$PD/outbox/phone-login.json")"; fi
+# PL7. No ntfy container, or two: nothing is changed.
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="" plhost
+[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="abc123def456 fed654cba321" plhost
+[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+# PL8. A failing ntfy command is reported without the password, and a failed create leaves no sealed answer.
+: >"$PLW/users"
+plreq create phone-read alerts "$PUB"; PL_FAIL=user plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PL8a: $(cat "$PD/outbox/phone-login.json")"
+plreq create phone-read alerts "$PUB"; PL_FAIL=access plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PL8b: $(cat "$PD/outbox/phone-login.json")"
+no_plaintext "$(cat "$PLW/pw.phone-read")"
+# PL9. The host says whether it can seal; a dry run changes nothing.
+has "$PD/outbox/host.json" '"phoneLogin": {"openssl": true}'
+plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" --dry-run >"$T/out" 2>&1 || fail "PL9 dry run"
+[[ -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL9: a dry run handled the request"
+rm -f "$PD/inbox/phone-login.json"
+
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
 out="$( (unset BOSSMAN_DEPLOYER; bash "$own/deployer/host-deployer.sh" --dry-run 2>&1) || true)"
