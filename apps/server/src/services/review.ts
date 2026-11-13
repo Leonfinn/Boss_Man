@@ -1852,11 +1852,15 @@ export function reviewService(
           const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
           return row?.value !== false && row?.value !== "false";
         };
+        // BOS-1365: one job per merge. When the deep check runs, it alone is queued: two jobs on one tree each waited for a slot
+        // and a quick merge landed in between. check-all.sh runs the migration lint and script tests the project check
+        // would have run (the merged-clean step is moot: the tree is already the prepared merge).
+        const queuedChecks = needsDeep && deepVerifyCommand ? [deepVerifyCommand] : checks;
         for (let round = 0; round < 3; round++) {
           let prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
           if (prep.status !== "prepared") return prep;
           let lastRefresh = Date.now();
-          for (const command of checks) {
+          for (const command of queuedChecks) {
             const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
             // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
             // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
@@ -1889,7 +1893,7 @@ export function reviewService(
               // BOS-1344: still waiting for a slot. When main moved, the job takes the new merged tree before it starts, so the check
               // never begins on a tree that is already stale. A failed refresh (conflict, migration) is left to the normal round.
               // Only the round's first command: a later one would push a tree an earlier command never ran on (finish then says main_moved).
-              if (command === checks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await retargetOn())) {
+              if (command === queuedChecks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await retargetOn())) {
                 lastRefresh = Date.now();
                 const fresh = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS).catch(() => null);
                 if (fresh?.status === "prepared" && fresh.tree !== cur.tree) {

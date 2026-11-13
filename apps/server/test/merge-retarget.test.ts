@@ -120,25 +120,29 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
     await res;
   });
 
-  it("does not move the deep check's job after the project check passed on the old tree", async () => {
+  it("queues one job for a high-risk merge (the deep check alone, BOS-1365) and moves it to the new main", async () => {
     const c = await setup();
     await c.db.update(projects).set({ deepVerifyCommand: "pnpm test:e2e" });
     await c.db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, c.ticket.id));
     const res = approveAndWait(c.req, c.ticket.id);
-    const first = await c.jobOf();
-    expect(first.command).toContain("pnpm test");
-    await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, first.id));
-    const secondQueued = await c.waitFor(async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).length === 2);
-    expect(secondQueued).toBe(true);
-    const second = (await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).find((j) => j.id !== first.id)!;
-    expect(second.command).toBe("pnpm test:e2e");
+    const job = await c.jobOf();
+    expect(job.command).toBe("pnpm test:e2e");
     c.state.mainMoved = true;
-    // Give the refresh several intervals: it must stay away, or finish would push a tree the project check never ran on.
-    await new Promise((r) => setTimeout(r, 300));
-    const [after] = await c.db.select().from(checkJobs).where(eq(checkJobs.id, second.id));
-    expect(after!.tree).toBe(OLD.tree);
-    expect(after!.commit).toBe(second.commit);
-    await c.db.update(checkJobs).set({ state: "cancelled", reason: "test over", endedAt: new Date() }).where(eq(checkJobs.state, "queued"));
+    const moved = await c.waitFor(async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]!.tree === NEW.tree);
+    expect(moved).toBe(true);
+    await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, job.id));
+    expect((await res).json()).toMatchObject({ outcome: "merged" });
+    expect(c.state.finishTree).toBe(NEW.tree);
+    expect(await c.db.select({ id: checkJobs.id }).from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).toHaveLength(1);
+  });
+
+  it("gives a merge job for a ticket fixing the merge check priority 0", async () => {
+    const c = await setup();
+    await c.db.update(tickets).set({ fixesMergeCheck: true }).where(eq(tickets.id, c.ticket.id));
+    const res = approveAndWait(c.req, c.ticket.id);
+    const job = await c.jobOf();
+    expect(job.priority).toBe(0);
+    await c.db.update(checkJobs).set({ state: "cancelled", reason: "test over", endedAt: new Date() }).where(eq(checkJobs.id, job.id));
     await res;
   });
 
