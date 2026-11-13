@@ -88,6 +88,8 @@ export const OWNER_CONTROLS = {
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
     // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
     "What's holding work up …", "Show all …", "Show fewer",
+    // BOS-1306: the labelled Hide / Show button at the right end of that heading.
+    "Hide", "Show",
   ],
   Wiki: [
     "Show older versions",

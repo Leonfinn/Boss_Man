@@ -762,12 +762,13 @@ export async function buildApp(opts: AppOptions) {
     cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
-    resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
+    resumeLand: (ticketId, adopt) => review.startLanding(ticketId, adopt ? "Boss Man (the server restarted; carrying on with the merge check that is still running)" : "Boss Man (the server restarted during this merge; starting it again)", undefined, adopt ? { adopt } : undefined),
     // Approved work held on a fix goes on once the fix is merged and live (BOS-1173); a repeat round on passed code is withdrawn.
     releaseHolds: () => review.releaseHolds(),
     withdrawRepeatRounds: (judged) => review.withdrawRepeatRounds(judged),
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
+    landingRunning: (ticketId) => review.runningMerges().some((m) => m.ticketId === ticketId),
     branchClash: (ticketId) => review.branchClash(ticketId),
     signoffCovers: (ticketId, signed, head) => review.signoffCovers(ticketId, signed, head),
     signoffWithdraw: (ticketId, cardHead, head, why) => review.withdrawStaleSignoff(ticketId, cardHead, head, why),
