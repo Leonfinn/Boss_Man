@@ -1526,7 +1526,7 @@ function ClosedGroup({ notices, advised }: { notices: ClosedNoticeCard[]; advise
                   <p style={{ margin: "0 0 4px" }}>{n.notice.text}</p>
                   {n.notice.newer && (
                     <p style={{ margin: "0 0 4px" }}>
-                      <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                      <a href={`#/decisions/${n.notice.newer.decisionId}`}>Follow the newer card: {n.notice.newer.label}</a>
                     </p>
                   )}
                   {steps?.length ? (

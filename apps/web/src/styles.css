@@ -549,6 +549,12 @@ details > summary { cursor: pointer; font-size: 14px; }
   .set-nav .set-wizard { display: none; }
   .set-head-wizard { display: none; }
   .set-jump a { min-height: 24px; }
+  /* (BOS-1126 Q8) The bare #/settings menu on a wide screen: each page's one-line hint under its name, two columns of pages (the sidebar beside a page stays names only). */
+  .set-nav-index ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+  .set-nav-index li > a { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; min-height: 56px; border: 1px solid var(--line); border-left-width: 4px; height: 100%; box-sizing: border-box; }
+  .set-nav-index .set-item-label { grid-column: 1; grid-row: 1; }
+  .set-nav-index .set-item-hint { display: block; grid-column: 1; grid-row: 2; }
+  .set-nav-index .set-item-chevron { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
 }
 /* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */
 @media (pointer: coarse) {
@@ -581,7 +587,9 @@ details > summary { cursor: pointer; font-size: 14px; }
 .rm-card-title { display: flex; gap: 8px; align-items: flex-start; padding: 0; border: 0; background: none; color: var(--ink); text-align: left; font-size: 15px; }
 .rm-card-title a { color: var(--ink); text-decoration: none; }
 .rm-card-title a:hover { text-decoration: underline; }
-.rm-unfold { flex: none; margin-left: auto; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: var(--ink); cursor: pointer; }
+.rm-unfold { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+.rm-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform 0.15s; }
+.rm-unfold.open .rm-chevron { transform: rotate(90deg); }
 .rm-card-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
 .rm-pin select { width: 100%; min-height: 40px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); font-size: 13px; }
 .rm-milestones { list-style: none; margin: 0; padding: 8px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
@@ -913,7 +921,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
   .btn, .chip, .props-toggle, .use-suggestion { min-height: 44px; }
   .btn.small, .chip { padding-top: 6px; padding-bottom: 6px; }
   .use-suggestion { display: flex; align-items: center; padding: 8px 0; font-size: 14px; }
-  .icon-btn, .rm-unfold { width: 44px; height: 44px; }
+  .icon-btn { width: 44px; height: 44px; }
+  .rm-unfold { min-height: 44px; }
   select, .board-bar select, .rules select, .ticket-props select, .rm-pin select, .rm-milestones .rm-pin select, select.mini, .compose-to select { min-height: 44px; }
   input.search { min-height: 44px; }
   /* Fold-out links keep their arrow and sit on one 44px line. */
@@ -1239,6 +1248,22 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
+
+/* Shared loading mark (BOS-1276). Three columns rise in turn; still under reduced motion. */
+.loader { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; animation: loader-in 0.2s ease-out; }
+.loader.sm { gap: 6px; font-size: 13px; }
+.loader-mark rect { transform-box: fill-box; transform-origin: 50% 100%; animation: loader-rise 1.1s ease-in-out infinite; }
+.loader-mark .b2 { animation-delay: 0.18s; }
+.loader-mark .b3 { animation-delay: 0.36s; }
+@keyframes loader-rise { 0%, 100% { transform: scaleY(0.45); } 50% { transform: scaleY(1); } }
+@keyframes loader-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .loader { animation: none; }
+  .loader-mark rect { animation: none; }
+  .loader-mark .b1 { transform: scaleY(0.55); }
+  .loader-mark .b2 { transform: scaleY(1); }
+  .loader-mark .b3 { transform: scaleY(0.75); }
+}
 
 /* ---------- Features table: values read as text, cards on a phone (BOS-1257) ---------- */
 .cell { position: relative; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 32px; padding: 2px 6px; border: 1px solid transparent; border-radius: 6px; }

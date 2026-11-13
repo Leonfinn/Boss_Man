@@ -131,7 +131,7 @@ export type AdvisedDecision = {
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
 export type ClosedNotice = {
-  why: "live" | "newer";
+  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn";
   text: string;
   at: string;
   until: string;

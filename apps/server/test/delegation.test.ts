@@ -288,7 +288,7 @@ describe("CEO edits the roadmap", () => {
 
   it("refuses a worker and another company's objective", async () => {
     const dev = await agent(ctx.dev.id);
-    expect(textOf(await roadmap(dev, { action: "list" }))).toMatch(/Only your company's CEO or a manager/);
+    expect(textOf(await roadmap(dev, { action: "list" }))).toMatch(/Only your company's CEO, a manager or a product manager can change the roadmap/);
     await dev.close();
     const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
     const theirs = (await ctx.req("POST", `/api/companies/${other.company.id}/objectives`, { title: "Theirs" })).json() as { id: string };

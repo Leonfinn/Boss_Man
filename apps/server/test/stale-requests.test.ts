@@ -334,7 +334,7 @@ describe("stale requests (BOS-123)", () => {
     await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
 
     const mcp = await c.mcp(c.other.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved", replacedBy: "none" } });
     expect(isError(r)).toBe(true);
     expect(textOf(r)).toMatch(/another flow/i);
 
@@ -349,7 +349,7 @@ describe("stale requests (BOS-123)", () => {
     const t = await c.ticket("Pick a colour", c.worker.id);
     const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Blue or navy?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Read the brand guide" });
     const mcp = await c.mcp(c.worker.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue, so this question is no longer needed.", replacedBy: "none" } });
     expect(isError(r)).toBe(false);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");

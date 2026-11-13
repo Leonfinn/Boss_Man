@@ -89,7 +89,7 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
 
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "short" } }))).toBe(true);
-    const r = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "The ticket is finished, so this card no longer applies." } });
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "The ticket is finished, so this card no longer applies.", replacedBy: "none" } });
     expect(isError(r)).toBe(false);
     const after = await row(d.id);
     expect(after.status).toBe("withdrawn");
@@ -125,7 +125,7 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
 
     // Once its ticket is finished it is stale, and may go.
     await c.work.updateTicket(t.id, { state: "done", overLimit: true });
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies.", replacedBy: "none" } }))).toBe(false);
     expect((await row(first.id)).status).toBe("withdrawn");
   });
 
@@ -149,7 +149,7 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
       .insert(decisions)
       .values({ companyId: c.company.id, kind: "question", question: "A merge card left behind", options: [CHECK_AGAIN, CHECK_SEND_BACK], recommendedOption: CHECK_AGAIN, tier: "owner", dedupeKey: `merge-stuck:${done.id}`, context: { type: "check_stuck", ticketId: done.id, command: "", output: "timed out" } })
       .returning();
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: stale!.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: stale!.id, note: "The ticket is finished, so this card no longer applies.", replacedBy: "none" } }))).toBe(false);
     expect((await row(stale!.id)).status).toBe("withdrawn");
   });
 
@@ -259,7 +259,7 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     // Raised by another agent: the same agent asking again would have closed the first card by itself (BOS-1193).
     const second = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
     const ceo = await c.mcp(c.ceo.id);
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card that asks the same thing." } }))).toBe(false);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card that asks the same thing.", replacedBy: "none" } }))).toBe(false);
     expect((await row(first.id)).status).toBe("withdrawn");
     // The withdrawn card no longer holds the ticket; the identical open card still does.
     expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(0);
@@ -548,7 +548,7 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
     expect((await row(second.id)).status).toBe("open");
     // Once the ticket is finished they are stale, and may go.
     await c.work.updateTicket(t.id, { state: "done", overLimit: true });
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies.", replacedBy: "none" } }))).toBe(false);
   });
 
   it("never withdraws one of two merge cards as a duplicate", async () => {
