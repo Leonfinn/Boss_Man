@@ -27,6 +27,19 @@ type Block =
 
 const MCP_TOOL = "mcp__bossman__create_ticket";
 
+/** All user-written text in a conversation (string content and text blocks), joined. */
+function allUserText(messages: any[]): string {
+  return messages
+    .filter((m) => m.role === "user")
+    .map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")))
+    .join("\n");
+}
+
+/** A prompt containing this starts the long-step scenario (BOS-1016): one 60 s Bash command. */
+export const LONG_STEP_MARKER = "LONG-STEP-SCENARIO";
+/** A message containing this, once the model sees it, makes it answer WRAPPED and end the turn. */
+export const WRAP_UP_MARKER = "WRAP-UP-NOW";
+
 // The scripted main-loop turn: each step answers the tool_results seen so far.
 function scriptedReply(messages: any[]): { step: string; blocks: Block[] } {
   const results = messages
@@ -39,6 +52,11 @@ function scriptedReply(messages: any[]): { step: string; blocks: Block[] } {
     name,
     input,
   });
+  if (firstUserText(messages).includes(LONG_STEP_MARKER)) {
+    if (allUserText(messages).includes(WRAP_UP_MARKER)) return { step: "wrapped", blocks: [{ type: "text", text: "WRAPPED" }] };
+    if (results === 0) return { step: "long-step", blocks: [tool("Bash", { command: "sleep 60", description: "A long check", timeout: 120000 })] };
+    return { step: "final", blocks: [{ type: "text", text: "SLEPT" }] };
+  }
   switch (results) {
     case 0:
       return {

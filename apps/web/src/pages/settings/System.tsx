@@ -622,19 +622,31 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
               {s.runsList.map((run) => {
                 const onCard = !!run.waitingOn;
                 const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                // BOS-1016: a run inside one long step (a check, a build) is busy, not stuck. Agents that can be
+                // steered get the message inside the step; others read it when the step ends.
+                const step = run.step ?? null;
                 return (
                   <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
                     <strong>{run.agent ?? "An agent"}</strong>
                     <span className="muted">
                       {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                      {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
                     </span>
                     {onCard ? (
                       <span className="tag amber" title={run.waitingOn!.question}>
                         Waiting for an answer
                       </span>
                     ) : late ? (
-                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
-                        Not responding
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes or more after being asked to wrap up.`}>
+                        Still going after {run.sinceWrapUpMinutes} min
+                      </span>
+                    ) : run.gotMessage ? (
+                      <span className="tag grey" title="It has the message and is saving its work.">
+                        Finishing up
+                      </span>
+                    ) : step ? (
+                      <span className="tag grey" title={step.title}>
+                        In a long step: it will stop when this step ends
                       </span>
                     ) : (
                       <span className="tag grey">Working</span>
@@ -651,7 +663,7 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
           )}
           {s.runsList.length > 0 && (
             <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
-              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              Agents have been asked to save their work and finish; most finish within a few minutes. One in a long step, like a full check, may take longer. One still going {s.notRespondingAfter} minutes after being asked shows Still going next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
               {s.kind === "wrapup"
                 ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
                 : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}

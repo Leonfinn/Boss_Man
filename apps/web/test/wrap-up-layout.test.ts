@@ -22,8 +22,8 @@ const built = existsSync(path.join(DIST, "index.html"));
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, agents: [{ id: "a1", companyId: "c1", name: "Radagast", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null }], projects: [] };
 const runsList = [
-  { runId: "r1", agent: "Bungle", ticket: "BOS-957", ticketTitle: "Feature tickbox", runningForMinutes: 34, sinceWrapUpMinutes: 6, waitingOn: null },
-  { runId: "r2", agent: "Kit", ticket: "BOS-972", ticketTitle: "Claude pack", runningForMinutes: 33, sinceWrapUpMinutes: 6, waitingOn: null },
+  { runId: "r1", agent: "Bungle", ticket: "BOS-957", ticketTitle: "Feature tickbox", runningForMinutes: 34, sinceWrapUpMinutes: 6, waitingOn: null, gotMessage: false, step: { title: "scripts/check-all.sh", sinceMinutes: 14 } },
+  { runId: "r2", agent: "Kit", ticket: "BOS-972", ticketTitle: "Claude pack", runningForMinutes: 33, sinceWrapUpMinutes: 6, waitingOn: null, gotMessage: true, step: null },
   { runId: "r3", agent: "Dougal", ticket: "BOS-420", ticketTitle: "Server updates", runningForMinutes: 20, sinceWrapUpMinutes: 6, waitingOn: { question: "May I run the full test suite?", tier: "ceo" } },
   { runId: "r4", agent: "Zebedee", ticket: "BOS-971", ticketTitle: "Multi-arch CI", runningForMinutes: 12, sinceWrapUpMinutes: 6, waitingOn: null },
 ];
@@ -39,7 +39,7 @@ const maintenance = (mode: string) => {
   if (mode === "none") return { on: false, last: null };
   const base = { on: true, kind: "update", reason: "runner update", since: now(), deadline: new Date(Date.now() + 30 * 60000).toISOString(), runs: runsList.length, companies: 1, chatOpen: true, last: null };
   if (mode === "waiting") return base;
-  return { ...base, wrapAsked: true, notRespondingAfter: 10, runsList };
+  return { ...base, wrapAsked: true, notRespondingAfter: 30, runsList };
 };
 
 function answer(p: string, mode: string): unknown {
@@ -162,6 +162,11 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
             const text = (await page.locator(`${sec} [data-testid='wrapup-runs']`).innerText()).toLowerCase();
             expect(text).toContain("bungle");
             expect(text).toContain("waiting for an answer");
+            // BOS-1016: a run in a long step and one that has the message, never "not responding".
+            expect(text).toContain("in a long step: it will stop when this step ends");
+            expect(text).toContain("running scripts/check-all.sh for 14 min");
+            expect(text).toContain("finishing up");
+            expect(text).not.toContain("not responding");
           }
           await saveShot(`wrap-up-${vp.name}-${m}.png`, page);
           await page.close();
