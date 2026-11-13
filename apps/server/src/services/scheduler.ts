@@ -122,7 +122,8 @@ const LOOP_EXCHANGES = 4;
 
 /** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
 export const CARRY_ON_MS = 15 * 60_000;
-export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
+export { CARRY_ON_NOTE } from "./check-wording.js";
+import { CARRY_ON_NOTE } from "./check-wording.js";
 
 /**
  * True while the agent has its own check job queued or running on the ticket (request_check, DR-003).

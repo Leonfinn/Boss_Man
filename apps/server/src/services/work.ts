@@ -15,6 +15,8 @@ import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
+import { checkQueue } from "./check-queue.js";
+import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
 
 export { WorkError };
 
@@ -540,6 +542,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.by) {
         if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");
         if (input.at.getTime() <= now().getTime()) throw new WorkError(422, "The time must be in the future.");
+        // BOS-1412: while the agent's own check waits or runs, its result wakes them, so one booked fallback is all it
+        // needs. A second would be an empty run that only re-reads the queue. Re-booking the same time is just a rewrite.
+        const own = await ownLiveCheck(db, t.id, input.by.agentId);
+        if (own) {
+          const booked = await pendingFallback(db, t.id, CARRY_ON_NOTE);
+          if (booked && booked.at.getTime() !== input.at.getTime()) {
+            const place = await checkPlace(checkQueue(db), t.companyId, own);
+            throw new WorkError(422, `Your check for ${own.commit.slice(0, 8)} is ${place}; its result will wake you. You already have a fallback booked for ${hhmm(booked.at)}.`);
+          }
+        }
       }
       const [row] = await db
         .update(tickets)

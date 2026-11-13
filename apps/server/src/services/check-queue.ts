@@ -107,8 +107,10 @@ export function checkQueue(db: Db) {
     const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null);
     const passed = sameTree.find((j) => j.state === "passed" && wide(j));
     if (passed) return { job: passed, reused: "passed" };
-    // The same ticket already has a live job on this tree that is wide enough: it is the answer.
-    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j));
+    // The same ticket already has a live job on this tree with the same command: it is the answer (BOS-1412). Asking
+    // again for code that is already waiting must never cancel or re-queue it: the agent re-reading its own position
+    // used to send the job to the back of a long line. A live job of another scope is left alone too, below.
+    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && (j.command ?? null) === (input.command ?? null));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
