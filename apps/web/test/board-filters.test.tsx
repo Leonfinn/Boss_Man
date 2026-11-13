@@ -188,6 +188,22 @@ describe("board filters", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("closes when Tab leaves the panel without pulling focus back to Filter", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    const button = screen.getByRole("button", { name: "Filter" });
+    fireEvent.click(button);
+    const dialog = screen.getByRole("dialog", { name: "Filter tasks" });
+    // The next focus target outside the panel, as a Tab would land on it.
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    fireEvent.blur(dialog, { relatedTarget: outside });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement, "focus is not pulled back to Filter").not.toBe(button);
+    outside.remove();
+  });
+
   it("is a modal bottom sheet on a phone, with Clear all and a live Show N tasks", async () => {
     vi.stubGlobal("matchMedia", (q: string) => ({ matches: q.includes("max-width: 640px"), media: q, addEventListener: () => {}, removeEventListener: () => {} }));
     stub();

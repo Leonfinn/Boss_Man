@@ -44,14 +44,20 @@ export type FilterPanelProps = {
 /** The Board's filters (BOS-1194): a popover under the Filter button on a wide screen, a bottom sheet on a phone. Changes apply at once. */
 export function FilterPanel(p: FilterPanelProps) {
   const ref = useRef<HTMLDivElement>(null);
+  // Closing normally (Esc, outside click, the button) returns focus to Filter; tabbing past the edge does not,
+  // so the tab carries on to whatever follows the button instead of being pulled back (BOS-1194).
+  const returnFocus = useRef(true);
   const { onClose, phone, triggerRef } = p;
   const featuresView = p.view === "features";
 
   // Opening moves focus to the first control; closing returns it to the Filter button.
   useEffect(() => {
     const trigger = triggerRef.current;
+    returnFocus.current = true;
     ref.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
-    return () => trigger?.focus();
+    return () => {
+      if (returnFocus.current) trigger?.focus();
+    };
   }, [triggerRef]);
 
   useEffect(() => {
@@ -88,7 +94,11 @@ export function FilterPanel(p: FilterPanelProps) {
   const onBlur = (e: React.FocusEvent) => {
     if (phone) return;
     const next = e.relatedTarget as Node | null;
-    if (next && !ref.current?.contains(next) && !triggerRef.current?.contains(next)) onClose();
+    if (next && !ref.current?.contains(next) && !triggerRef.current?.contains(next)) {
+      // Tab left the panel: close it but let the tab move on to where it was going.
+      returnFocus.current = false;
+      onClose();
+    }
   };
 
   // One announcement after a short pause when a filter changes on a wide screen.
