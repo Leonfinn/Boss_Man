@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
-import { probeGuard } from "./guard-probe.js";
+import { probeGuardWhenReady } from "./guard-probe.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
@@ -161,16 +161,24 @@ if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) f
 connection.start();
 // The network guard proves itself: a connect to our own gateway must be refused at once (DR-049 point 2).
 // Reported with the sandbox report at start and every 5 minutes.
+// BOS-1362: the launcher connects the runner's network only after the guard loads, so the first probe waits
+// for the default route (up to 60 s) instead of reporting "absent" for a guard that comes up seconds later.
+// An absent result is looked at again after 15 s, so a late guard doesn't wait for the 5-minute probe.
+let guardProbing = false; // one probe (and one 15 s retry chain) at a time
 const reportGuard = async () => {
+  if (guardProbing) return;
+  guardProbing = true;
   try {
-    sandbox.guard = await probeGuard();
+    sandbox.guard = await probeGuardWhenReady();
     log(`network guard: ${sandbox.guard.state} (${sandbox.guard.reason}, ${sandbox.guard.ms} ms)`);
   } catch (err) {
     sandbox.guard = { state: "absent", reason: `probe failed: ${(err as Error).message}`.slice(0, 200), errno: null, ms: 0 };
   }
+  guardProbing = false;
   connection.emit({ type: "runner.sandbox", report: sandbox });
+  if (sandbox.guard.state !== "on") setTimeout(() => void reportGuard(), 15_000).unref();
 };
-await reportGuard();
+void reportGuard();
 setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled

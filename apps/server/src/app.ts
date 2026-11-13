@@ -90,6 +90,7 @@ import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/schedu
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
+import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
@@ -262,6 +263,7 @@ export async function buildApp(opts: AppOptions) {
   });
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
+  const privateDetails = privateDetailsService(db, master);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
@@ -310,7 +312,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
-  const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -415,6 +417,8 @@ export async function buildApp(opts: AppOptions) {
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
   });
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
+  // DR-058: a withdrawn owner card tells the feed (a quiet note) as well as Decisions.
+  decisionsSvc.setNotifyHook((n) => notes.notify(n));
   const maintenance = maintenanceService(db, {
     fleet: async () => (launch.enabled ? launch.fleet() : []),
     rollback: (slug) => launch.rollback(slug),
@@ -889,6 +893,7 @@ export async function buildApp(opts: AppOptions) {
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
+    scanList: () => privateDetails.forRunner(),
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
   });
@@ -904,6 +909,12 @@ export async function buildApp(opts: AppOptions) {
   const mergeQueue = mergeQueueService(db, {
     runningMerges: () => review.runningMerges(),
     limit: () => checkGate(db).limit(),
+    runningChecks: (companyId) =>
+      db
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
+        .orderBy(asc(checkJobs.startedAt)),
     queueStatus: async (companyId) => {
       const mode = await checkQueueSvc.mode();
       if (mode !== "server") return { mode, slots: await checkQueueSvc.slots(), running: 0, waiting: 0 };
@@ -916,6 +927,7 @@ export async function buildApp(opts: AppOptions) {
         .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
       return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
+    places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
     now: opts.now,
   });
   // The merge line jam alert (BOS-766): the same view the Merge queue screen reads, and the owner's own
@@ -1254,6 +1266,17 @@ export async function buildApp(opts: AppOptions) {
     // Notifications (R44): the feed.
     notificationRoutes(owner, { notes });
     // The run and WIP limits and the check-queue and merged-result settings: routes/settings-limits.ts, on this owner scope.
+    // Private details the merge-line scan blocks (BOS-979). The list is write-only: reading it back gives a count per kind.
+    owner.get("/api/private-details", async () => privateDetails.summary());
+    owner.put("/api/private-details", async (req, reply) => {
+      const { text } = z.object({ text: z.string().max(60_000) }).parse(req.body);
+      try {
+        return await privateDetails.save(text);
+      } catch (err) {
+        if (err instanceof PrivateDetailsRejected) return reply.code(400).send({ error: err.message });
+        throw err;
+      }
+    });
     settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
@@ -1699,6 +1722,13 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => checkQueueSvc.list(IdParam.parse(req.params).id));
+    // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
+    owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
+      const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
+      const job = await checkQueueSvc.moveToFront(id, ticketId, await ownerName(req), "owner chose Move to front");
+      if (!job) return reply.code(409).send({ error: "That merge isn't waiting for a check slot, so there is nothing to move." });
+      return { ok: true };
+    });
 
     // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
     owner.get("/api/companies/:id/workflow", async (req) => {
