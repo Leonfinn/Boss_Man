@@ -25,6 +25,9 @@ export const MAX_CHECK_SLOTS = 8;
 /** A running job that prints nothing for this long is marked stuck. Waiting in the queue has no limit. */
 export const DEFAULT_NO_OUTPUT_MINUTES = 20;
 
+/** BOS-1328: how long after an earlier merge job of a ticket ended its place in line is still handed to the ticket's next merge job. */
+export const PLACE_KEEP_MS = 30 * 60_000;
+
 export type CheckKind = "merge" | "pre_review";
 export type CheckScope = "quick" | "full";
 export type CheckJob = typeof checkJobs.$inferSelect;
@@ -118,6 +121,18 @@ export function checkQueue(db: Db) {
     const stale = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, input.kind), eq(checkJobs.state, "queued")))).filter(
       (j) => (SCOPE_RANK[j.scope] ?? 0) <= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null),
     );
+    // BOS-1328: a merge job that replaces an earlier merge job of the same ticket (main moved, so the tree changed; or a restart
+    // started the landing again) keeps the earlier job's place in line. Only jobs still live or ended in the last PLACE_KEEP_MS
+    // count, and failed or stuck ones never do, so a fixed branch queues as new.
+    let inheritedAt: Date | null = null;
+    if (input.kind === "merge") {
+      const since = Date.now() - PLACE_KEEP_MS;
+      const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
+        // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
+        (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
+      );
+      for (const j of earlier) if (!inheritedAt || j.queuedAt < inheritedAt) inheritedAt = j.queuedAt;
+    }
     if (stale.length)
       await db
         .update(checkJobs)
@@ -137,6 +152,7 @@ export function checkQueue(db: Db) {
         priority: input.priority ?? 1,
         fixesMain: input.fixesMain ?? false,
         requestedBy: input.requestedBy ?? null,
+        ...(inheritedAt ? { queuedAt: inheritedAt } : {}),
       })
       .returning();
     return { job: job!, reused: null };
