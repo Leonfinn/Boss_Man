@@ -41,6 +41,17 @@ export function normaliseUtilization(v: unknown): number | null {
   return Math.min(f, 1);
 }
 
+/**
+ * Whether a stored reading belongs to a window that has already ended, so it says nothing about the
+ * window running now (BOS-1409). `resetsAt` is when the window the reading was taken in ends; once
+ * that time has passed the reading is from the window before and every limit reads as empty (no
+ * reading yet this window) rather than showing the old figure. `resetsAt` is kept so the card can say
+ * the reset has happened. This is the same test the 5-hour window and the forecast already use.
+ */
+export function windowHasReset(resetsAt: Date | null, now: Date): boolean {
+  return resetsAt !== null && resetsAt.getTime() <= now.getTime();
+}
+
 export function parseClaudeRateLimit(meta: unknown): QuotaSample[] {
   if (!isRecord(meta)) return [];
   const rl = meta["_claude/rateLimit"];
