@@ -1051,6 +1051,10 @@ export const checkJobs = pgTable(
     priority: integer("priority").notNull().default(1),
     /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
     fixesMain: boolean("fixes_main").notNull().default(false),
+    /** BOS-1384: when the owner (or the CEO) moved this merge to the front; the latest move is served first, below a fix for main. */
+    frontAt: timestamp("front_at", { withTimezone: true }),
+    /** Who moved it, by name, for the reason shown beside the place. */
+    frontBy: text("front_by"),
     /** The agent to wake with the result. */
     requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
     runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),

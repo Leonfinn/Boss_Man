@@ -150,6 +150,15 @@ export function looksLikeSecurity(text: string): boolean {
   return SECURITY_PHRASES.some((p) => lower.includes(p));
 }
 
+/** Whether text reads as security work by a security phrase only, ignoring the single security words. Criteria are
+ * scoring axes a feature is graded on ("Security" means "how much this improves security", not "this is security
+ * work"), so a bare word like that must not flag every feature scored on it (BOS-1260). A real phrase still does
+ * (BOS-991: "Keeps the agent fence sound"). */
+export function looksLikeSecurityPhrase(text: string): boolean {
+  const lower = text.toLowerCase();
+  return SECURITY_PHRASES.some((p) => lower.includes(p));
+}
+
 /**
  * Whether a feature goes on the feedback portal by default (BOS-957). A feature is off, and says why, when
  * someone marked it "keep off the portal (sensitive)"; that mark always wins. Otherwise it is security work if
@@ -165,8 +174,11 @@ export function portalVerdict(input: {
   hasPublicSummary?: boolean;
 }): PortalVerdict {
   if (input.keepOffPortal) return { onPortal: false, reason: "sensitive" };
-  const text = [input.title, input.description ?? "", input.area ?? "", ...(input.criteria ?? [])].join(" ");
+  const text = [input.title, input.description ?? "", input.area ?? ""].join(" ");
   if (looksLikeSecurity(text)) return { onPortal: false, reason: "security" };
+  // A criterion is a scoring axis, so only a security phrase in one counts ("agent fence"), never a bare word
+  // such as a criterion simply named "Security" (BOS-1260).
+  if (looksLikeSecurityPhrase((input.criteria ?? []).join(" "))) return { onPortal: false, reason: "security" };
   if (!input.hasPublicSummary) return { onPortal: false, reason: "needs public summary" };
   return { onPortal: true, reason: null };
 }

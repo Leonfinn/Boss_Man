@@ -21,7 +21,7 @@ const RECHECK_STEPS = [
   "Check the live state first: their latest answers, what's deployed, and whether the tickets involved are done. Then do exactly one:",
   "- It still holds: withdraw_decision with action confirm and checked (one line on what you checked). Nothing is written on the card.",
   "- It needs changing: raise one corrected card with raise_decision replaces <this card's id>; the old one closes as superseded.",
-  "- It is no longer needed: withdraw_decision (action withdraw, with a reason).",
+  "- It is no longer needed: withdraw_decision (action withdraw, with a reason and replacedBy: card:<id>, ticket:<ref> with when, or none).",
 ];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,6 +135,13 @@ export async function wakeCeoForRecheck(db: Db, input: { companyId: string; wake
   return !(!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped"));
 }
 
+/**
+ * A card on the alert ladder is Boss Man's own and is never marked stale, except a question an agent asked by hand
+ * that waits with the CEO first (context type "question", BOS-1318): it is still the agent's card and keeps its flag-and-wake.
+ */
+const notOnSystemLadder = sql`(${decisions.context}->'ladder' is null or ${decisions.context}->>'type' = 'question')`;
+const onSystemLadder = sql`not ${notOnSystemLadder}`;
+
 type ActedResult ={ flaggedDecisions: string[]; flaggedTickets: string[]; woken: string[] };
 
 /**
@@ -174,7 +181,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   // either current or closed by its own condition, not marked stale. A question an agent asked by
   // hand keeps today's flag-and-wake, and is matched only by the ticket it names or blocks, never by
   // an answer on a different card about the same ticket.
-  const system = or(isNull(decisions.raisedByAgentId), sql`${decisions.context}->'ladder' is not null`);
+  const system = or(isNull(decisions.raisedByAgentId), onSystemLadder);
   const open = await db
     .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
     .from(decisions)
@@ -253,7 +260,7 @@ async function flagCards(db: Db, input: { cards: FlaggedCard[]; reason: string; 
 
 /** The open cards a person (an agent) wrote and nobody has flagged yet: Boss Man's own cards close by their own condition instead (BOS-470). */
 const agentCardFilter = (companyId: string) =>
-  and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, sql`${decisions.context}->'ladder' is null`);
+  and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, notOnSystemLadder);
 
 /**
  * The runners were rebuilt (BOS-1161): open question cards that talk about the runners or a rebuild may be moot now.
@@ -282,7 +289,7 @@ export async function ticketStateChanged(db: Db, input: { companyId?: string; wa
     .innerJoin(tickets, sql`${tickets.id}::text = (${decisions.context} ->> 'ticketId')`)
     // A card a re-check confirmed is only flagged by a change after that confirmation (BOS-1193): else the same old
     // state change would flag it again on every sweep. `greatest` ignores a null recheckedAt.
-    .where(and(eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, sql`${decisions.context}->'ladder' is null`, sql`(${decisions.kind} <> 'permission' or ${decisions.context}->>'plan' = 'true')`, sql`${tickets.stateChangedAt} > greatest(${decisions.createdAt} + (${STATE_CHANGE_GRACE_MS} * interval '1 millisecond'), ${decisions.recheckedAt})`, ...(input.companyId ? [eq(decisions.companyId, input.companyId)] : [])));
+    .where(and(eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, notOnSystemLadder, sql`(${decisions.kind} <> 'permission' or ${decisions.context}->>'plan' = 'true')`, sql`${tickets.stateChangedAt} > greatest(${decisions.createdAt} + (${STATE_CHANGE_GRACE_MS} * interval '1 millisecond'), ${decisions.recheckedAt})`, ...(input.companyId ? [eq(decisions.companyId, input.companyId)] : [])));
   const out = { flaggedDecisions: [] as string[], woken: [] as string[] };
   for (const companyId of new Set(open.map((d) => d.companyId))) {
     const r = await flagCards(db, { cards: open.filter((d) => d.companyId === companyId), reason: "the ticket it is about changed state", wake: input.wake, now, companyId });

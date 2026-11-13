@@ -1,0 +1,71 @@
+---
+title: About me: why I built Boss Man
+description: Who makes Boss Man, and why.
+path: /about
+nav: about
+---
+<!-- The owner's own words and photo (approved on BOS-1080, 12 Nov). Only spelling and punctuation were tidied there,
+     and the feature run became a list; the wording is the owner's and is not to be reworded.
+     Photo: apps/site/public/img/owner.webp, made from the owner's 928 x 1152 JPEG; EXIF/GPS stripped, 4:5 crop. -->
+<section class="about-head dark">
+  <div class="wrap">
+    <figure class="portrait">
+      <img class="photo" src="/img/owner.webp" width="725" height="900" alt="Leon Finnerty, smiling, on a clifftop above the sea.">
+      <img class="sidekick" src="/img/hero-clean.webp" width="720" height="683" alt="">
+    </figure>
+    <div class="about-title">
+      <h1>About me</h1>
+      <p class="lead">I'm a product manager, and I've worked on some of England's largest IT systems across financial services and public-sector national infrastructure. I've also been a passionate tech geek all my life: I wrote my first program in BASIC on my Acorn Electron at the age of 7.</p>
+      <p class="byline">Leon Finnerty</p>
+    </div>
+  </div>
+</section>
+
+<section class="band story-band">
+  <div class="wrap story">
+    <article class="story-text" aria-labelledby="story-h">
+      <h2 id="story-h">Why I built Boss Man</h2>
+      <p>Given my inclination to tinker with new tech, I started learning some of the Python machine-learning tools (scikit-learn, Keras, etc.) back in 2017. I managed to develop a few useful tools, but it was tough going. Then LLMs came along. Initially they were pretty poor, but it wasn't long before they could generate code better than I could write myself. More recently agents came along and made that process even easier. A huge thanks to the developers of Hermes Agent and Paperclip, both of which have influenced my development of Boss Man.</p>
+      <p>Despite liking those tools, I did keep running into a number of frustrations. I won't list them in detail here, but essentially I wanted to be able to work with my agent teams the same way as I work with my human teams at work.</p>
+      <h3>What Boss Man does differently</h3>
+      <p>I wanted to try to reduce wasted tokens, so Boss Man doesn't have a heartbeat (waking agents just to check if they might be needed). Instead, a lot of that mundane checking is written into Boss Man. You can also set up a scrum master agent to help keep work flowing. Boss Man also has these, and much more:</p>
+      <ul class="has-list">
+        <li>a kanban board per project</li>
+        <li>cross-company engagements: one team requesting work from a different team in a formal, tracked way</li>
+        <li>a roadmap you can share publicly</li>
+        <li>a user feedback portal, where your users can suggest ideas and vote on what they'd like to see next</li>
+        <li>retros: a review of the last period of work, to see how the team can improve, with actionable outcomes</li>
+      </ul>
+      <p>And yes, after the initial three weeks of development, Boss Man is now developed fully by Boss Man. There's even a blue/green, zero-downtime deployment option. I suspect most people won't need it, but for me it's invaluable.</p>
+    </article>
+
+    <aside class="in-short" aria-labelledby="short-h">
+      <h2 id="short-h">Boss Man in short</h2>
+      <dl>
+        <div><dt>Price</dt><dd>Free and open source, under the Apache 2.0 licence.</dd></div>
+        <div><dt>Stage</dt><dd><span class="flag">ALPHA</span>It works, and it still changes often.</dd></div>
+        <div><dt>Where it runs</dt><dd>On your own Linux machine with Docker. There's no Boss Man cloud.</dd></div>
+        <div><dt>Your AI</dt><dd>Your own Claude or ChatGPT plan, or an OpenAI-compatible key.</dd></div>
+      </dl>
+      <a class="textlink" href="{{repo}}">See the code on GitHub</a>
+    </aside>
+  </div>
+</section>
+
+<!-- Close the story with the two things a reader can do next: shape what comes next, or try it.
+     The roadmap link follows the site's rule: it is left out while the public portal address is unset. -->
+<section class="band dark next-band">
+  <div class="wrap next">
+    <img src="/img/boss-done.webp" width="640" height="605" alt="">
+    <div>
+      <h2>Help decide what comes next</h2>
+      <p class="intro muted">Boss Man's roadmap is public. See what's planned, vote for the features you want, and suggest your own. It uses Boss Man's own feedback portal.</p>
+      <div class="actions">
+        <!--portal-->
+        <a class="btn" href="{{portal}}">Open the roadmap<span class="sr"> (opens our feedback portal)</span><span class="arrow" aria-hidden="true">↗</span></a>
+        <!--/portal-->
+        <a class="textlink" href="/guides/install-boss-man">Install Boss Man</a>
+      </div>
+    </div>
+  </div>
+</section>

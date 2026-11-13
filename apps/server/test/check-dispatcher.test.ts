@@ -7,7 +7,7 @@ import { checkDispatcher } from "../src/services/check-dispatcher.js";
 const shared = openPglite();
 afterAll(async () => (await shared).close());
 
-async function setup(mode: "server" | "legacy" = "server") {
+async function setup(mode: "server" | "legacy" = "server", scanList?: () => Promise<string | null>) {
   const { db } = await shared;
   await db.delete(checkJobs);
   await db.delete(settings);
@@ -29,6 +29,7 @@ async function setup(mode: "server" | "legacy" = "server") {
     send: (runnerId, command) => (connected ? (sent.push({ runnerId, command }), true) : false),
     isConnected: () => connected,
     can: () => true,
+    scanList,
     wake: async (agentId, w) => void woken.push({ agentId, note: w.note }),
   });
   const q = checkQueue(db);
@@ -43,6 +44,30 @@ describe("check dispatcher", () => {
     await s.req("t1");
     await s.d.pump();
     expect(s.sent).toHaveLength(0);
+  });
+
+  it("hands the owner's private-details list to the runner with the job (BOS-979), and still runs without one", async () => {
+    const s = await setup("server", async () => "ip\t192.0.2.77");
+    await s.req("sl1", { kind: "merge" });
+    await s.d.pump();
+    expect(s.sent[0]!.command.scanList).toBe("ip\t192.0.2.77");
+    const none = await setup("server", async () => null);
+    await none.req("sl2", { kind: "merge" });
+    await none.d.pump();
+    expect(none.sent[0]!.command).not.toHaveProperty("scanList");
+    const broken = await setup("server", async () => Promise.reject(new Error("no key")));
+    await broken.req("sl3", { kind: "merge" });
+    await broken.d.pump();
+    expect(broken.sent[0]!.command.type).toBe("check.run");
+    expect(broken.sent[0]!.command).not.toHaveProperty("scanList");
+  });
+
+  it("does not hand the list to an agent-requested check (BOS-1043: no guessing oracle)", async () => {
+    const s = await setup("server", async () => "ip\t192.0.2.77");
+    await s.req("sl4"); // kind pre_review
+    await s.d.pump();
+    expect(s.sent[0]!.command.type).toBe("check.run");
+    expect(s.sent[0]!.command).not.toHaveProperty("scanList");
   });
 
   it("gives a full job a longer time limit than a quick one", async () => {

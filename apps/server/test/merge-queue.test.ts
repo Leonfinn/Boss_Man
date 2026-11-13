@@ -318,4 +318,44 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     expect(data.mode).toBe("server");
     expect(data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id)).toMatchObject({ state: "waiting_for_slot" });
   });
+
+  it("after a restart, shows only the merge that holds a slot as running (BOS-1287)", async () => {
+    const c = (ctx = await setup());
+    await c.db.insert(settings).values([
+      { key: CHECK_QUEUE_MODE_KEY, value: "server" },
+      { key: CHECK_SLOTS_KEY, value: "3" },
+    ]);
+    const mk = async (title: string) => {
+      const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+      return t.id;
+    };
+    // Five merges restarted at once; only the first holds a slot, the others are queued at places 1-4.
+    const merges = [await mk("M1"), await mk("M2"), await mk("M3"), await mk("M4"), await mk("M5")];
+    const quick = [await mk("Q1"), await mk("Q2")];
+    const sha = (n: number) => String(n).repeat(40).slice(0, 40);
+    const base = Date.now() - 600_000;
+    const ins = (ticketId: string, kind: string, scope: string, state: string, n: number, startedAt: Date | null) =>
+      c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId, kind, scope, state, commit: sha(n), tree: sha(n), startedAt } as never);
+    await ins(quick[0]!, "check", "quick", "running", 1, new Date(base));
+    await ins(quick[1]!, "check", "quick", "running", 2, new Date(base + 1000));
+    await ins(merges[0]!, "merge", "full", "running", 3, new Date(base + 2000));
+    for (let i = 1; i < 5; i++) await ins(merges[i]!, "merge", "full", "queued", 3 + i, null);
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => merges.map((id, i) => ({ ticketId: id, startedAt: new Date(base + i).toISOString(), startedBy: "Boss Man (the server restarted during this merge; starting it again)", phase: "queued" as const })),
+      limit: async () => 3,
+      runningChecks: async () => (await c.db.select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind }).from(checkJobs).where(eq(checkJobs.state, "running")).orderBy(checkJobs.startedAt)),
+      queueStatus: async () => ({ mode: "server", slots: 3, running: 3, waiting: 4 }),
+    });
+    const data = await service.get(c.company.id);
+    expect(data.running.map((r) => r.ticketId)).toEqual([merges[0]]);
+    // Slot 3: two quick checks started before it.
+    expect(data.running[0]!.slot).toBe(3);
+    expect(data.running.length).toBeLessThanOrEqual(3);
+    const waitingMerges = data.waiting.filter((w) => merges.includes(w.ticketId));
+    expect(waitingMerges).toHaveLength(4);
+    for (const w of waitingMerges) expect(w.label).toMatch(/server restarted/);
+    expect(new Set(data.running.map((r) => r.slot)).size).toBe(data.running.length);
+  });
 });

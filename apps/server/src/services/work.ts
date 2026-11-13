@@ -412,7 +412,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, ticketNumber: rows.find((r) => r.t.id === d.blockerTicketId)?.t.number ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
         wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit))) : null,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
@@ -678,6 +678,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Every state change, and the write of the other fields with it, goes through moveTicket (DR-047): the
       // column, the WIP limit, the no-code reopen rule (BOS-532), the history line, the merge line's "left"
       // event (BOS-769), and the done, review and feature steps after a real change.
+      // One instant for the whole write (BOS-1343): the note's time and the activity time come from one read,
+      // so a fresh note never reads as stale because the clock ticked between the two.
+      const at = now();
       const { ticket: updated } = await moveTicket(db, ticketId, target, {
         by: patch.byAgentId,
         expectedVersion: expected,
@@ -689,9 +692,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         reviewRound: patch.reviewRound ?? "keep",
         columnId: patch.columnId,
         projectId: dest?.id,
-        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}) },
+        fields: { ...fields, ...(patch.stateNote ? { stateNoteAt: at, stateNoteStaleAt: null } : {}) },
         hooks,
-        now: now(),
+        now: at,
       });
       if (dest) {
         const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));

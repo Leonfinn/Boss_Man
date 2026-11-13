@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Helper for Penpot's API: read designs, and create/edit designs in files agents own. Needs curl and jq, and these
 # env vars from granted Boss Man secrets:
-#   PENPOT_URL    the Penpot address, e.g. http://192.168.1.20:9001
+#   PENPOT_URL    the Penpot address, e.g. https://penpot.example.com
 #   PENPOT_TOKEN  the agent account's access token (never printed, never written to a file)
 #   PENPOT_EMAIL, PENPOT_PASSWORD  the same account's login; only `export` needs them (the export service wants a session, not a token)
 # Read:  penpot.sh check | teams | projects TEAM_ID | files PROJECT_ID | pages FILE_ID | boards FILE_ID | shapes FILE_ID
@@ -490,7 +490,7 @@ case "${1:-}" in
     # access token (the page it renders can't use one). So log in with the agent account's email and
     # password and send the cookie instead of the token.
     if [ -z "${PENPOT_EMAIL:-}" ] || [ -z "${PENPOT_PASSWORD:-}" ]; then
-      die "exporting a board needs PENPOT_EMAIL and PENPOT_PASSWORD (the agent account's login) granted to you as well as the token. Ask the owner to add both secrets (docs/16-penpot-agent-setup.md). Do not look for them anywhere else."
+      die "exporting a board needs PENPOT_EMAIL and PENPOT_PASSWORD (the agent account's login) granted to you as well as the token. Ask the owner to add both secrets. Do not look for them anywhere else."
     fi
     for id in "$2" "$3" "$4"; do
       case "$id" in ""|*[!0-9a-fA-F-]*) die "ids must be UUIDs, as printed by the boards command." ;; esac

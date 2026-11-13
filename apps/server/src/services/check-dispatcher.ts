@@ -19,6 +19,8 @@ export type CheckDispatcherDeps = {
   defaultCommand?: (job: CheckJob) => string;
   /** The runner's own time limit for a job, in ms. */
   timeoutMs?: number;
+  /** The owner's private-details list for the merge-line scan (BOS-979); null or absent when none is set. Never logged. */
+  scanList?: () => Promise<string | null>;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -47,7 +49,12 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     for (const { companyId } of queuedCompanies) {
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       if (!runner || !deps.isConnected(runner.id) || !deps.can(runner.id)) continue;
+      // A list that can't be read must not stop the line: the scan then runs its secret rules only.
+      const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
       for (const job of await queue.claimNext(runner.id, new Date(), companyId)) {
+        // BOS-1043: only the merge gate's job carries the list. An agent-requested check reports its scan result back to the
+        // agent, so a listed value named by file and line would let it test guesses against the owner's list.
+        const sendList = scanList && job.kind === "merge";
         const sent = deps.send(runner.id, {
           type: "check.run",
           jobId: job.id,
@@ -56,6 +63,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           commit: job.commit,
           command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
           timeoutMs: deps.timeoutMs ?? (job.scope === "full" ? FULL_TIMEOUT : DEFAULT_TIMEOUT),
+          ...(sendList ? { scanList } : {}),
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
       }
