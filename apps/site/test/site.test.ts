@@ -140,9 +140,48 @@ describe("build", () => {
   });
 });
 
+describe("About page", () => {
+  it("builds /about in its own head, with the owner's words as they were approved", () => {
+    const html = read("about.html");
+    expect(html).toContain('<section class="about-head dark">');
+    expect(html).toContain("<h1>About me</h1>");
+    expect(html).toContain("I'm a product manager, and I've worked on some of England's largest IT systems");
+    expect(html).toContain('<p class="byline">Leon Finnerty</p>');
+    expect(html).toContain('<h2 id="story-h">Why I built Boss Man</h2>');
+    expect(html).toContain("<h3>What Boss Man does differently</h3>");
+    expect((html.match(/<li>/g) ?? []).length).toBeGreaterThanOrEqual(5); // the 5-item feature list, plus the one footer item
+    expect(html).toContain('id="short-h">Boss Man in short');
+    expect(html).not.toMatch(/slot-tag|photo-slot|placeholder|pull|Where it's going/i); // the owner left those blank
+  });
+
+  it("puts the owner's photo in the 4:5 frame with the given alt, width and height", () => {
+    expect(read("about.html")).toMatch(/<img class="photo" src="\/img\/owner\.webp" width="725" height="900" alt="Leon Finnerty, smiling, on a clifftop above the sea\.">/);
+  });
+
+  it("ships an optimised WebP with no EXIF or location data", () => {
+    const webp = readFileSync(path.join(dist, "img/owner.webp"));
+    expect(webp.toString("ascii", 0, 4)).toBe("RIFF");
+    expect(webp.toString("ascii", 8, 12)).toBe("WEBP");
+    expect(webp.length).toBeLessThan(100_000);
+    const text = webp.toString("latin1");
+    for (const tag of ["EXIF", "GPS", "XMP"]) expect(text).not.toContain(tag);
+  });
+
+  it("links About from the header, the phone menu and the footer on every page, marked current on About", () => {
+    for (const f of htmlFiles()) {
+      const html = read(f);
+      const footer = html.slice(html.indexOf('<nav aria-label="Footer">'));
+      expect(html, f).toMatch(/<a href="\/about" aria-current="page">About<\/a>|<a href="\/about">About<\/a>/);
+      expect(footer, f).toContain('<a href="/about">About</a>');
+    }
+    expect(read("about.html")).toContain('<a href="/about" aria-current="page">About</a>');
+    expect(read("index.html")).not.toContain('href="/about" aria-current');
+  });
+});
+
 describe("roadmap portal link", () => {
   it("is left out of the menu, the footer and the home page while no portal address is set", () => {
-    for (const f of ["index.html", "guides/install-boss-man.html"]) {
+    for (const f of ["index.html", "about.html", "guides/install-boss-man.html"]) {
       const html = read(f);
       expect(html).not.toMatch(/class="ext"|Roadmap and feedback|Open the Boss Man roadmap|<!--portal-->/);
     }
@@ -156,6 +195,7 @@ describe("roadmap portal link", () => {
     expect(html).toContain("Open the Boss Man roadmap");
     expect(html).not.toContain("target=");
     expect(html).toContain("Roadmap<span class=\"sr\"> and feedback, on our feedback portal</span>");
+    expect(readFileSync(path.join(out, "about.html"), "utf8")).toContain('href="https://roadmap.example.com/p/abc">Open the roadmap');
     expect(checkSite(out)).toEqual([]);
   });
 
