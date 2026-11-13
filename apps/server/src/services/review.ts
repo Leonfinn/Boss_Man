@@ -162,7 +162,8 @@ export function highestRisk(risks: Array<RiskTier | null | undefined>): RiskTier
 type CarriedInfo = CarriedTicket & { title: string; risk: RiskTier | null };
 
 /** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
-export type LandOptions = { skipChecks?: boolean };
+/** `adopt` (BOS-1371): a server that took charge picks up a merge whose check job is still live: skip "prepare" and wait on the job for this commit and tree; "finish" still pushes only if that exact tree is what the merge gives now. */
+export type LandOptions = { skipChecks?: boolean; adopt?: { commit: string; tree: string } };
 
 /**
  * A merge that can't start because the owner's sign-off card is still open (BOS-471): the ticket waits for
@@ -1345,7 +1346,8 @@ export function reviewService(
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
-      if (lineRow) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
+      // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
+      if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -1844,9 +1846,15 @@ export function reviewService(
       // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
       const serverMerge = async (): Promise<MergeResult | Stuck | { status: "job_superseded" }> => {
         const message = `Merge "${t.title}" (${ticketId})`;
+        // BOS-1371: the first round of an adopted merge uses the live job's commit and tree; any trouble falls back to a normal prepare.
+        let adopted = opts?.adopt;
         for (let round = 0; round < 3; round++) {
-          const prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
+          const prep: MergeResult = adopted
+            ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" }
+            : await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
           if (prep.status !== "prepared") return prep;
+          const wasAdopted = !!adopted;
+          adopted = undefined;
                     for (const command of checks) {
             const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
             // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
@@ -1892,8 +1900,10 @@ export function reviewService(
             }
           }
           await touch();
-          const fin = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree }), MERGE_WAIT_MS);
-          if (fin.status !== "main_moved") return fin;
+          const finish = () => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "finish", commit: prep.commit, tree: prep.tree }), MERGE_WAIT_MS);
+          // The runner may have lost the adopted commit (it restarted too): prepare again rather than fail. A runner that went away stays an error.
+          const fin = wasAdopted ? await finish().catch((err: Error) => { if (err instanceof RunnerGone) throw err; return null; }) : await finish();
+          if (fin && fin.status !== "main_moved") return fin;
         }
         return { status: "main_moved" };
       };
