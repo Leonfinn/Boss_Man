@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures, type TraceBody } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -1312,6 +1312,27 @@ export const ownerChatMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
+);
+
+/**
+ * The Thinking trace shown above one agent reply (BOS-1368): the steps it took, in order, and the
+ * header numbers. Set once when the reply is saved, so a stored trace never grows; a reply with no
+ * steps has no row. Only the owner's chat reads it, and text was redacted and clipped before it was
+ * kept here.
+ */
+export const ownerChatTraces = pgTable(
+  "owner_chat_traces",
+  {
+    messageId: uuid("message_id")
+      .primaryKey()
+      .references(() => ownerChatMessages.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    trace: jsonb("trace").$type<TraceBody>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("owner_chat_traces_created").on(t.createdAt)],
 );
 
 /**

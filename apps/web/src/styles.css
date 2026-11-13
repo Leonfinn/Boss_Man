@@ -497,6 +497,60 @@ details > summary { cursor: pointer; font-size: 14px; }
   .chat-form { padding: 0 14px 14px; }
 }
 
+/* Thinking trace (BOS-1368, design BOS-1367): the collapsible steps above an agent reply. */
+.chat-msg.assistant.has-trace, .chat-msg.assistant.live { width: min(640px, 90%); }
+/* The bubble rule (.chat-msg.assistant p) must not reach text inside the trace. */
+.chat-msg .trace p { background: none; padding: 0; border-radius: 0; }
+.chat-msg.live { align-self: flex-start; }
+.trace { display: flex; flex-direction: column; gap: 2px; margin-bottom: 2px; }
+.trace-head { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; max-width: 100%; min-height: 32px; margin-left: -6px; padding: 4px 8px 4px 6px; border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: 13px; line-height: 1.35; text-align: left; }
+.trace-head:hover { background: var(--raise); color: var(--ink); }
+.trace-head .lead { flex: none; width: 16px; height: 16px; color: #6b7787; }
+.trace-head .lead.spin { color: var(--link); animation: pulse 1.6s ease-in-out infinite; }
+.trace-head .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-head .words .now { color: var(--ink); }
+.trace-head .chev { flex: none; width: 14px; height: 14px; transition: transform 120ms ease-out; }
+.trace-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.trace-head.stopped { color: var(--amber-ink); }
+.trace-steps { list-style: none; margin: 2px 0 6px 2px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line-strong); display: flex; flex-direction: column; gap: 1px; }
+.step-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto 14px; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--ink); font-size: 14px; line-height: 1.35; text-align: left; }
+.step-row:hover, .step-row[aria-expanded="true"] { background: var(--raise); }
+.step-row .ico { width: 16px; height: 16px; }
+.step-row .sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-row .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* On the raised row, --muted is only 3.9:1; --grey-ink is 5.5:1. */
+.step-row:hover .time, .step-row[aria-expanded="true"] .time { color: var(--grey-ink); }
+.step-row .chev { width: 14px; height: 14px; color: var(--muted); transition: transform 120ms ease-out; }
+.step-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.step-row.plain { cursor: default; } .step-row.plain:hover { background: none; }
+.k-think .ico { color: var(--purple-ink); }
+.k-look .ico { color: var(--type-ink); }
+.k-do .ico { color: var(--green-ink); }
+.k-run .ico { color: var(--amber-ink); }
+.k-live .ico { color: var(--link); animation: pulse 1.6s ease-in-out infinite; }
+.k-fail .ico { color: var(--red-ink); }
+.step-flag { white-space: nowrap; font-size: 12px; font-weight: 500; padding: 1px 6px; border-radius: 6px; background: var(--red-soft); color: var(--red-ink); }
+.step-flag.no { background: var(--amber-soft); color: var(--amber-ink); }
+.step-detail { margin: 2px 0 8px 34px; padding: 10px 12px; border-radius: 8px; background: var(--field); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.step-detail .label { display: block; margin-bottom: 4px; }
+.step-detail pre { margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.step-detail .reason { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.step-detail .clip { max-height: 9em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.step-detail .reason.clip { max-height: 7.75em; }
+.step-detail .cut { font-size: 12px; color: var(--muted); }
+.trace .more { align-self: flex-start; display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; background: none; border: 0; color: var(--link); padding: 0; }
+.trace-steps > li > .more { margin-left: 34px; }
+.trace .gone { font-size: 13px; color: var(--muted); padding: 6px 8px; }
+@media (pointer: coarse) { .trace-head, .step-row, .trace .more { min-height: 44px; } }
+@media (max-width: 760px) {
+  .chat-msg.assistant.has-trace, .chat-msg.assistant.live { width: 100%; max-width: 100%; }
+  .step-row { grid-template-columns: 16px minmax(0, 1fr) auto 14px; gap: 8px; padding: 4px 6px; }
+  .step-row .time { display: none; }
+  .step-detail { margin-left: 4px; }
+  .trace-steps > li > .more { margin-left: 4px; }
+}
+@media (prefers-reduced-motion: reduce) { .trace-head .chev, .step-row .chev, .trace-head .lead.spin, .k-live .ico { transition: none; animation: none; } }
+
 /* ---------- Tabs ---------- */
 /* Horizontal only, for the same reason as `.board-scroll` (BOS-554): the wheel over the tabs
    scrolls the page, not a one-pixel vertical overflow. */
