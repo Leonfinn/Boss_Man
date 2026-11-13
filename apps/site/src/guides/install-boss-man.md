@@ -123,7 +123,7 @@ scripts/update-runner.sh
 
 Open `http://<host-ip>:3100` in your browser. Type a username and a password of at least 12 characters, and choose **Create owner account**.
 
-There is only one owner account, and it controls every company on the server. The setup wizard opens next. Carry on with [Your first company and ticket](/guides/first-company-and-ticket).
+There is only one owner account, and it controls every company on the server. The setup wizard opens next. Carry on with [Your first company and task](/guides/first-company-and-ticket).
 
 ## If something goes wrong
 

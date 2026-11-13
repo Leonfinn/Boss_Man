@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
@@ -1246,8 +1247,63 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS, fence = false): Promise<VerifyResult> {
-    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs, undefined, fence ? spec.projectId : null);
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS, fence = false, scanList?: string): Promise<VerifyResult> {
+    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs, undefined, fence ? spec.projectId : null, { projectId: spec.projectId, list: scanList });
+  }
+
+  /**
+   * The check line's secrets and private-details scan (BOS-979), run by the runner's OWN installed copy of the scanner
+   * (BOSSMAN_SCAN_SCRIPT, set by the runner image; root-owned like check-slot.sh) before any of the branch's code runs.
+   * The branch's scripts can't remove or weaken it, and the owner's list (scanList) goes into a 0600 file outside the
+   * copy that only this scanner reads, then is deleted: it is never in the check command's environment or its tree.
+   * A runner without the scanner installed skips it (nothing to run). Returns the scanner's output when it blocks the change.
+   */
+  private async scanBeforeCheck(dir: string, projectId: string, scanList?: string): Promise<string | null> {
+    const script = this.baseEnv.BOSSMAN_SCAN_SCRIPT;
+    if (!script || !path.isAbsolute(script) || !existsSync(script)) return null;
+    // The base is read from the shared repo's own refs (the branch can't move them), as a commit id.
+    let base = "";
+    for (const ref of ["refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+      base = await this.git(["rev-parse", "--verify", "-q", `${ref}^{commit}`], { cwd: this.repoDir(projectId) }).catch(() => "");
+      if (base) break;
+    }
+    if (!base) return "scan: couldn't find the base branch (origin/main) to compare with, so the change was not scanned";
+    const scratch = mkdtempSync(path.join(tmpdir(), "bm-scan-"));
+    try {
+      const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
+      if (scanList) {
+        const file = path.join(scratch, "list");
+        writeFileSync(file, scanList.endsWith("\n") ? scanList : `${scanList}\n`, { mode: 0o600 });
+        env.BOSSMAN_SCAN_DENYLIST_FILE = file;
+      }
+      const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
+        execFile(process.execPath, [script, base], { cwd: dir, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+          const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null) : 0;
+          resolve({ code, out: `${stdout}${stderr}`.trim() });
+        });
+      });
+      if (r.code === 0) return null;
+      return r.out || "scan: the secrets and private-details scan failed to run, so the change was not scanned";
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  private async runCheck(
+    dir: string,
+    command: string,
+    timeoutMs: number,
+    queueMaxMs = VERIFY_QUEUE_MAX_MS,
+    job?: { onOutput?: (tail: string) => void; onStart?: (kill: () => void) => void; fence?: { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } },
+    fenceProject: string | null = null,
+    scan?: { projectId: string; list?: string },
+  ): Promise<VerifyResult> {
+    if (scan) {
+      const started = Date.now();
+      const blocked = await this.scanBeforeCheck(dir, scan.projectId, scan.list);
+      if (blocked) return { ok: false, exitCode: 1, timedOut: false, output: `${blocked}\ncheck stopped: the secrets and private-details scan found something, so the branch's own checks did not run.`, ms: Date.now() - started };
+    }
+    return this.spawnCheck(dir, command, timeoutMs, queueMaxMs, job, fenceProject);
   }
 
   /**
@@ -1258,7 +1314,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1273,7 +1329,7 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) });
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, { projectId: spec.projectId, list: hooks.scanList });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -1366,7 +1422,7 @@ export class Workspaces {
    * One check command in a folder: its own process group, output kept to the last 8 KB. A server-queued job (BOS-316) brings
    * its own fence and takes no lock; a merge check asked to run fenced (BOS-323) gets one from fenceCheck.
    */
-  private runCheck(
+  private spawnCheck(
     dir: string,
     command: string,
     timeoutMs: number,

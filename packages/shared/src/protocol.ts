@@ -188,7 +188,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * fence: run the check inside the fence (BOS-323), like run.start's. A runner that can't fence runs
    * it as before and says so (VerifyResult.fenced); an older runner ignores it.
    */
-  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional(), scanList: z.string().max(60_000).optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
@@ -233,7 +233,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
    * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
    */
-  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional() }),
+  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional(), scanList: z.string().max(60_000).optional() }),
   /** Stop a check job. Only the server sends this; agents have no way to. */
   z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
   /** The server has recorded this job’s result; the runner can stop re-sending it. */
@@ -242,8 +242,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
    * turn is stopped first. The max leaves room for the prefix the server adds to a longest-allowed owner message (BOS-502).
+   * With steer, an agent that supports ACP steering gets it inside the running turn instead, without a cancel (BOS-1016);
+   * others queue it as usual. Optional, so either side can be older.
    */
-  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean() }),
+  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean(), steer: z.boolean().optional() }),
   z.object({ type: z.literal("permission.decide"), runId: Uuid, requestId: z.string(), verdict: z.enum(["allow", "deny"]) }),
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;

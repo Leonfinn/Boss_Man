@@ -106,6 +106,10 @@ export const MERGE_WAIT_MS = 10 * 60_000;
 /** Set for the project check when the deeper check runs straight after it on the same tree (BOS-665); scripts/check-quick.sh reads it. */
 export const FULL_CHECK_NEXT = "BOSSMAN_FULL_CHECK_NEXT";
 /** How often a landing re-reads its check job row (BOS-316). Tests shorten it with BOSSMAN_CHECK_JOB_POLL_MS. */
+/** BOS-1344: how often a waiting merge looks for a moved main. Tests shorten it with BOSSMAN_MERGE_RETARGET_MS. */
+const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Number(process.env.BOSSMAN_MERGE_RETARGET_MS) : 60_000;
+/** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
+export const MERGE_RETARGET_KEY = "merge_retarget";
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
@@ -253,6 +257,8 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
+    /** The owner's private-details list for the merge-line scan (BOS-979). */
+    scanList?: () => Promise<string | null>;
     /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
     onMerged?: (ticketId: string) => Promise<unknown>;
     /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
@@ -1797,7 +1803,10 @@ export function reviewService(
             phases.set(ticketId, "queued");
             return timedCheck(named(command), "gate", (w) => gate.run(checkPriority(t), alone, w), checkVerdict, () => {
               phases.set(ticketId, "checking");
-              return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS).catch((err: Error): VerifyResult & { noAnswer: true } => {
+              return (async () => {
+                const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
+                return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command, ...(scanList ? { scanList } : {}) }), VERIFY_ASK_TIMEOUT_MS);
+              })().catch((err: Error): VerifyResult & { noAnswer: true } => {
                 // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
                 if (err instanceof RunnerGone) throw err;
                 return { ok: false, exitCode: null, timedOut: false, output: err.message, ms: 0, noAnswer: true };
@@ -1844,10 +1853,15 @@ export function reviewService(
       // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
       const serverMerge = async (): Promise<MergeResult | Stuck | { status: "job_superseded" }> => {
         const message = `Merge "${t.title}" (${ticketId})`;
+        const retargetOn = async () => {
+          const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
+          return row?.value !== false && row?.value !== "false";
+        };
         for (let round = 0; round < 3; round++) {
-          const prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
+          let prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
           if (prep.status !== "prepared") return prep;
-                    for (const command of checks) {
+          let lastRefresh = Date.now();
+          for (const command of checks) {
             const { job, reused } = await queue.enqueue({ companyId: t.companyId, projectId: t.projectId, ticketId, kind: "merge", scope: "full", commit: prep.commit, tree: prep.tree, command, priority: checkPriority(t) });
             // BOS-1289: a merge that starts again after a restart has no waiter on the old process's job. It was adopted above when
             // the tree is the same; a job for another tree (main moved) is left over and would hold a slot beside this one.
@@ -1877,6 +1891,22 @@ export function reviewService(
               }
               cur = row;
               await started(cur);
+              // BOS-1344: still waiting for a slot. When main moved, the job takes the new merged tree before it starts, so the check
+              // never begins on a tree that is already stale. A failed refresh (conflict, migration) is left to the normal round.
+              // Only the round's first command: a later one would push a tree an earlier command never ran on (finish then says main_moved).
+              if (command === checks[0] && cur.state === "queued" && Date.now() - lastRefresh >= MERGE_RETARGET_MS && (await retargetOn())) {
+                lastRefresh = Date.now();
+                const fresh = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS).catch(() => null);
+                if (fresh?.status === "prepared" && fresh.tree !== cur.tree) {
+                  const moved = await queue.retarget(cur.id, { commit: fresh.commit, tree: fresh.tree });
+                  // null: a runner claimed the job meanwhile, so it runs on the old tree and "finish" decides.
+                  if (moved) {
+                    prep = fresh;
+                    cur = moved;
+                    await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: "Main moved while the merge check waited, so the check now runs on the current main. Nothing to do." });
+                  }
+                }
+              }
             }
             await lineEvent(db, t, { event: "check_ended", ...line, passed: cur.state === "passed" ? true : cur.state === "failed" ? checkVerdict({ ok: false, exitCode: cur.exitCode, timedOut: /timed out/i.test(cur.reason ?? ""), output: cur.logTail ?? "", ms: 0 }) : null, ...(cur.reason && cur.state !== "passed" ? { why: cur.reason.slice(0, 200) } : {}) }, reused === "passed" ? new Date() : (cur.endedAt ?? new Date()));
             if (cur.state === "passed") {
