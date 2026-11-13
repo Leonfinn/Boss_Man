@@ -259,8 +259,10 @@ export class MergeTrain {
 }
 
 /** One train per project, on the server in charge. Cleared only by a restart (the train is rebuilt, never stored). */
+// lost on restart, harmless because the train is rebuilt from the live merge jobs in their old order (BOS-1289), and the runner's expectBase + tree check refuse any push a wrong rebuild would make.
 const trains = new Map<string, MergeTrain>();
 
+// lost on restart, harmless because every trainFor() call sets it again from the check_slots setting.
 const seatCounts = new Map<string, number>();
 
 /** The project's train; `seats` (check_slots, read by the caller) applies from now on. `created`: first use since the server started. */
