@@ -1569,8 +1569,10 @@ export function reviewService(
     async requireSignoff(t: typeof tickets.$inferSelect, head: string | null) {
       const d = await derivedSignoff(db, t, head || null);
       if (d.state === "not_needed") return;
-      if (d.state === "signed_off" && (head === null || d.head === null || d.head === head)) {
-        if (head === "" && d.head !== null) throw new ReviewError(409, "The owner's sign-off couldn't be matched to the commit: the runner didn't say which commit would merge, so nothing was merged. Try again once the runner answers.");
+      if (d.state === "signed_off" && (head === null || head === "" || d.head === null || d.head === head)) {
+        // No commit was read (the runner was away or its diff failed): a failed prep, never a different commit.
+        // land() asks again like for a runner that went away; the sign-off is not in question (BOS-1396).
+        if (head === "" && d.head !== null) throw new RunnerGone("The runner didn't say which commit would merge.");
         return;
       }
       if (d.state === "waiting" && head) {
@@ -1645,6 +1647,9 @@ export function reviewService(
         } catch (err) {
           // The runner went away: land() runs the merge again by itself instead of raising a card (DR-014).
           if (err instanceof RunnerGone) throw err;
+          // The repo lock stayed taken (a restart leaves many runs queued for it): nothing is wrong, so land() asks again
+          // by itself and only raises a card when the retries fail too (BOS-1396).
+          if (/^Timed out waiting for the lock on /.test((err as Error).message)) throw new RunnerGone((err as Error).message);
           throw new ReviewError(409, (err as Error).message);
         }
       };
@@ -1667,7 +1672,9 @@ export function reviewService(
 
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
-      let changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch(() => null);
+      // A runner that went away is not "no diff": land() asks again once it is back (BOS-1396). Other failures read as no diff.
+      const readDiff = () => whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch((err: unknown) => { if (err instanceof RunnerGone) throw err; return null; });
+      let changed = await readDiff();
       // A ticket sent back after its merge as no-code, then reopened for real work (BOS-532): a commit on its
       // branch now is that work. Clear the stale no-code mark and read the diff again (a diff read over the
       // old commit may show nothing), so the review checks code and the branch merges like any other.
@@ -1676,7 +1683,7 @@ export function reviewService(
         await db.update(tickets).set({ noCode: false }).where(eq(tickets.id, ticketId));
         await record(db, { companyId: t.companyId, ticketId, kind: "reopened", summary: "Reopened for code: its branch has new commits again, so it is no longer a no-code ticket." });
         noCode = false;
-        changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, baseRef: defaultBranch }), 60_000)).catch(() => null);
+        changed = await readDiff();
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
