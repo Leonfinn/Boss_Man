@@ -17,6 +17,7 @@ import { signoffLine, signoffState } from "./services/signoff.js";
 import { WatchdogError } from "./services/watchdog.js";
 import { RetroError } from "./services/retro.js";
 import { ADDONS } from "./services/addons.js";
+import { seenImageDates } from "./services/ticket-images.js";
 import { criterionLines, fail, FIXES_LIVE_HELP, REF, text, type Scope } from "./mcp-common.js";
 import type { Services } from "./mcp.js";
 
@@ -238,7 +239,7 @@ export function registerDecisionTools(
           let r;
           if (input.outcome === "reissue") {
             if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
-            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
+            const ask = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps, options: input.options, lintOverride: input.lintOverride, byCeo: true, hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(input.newHost ? { newHost: input.newHost } : {}), hostValues: await hostFacts.valuesFor(input.steps), addons: input.steps?.length ? await addons?.() : undefined, setsUp: input.setsUp, proof: input.proof, ...(input.steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), ...(await seenImageDates(db, scope.companyId, input.steps).then((images) => (images ? { images } : {}))) });
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
