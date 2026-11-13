@@ -37,8 +37,8 @@ export const MAX_CARDS_PER_PASS = 10;
 /**
  * The features of a company held off the portal for a reason the owner should settle: the security guess
  * or a keep-off mark. A feature only waiting for a public summary is ticked on and is not held off by a
- * choice, so it is left alone. The rule judges the stored feature, so an agent can't slip one past it
- * (BOS-991).
+ * choice, so it is left alone. A feature the owner made and switched off by hand is their own choice, so
+ * it is left alone too. The rule judges the stored feature, so an agent can't slip one past it (BOS-991).
  */
 export async function heldOffFeatures(db: Db, companyId: string): Promise<HeldOffFeature[]> {
   const fs = await db.select().from(features).where(and(eq(features.companyId, companyId), ne(features.status, "declined")));
@@ -56,6 +56,9 @@ export async function heldOffFeatures(db: Db, companyId: string): Promise<HeldOf
       .filter((n): n is string => !!n);
     const verdict = portalVerdict({ title: f.title, description: f.description, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
     if (verdict.reason === "needs public summary" || !HOLD_REASONS.has(String(verdict.reason))) continue;
+    // The owner switched a feature off by hand: that was already their choice, so don't ask again. A security
+    // guess on an owner-made feature is not their choice, so that still comes to them.
+    if (verdict.reason === "sensitive" && !f.createdByAgentId) continue;
     const reason = verdict.reason === "sensitive" ? (f.keepOffReason?.trim() ? `kept off by hand: ${f.keepOffReason.trim()}` : "kept off by hand") : "it reads as security work";
     out.push({ id: f.id, title: f.title, reason, hasPublicSummary: !!f.publicSummary?.trim() });
   }

@@ -26,11 +26,19 @@ async function setup() {
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const pm = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Pip", template: "product-manager" })).json() as { id: string };
   const feature = async (body: Record<string, unknown> = {}) => (await req("POST", `/api/companies/${company.id}/features`, { title: "Dark mode", ...body })).json() as { id: string; title: string; portalVisible: boolean; keepOffPortal: boolean; keepOffReason: string | null };
+  // A feature an agent made and kept off the portal by hand (not the owner's own choice, so it is asked about).
+  const agentKeptOff = async (title: string, reason: string, publicSummary?: string) => {
+    const c = await agentAs(ceo.id);
+    const r = await c.callTool({ name: "feedback", arguments: { action: "create_feature", title, description: "Held off by the team.", keepOffPortal: true, keepOffReason: reason, reason: "Needs the owner's call." } });
+    const id = /Created feature ([0-9a-f-]{36})/.exec(textOf(r))![1]!;
+    if (publicSummary) await req("PATCH", `/api/features/${id}`, { publicSummary });
+    return { id };
+  };
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { portalHolds: { raised: number } };
   const roadmap = async () => (await req("GET", "/api/roadmap/features")).json().find((x: { id: string }) => x.id === company.id) as { features: Array<{ id: string; column: string }> };
   const answer = (id: string, a: string) => req("POST", `/api/decisions/${id}/answer`, { answer: a });
   const cards = async (featureId: string) => (await db.select().from(decisions)).filter((d) => (d.context as { featureId?: string }).featureId === featureId);
-  return { ...built, db, close, base, req, company, ceo, pm, feature, sweep, roadmap, answer, cards };
+  return { ...built, db, close, base, req, company, ceo, pm, feature, agentKeptOff, sweep, roadmap, answer, cards };
 }
 
 beforeEach(async () => {
@@ -109,7 +117,7 @@ describe("features land on the roadmap and the portal (BOS-1358)", () => {
   });
 
   it("answering Keep off keeps the feature off and marks it keep-off by hand", async () => {
-    const held = await ctx.feature({ title: "Internal pilot", description: "Trial with one team.", keepOffPortal: true, keepOffReason: "Internal pilot" });
+    const held = await ctx.agentKeptOff("Internal pilot", "Internal pilot");
     await ctx.sweep();
     const [card] = await ctx.cards(held.id);
     expect(card!.question).toContain("Internal pilot");
@@ -119,8 +127,29 @@ describe("features land on the roadmap and the portal (BOS-1358)", () => {
     expect((await ctx.sweep()).portalHolds.raised).toBe(0);
   });
 
+  it("asks nothing for a feature the owner made and switched off by hand", async () => {
+    // The owner created it on the Features page (no agent) and marked it keep-off themselves.
+    const own = await ctx.feature({ title: "Owner kept off", description: "Mine to hide.", keepOffPortal: true, keepOffReason: "Not ready to show" });
+    expect((await ctx.sweep()).portalHolds.raised).toBe(0);
+    expect(await ctx.cards(own.id)).toHaveLength(0);
+  });
+
+  it("still asks when an agent marks a feature keep-off, since that is not the owner's choice", async () => {
+    const pm = await agentAs(ctx.pm.id);
+    const call = await pm.callTool({ name: "feedback", arguments: { action: "create_feature", title: "PM kept off", description: "Held back by the PM.", keepOffPortal: true, keepOffReason: "Partners only", reason: "Partner pilot." } });
+    const id = /Created feature ([0-9a-f-]{36})/.exec(textOf(call))![1]!;
+    expect((await ctx.sweep()).portalHolds.raised).toBe(1);
+    expect(await ctx.cards(id)).toHaveLength(1);
+  });
+
+  it("still asks about a security-flagged feature the owner made, since the guess is not their choice", async () => {
+    const own = await ctx.feature({ title: "Rotate API keys", description: "Rotate the secret every week." });
+    expect((await ctx.sweep()).portalHolds.raised).toBe(1);
+    expect(await ctx.cards(own.id)).toHaveLength(1);
+  });
+
   it("recommends Publish when the feature already has a public summary", async () => {
-    const ready = await ctx.feature({ title: "Internal pilot", description: "Trial with one team.", keepOffPortal: true, publicSummary: "A trial with one team." });
+    const ready = await ctx.agentKeptOff("Internal pilot", "Internal pilot", "A trial with one team.");
     await ctx.sweep();
     const [card] = await ctx.cards(ready.id);
     expect(card!.recommendedOption).toBe(PORTAL_PUBLISH);
