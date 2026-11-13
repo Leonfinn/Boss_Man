@@ -243,6 +243,8 @@ export const OWNER_FIELDS = {
     "Tickets in progress, whole company (leave empty for no limit)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
+    // Settings → Checks: the merge train switch (BOS-1366).
+    "Land approved merges in order (merge train)",
     // Workspace disk.
     "Disk cap (GB)",
   ],
