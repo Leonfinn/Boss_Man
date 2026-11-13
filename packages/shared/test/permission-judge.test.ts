@@ -221,9 +221,8 @@ describe("rules judge: own memory folder and secret dodges", () => {
 
 describe("rules judge on very long input (round 6: slow pattern)", () => {
   it.each(["echo $(mktemp " + "a ".repeat(50_000), "x=$(mktemp " + "-d ".repeat(50_000), "ls " + "$(mktemp ".repeat(20_000)])("denies and returns fast: %#", (cmd) => {
-    const t = Date.now();
     const r = judgePermission("run", cmd);
-    expect(Date.now() - t).toBeLessThan(50);
+    expect(slowdown((c) => judgePermission("run", c), cmd)).toBeLessThan(SLOWDOWN_LIMIT);
     expect(r.verdict).toBe("deny");
     expect(r.row).toBe("tooLong");
     expect(isJudgeable(cmd)).toBe(false);
@@ -310,9 +309,8 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get user.name", "git config --list", "git commit -m 'update config'", "python3 -c \"print(1)\"", "python3 -c \"open('/tmp/x','w').write('y')\""]);
     it("reads adversarial inline code in linear time", () => {
       for (const cmd of ['python3 -c "open(' + " ".repeat(3900), 'python3 -c "open(' + " ".repeat(9000)]) {
-        const t = Date.now();
-        judge(cmd); // an unclosed call writes nothing, so the verdict is not the point: the time is
-        expect(Date.now() - t).toBeLessThan(200);
+        // an unclosed call writes nothing, so the verdict is not the point: the time is
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -377,9 +375,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get core.x", "echo $HOME -n > /tmp/x"]);
     it("scans the new patterns in linear time", () => {
       for (const cmd of ["g''".repeat(5000) + "it config x", "$p " + "-c\"x\" ".repeat(3000), "a |& ".repeat(3000) + "$p", "sudo " + "-u x ".repeat(3000) + "$p"]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -413,9 +409,8 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get core.x", "git config --list", "git log --oneline"]);
     it("keeps the git config scan fast on 40 repeated tokens", () => {
       for (const cmd of ["git" + " -c".repeat(40) + " config x", "git" + " --git-dir".repeat(40) + " config x", "git config" + " --get".repeat(40)]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        // These lines are short (a few hundred chars), so the plain baseline is tiny; the limit's floor keeps it steady.
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -478,9 +473,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get a && git config --get b", "git log --oneline | head -3"]);
     it("scans a long run of git -c options in linear time", () => {
       for (const cmd of ["x=1 " + "$p ".repeat(2000), "$p " + "-c ".repeat(5000), "git " + "--git-dir x ".repeat(3000) + "status","git" + " -c".repeat(60) + " x", "git" + " -c".repeat(5000) + " x", "git" + " -c a=b".repeat(500) + " status"]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -1215,10 +1208,8 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       ('bash -c "'.repeat(9) + "sh -c sh -c ".repeat(500) + "ls" + '"'.repeat(9)).slice(0, 10000),
     ];
     for (const cmd of shapes) {
-      const t = performance.now();
       const r = judge(cmd);
-      const ms = performance.now() - t;
-      expect(ms).toBeLessThan(250);
+      expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       expect(r.verdict).not.toBe("allow"); // out of budget or unplaceable: never Allow
     }
   });
