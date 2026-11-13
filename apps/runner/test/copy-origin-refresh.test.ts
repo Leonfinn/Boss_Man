@@ -50,7 +50,8 @@ for (const copies of ["worktree", "clone"] as const) {
   describe(`a ticket's ${copies} gets a fresh origin (BOS-853)`, () => {
     async function setup() {
       const url = upstream();
-      const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")), { ...process.env, BOSSMAN_TICKET_COPIES: copies === "clone" ? "clone" : "" });
+      // The worktree arm is pinned (BOS-343): this suite covers the worktree layer, and unset now means a clone.
+      const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")), { ...process.env, BOSSMAN_TICKET_COPIES: copies === "clone" ? "clone" : "worktree" });
       const spec = { projectId: ids.project, ticketId: ids.ticket, repoUrl: url, baseRef: "main" };
       const dir = (await ws.ensure(spec)).path;
       expect(isClone(dir)).toBe(copies === "clone");

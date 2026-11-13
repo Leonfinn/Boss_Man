@@ -85,6 +85,12 @@ export async function managerIn(db: Db, scope: Scope) {
   return me?.role === "ceo" || me?.role === "manager";
 }
 
+/** The CEO, a manager, or an agent hired from the product-manager template (BOS-1359): who runs the roadmap, features and portal. */
+export async function planningIn(db: Db, scope: Scope) {
+  const [me] = scope.agentId ? await db.select({ role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+  return me?.role === "ceo" || me?.role === "manager" || me?.template === "product-manager";
+}
+
 export const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 export const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
 

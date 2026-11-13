@@ -131,7 +131,7 @@ export type AdvisedDecision = {
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
 export type ClosedNotice = {
-  why: "live" | "newer";
+  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn";
   text: string;
   at: string;
   until: string;
@@ -239,7 +239,7 @@ export type Ticket = {
   dueDate: string | null;
   /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
   wipExempt?: "waits" | "plan" | "live" | null;
-  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; ticketNumber?: number | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
@@ -401,7 +401,9 @@ export type Notice = {
   readAt: string | null;
   createdAt: string;
 };
-export type NoticeFeed = { items: Notice[]; unread: number };
+/** Unread notices by level and by company id ("none" = no company), ignoring any filter (BOS-1277). */
+export type NoticeCounts = { level: Partial<Record<NotifyLevel, number>>; company: Record<string, number> };
+export type NoticeFeed = { items: Notice[]; unread: number; counts?: NoticeCounts };
 export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;

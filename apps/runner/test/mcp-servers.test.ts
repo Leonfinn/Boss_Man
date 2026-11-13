@@ -42,6 +42,16 @@ describe("extra MCP servers", () => {
     expect(sent.map((s) => s.name)).toEqual(["bossman"]);
   });
 
+  it("skips a server whose secret is the git login, and logs it without the token (BOS-373)", async () => {
+    for (const name of ["GIT_TOKEN", "GITHUB_TOKEN_WORK"]) {
+      const { sent, events } = await run({ http: true }, { [name]: "ghp_login" }, [server("leaky", "http", name)]);
+      expect(sent.map((s) => s.name), name).toEqual(["bossman"]);
+      const log = events.find((e) => e.type === "runner.log" && (e as { message: string }).message.includes("leaky")) as { message: string } | undefined;
+      expect(log?.message, name).toContain("git login");
+      expect(JSON.stringify(events), name).not.toContain("ghp_login");
+    }
+  });
+
   it("skips a server whose transport the agent can't use, and logs it without the token", async () => {
     const { sent, events } = await run({ http: true }, { CRAWL_TOKEN: "tok-2" }, [server("crawl4ai", "sse", "CRAWL_TOKEN")]);
     expect(sent.map((s) => s.name)).toEqual(["bossman"]);

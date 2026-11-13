@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -6,6 +6,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
+import { Loader } from "../components/Loader";
 import { usePoll } from "../hooks";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -508,6 +509,159 @@ function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask:
   );
 }
 
+/** True while the element's text is cut by its line clamp or its ellipsis. Frozen while the card is open (the clamp is off then), so the arrow stays. */
+function useCut(ref: { current: HTMLElement | null }, text: string, open: boolean) {
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      if (!open) setCut(el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, text, open]);
+  return cut;
+}
+
+/** A Done-column row: the title is cut to 2 lines, and the full title shows on hover only when it was cut. */
+function DoneTitle({ id, title }: { id: string; title: string }) {
+  const ref = useRef<HTMLAnchorElement>(null);
+  const cut = useCut(ref, title, false);
+  return <a ref={ref} className="clamp2" href={`#/tickets/${id}`} title={cut ? title : undefined}>{title}</a>;
+}
+
+type BoardTicket = BoardData["columns"][number]["tickets"][number];
+
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow }: { t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  const titleRef = useRef<HTMLAnchorElement>(null);
+  const noteRef = useRef<HTMLSpanElement>(null);
+  const waitsRef = useRef<HTMLSpanElement>(null);
+  const noteText = t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`;
+  const blockers = t.blockedBy.filter((b) => b.ticketId);
+  const refOf = (b: (typeof blockers)[number]) => {
+    const n = b.ticketNumber ?? numberOf(b.ticketId!);
+    return n ? ticketRef(prefix, n) : null;
+  };
+  const waitsFull = blockers.map((b) => `${refOf(b) ? `${refOf(b)} · ` : ""}${b.ticketTitle ?? "a task"}${b.until ? ` (until ${b.until})` : ""}`).join("; ");
+  const titleCut = useCut(titleRef, t.title, open);
+  const noteCut = useCut(noteRef, noteText, open);
+  const waitsCut = useCut(waitsRef, waitsFull, open);
+  const ticketRefText = t.number ? ticketRef(prefix, t.number) : t.title;
+  const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
+  const first = who ? name.split(" ")[0]! : name;
+  return (
+    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
+      <div className="top">
+        <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
+        {(t.risk === "high" || t.risk === "critical") && (
+          <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
+            {t.risk === "critical" ? "Critical" : "High"} risk
+          </span>
+        )}
+        {t.size && (
+          <span className="tag" title="Size, relative to other tasks">
+            Size {t.size}
+          </span>
+        )}
+        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
+        {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
+        {t.hold && (
+          <span className="tag amber" title={t.hold.reason}>
+            Held: {t.hold.label}
+            {t.hold.reviewer ? ` · ${t.hold.reviewer}` : ""}
+          </span>
+        )}
+        {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
+        {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
+      </div>
+      <h3>
+        <a ref={titleRef} className={open ? undefined : "clamp2"} href={`#/tickets/${t.id}`} title={hover(titleCut, t.title)}>{t.title}</a>
+      </h3>
+      {mine && <span ref={noteRef} className={`note${open ? "" : " clamp2"}`} title={hover(noteCut, noteText)}>{noteText}</span>}
+      {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
+      {mine && (
+        <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+          {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
+        </a>
+      )}
+      {t.wipExempt && (
+        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
+          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}
+        </span>
+      )}
+      {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
+      {t.featureTitle && (
+        <span className="fchip" title={t.featureTitle}>
+          <b>Feature</b>
+          <span>{t.featureTitle}</span>
+        </span>
+      )}
+      {blockers.length > 0 &&
+        (open ? (
+          <span className="note waits-open">
+            Waits on
+            {blockers.map((b) => (
+              <span key={b.ticketId} className="waits-line">
+                <a href={`#/tickets/${b.ticketId}`}>{refOf(b) ? `${refOf(b)} · ` : ""}{b.ticketTitle ?? "a task"}</a>
+                {b.until ? ` (until ${b.until})` : ""}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span ref={waitsRef} className="note clamp1" title={hover(waitsCut, waitsFull)}>
+            Waits on{" "}
+            {blockers.length === 1 ? (
+              <a href={`#/tickets/${blockers[0]!.ticketId}`}>{refOf(blockers[0]!) ? `${refOf(blockers[0]!)} · ` : ""}{blockers[0]!.ticketTitle ?? "a task"}</a>
+            ) : (
+              blockers.map((b, i) => (
+                <span key={b.ticketId}>
+                  {i > 0 && ", "}
+                  <a href={`#/tickets/${b.ticketId}`}>{refOf(b) ?? b.ticketTitle ?? "a task"}</a>
+                </span>
+              ))
+            )}
+          </span>
+        ))}
+      {t.quotaHeldUntil && !t.working?.length && (
+        <span className="note" role="status">
+          Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
+          <button type="button" className="linkish" onClick={() => onRunNow(t.id)}>
+            Run now
+          </button>
+        </span>
+      )}
+      {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
+      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
+      {!!t.working?.length && (
+        <span className="working" role="status">
+          <span className="pulse-dot" aria-hidden="true" />
+          {t.working.join(" and ")}
+        </span>
+      )}
+      <div className="row">
+        <span className="who" title={who ? `${who.name} (${who.agentKind})` : undefined}>
+          {who && <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />}
+          <span className="who-name">{first}</span>
+        </span>
+        <span className="end">
+          <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
+          {(titleCut || noteCut || waitsCut || open) && (
+            <button type="button" className="icon-btn expand" aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Show less of" : "Show all of"} ${ticketRefText}`} onClick={() => setOpen(!open)}>
+              <svg width="16" height="16" {...iconProps} style={{ transform: open ? "rotate(180deg)" : undefined }}><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+          )}
+        </span>
+      </div>
+    </article>
+  );
+}
+
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void }) {
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
@@ -624,8 +778,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <p className="label">{company ? `${company.name} · project` : "Project"}</p>
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
+          {/* (BOS-1126 Q10) The watchdog status is a small pill on the line under the project name, not floating mid-heading. */}
+          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /></p>}
         </div>
-        {current && <WatchdogHealth companyId={current.companyId} />}
         {current && (
           <StarButton
             agent={current}
@@ -792,12 +947,6 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             </button>
           )}
         </div>
-        {view !== "features" && (
-          <p>
-            <svg width="14" height="14" {...iconProps}>{PENCIL}</svg>
-            Rename a column with its pencil. Agents always see the fixed state.
-          </p>
-        )}
       </div>
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
@@ -814,6 +963,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
+          {!board.data && current && !board.error && (
+            <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>
+          )}
           {lanes.map(({ col, tickets, mine, merging, held }) => {
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
@@ -865,7 +1017,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
                       </span>
-                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
+                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>
@@ -884,8 +1036,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         <li key={t.id}>
                           <svg width="16" height="16" {...iconProps} strokeWidth={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
                           <span>
-                            <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                            <small>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{named(t)} · {when(t.lastActivityAt)}</small>
+                            <DoneTitle id={t.id} title={t.title} />
+                            <small title={named(t)}>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{t.assigneeAgentId ? named(t).split(" ")[0] : named(t)} · {when(t.lastActivityAt)}</small>
                           </span>
                         </li>
                       ))}
@@ -897,97 +1049,20 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </>
                 ) : (
-                  shown.map((t) => {
-                  const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
-                  return (
-                    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}`} key={t.id}>
-                      <div className="top">
-                        <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
-                        {t.number && <span className="mono muted">{ticketRef(company?.ticketPrefix, t.number)}</span>}
-                        {(t.risk === "high" || t.risk === "critical") && (
-                          <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
-                            {t.risk === "critical" ? "Critical" : "High"} risk
-                          </span>
-                        )}
-                        {t.size && (
-                          <span className="tag" title="Size, relative to other tasks">
-                            Size {t.size}
-                          </span>
-                        )}
-                      </div>
-                      <h3>
-                        <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                      </h3>
-                      {mine && <span className="note">{t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
-                      {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
-                      {mine && (
-                        <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
-                          {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
-                        </a>
-                      )}
-                      {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
-                      {t.wipExempt && (
-                        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
-                          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${t.blockedBy.filter((b) => b.ticketId).map((b) => { const n = (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === b.ticketId)?.number; return n ? ticketRef(company?.ticketPrefix, n) : (b.ticketTitle ?? "a task"); }).join(", ")}`}
-                        </span>
-                      )}
-                      {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
-                      {t.featureTitle && (
-                        <span className="fchip" title={t.featureTitle}>
-                          <b>Feature</b>
-                          <span>{t.featureTitle}</span>
-                        </span>
-                      )}
-                      {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
-                      {t.blockedBy.some((b) => b.ticketId) && (
-                        <span className="note">
-                          Waits on{" "}
-                          {t.blockedBy
-                            .filter((b) => b.ticketId)
-                            .map((b, i) => (
-                              <span key={b.ticketId}>
-                                {i > 0 && ", "}
-                                <a href={`#/tickets/${b.ticketId}`}>{b.ticketTitle ?? "a task"}</a>
-                                {b.until ? ` (until ${b.until})` : ""}
-                              </span>
-                            ))}
-                        </span>
-                      )}
-                      {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
-                      {t.quotaHeldUntil && !t.working?.length && (
-                        <span className="note" role="status">
-                          Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
-                          <button type="button" className="linkish" onClick={() => void runNow(t.id)}>
-                            Run now
-                          </button>
-                        </span>
-                      )}
-                      {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
-                      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
-                      {t.hold && (
-                        <span className="tag amber" style={{ alignSelf: "flex-start" }} title={t.hold.reason}>
-                          Held: {t.hold.label}
-                          {t.hold.reviewer ? ` · ${t.hold.reviewer}` : ""}
-                        </span>
-                      )}
-                      {!!t.working?.length && (
-                        <span className="working" role="status">
-                          <span className="pulse-dot" aria-hidden="true" />
-                          {t.working.join(" and ")}
-                        </span>
-                      )}
-                      <div className="row">
-                        <span className="who">
-                          {who && (
-                            <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />
-                          )}
-                          {named(t)}
-                        </span>
-                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
-                      </div>
-                    </article>
-                  );
-                  })
+                  shown.map((t) => (
+                    <TicketCard
+                      key={t.id}
+                      t={t}
+                      mine={!!mine}
+                      merging={!!merging}
+                      who={t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined}
+                      name={named(t)}
+                      prefix={company?.ticketPrefix}
+                      tiers={tiers}
+                      numberOf={(id) => (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === id)?.number}
+                      onRunNow={(id) => void runNow(id)}
+                    />
+                  ))
                 )}
               </section>
             );

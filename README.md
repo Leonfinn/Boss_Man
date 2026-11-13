@@ -1,7 +1,5 @@
 # Boss Man
 
-*Working name.*
-
 Boss Man runs teams of AI agents on a machine you own. Each team is a **company**: a CEO agent plans the work, other agents pick up tickets on a board, and anything that needs you lands in one **decision queue**, so you approve and steer instead of watching every step.
 
 It is for people who want AI agents doing real project work (code, docs, design) on their own Docker host, with their own keys, and who want to stay in charge of what gets merged and deployed.
@@ -10,7 +8,7 @@ It is for people who want AI agents doing real project work (code, docs, design)
 
 ## Install
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested working with OpenRouter, Ollama, Synthetic so far). The alpha install builds the containers on your server, for the beta release pre-built docker images will be available.
 
 1. Follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
 2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups and self-updates.
@@ -89,4 +87,4 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE). Any code adapted from Paperclip (MIT) keeps its MIT notice.
+Apache-2.0. See [LICENSE](LICENSE).
