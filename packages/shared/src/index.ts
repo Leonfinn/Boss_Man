@@ -1,4 +1,5 @@
 export * from "./billing.js";
+export * from "./redact.js";
 export * from "./quota.js";
 export * from "./secrets.js";
 export * from "./protocol.js";

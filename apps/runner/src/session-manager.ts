@@ -11,7 +11,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { FENCE_DENIED_PATTERN, clipField, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, traceKindOf, TRACE_CLIP, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, clipField, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, redact, traceKindOf, TRACE_CLIP, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
@@ -111,6 +111,22 @@ export function shortValue(v: unknown, max: number): string | undefined {
   const t = s.replace(/\s+/g, " ").trim();
   if (!t) return undefined;
   return t.length > max ? `${t.slice(0, max).trimEnd()}…` : t;
+}
+
+/**
+ * The Thinking trace fields for one tool call (BOS-1368), redacted and clipped ready to emit. Redaction
+ * happens here, before the event leaves the runner, because the server stores every run.update whole in
+ * runner_events: a `cat .env` must not put a key in the database (security review). Exported so a test
+ * can check a fake token never survives.
+ */
+export function traceToolFields(rawInput: unknown, rawText: string, title: string | null): { title: string | null; inputSummary?: string; resultSummary?: { text: string; cut: boolean } } {
+  const input = shortValue(rawInput, TRACE_CLIP.input);
+  const result = clipField(redact(rawText), TRACE_CLIP.output);
+  return {
+    title: title ? redact(title) || null : null,
+    ...(input ? { inputSummary: redact(input) } : {}),
+    ...(result.text ? { resultSummary: result } : {}),
+  };
 }
 
 /** The permission option kinds ACP defines; the runner answers with these only. */
@@ -1111,11 +1127,15 @@ export class SessionManager {
           // A failed call whose output says the permission was refused: the server logs it with the run and ticket (BOS-306).
           const refused = u.status === "failed" && /User refused permission/i.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""));
           // The Thinking trace (BOS-1368): a short input and a short result so the server can record the step.
-          // Clipped here, never raw: a tool call can carry a whole file or a command's output.
-          const title = typeof u.title === "string" ? u.title : null;
+          // Clipped here, never raw: a tool call can carry a whole file or a command's output. Redacted
+          // here too, before it leaves the runner: the server stores every run.update whole in
+          // runner_events (security review), so a `cat .env` must not put a key in the database.
           const rawInput = isEmpty(u.rawInput) ? (id ? (toolCalls.get(id)?.rawInput ?? null) : null) : u.rawInput;
-          const inputSummary = shortValue(rawInput, TRACE_CLIP.input);
-          const resultSummary = clipField(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""), TRACE_CLIP.output);
+          const rawText = textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "");
+          const fields = traceToolFields(rawInput, rawText, typeof u.title === "string" ? u.title : null);
+          const title = fields.title;
+          const inputSummary = fields.inputSummary;
+          const resultSummary = fields.resultSummary;
           const stamp = new Date().toISOString();
           emit({
             type: "run.update",
@@ -1128,7 +1148,7 @@ export class SessionManager {
               ...(id ? { toolCallId: id } : {}),
               traceKind: traceKindOf(u.kind as string | null, title),
               ...(inputSummary ? { inputSummary } : {}),
-              ...(resultSummary.text ? { resultSummary: resultSummary.text, ...(resultSummary.cut ? { resultCut: true } : {}) } : {}),
+              ...(resultSummary?.text ? { resultSummary: resultSummary.text, ...(resultSummary.cut ? { resultCut: true } : {}) } : {}),
               at: stamp,
               ...(refused ? { refused: true } : {}),
               ...(fenced === true && u.status === "failed" && FENCE_DENIED_PATTERN.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "")) ? { fenceDenied: true } : {}),
@@ -1141,7 +1161,8 @@ export class SessionManager {
           // models, send it; where they don't, the tool calls still record). Sent as a separate
           // reasoning update; the server joins consecutive chunks into one step.
           const content = u.content as { type?: string; text?: string } | undefined;
-          if (content?.type === "text" && content.text) emit({ type: "run.update", runId: cmd.runId, update: { kind: "reasoning", text: content.text.slice(0, 4000), at: new Date().toISOString() } });
+          // Redacted before it is sent: this text is stored in runner_events whole (security review BOS-1368).
+          if (content?.type === "text" && content.text) emit({ type: "run.update", runId: cmd.runId, update: { kind: "reasoning", text: redact(content.text.slice(0, 4000)), at: new Date().toISOString() } });
           return;
         }
         case "agent_message_chunk": {

@@ -627,8 +627,9 @@ export async function buildApp(opts: AppOptions) {
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
     // The Thinking trace (BOS-1368): every step a run takes, kept for its owner-chat reply. The runner
-    // clips and this service redacts, so nothing secret is stored; a ticket run's steps are simply
-    // never asked for and dropped when the run ends.
+    // clips and redacts before it emits, and runner_events redacts the same fields again as it stores
+    // them (security review), so no raw secret is kept there; this service redacts once more for the
+    // trace itself. A ticket run's steps are simply never asked for and dropped when the run ends.
     if (event.type === "run.started") trace.begin(event.runId);
     if (event.type === "run.update") trace.onUpdate(event.runId, event.update as TraceUpdate);
     // A tool call a fenced agent got a kernel refusal for (BOS-325).

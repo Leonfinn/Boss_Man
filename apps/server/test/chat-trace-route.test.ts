@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { ownerChatTraces, runners } from "../src/db/schema.js";
+import { ownerChatTraces, runnerEvents, runners } from "../src/db/schema.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -68,6 +68,27 @@ describe("Thinking trace in the owner chat (BOS-1368)", () => {
     const rows = await c.db.select().from(ownerChatTraces).where(eq(ownerChatTraces.companyId, c.company.id));
     expect(rows).toHaveLength(1);
     expect(JSON.stringify(rows[0]!.trace)).not.toContain("ghp_");
+  });
+
+  it("stores no raw secret in runner_events, for any run whose events carry one (security review)", async () => {
+    const c = await setup();
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What did the team do?" });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    await c.emit({ type: "run.started", runId: start.runId, agentId: c.ceo.id, acpSessionId: "s1", model: "m" });
+    // A command that printed a secret, and reasoning carrying one: the runner would redact these, but
+    // the server must clean them again as it stores the event (an older runner image may not).
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "reasoning", text: "The key is sk-abcdefghijklmnopqrstuvwx, noted." } });
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "tool_call", toolCallId: "c1", title: "bash", toolKind: "execute", traceKind: "command", inputSummary: "cat .env", resultSummary: "DB_PASSWORD=hunter2\nGIT_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123", status: "completed" } });
+    await c.settle();
+
+    const stored = await c.db.select().from(runnerEvents).where(eq(runnerEvents.type, "run.update"));
+    const payload = JSON.stringify(stored.map((r) => r.payload));
+    expect(payload).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+    expect(payload).not.toContain("sk-abcdefghijklmnopqrstuvwx");
+    expect(payload).not.toContain("hunter2");
+    // The step itself is still kept (redacted, not dropped).
+    expect(payload).toContain("redacted");
   });
 
   it("saves no trace for a reply with no steps, and shows a worker's trace too", async () => {
