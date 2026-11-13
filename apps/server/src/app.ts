@@ -417,6 +417,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
   const maintenance = maintenanceService(db, {
     fleet: async () => (launch.enabled ? launch.fleet() : []),
+    rollback: (slug) => launch.rollback(slug),
     // BOS-993: the launcher is told "Checks at once" first, so a recreate always uses the current setting (it also covers a launcher that lost it).
     recreate: async (slug) => {
       await launch.setChecks(await checkQueueSvc.slots()).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
@@ -523,6 +524,7 @@ export async function buildApp(opts: AppOptions) {
       const h = await getHold(db);
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
+    swapping: (companyId) => runnerReport.swappingFor(companyId),
     errors: errorBuffer,
     stalls: () => stalls.summary(),
     cpuReserve: () => launch.cpuReserve(),
@@ -851,7 +853,7 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
   });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
-  const runnerWatch = runnerWatchService(db, { isConnected: (id) => runners.isConnected(id), holdOn: async () => !!(await getHold(db)), wantedCompanies: () => launch.wantedCompanies(), notify: (n) => notes.notify(n), alert: (input) => alerts.raise(input), now: opts.now, log: (m) => app.log.warn(m) });
+  const runnerWatch = runnerWatchService(db, { isConnected: (id) => runners.isConnected(id), holdOn: async () => !!(await getHold(db)), wantedCompanies: () => launch.wantedCompanies(), guardFault: async (companyId) => ((await launch.status(companyId))?.container?.guardReason ?? null), notify: (n) => notes.notify(n), alert: (input) => alerts.raise(input), now: opts.now, log: (m) => app.log.warn(m) });
   // Server-health alerts (BOS-640): memory to the CEO, freezes to the owner. main.ts runs check() on the leader.
   health = serverHealthService({
     now: opts.now ? () => opts.now!().getTime() : undefined,

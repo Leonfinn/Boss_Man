@@ -54,8 +54,8 @@ export type Hold = {
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
   failed?: Record<string, string>;
-  /** slug -> failed recreate tries so far and when the last was; a recreate is tried up to RECREATE_TRIES times before it counts as failed. */
-  tries?: Record<string, { n: number; at: string }>;
+  /** slug -> a swap that failed and is tried again after `next` (BOS-382): the hold stays on while it is retried. */
+  tries?: Record<string, { n: number; next: string; last: string }>;
   /** The "update is stuck" page has been sent for this hold (once). */
   stalledPaged?: boolean;
   /**
@@ -71,9 +71,6 @@ export type Hold = {
   /** runId -> when this hold's own update/settings message went to it, so a later run gets it once too (BOS-988). */
   startTold?: Record<string, string>;
 };
-
-export const RECREATE_TRIES = 3;
-const RECREATE_RETRY_MS = 30_000;
 
 export async function getHold(db: Db): Promise<Hold | null> {
   const [row] = await db.select().from(settings).where(eq(settings.key, MAINTENANCE_KEY));
@@ -93,6 +90,11 @@ export type MaintenanceDeps = {
   /** The launcher's runners, each with its company and whether it runs the current image. */
   fleet: () => Promise<FleetRunner[]>;
   recreate: (slug: string) => Promise<unknown>;
+  /** Puts a company's runner back on the image it ran before, when the new one would not start (BOS-382). */
+  rollback?: (slug: string) => Promise<unknown>;
+  /** How many times a swap is tried before going back to the previous image (default 3), and the first wait between tries (doubles each time). */
+  swapTries?: number;
+  swapRetryMs?: number;
   connected: (companyId: string) => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
@@ -116,6 +118,21 @@ export type MaintenanceDeps = {
 export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   const now = deps.now ?? (() => new Date());
   const reconnectMs = deps.reconnectMs ?? 5 * 60_000;
+  const swapTries = Math.max(1, deps.swapTries ?? 3);
+  const swapRetryMs = deps.swapRetryMs ?? 30_000;
+
+  /** BOS-382: the new runner would not start after every try. Go back to the previous image; say plainly what happened either way. */
+  async function goBack(slug: string, why: string, n: number): Promise<string> {
+    const tried = `the new runner would not start (${n} tr${n === 1 ? "y" : "ies"}: ${why})`;
+    if (!deps.rollback) return tried;
+    try {
+      await deps.rollback(slug); // leader-only
+      deps.log?.(`drain: ${slug} is back on the previous runner image`);
+      return `${tried}, so it was put back on the previous runner image and is running that`;
+    } catch (err) {
+      return `${tried}, and going back to the previous runner image failed too (${(err as Error).message}). Press Start runner in Settings > Runner`;
+    }
+  }
   const trigger = deps.dir && path.join(deps.dir, "inbox", "drain.json");
 
   const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
@@ -456,7 +473,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       for (const r of fleet) {
         if (!needsSwap(h, r, swapped) || failed[r.slug]) continue;
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
-        if (tries[r.slug] && t.getTime() - new Date(tries[r.slug]!.at).getTime() < RECREATE_RETRY_MS) continue;
+        if (tries[r.slug] && t < new Date(tries[r.slug]!.next)) continue; // a failed swap, waiting for its next try
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
@@ -469,15 +486,24 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           swapped[r.slug] = now().toISOString();
           delete tries[r.slug];
         } catch (err) {
+          const why = (err as Error).message;
           const n = (tries[r.slug]?.n ?? 0) + 1;
-          tries[r.slug] = { n, at: now().toISOString() };
-          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${RECREATE_TRIES}): ${(err as Error).message}`);
-          if (n >= RECREATE_TRIES) failed[r.slug] = (err as Error).message;
+          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${swapTries}): ${why}`);
+          // A network guard failure is not the new image's fault: the previous image starts behind the same guard,
+          // so trying again or going back can't help. It is reported at once.
+          const guardFault = /network guard/i.test(why);
+          if (!guardFault && n < swapTries) {
+            tries[r.slug] = { n, next: new Date(now().getTime() + swapRetryMs * 2 ** (n - 1)).toISOString(), last: why };
+            continue;
+          }
+          delete tries[r.slug];
+          failed[r.slug] = guardFault ? why : await goBack(r.slug, why, n);
         }
       }
       h = { ...h, swapped, failed, tries };
       // No swap for twice the reconnect time while runners still wait: say so once, so a hold is never silently stuck.
-      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug]);
+      // A runner whose swap failed and is being tried again is not stuck: it is on its retry schedule (BOS-382), and the end of it pages.
+      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug] && !tries[r.slug]);
       if (waiting.length && !h.stalledPaged) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         if (t.getTime() - lastProgress >= 2 * reconnectMs) {

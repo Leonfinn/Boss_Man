@@ -20,6 +20,13 @@ afterEach(async () => {
 });
 
 const MIN = 60_000;
+/** Steps the drain past every retry of a failing swap (3 tries, 30 s then 60 s apart). */
+async function retryOut(c: { maintenance: { step: () => Promise<unknown> }; advance: (ms: number) => unknown }) {
+  for (let i = 0; i < 4; i++) {
+    await c.maintenance.step();
+    c.advance(2 * MIN);
+  }
+}
 const KEY = "k".repeat(43);
 
 /** A stand-in launcher with one runner per slug; `recreate` puts a runner on the new image. */
@@ -33,8 +40,20 @@ function fakeLauncher() {
     const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if (method === "GET" && url.pathname === "/runners") return json(200, [...runnersBySlug].map(([slug, r]) => ({ slug, state: "running", status: "Up", image: "boss-man-runner:current", ...(old ? {} : { current: r.current }) })));
     if (method === "PUT") return json(200, { slug: url.pathname.split("/")[2], id: "x" }); // a new company's runner starts by itself
+    const back = /^\/runners\/([^/]+)\/previous$/.exec(url.pathname);
+    if (method === "POST" && back) {
+      if (noPrevious) return json(409, { error: "There is no previous runner image (boss-man-runner:previous) to go back to." });
+      rolledBack.push(back[1]!);
+      return json(200, { slug: back[1], image: "boss-man-runner:previous" });
+    }
     const m = /^\/runners\/([^/]+)\/recreate$/.exec(url.pathname);
     if (method === "POST" && m) {
+      const left = failTimes.get(m[1]!);
+      if (left) {
+        failTimes.set(m[1]!, left - 1);
+        return json(502, { error: "Creating the runner failed: the container exited at once" });
+      }
+      if (guardBroken.has(m[1]!)) return json(502, { error: `The network guard for ${m[1]} stopped (exit code 1); see docker logs.` });
       if (broken.has(m[1]!)) return json(502, { error: "Creating the runner failed: no such image" });
       runnersBySlug.get(m[1]!)!.current = true;
       return json(200, { slug: m[1] });
@@ -43,7 +62,11 @@ function fakeLauncher() {
   }) as typeof globalThis.fetch;
   let old = false;
   const broken = new Set<string>();
-  return { fetch, calls, runnersBySlug, broken, setOldLauncher: (v: boolean) => (old = v) };
+  const guardBroken = new Set<string>();
+  const failTimes = new Map<string, number>();
+  const rolledBack: string[] = [];
+  let noPrevious = false;
+  return { fetch, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v) };
 }
 
 async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
@@ -302,20 +325,63 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.company("Silent Co", "silent-co", false);
     await c.company("Broken Co", "broken-co");
     c.fake.broken.add("broken-co");
+    c.fake.setNoPrevious(true);
     await c.maintenance.start();
     await c.maintenance.step();
-    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in; Broken Co is tried again, not given up on
-    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
-    c.advance(31_000);
-    await c.maintenance.step();
-    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
-    c.advance(31_000);
-    await c.maintenance.step(); // third failed try: now it counts as failed
+    expect(await getHold(c.db)).not.toBeNull(); // Broken Co is tried again, and Silent Co is given time to dial in
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     const page = (await c.db.select().from(notifications)).find((n) => n.title === "Runner update finished with problems");
     expect(page).toMatchObject({ level: "page" });
-    expect(page!.body).toContain("broken-co: Creating the runner failed");
+    expect(page!.body).toContain("broken-co: the new runner would not start (3 tries: Creating the runner failed");
+    expect(page!.body).toContain("going back to the previous runner image failed too");
+    expect(page!.body).toContain("Press Start runner");
     expect(page!.body).toContain("silent-co: has not reconnected");
+  });
+
+  // BOS-382: a swap that fails is tried again on its own, then goes back to the previous image, then says so once.
+  it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.failTimes.set("app-co", 2);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ tries: { "app-co": { n: 1 } } });
+    await c.maintenance.step(); // still waiting for the next try: no second call yet
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    await retryOut(c);
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(3);
+    expect(c.fake.rolledBack).toEqual([]);
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Runners updated");
+    expect((await c.titles()).some((t) => t.startsWith("page:"))).toBe(false);
+  });
+
+  it("after the last try, puts the runner back on the previous image and pages once, in plain words", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.broken.add("app-co");
+    await c.maintenance.start();
+    await retryOut(c);
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(3);
+    expect(c.fake.rolledBack).toEqual(["app-co"]);
+    expect(await getHold(c.db)).toBeNull();
+    const pages = (await c.db.select().from(notifications)).filter((n) => n.level === "page");
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toContain("app-co: the new runner would not start (3 tries: Creating the runner failed: no such image), so it was put back on the previous runner image and is running that");
+  });
+
+  it("a network guard failure is reported at once: trying again or going back can't fix it", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.guardBroken.add("app-co");
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    expect(c.fake.rolledBack).toEqual([]);
+    expect(await getHold(c.db)).toBeNull();
+    const page = (await c.db.select().from(notifications)).find((n) => n.level === "page");
+    expect(page!.body).toContain("app-co: The network guard for app-co stopped");
   });
 
   it("a failed swap lifts the hold; once the runner is back on the new image the panel shows the current state, not the failure", async () => {
@@ -323,11 +389,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.company("App Co", "app-co");
     c.fake.broken.add("app-co");
     await c.maintenance.start();
-    await c.maintenance.step();
-    c.advance(31_000);
-    await c.maintenance.step();
-    c.advance(31_000);
-    await c.maintenance.step(); // third failed try: now it counts as failed
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
     c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
@@ -345,7 +407,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const orig = c.fake.runnersBySlug.get("app-co")!;
     Object.defineProperty(orig, "current", { get: (() => { let n = 0; return () => ++n > 1; })(), set: () => undefined });
     void recreate;
-    await c.maintenance.step();
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Runners updated");
   });
