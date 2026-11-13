@@ -298,6 +298,7 @@ function paPrompt(agent: Agent, company: string, recent: Array<{ role: string; t
     "",
     "Your tools are read-only: tickets (find and read), decisions (what is waiting on someone), list_my_work, board, whats_new and wiki (list and read). You can't create or change anything.",
     "- Look the answer up with your tools first, then answer the owner's LAST message with pa_reply: text, cites (the tickets and decisions your answer rests on, each with its id; empty is fine for a \"nothing found\" answer after you searched tickets or decisions) and confidence (high only when the tools show it plainly). Your closing text is not shown to the owner; pa_reply is the only way you answer.",
+    "- Answer the LAST message in the light of the owner's messages before it. If the last one is material for an earlier question (pasted text, a link, \"here it is\"), treat them as one question, and escalate it as one.",
     "- Boss Man checks every reply in code. It escalates to the CEO instead of posting when you cite an id no tool showed you, cite nothing without having searched, are unsure, or the question asks for judgement (why, should, plans, priorities, money, risk, deploys, hiring). If you can't answer from what the tools return, call pa_escalate with a short summary of what you found.",
     "",
     "The conversation so far, oldest first:",

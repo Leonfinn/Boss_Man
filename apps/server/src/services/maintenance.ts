@@ -13,6 +13,16 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 
 export const MAINTENANCE_KEY = "maintenance";
+
+/**
+ * The words a failed swap's note carries (BOS-382), shared with runner-report.ts, which reads them back to pick the
+ * panel's wording. Reword them here and both sides move together.
+ */
+export const SWAP_PUT_BACK = "put back on the previous runner image";
+export const SWAP_PUT_BACK_RUNNING = `${SWAP_PUT_BACK} and is running that`;
+export const SWAP_PUT_BACK_FAILED = "going back to the previous runner image failed";
+/** How long a recreated runner has to dial in (the drain's reconnect wait), and how long it still counts as mid-swap. */
+export const SWAP_WINDOW_MS = 5 * 60_000;
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
 /** The same, for a runner restart that applies new runner settings (BOS-594). */
@@ -121,7 +131,7 @@ export type MaintenanceDeps = {
 
 export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   const now = deps.now ?? (() => new Date());
-  const reconnectMs = deps.reconnectMs ?? 5 * 60_000;
+  const reconnectMs = deps.reconnectMs ?? SWAP_WINDOW_MS;
   const swapTries = Math.max(1, deps.swapTries ?? 3);
   const swapRetryMs = deps.swapRetryMs ?? 30_000;
 
@@ -132,9 +142,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     try {
       await deps.rollback(slug); // leader-only
       deps.log?.(`drain: ${slug} is back on the previous runner image`);
-      return `${tried}, so it was put back on the previous runner image and is running that`;
+      return `${tried}, so it was ${SWAP_PUT_BACK_RUNNING}`;
     } catch (err) {
-      return `${tried}, and going back to the previous runner image failed too (${(err as Error).message}). Press Start runner in Settings > Runner`;
+      return `${tried}, and ${SWAP_PUT_BACK_FAILED} too (${(err as Error).message}). Press Start runner in Settings > Runner`;
     }
   }
   const trigger = deps.dir && path.join(deps.dir, "inbox", "drain.json");

@@ -57,6 +57,24 @@ export function secretHint(value: string): string {
   return value.length <= 8 ? "••••" : `••••${value.slice(-4)}`;
 }
 
+/**
+ * Secrets only the runner daemon may hold: git authentication, in any of the ways git reads it from the
+ * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
+ * that build a header), plus the forge and package-manager tokens git, Claude Code and other tools push
+ * with on their own. The forge/package families match a suffix too (GITHUB_TOKEN_WORK, NPM_TOKEN_LEGACY):
+ * the suffix says which repo or registry, so the whole family is withheld (BOS-396). The runner keeps them
+ * out of an agent's environment (BOS-322), and a company tool server may not name one as its secret,
+ * since that would hand it to the agent's harness as a header (BOS-373).
+ */
+const DAEMON_ONLY_SECRET = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
+
+export function isDaemonOnlySecret(name: string): boolean {
+  return DAEMON_ONLY_SECRET.test(name);
+}
+
+/** Why a tool server may not use a daemon-only secret, as the API and import say it. */
+export const DAEMON_ONLY_SECRET_REFUSAL = "That is the git login, which agents may never hold. Give the tool server its own token.";
+
 // Engagement threads and deliverables must never carry credentials (R24). These are the
 // shapes of common secrets; a match blocks the message and names what it looked like.
 const CREDENTIAL_PATTERNS: Array<[string, RegExp]> = [

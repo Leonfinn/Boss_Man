@@ -48,7 +48,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
+  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
   Chat: ["Ask the CEO", "Send"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -82,15 +82,17 @@ export const OWNER_CONTROLS = {
   // The Merge queue page's two views (BOS-1174).
   // Below three recently finished checks, "Show N more" opens the rest (BOS-1239).
   "Merge queue": ["Merges", "Queued checks", "Show …", "Move to front"],
-  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
+  Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective", "Milestones"],
   Plan: [
     "Refresh",
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
     // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
     "What's holding work up …", "Show all …", "Show fewer",
+    // BOS-1306: the labelled Hide / Show button at the right end of that heading.
+    "Hide", "Show",
   ],
   Wiki: [
-    "Show older versions", "Loading",
+    "Show older versions",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
@@ -135,6 +137,8 @@ export const OWNER_CONTROLS = {
     "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
+    // Outgoing email (BOS-1387).
+    "Turn off", "Send test email",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -143,7 +147,7 @@ export const OWNER_CONTROLS = {
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Save", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test"],
+  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
@@ -245,6 +249,8 @@ export const OWNER_FIELDS = {
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
     // Workspace disk.
     "Disk cap (GB)",
+    // Settings → Server and runner → Outgoing email (BOS-1387).
+    "Server", "Port", "Security", "Username", "Password or token", "From address", "From name (optional)", "Send a test email to",
   ],
   // Tool servers and deploy targets.
   "Tools and deploys": [

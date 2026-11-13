@@ -92,7 +92,8 @@ describe("stale requests (BOS-123)", () => {
 
     const allowed = await ask("Which payment provider should I use, Stripe or Mollie?", { stillNeeded: "The owner chose Mollie, but the Mollie key has expired and they must pick again." });
     expect(isError(allowed)).toBe(false);
-    expect(textOf(allowed)).toMatch(/in the owner's queue/i);
+    // BOS-1318: a plain question goes to the CEO first.
+    expect(textOf(allowed)).toMatch(/went to the CEO first/i);
   });
 
   it("lets the same agent ask an unrelated question after the owner answered a different one (BOS-175)", async () => {
@@ -107,7 +108,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the checkout button?", options: ["Green", "Brand blue"], recommended: "Green", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("flags notes and cards that wait on a ticket when that ticket is done", async () => {
@@ -228,7 +229,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the footer?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("marks cards and notes across every kind of card in one action, and wakes each author once (BOS-175 item 3)", async () => {
@@ -334,7 +335,7 @@ describe("stale requests (BOS-123)", () => {
     await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
 
     const mcp = await c.mcp(c.other.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved", replacedBy: "none" } });
     expect(isError(r)).toBe(true);
     expect(textOf(r)).toMatch(/another flow/i);
 
@@ -349,7 +350,7 @@ describe("stale requests (BOS-123)", () => {
     const t = await c.ticket("Pick a colour", c.worker.id);
     const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Blue or navy?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Read the brand guide" });
     const mcp = await c.mcp(c.worker.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue, so this question is no longer needed.", replacedBy: "none" } });
     expect(isError(r)).toBe(false);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");
