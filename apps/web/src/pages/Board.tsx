@@ -901,7 +901,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         {t.number && <span className="mono muted">{ticketRef(company?.ticketPrefix, t.number)}</span>}
                         {(t.risk === "high" || t.risk === "critical") && (
                           <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
-                            {t.risk} risk
+                            {t.risk === "critical" ? "Critical" : "High"} risk
                           </span>
                         )}
                         {t.size && (

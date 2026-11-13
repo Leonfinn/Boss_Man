@@ -32,7 +32,7 @@ import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
 
-export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked";
+export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on";
 export type CheckWay = "gate" | "merged" | "queue";
 
 export type MergeLineEvent =

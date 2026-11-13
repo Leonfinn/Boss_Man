@@ -16,7 +16,27 @@ const BOS377_DENY = new Set(("14b1242b 2183ea06 2d9be3ef 32866b0f 3399d6d6 4872d
 // Deny on purpose; the CEO's decision on the ticket supersedes the earlier Allow.
 const BOS706_DENY = new Set("c0d5b751 aee48980 e1d1491d 597127c8".split(" "));
 const want = (c: Case): string => (BOS377_DENY.has(c.id.slice(0, 8)) || BOS706_DENY.has(c.id.slice(0, 8)) ? "deny" : c.expected);
-const agree = (cs: Case[]) => cs.filter((c) => run(c) === want(c)).length;
+// Speed tests time the hostile line against a plain line of the same length, run in turn on the same machine (best of a few runs
+// each), instead of a fixed number of ms: a fixed limit tuned on a dev machine failed at the merge gate (111 ms against 100) and
+// on GitHub's slower runners. A loaded machine slows both sides together, so the ratio holds; a scan that went quadratic costs
+// 40x or more on these inputs (see "stays fast on a 10,000-char line"), well past the limit. Only the quick tests read it.
+const SLOWDOWN_LIMIT = 30;
+function slowdown(run: (cmd: string) => unknown, cmd: string): number {
+  const plain = "echo ".repeat(Math.ceil(cmd.length / 5));
+  const time = (c: string) => {
+    const t = performance.now();
+    run(c);
+    return performance.now() - t;
+  };
+  let hostile = Infinity;
+  let base = Infinity;
+  for (let i = 0; i < 5; i++) {
+    hostile = Math.min(hostile, time(cmd));
+    base = Math.min(base, time(plain));
+  }
+  return hostile / Math.max(base, 0.05); // the floor keeps a timer-resolution baseline from inflating the ratio
+}
+const agree = (cs: Case[]) =>cs.filter((c) => run(c) === want(c)).length;
 
 describe("rules judge against the BOS-329 cases", () => {
   it("agrees with the CEO on the eval set (weighted like the study, >= 90%)", () => {
@@ -201,9 +221,8 @@ describe("rules judge: own memory folder and secret dodges", () => {
 
 describe("rules judge on very long input (round 6: slow pattern)", () => {
   it.each(["echo $(mktemp " + "a ".repeat(50_000), "x=$(mktemp " + "-d ".repeat(50_000), "ls " + "$(mktemp ".repeat(20_000)])("denies and returns fast: %#", (cmd) => {
-    const t = Date.now();
     const r = judgePermission("run", cmd);
-    expect(Date.now() - t).toBeLessThan(50);
+    expect(slowdown((c) => judgePermission("run", c), cmd)).toBeLessThan(SLOWDOWN_LIMIT);
     expect(r.verdict).toBe("deny");
     expect(r.row).toBe("tooLong");
     expect(isJudgeable(cmd)).toBe(false);
@@ -290,9 +309,8 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get user.name", "git config --list", "git commit -m 'update config'", "python3 -c \"print(1)\"", "python3 -c \"open('/tmp/x','w').write('y')\""]);
     it("reads adversarial inline code in linear time", () => {
       for (const cmd of ['python3 -c "open(' + " ".repeat(3900), 'python3 -c "open(' + " ".repeat(9000)]) {
-        const t = Date.now();
-        judge(cmd); // an unclosed call writes nothing, so the verdict is not the point: the time is
-        expect(Date.now() - t).toBeLessThan(200);
+        // an unclosed call writes nothing, so the verdict is not the point: the time is
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -357,9 +375,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get core.x", "echo $HOME -n > /tmp/x"]);
     it("scans the new patterns in linear time", () => {
       for (const cmd of ["g''".repeat(5000) + "it config x", "$p " + "-c\"x\" ".repeat(3000), "a |& ".repeat(3000) + "$p", "sudo " + "-u x ".repeat(3000) + "$p"]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -393,9 +409,8 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get core.x", "git config --list", "git log --oneline"]);
     it("keeps the git config scan fast on 40 repeated tokens", () => {
       for (const cmd of ["git" + " -c".repeat(40) + " config x", "git" + " --git-dir".repeat(40) + " config x", "git config" + " --get".repeat(40)]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        // These lines are short (a few hundred chars), so the plain baseline is tiny; the limit's floor keeps it steady.
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -458,9 +473,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     allows(["git config --get a && git config --get b", "git log --oneline | head -3"]);
     it("scans a long run of git -c options in linear time", () => {
       for (const cmd of ["x=1 " + "$p ".repeat(2000), "$p " + "-c ".repeat(5000), "git " + "--git-dir x ".repeat(3000) + "status","git" + " -c".repeat(60) + " x", "git" + " -c".repeat(5000) + " x", "git" + " -c a=b".repeat(500) + " status"]) {
-        const t = Date.now();
-        judge(cmd);
-        expect(Date.now() - t).toBeLessThan(200);
+        expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       }
     });
   });
@@ -1103,9 +1116,7 @@ describe("rules judge: unquoteFlags stays linear on hostile input (BOS-697 round
     ["rm " + "$'a'".repeat(200) + "(", "$'...' run"],
     ["rm " + "\\a".repeat(4_000) + "(", "very long backslash-escape run"],
   ])("finishes fast on a %s", (cmd, _label) => {
-    const t = Date.now();
-    judge(cmd);
-    expect(Date.now() - t).toBeLessThan(100);
+    expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
   });
 });
 
@@ -1185,9 +1196,8 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       "rm " + "\\/".repeat(4_000) + "(",
       "sh -c " + "'\"".repeat(1_000) + "(",
     ]) {
-      const t = Date.now();
-      judge(cmd);
-      expect(Date.now() - t).toBeLessThan(100);
+      // A ratio against a plain line of the same length (see slowdown): it still catches the scan going quadratic.
+      expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
     }
   });
 
@@ -1198,10 +1208,8 @@ describe("rules judge: quoted targets, obfuscated -c strings, more shells, shred
       ('bash -c "'.repeat(9) + "sh -c sh -c ".repeat(500) + "ls" + '"'.repeat(9)).slice(0, 10000),
     ];
     for (const cmd of shapes) {
-      const t = performance.now();
       const r = judge(cmd);
-      const ms = performance.now() - t;
-      expect(ms).toBeLessThan(250);
+      expect(slowdown(judge, cmd)).toBeLessThan(SLOWDOWN_LIMIT);
       expect(r.verdict).not.toBe("allow"); // out of budget or unplaceable: never Allow
     }
   });

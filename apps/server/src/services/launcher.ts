@@ -14,7 +14,7 @@ import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
 /** `current`: running the image `boss-man-runner:current` points at now (absent from a launcher older than the server). */
-export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean; guard?: "on" | "off" | "unavailable" | "down" };
+export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen"; guardReason?: string; guardSince?: string };
 
 export class LauncherError extends Error {
   constructor(
@@ -486,6 +486,11 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     /** One company's runner again on the current image; the launcher keeps its token and data. // leader-only */
     async recreate(slug: string) {
       await call("POST", `/runners/${slug}/recreate`);
+    },
+
+    /** BOS-382: the swap failed, so the company's runner goes back on the image it ran before. // leader-only */
+    async rollback(slug: string) {
+      await call("POST", `/runners/${slug}/previous`);
     },
 
     async status(companyId: string): Promise<{ slug: string; container: LaunchedRunner | null; error?: string } | null> {

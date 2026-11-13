@@ -68,6 +68,9 @@ export type WaitingRow = {
   carried?: CarriedHold[];
   /** The card that holds the merge (BOS-1078), so the screen names it and links straight to it. */
   card?: HoldingCardView | null;
+  /** BOS-1384: place among the queued checks (1 is next) and why it is ahead ("urgent", "moved to front by …"); null when not queued. */
+  place?: number | null;
+  why?: string | null;
   /** When the owner's sign-off for this round was given, if it was: a merge held by another card says so. */
   signedOffAt?: string | null;
 };
@@ -239,6 +242,8 @@ export function mergeQueueService(
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
+    /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
+    places?: (companyId: string) => Promise<Map<string, { place: number; why: string | null }>>;
     now?: () => Date;
   },
 ) {
@@ -425,7 +430,9 @@ export function mergeQueueService(
         // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
         const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
         if (hold) {
-          waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
+          // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
+          if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
+          else waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
           continue;
         }
         const view = (kind: HoldingCardView["kind"], staleHintText: string | null = null): HoldingCardView => ({ id: card!.id, kind, question: shortQuestion(card!.question), raisedBy: card!.raisedBy, raisedAt: card!.raisedAt.toISOString(), staleHint: staleHintText });
@@ -493,7 +500,16 @@ export function mergeQueueService(
         }
         waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for a check slot", stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
-      waiting.sort((a, b) => Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
+      // BOS-1384: the order the check queue will serve them in (a fix for main, a move to front, urgent, then oldest), with why.
+      const places = deps.places ? await deps.places(companyId).catch(() => null) : null;
+      for (const w of waiting) {
+        const p = places?.get(w.ticketId);
+        if (p) {
+          w.place = p.place;
+          w.why = p.why;
+        }
+      }
+      waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
       return {
         companyId,
