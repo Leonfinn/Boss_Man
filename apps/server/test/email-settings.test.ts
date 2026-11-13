@@ -106,6 +106,20 @@ describe("Send test email", () => {
     expect(fake.received[0]).toMatchObject({ encrypted: true, authed: "sender@example.com" });
   });
 
+  it("refuses replies injected in plaintext after the STARTTLS 220 instead of reading them over TLS", async () => {
+    // BOS-1410: "220 go" and a fake "250" arrive together; the fake 250 must never be taken as an answer.
+    for (const injected of ["250 fake\r\n", "250 fa", "250-fake\r\n"]) {
+      fake = await startFakeSmtp({ starttls: true, cert, auth: { user: "sender@example.com", pass: PASSWORD }, starttlsInjected: injected });
+      await save(base(fake.port, { security: "starttls" }));
+      const res = await test("owner@example.com");
+      expect(res.statusCode).toBe(502);
+      expect(res.json().message).toContain("sent data before the encryption started");
+      expect(fake.received).toHaveLength(0);
+      await fake.close();
+      fake = undefined;
+    }
+  });
+
   it("works over TLS from the first byte (port 465 style)", async () => {
     fake = await startFakeSmtp({ implicitTls: true, cert, auth: { user: "sender@example.com", pass: PASSWORD } });
     await save(base(fake.port, { security: "tls" }));

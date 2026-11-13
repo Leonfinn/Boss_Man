@@ -86,6 +86,11 @@ class Wire {
     });
   }
 
+  /** True when anything has arrived that hasn't been read as a reply yet (a whole reply, a partial line, or a partly-read multi-line reply). */
+  get hasPending(): boolean {
+    return this.ready.length > 0 || this.buf !== "" || this.lines.length > 0;
+  }
+
   write(s: string) {
     this.sock.write(s);
   }
@@ -152,6 +157,9 @@ export async function sendMail(cfg: SmtpConfig, msg: MailMessage): Promise<void>
     if (cfg.security === "starttls") {
       if (!ehlo.lines.some((l) => /^250[ -]STARTTLS$/i.test(l.trim()))) throw new SmtpError("The server doesn't offer STARTTLS on this port. Pick the security the server expects (often TLS on port 465), or none if it really is unencrypted.");
       await cmd("STARTTLS", "STARTTLS", 220);
+      // Anything after the 220 in plaintext is a response-injection attempt (CVE-2011-0411), not a reply: the real
+      // server wrote nothing more before the handshake, so refuse rather than let it answer EHLO, AUTH or the message.
+      if (wire.hasPending) throw new SmtpError("The mail server sent data before the encryption started.");
       wire.sock.removeAllListeners("data"); // the TLS layer reads the raw socket from here
       const upgraded = tls.connect({ ...opts, socket: wire.sock });
       await new Promise<void>((resolve, reject) => {
