@@ -59,6 +59,9 @@ function fakeDocker(exitCode = 0) {
       return { stopped: true, exitCode: c.exitCode };
     },
     async restart() {},
+    async pause() {},
+    async unpause() {},
+    async stop() {},
     async disconnect() {},
     async connect() {},
     async signal() {},
