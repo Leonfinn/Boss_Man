@@ -11,6 +11,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { INFRA_RETRY_BASE_MS, setInfraRetryBase } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -70,7 +71,8 @@ async function mergeOne(commit: string, path: string, opts: { noFileList?: boole
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live panel", assigneeAgentId: dev.id, acceptanceCriteria: [LIVE] })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review" }).where(eq(tickets.id, t.id));
   const r = await ctx.review.landVisible(t.id, "the owner");
-  expect(stand).toEqual(opts.noFileList ? ["workspace.diff"] : []);
+  // With no file list the gate asks again before giving up (BOS-1396): the first try plus its retries.
+  expect(stand).toEqual(opts.noFileList ? Array(4).fill("workspace.diff") : []);
   expect(co.company.id).toBeTruthy();
   return { id: t.id, r };
 }
@@ -169,7 +171,15 @@ describe("after-merge checks wait for go-live", () => {
   it("a merge whose changed files are unknown does not happen", { timeout: 120_000 }, async () => {
     await serverRuns(OLD);
     await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));
-    const { id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true });
+    // The gate asks again (BOS-1396) before it gives up; make the pauses between tries short.
+    const before = INFRA_RETRY_BASE_MS;
+    setInfraRetryBase(1);
+    let id: string, r: Awaited<ReturnType<typeof mergeOne>>["r"];
+    try {
+      ({ id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true }));
+    } finally {
+      setInfraRetryBase(before);
+    }
     expect(r.outcome).toBe("check_stuck");
     const t = await ctx.row(id);
     expect(t.mergeCommit).toBeNull();
