@@ -4,7 +4,6 @@ import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
 import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
-import { eq } from "drizzle-orm";
 import { FULL_LOG_MAX } from "@boss-man/shared";
 const OTHER_RUNNER = "00000000-0000-4000-8000-000000000001";
 
