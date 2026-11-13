@@ -23,10 +23,15 @@ export type PortalLimits = { writesPerIpPerHour: number; writesPerPortalPerHour:
 export const DEFAULT_PORTAL_LIMITS: PortalLimits = { writesPerIpPerHour: 40, writesPerPortalPerHour: 600, readsPerIpPerMinute: 120 };
 
 /** A sliding-window counter per key, bounded in memory. */
-function windowCounter(now: () => number) {
+export const WINDOW_COUNTER_MAX_KEYS = 20_000;
+export function windowCounter(now: () => number) {
   // shortcut: rate-limit counters in memory; lost on restart, harmless because it only forgets recent hits.
   const hits = new Map<string, number[]>();
   return {
+    /** How many keys it holds; never more than WINDOW_COUNTER_MAX_KEYS. */
+    get size() {
+      return hits.size;
+    },
     /** Records a hit and says whether it was within the limit. */
     take(key: string, limit: number, windowMs: number) {
       const cutoff = now() - windowMs;
@@ -37,7 +42,7 @@ function windowCounter(now: () => number) {
       }
       list.push(now());
       hits.set(key, list);
-      if (hits.size > 20_000) hits.delete(hits.keys().next().value!);
+      if (hits.size > WINDOW_COUNTER_MAX_KEYS) hits.delete(hits.keys().next().value!);
       return true;
     },
   };
