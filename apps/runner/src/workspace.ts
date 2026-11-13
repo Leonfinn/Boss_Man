@@ -1265,8 +1265,8 @@ export class Workspaces {
   /**
    * The check line's secrets and private-details scan (BOS-979), run by the runner's OWN installed copy of the scanner
    * (BOSSMAN_SCAN_SCRIPT, set by the runner image; root-owned like check-slot.sh) before any of the branch's code runs.
-   * The branch's scripts can't remove or weaken it, and the owner's list (scanList) goes into a 0600 file outside the
-   * copy that only this scanner reads, then is deleted: it is never in the check command's environment or its tree.
+   * The branch's scripts can't remove or weaken it, and the owner's list (scanList) goes to the scanner on its stdin
+   * (BOS-1043): never a file, never in the check command's environment or its tree.
    * A runner without the scanner installed skips it (nothing to run). Returns the scanner's output when it blocks the change.
    */
   private async scanBeforeCheck(dir: string, projectId: string, scanList?: string): Promise<string | null> {
@@ -1279,25 +1279,20 @@ export class Workspaces {
       if (base) break;
     }
     if (!base) return "scan: couldn't find the base branch (origin/main) to compare with, so the change was not scanned";
-    const scratch = mkdtempSync(path.join(tmpdir(), "bm-scan-"));
-    try {
-      const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
-      if (scanList) {
-        const file = path.join(scratch, "list");
-        writeFileSync(file, scanList.endsWith("\n") ? scanList : `${scanList}\n`, { mode: 0o600 });
-        env.BOSSMAN_SCAN_DENYLIST_FILE = file;
-      }
-      const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
-        execFile(process.execPath, [script, base], { cwd: dir, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null) : 0;
-          resolve({ code, out: `${stdout}${stderr}`.trim() });
-        });
+    // BOS-1043: the list goes to the scanner on its stdin, never into a file: the runner and the agent sessions share /tmp
+    // and a user, so a 0600 file there could still be read by an agent that polled for it.
+    const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
+    const args = [script, base, ...(scanList ? ["--list-stdin"] : [])];
+    const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const child = execFile(process.execPath, args, { cwd: dir, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null) : 0;
+        resolve({ code, out: `${stdout}${stderr}`.trim() });
       });
-      if (r.code === 0) return null;
-      return r.out || "scan: the secrets and private-details scan failed to run, so the change was not scanned";
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(scanList ? (scanList.endsWith("\n") ? scanList : `${scanList}\n`) : undefined);
+    });
+    if (r.code === 0) return null;
+    return r.out || "scan: the secrets and private-details scan failed to run, so the change was not scanned";
   }
 
   private async runCheck(
