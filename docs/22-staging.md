@@ -25,6 +25,10 @@ Do this on the host that will run staging, with `docker` and `git`. Nothing here
    ```
    git clone <the same repository URL production uses> boss-man-staging
    ```
+   For a private repo, production reads it with a deploy key that is set inside production's checkout (`core.sshCommand`, [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)), not in your shell's own SSH setup, so a plain clone fails with `Permission denied (publickey)`. Clone with production's setting so staging's later fetches use the same read-only key (the same host, so it is still one key per host):
+   ```
+   git clone -c core.sshCommand="$(git -C <production folder> config core.sshCommand)" "$(git -C <production folder> remote get-url origin)" boss-man-staging
+   ```
 2. Make staging's own secrets (new key, new password):
    ```
    cd boss-man-staging && mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
@@ -49,13 +53,14 @@ Do this on the host that will run staging, with `docker` and `git`. Nothing here
    BOSSMAN_DOCKER_GID=<the group id above>
    BOSSMAN_RUNNER_MEMORY=2g
    COMPOSE_FILE=docker-compose.yml:deploy/staging.yml
+   BOSSMAN_INSECURE_COOKIES=1
    ```
-   `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `COMPOSE_FILE` makes every `docker compose` command in this folder use the staging overlay (staging image names, staging launcher stack), so even a hand-typed one can't build production's image tags; `--check` refuses without it. Do not run `scripts/deploy.sh` or `scripts/update-runner.sh` in this folder: they are production's and refuse here.
+   `BOSSMAN_INSECURE_COOKIES=1` lets you sign in over plain `http://`: without it the browser drops the session cookie and sign-in silently returns to the login page (`--check` refuses without it unless `BOSSMAN_TRUSTED_PROXIES` names an HTTPS proxy in front). `BOSSMAN_BIND` is who can reach staging: use the host's LAN or Tailscale address, never `0.0.0.0` on a host that faces the internet. `COMPOSE_FILE` makes every `docker compose` command in this folder use the staging overlay (staging image names, staging launcher stack), so even a hand-typed one can't build production's image tags; `--check` refuses without it. Do not run `scripts/deploy.sh` or `scripts/update-runner.sh` in this folder: they are production's and refuse here.
 5. Check the isolation rules without starting anything:
    ```
    scripts/deploy-staging.sh --check
    ```
-6. Deploy a commit (below), open `http://<BOSSMAN_BIND>:3200`, create the staging owner account, then create a staging company; the launcher starts its runner.
+6. Deploy a commit (below). Before you open the page: the staging owner account must be a made-up email and password, never your live Boss Man login. Then open `http://<BOSSMAN_BIND>:3200`, create the staging owner account, then create a staging company; the launcher starts its runner.
 
 ## Deploy a commit to staging (one step)
 
@@ -64,6 +69,12 @@ From the staging folder:
 scripts/deploy-staging.sh <commit, branch or tag>
 ```
 It refuses to run if this folder shares anything with another install it can see (project name, ports, `POSTGRES_PASSWORD`, `BOSSMAN_DATA`, `master.key`), checks out exactly that commit, builds, starts the stack, waits for the server to be healthy and prints the address. A branch name means the remote's branch (`origin/<name>`), and the line "Deploying <ref> = <hash>" shows what was picked. Only after the new commit is healthy does it remember the last good commit for rollback. Running it again for the same commit is safe. `--dry-run` shows the steps first. If the runner code changed it builds the staging runner image and has staging's own launcher recreate the staging runners; there is nothing to click in Settings. If production lives in a folder that is not beside this one, the script refuses because it has nothing to compare against; pass `BOSSMAN_PRODUCTION_DIRS=/path/to/production` so a shared password or copied key is caught (or `BOSSMAN_ISOLATION_NO_PEERS=1` if this host truly has no other Boss Man install). Two runs at once are refused: a lock in the folder's `.git` lets only one deploy proceed. `deploy.sh` and `update-runner.sh` also refuse in any folder whose `COMPOSE_FILE` includes `deploy/staging.yml`, even if `.env` sets no project name.
+
+If any image build fails, the script stops before starting anything ("An image build failed ... nothing was started") and the staging that was running, if any, is left as it was. The builds download packages (Debian's apt, npm), so a build error such as `Could not resolve 'deb.debian.org'` means Docker's builds on this host had no working DNS at that moment. To tell a one-off from a standing fault, run this on the host; it does a throwaway build that only looks up that name:
+```
+printf 'FROM debian:bookworm-slim\nRUN getent hosts deb.debian.org\n' | docker build --no-cache --progress=plain - 2>&1 | tail -n 4
+```
+An address in the output means DNS works in builds now: run the deploy again. An error every time means Docker's builds can't reach a name server: check `grep nameserver /etc/resolv.conf` on the host (Docker can't use a `127.x` resolver from inside a build) and, if needed, set `"dns"` in `/etc/docker/daemon.json`. Restarting Docker for that restarts production too, so pick a quiet moment.
 
 ## Rollback
 
@@ -79,7 +90,7 @@ puts the last commit that came up healthy back (code only; the staging database 
 ## Smoke checklist (QA, about 10 minutes)
 
 1. Open the staging address. It loads over the LAN or Tailscale and is not reachable from outside.
-2. Sign in as the staging owner (create the account the first time).
+2. Sign in as the staging owner. The first time, create the account with a made-up email and password, never your live login. If sign-in returns to the login page with no error, `.env` lacks `BOSSMAN_INSECURE_COOKIES=1` (step 4).
 3. The board loads with no errors, and the side menu opens.
 4. Create a ticket and see it on the board.
 5. Create or open a staging company, check Settings → Runner shows its runner connected, assign the ticket and see the run start and finish.

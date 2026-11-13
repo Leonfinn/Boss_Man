@@ -10,7 +10,9 @@ const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 // it sits under (null at the top level). Enough for these plain single-line rules.
 function rules(selector: string, exact = false) {
   const found: { at: string | null; body: string }[] = [];
-  const re = /@media\s*\(([^)]*)\)\s*\{([\s\S]*?)\n\}/g;
+  // Only multi-line blocks (`{` then a newline, closed by `}` at line start): a one-line block like
+  // `@media (...) { .x { ... } }` has no "\n}", so the lazy match would run on into the next block.
+  const re = /^@media\s*\(([^)]*)\)\s*\{\n([\s\S]*?)\n\}/gm;
   for (let m; (m = re.exec(css)); ) {
     const at = m[1] ?? null;
     const body = m[2] ?? "";
@@ -56,7 +58,8 @@ describe("side menu height", () => {
   it("keeps the menu beside the page, not wrapped above it, from 641px up", () => {
     // The shell must not wrap at this width, and the menu must keep a fixed column so it and the
     // page share one row instead of the menu taking the whole screen on a row of its own.
-    const [shell] = rules(".app", true);
+    // The phone block also has an `.app` rule (BOS-1213), so pick the one under the 641px query.
+    const shell = rules(".app", true).find((r) => r.at === "min-width: 641px");
     if (!shell) throw new Error(".app no-wrap rule missing from styles.css");
     expect(shell.at).toBe("min-width: 641px");
     expect(shell.body).toContain("flex-wrap: nowrap");

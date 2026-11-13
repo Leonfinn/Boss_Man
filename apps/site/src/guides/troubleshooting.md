@@ -160,6 +160,19 @@ This fix is only for iPhones. Android phones do not need it. iPhones need a wake
 
 From: [Guide 8](/guides/phone-notifications).
 
+### An urgent push didn't break through Focus.
+
+On an iPhone, the current ntfy app may not break through a Focus, even for urgent pushes. The ntfy.sh wake-up above makes pushes arrive quickly, but it does not help them break through.
+
+- Open **Settings → Notifications → ntfy** and turn on **Time Sensitive Notifications**. If the switch is not there, your app build cannot break through a Focus.
+- Open **Settings → Focus** and add ntfy to the allowed apps of each Focus you use.
+- Check the silent switch. It silences ntfy even when a push gets through.
+- Turn on a Focus and choose **Send a test to my phone** to see what happens.
+
+The full steps are in [Urgent pushes on iPhone](/guides/phone-notifications#urgent-pushes-on-iphone).
+
+From: [Guide 8](/guides/phone-notifications).
+
 ### Some notifications never reach my phone.
 
 Check **Notifications > How you're told**. During **Quiet hours**, pages and asks become flags, which do not go to your phone. **Per agent, per hour** turns an agent's flags and pages into notes after 6 in an hour. **To the phone** sets which levels are sent (pages and asks by default).

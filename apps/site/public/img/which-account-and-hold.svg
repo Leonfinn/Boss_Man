@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 640" width="1160" height="640" role="img" aria-labelledby="wa-title wa-desc">
+  <title id="wa-title">Which account a run uses, and when work pauses: pick an account, then the quota hold, and what the two top-up settings change</title>
+  <desc id="wa-desc">A new run first uses the agent's account. An API key has no quota hold and just runs. A Claude plan that is ranked on the Funding page is chosen in your order: the first plan under its hold level, which is 95 percent unless you change it. If no plan has room, a plan that still allows the work is used, which can mean extra usage. If none allows it, the run waits for the plan with the earliest reset. Chats and reviews are never held. Routine work is held at the hold level under both "Hold everything at the limit" and "Keep urgent work running on top-up credit", and runs on credit only under "Keep all work running". Urgent tickets under "Hold everything at the limit" keep running until the limit itself and then wait, and under "Keep urgent work running on top-up credit" and "Keep all work running" they carry on past the limit using the credit.</desc>
+  <defs>
+    <style>
+      .d { font-family: "Archivo Variable", "Archivo", "IBM Plex Sans", Arial, sans-serif; font-stretch: 112%; font-weight: 750; }
+      .b { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 400; }
+      .bb { font-family: "IBM Plex Sans", Arial, sans-serif; font-weight: 700; }
+    </style>
+    <marker id="wa-ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#17202c"/></marker>
+  </defs>
+  <rect width="1160" height="640" fill="#ffffff"/>
+
+  <text x="0" y="22" class="bb" font-size="16" fill="#3d4757">Every new run picks an account first. Then the quota hold decides which work waits.</text>
+
+  <!-- step 1 -->
+  <rect x="0" y="40" width="340" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="0" y="40" width="340" height="34" rx="10" fill="#17202c"/><rect x="0" y="62" width="340" height="12" fill="#17202c"/>
+  <text x="14" y="63" class="d" font-size="16" fill="#eef2f6">1. The agent's account</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="14" y="100">Each agent is tied to a funding source.</text>
+    <text x="14" y="128" class="bb">An API key</text><text x="94" y="128">has no quota hold.</text>
+    <text x="14" y="146">The run just starts.</text>
+    <text x="14" y="174" class="bb">A Claude plan</text><text x="108" y="174">(setup-token) has a</text>
+    <text x="14" y="192">weekly allowance, so it is checked</text>
+    <text x="14" y="210">against the hold in steps 2 and 3.</text>
+  </g>
+
+  <!-- step 2 -->
+  <rect x="410" y="40" width="340" height="190" rx="10" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <rect x="410" y="40" width="340" height="34" rx="10" fill="#17202c"/><rect x="410" y="62" width="340" height="12" fill="#17202c"/>
+  <text x="424" y="63" class="d" font-size="16" fill="#eef2f6">2. Pick a Claude plan</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="424" y="100">Plans you ranked on Funding, in order:</text>
+    <text x="424" y="124" class="bb">a.</text><text x="442" y="124">the first plan under its hold level;</text>
+    <text x="424" y="146" class="bb">b.</text><text x="442" y="146">else the first that still allows the work;</text>
+    <text x="424" y="168" class="bb">c.</text><text x="442" y="168">else none: the run waits.</text>
+    <text x="424" y="198">The preferred plan is used again as soon</text>
+    <text x="424" y="216">as its window resets.</text>
+  </g>
+
+  <!-- step 3 -->
+  <rect x="820" y="40" width="340" height="190" rx="10" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <rect x="820" y="40" width="340" height="34" rx="10" fill="#c8282f"/><rect x="820" y="62" width="340" height="12" fill="#c8282f"/>
+  <text x="834" y="63" class="d" font-size="16" fill="#ffffff">3. The quota hold</text>
+  <g class="b" font-size="13" fill="#17202c">
+    <text x="834" y="100">At the hold level (95% unless you</text>
+    <text x="834" y="118">change it) routine work on that plan</text>
+    <text x="834" y="136">is paused, and you are told.</text>
+    <text x="834" y="164" class="bb">Chats and reviews are never held.</text>
+    <text x="834" y="192">If every plan is full, the run waits for</text>
+    <text x="834" y="210">the plan that frees up first.</text>
+  </g>
+
+  <g stroke="#17202c" stroke-width="2.5" fill="none" marker-end="url(#wa-ar)">
+    <path d="M342 135 H406"/><path d="M752 135 H816"/>
+  </g>
+  <text x="374" y="126" class="b" font-size="11" text-anchor="middle" fill="#3d4757">plan</text>
+
+  <!-- matrix -->
+  <text x="0" y="268" class="d" font-size="18" fill="#17202c">When a plan is at its hold level, your setting "I have extra usage" decides:</text>
+
+  <!-- header row -->
+  <rect x="0" y="282" width="200" height="64" rx="8" fill="#eef2f6"/>
+  <text x="14" y="320" class="bb" font-size="14" fill="#17202c">Kind of work</text>
+  <rect x="210" y="282" width="310" height="64" rx="8" fill="#17202c"/>
+  <text x="225" y="308" class="bb" font-size="14" fill="#ffffff">Hold everything at the limit</text>
+  <text x="225" y="328" class="b" font-size="12" fill="#eef2f6">the default; use it with no extra credit</text>
+  <rect x="530" y="282" width="310" height="64" rx="8" fill="#17202c"/>
+  <text x="545" y="308" class="bb" font-size="14" fill="#ffffff">Keep urgent work running</text>
+  <text x="545" y="328" class="b" font-size="12" fill="#eef2f6">on top-up credit (past the limit)</text>
+  <rect x="850" y="282" width="310" height="64" rx="8" fill="#17202c"/>
+  <text x="865" y="308" class="bb" font-size="14" fill="#ffffff">Keep all work running</text>
+  <text x="865" y="328" class="b" font-size="12" fill="#eef2f6">on top-up credit; nothing is held</text>
+
+  <!-- row chats -->
+  <rect x="0" y="356" width="200" height="64" rx="8" fill="#eef2f6"/>
+  <text x="14" y="383" class="bb" font-size="14" fill="#17202c">Chats and reviews</text>
+  <text x="14" y="403" class="b" font-size="12" fill="#3d4757">not held by the hold</text>
+  <g>
+    <rect x="210" y="356" width="310" height="64" rx="8" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+    <text x="225" y="383" class="bb" font-size="14" fill="#17202c">Carries on</text><text x="225" y="403" class="b" font-size="12" fill="#3d4757">runs as normal</text>
+    <rect x="530" y="356" width="310" height="64" rx="8" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+    <text x="545" y="383" class="bb" font-size="14" fill="#17202c">Carries on</text><text x="545" y="403" class="b" font-size="12" fill="#3d4757">runs as normal</text>
+    <rect x="850" y="356" width="310" height="64" rx="8" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+    <text x="865" y="383" class="bb" font-size="14" fill="#17202c">Carries on</text><text x="865" y="403" class="b" font-size="12" fill="#3d4757">runs as normal</text>
+  </g>
+
+  <!-- row urgent -->
+  <rect x="0" y="430" width="200" height="74" rx="8" fill="#eef2f6"/>
+  <text x="14" y="459" class="bb" font-size="14" fill="#17202c">Urgent tickets</text>
+  <text x="14" y="479" class="b" font-size="12" fill="#3d4757">marked Urgent by you</text>
+  <rect x="210" y="430" width="310" height="74" rx="8" fill="#f7f9fb" stroke="#c3cbd6" stroke-width="1.5"/>
+  <text x="225" y="457" class="bb" font-size="14" fill="#17202c">Runs until the limit itself</text>
+  <text x="225" y="477" class="b" font-size="12" fill="#17202c">then waits. Never spends credit</text><text x="225" y="493" class="b" font-size="12" fill="#17202c">you did not allow.</text>
+  <rect x="530" y="430" width="310" height="74" rx="8" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="545" y="457" class="bb" font-size="14" fill="#c8282f">Carries on, on credit</text>
+  <text x="545" y="477" class="b" font-size="12" fill="#17202c">runs past the limit and uses the</text><text x="545" y="493" class="b" font-size="12" fill="#17202c">extra usage or top-up credit.</text>
+  <rect x="850" y="430" width="310" height="74" rx="8" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="865" y="457" class="bb" font-size="14" fill="#c8282f">Carries on, on credit</text>
+  <text x="865" y="477" class="b" font-size="12" fill="#17202c">runs past the limit and uses the</text><text x="865" y="493" class="b" font-size="12" fill="#17202c">extra usage or top-up credit.</text>
+
+  <!-- row routine -->
+  <rect x="0" y="514" width="200" height="74" rx="8" fill="#eef2f6"/>
+  <text x="14" y="543" class="bb" font-size="14" fill="#17202c">Routine work</text>
+  <text x="14" y="563" class="b" font-size="12" fill="#3d4757">everything else</text>
+  <rect x="210" y="514" width="310" height="74" rx="8" fill="#f0b75c"/>
+  <text x="225" y="541" class="bb" font-size="14" fill="#17202c">Waits</text>
+  <text x="225" y="561" class="b" font-size="12" fill="#17202c">until the plan's window resets</text><text x="225" y="577" class="b" font-size="12" fill="#17202c">and credits come back.</text>
+  <rect x="530" y="514" width="310" height="74" rx="8" fill="#f0b75c"/>
+  <text x="545" y="541" class="bb" font-size="14" fill="#17202c">Waits</text>
+  <text x="545" y="561" class="b" font-size="12" fill="#17202c">until the plan's window resets</text><text x="545" y="577" class="b" font-size="12" fill="#17202c">and credits come back.</text>
+  <rect x="850" y="514" width="310" height="74" rx="8" fill="#f7f9fb" stroke="#c8282f" stroke-width="2.5"/>
+  <text x="865" y="541" class="bb" font-size="14" fill="#c8282f">Carries on, on credit</text>
+  <text x="865" y="561" class="b" font-size="12" fill="#17202c">nothing is held, even routine</text><text x="865" y="577" class="b" font-size="12" fill="#17202c">work. Credit may run out.</text>
+
+  <text x="0" y="620" class="b" font-size="13" fill="#3d4757">Boss Man cannot see your top-up balance. Set a spending limit with your provider. Under the hold level everything runs.</text>
+</svg>

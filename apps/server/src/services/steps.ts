@@ -9,6 +9,7 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -59,7 +60,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -429,6 +430,53 @@ function pieces(text: string) {
   return { blocks, blockPieces, inline, prose, stray: strayFence(parts) };
 }
 
+// ---------------------------------------------------------------------------------------------------
+// R17 (DR-052): a vague host step. "Delete X from .env" or "restart the notifications add-on" passes every other
+// rule but leaves the owner asking where the file is and how to restart anything. A small phrase table, not a
+// prose judge: each row is tested on its own, and a false refusal costs the author one rewrite (or a CEO override).
+// ---------------------------------------------------------------------------------------------------
+
+/** The host files a step may name, each of which needs a location. Not after a `/` (then it is a path) or a word
+ * character (`.envrc`, `my.env`). */
+const HOST_FILE = /(?<![\w/.}-])(\.env|(?:docker-)?compose[\w.-]*\.ya?ml|host\.json)(?![\w.-])/gi;
+/** The verbs that make a step ask the owner to work on a file. */
+const FILE_VERB = /\b(?:add|set|edit|open|change|remove|delete|put|copy|append|replace|update|write|uncomment|comment|look|check|find|create|paste|type)\b/i;
+/** A host action aimed at something on the host: the verb, up to three words, then what it acts on. */
+const HOST_ACTION = /\b(?:re-?start|stop|start|re-?create|pull|edit)\s+(?:[\w.-]+\s+){0,3}?(?:containers?|add-?ons?|services?|stacks?|files?)\b/i;
+/** "delete/remove … from" a host file or thing. */
+const HOST_REMOVE = /\b(?:delete|remove)\b[^.;\n]{1,80}?\bfrom\s+(?:[\w-]+\s+){0,3}?(?:\.env(?![\w.-])|(?:docker-)?compose[\w.-]*\.ya?ml|host\.json|containers?|add-?ons?|services?|stacks?|files?)\b/i;
+/** A Boss Man button path: the owner does it in the app, so no command is needed. */
+const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
+/** The pointer the go-live card writes in place of a host fact Boss Man hasn't been told yet (DR-052 point 5). */
+export const THIS_HOST_POINTER = "Settings → Server and runner → This host";
+
+/**
+ * R17: refuse a step that names a host file with no location, or asks for a host action with neither a command
+ * nor a button path. A command here is code with a space in it (`docker compose restart ntfy`), so a bare
+ * `` `.env` `` in backticks is still a name, not a command. A `{{host.…}}` token is a location (filled in at go-live).
+ */
+function vagueHostFindings(step: number, prose: string, blocks: string[], refuse: LintFinding[]) {
+  const commands = [...blocks, ...[...prose.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!)].filter((c) => /\S\s+\S/.test(c));
+  // The words the owner reads, with every command taken out: a file named inside a command is the command's business.
+  const words = prose.replace(/`([^`\n]+)`/g, (all, c: string) => (/\S\s+\S/.test(c) ? " " : c));
+  const pointer = words.includes(THIS_HOST_POINTER);
+  const before = refuse.length;
+  // Only a step that asks the owner to do something with the file: "Your .env needs nothing new" names it harmlessly.
+  for (const m of FILE_VERB.test(words) ? words.matchAll(HOST_FILE) : []) {
+    const file = m[1]!;
+    // A command that names the file, or a host token (filled with its real path at go-live), says where it is.
+    if (pointer || commands.some((c) => c.toLowerCase().includes(file.toLowerCase()) || /\{\{\s*host\./.test(c))) continue;
+    const token = /^\.env$/i.test(file) ? "{{host.env.file}}" : /compose/i.test(file) ? "{{host.compose.cmd}} (the docker compose command for this host)" : "its folder as a token ({{host.paths.deployer}}, {{host.paths.install}} or {{host.paths.src}}) followed by /" + file;
+    refuse.push({ step, rule: "R17", problem: `names ${file} without saying where it is, so the owner can't find it. Write ${token} instead (Boss Man fills in this server's real path when the card goes out), or give a command that does it` });
+    break;
+  }
+  const action = HOST_ACTION.exec(words) ?? HOST_REMOVE.exec(words);
+  // One finding a step is enough: "delete X from .env" is already refused for the file.
+  if (action && refuse.length === before && !commands.length && !SETTINGS_PATH.test(words)) {
+    refuse.push({ step, rule: "R17", problem: `says "${action[0]}" with no command and no Settings → path, so the owner can't tell how. Give the command (for a service in the stack: \`{{host.compose.cmd}} restart <service>\`, with the service's name from the compose file) or the button path in the app` });
+  }
+}
+
 /** Names a piece of shell sets: `X=…` (also inline, `X=1 cmd`, and after export/local), `read X Y`, `for X in`. */
 function setsIn(code: string, into: Set<string>) {
   for (const m of code.matchAll(/(?:^|[\s;&|(`])([A-Za-z_]\w*)=/g)) into.add(m[1]!);
@@ -629,6 +677,12 @@ export function fillServerHost(steps: readonly string[], serverHost: string | nu
  * database or container-shell prompt, or never returns by itself (`waitsIn`). R11 (DR-024): steps with a host command
  * (HOST_COMMAND) need `proof`; a "not rehearsed" proof also needs the last step to be a look-only check.
  * R12 (BOS-543): a command block that prints nothing when it works must say so or show its result (`silentBlock`).
+ * R17 (DR-052): a vague host step, a host file named with no location or a host action with neither a command nor a
+ * Settings → path (`vagueHostFindings`). It can be overridden by the CEO.
+ * R18 (DR-057): a step that adds, edits or offers "if it isn't there" on one of Boss Man's own forms (OWNER_FORMS)
+ * without a value for every field it needs, or that names a "Settings → … form" the registry doesn't know
+ * (`formStepFindings`). It can be overridden by the CEO. A `[if company.….deployTarget …]` branch still here wasn't
+ * settled from the record (company-facts.ts), so it is R4.
  */
 export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
@@ -692,6 +746,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (given.selfDeploy) updateCardFindings(step, code, given.selfDeploy, refuse);
     runnerUpdateFindings(step, text, code, given, refuse, warn);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
+    vagueHostFindings(step, prose, blocks, refuse);
     for (const c of code) {
       const hit = INTERACTIVE.find(([re]) => re.test(c));
       if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
@@ -709,6 +764,13 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
+  });
+  // R18 (DR-057): a step on one of Boss Man's own forms gives every value. Read over the whole card, as one visit to
+  // a form can take two steps; only the sentences, as a command block is never a form.
+  refuse.push(...formStepFindings(steps.map((s) => pieces(s).prose)));
+  steps.forEach((text, i) => {
+    const m = BRANCH_MARKER.exec(text);
+    if (m) refuse.push({ step: i + 1, rule: "R4", problem: `starts "${m[0].trim()}", a branch only Boss Man's own record can settle, and it couldn't (no such company, or no single deploy target to read). Write the step without the branch, with every value` });
   });
   if (hostStep && !proof) {
     refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });

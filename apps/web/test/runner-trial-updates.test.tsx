@@ -30,9 +30,9 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
     vi.stubGlobal("fetch", vi.fn(async (url: string) => (url.endsWith("/api/self-deploy") ? json(view({ trial: { endsAt: "2026-11-09T15:33:00Z", seconds: 900 } })) : json([]))));
     render(<SelfDeploy go={() => {}} />);
     const line = await screen.findByTestId("runner-trial");
-    expect(line.textContent).toContain("Runners can be updated from");
+    expect(line.textContent).toContain("Press Build and update runners to queue the runner update");
     expect(line.textContent).toContain("in about 6 minutes");
-    expect(line.className).toContain("error");
+    expect(line.className).toContain("muted");
   });
 
   it("drops the trial line once the end time has passed, by itself, without a new poll", async () => {
@@ -70,13 +70,54 @@ describe("Settings → Updates shows the runner trial and rate-limit wait from t
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url.endsWith("/api/self-deploy")) return json(view({ trial: { endsAt: "2026-11-09T15:33:00Z", seconds: 900 } }));
         if (url.includes("/update-runners") && init?.method === "POST") {
-          return json({ error: "cannot_update_runners", message: "Runners can be updated from 15:33, in about 6 minutes.", retryAt: "2026-11-09T15:33:00Z" }, 409);
+          return json({ queued: true, startsAt: "2026-11-09T15:33:00Z", message: "Runners will update at 15:33, when this server update's 15-minute trial ends. You don't need to press again." });
         }
         return json([]);
       }),
     );
-    render(<SelfDeploy go={() => {}} />);
+    const go = vi.fn();
+    render(<SelfDeploy go={go} />);
     (await screen.findByRole("button", { name: "Build and update runners" })).click();
-    expect(await screen.findByText(/Runners can be updated from 15:33, in about 6 minutes\./)).toBeTruthy();
+    expect(await screen.findByText(/Runners will update at 15:33, when this server update's 15-minute trial ends\./)).toBeTruthy();
+    // A queued press stays on the Settings page: there is no card to go to.
+    expect(go).not.toHaveBeenCalled();
+  });
+});
+
+describe("Settings → Updates says what holds the runner update (BOS-1086)", () => {
+  const now = Date.parse("2026-11-10T17:00:00Z");
+  it("says when a queued runner update starts, in plain words", () => {
+    render(<TrialLines trial={{ endsAt: "2026-11-10T17:04:00Z" }} wait={null} now={now} queue={{ startsAt: "2026-11-10T17:04:00Z", why: "the trial" }} />);
+    const line = screen.getByTestId("runner-trial");
+    expect(line.textContent).toContain("Runners will update at");
+    expect(line.textContent).toContain("when this server update's trial ends");
+    expect(line.className).toContain("muted");
+  });
+
+  it("names the other hold when the queued update waits for something besides the trial", () => {
+    render(<TrialLines trial={null} wait={null} now={now} queue={{ startsAt: null, why: "a server update is running now, so the runners can't be updated until it finishes." }} />);
+    expect(screen.getByTestId("runner-queue").textContent).toContain("waiting for a server update is running now");
+  });
+
+  it("shows a deploy held behind the runner update and a cancelled queue with its reason", () => {
+    render(<TrialLines trial={null} wait={null} now={now} held={{ commit: "cccccccc1234" }} cancelled={{ why: "The server update was switched back, so the runner update you queued was cancelled." }} />);
+    expect(screen.getByTestId("deploy-held").textContent).toContain("waits for the runner update to finish");
+    expect(screen.getByTestId("queue-cancelled").textContent).toContain("switched back");
+  });
+
+  it("offers Cancel queued runner update only while one is queued, and posts the cancel", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") calls.push(url);
+        if (url.endsWith("/api/self-deploy")) return json(view({ runnerQueue: { pressedAt: "2026-11-10T17:00:00Z", startsAt: null, why: "the host's wait" } }));
+        return json([]);
+      }),
+    );
+    render(<SelfDeploy go={() => {}} />);
+    (await screen.findByRole("button", { name: "Cancel queued runner update" })).click();
+    expect(await screen.findByText("The queued runner update is cancelled.")).toBeTruthy();
+    expect(calls.some((u) => u.endsWith("/api/self-deploy/cancel-runner-queue"))).toBe(true);
   });
 });

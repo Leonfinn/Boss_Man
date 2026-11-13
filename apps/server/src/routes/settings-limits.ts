@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
+import { CHECK_MEMORY_CEILING_BYTES, limitReason } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
@@ -91,8 +92,9 @@ export function settingsLimitsRoutes(
       ? {
           slots: lc.slots,
           memoryBytes: lc.memoryBytes,
-          // Only meaningful once the launcher has been sent the setting; before that it is the .env value.
-          reason: lc.requested === slots ? lc.reason : null,
+          perCheckBytes: CHECK_MEMORY_CEILING_BYTES,
+          // A lower limit always carries a reason (BOS-1152), also while the launcher has not yet been sent the setting.
+          reason: limitReason(slots, lc),
           // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
           runnerCount: lc.runners.length,
           pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,

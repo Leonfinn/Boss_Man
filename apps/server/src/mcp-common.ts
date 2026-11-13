@@ -15,6 +15,14 @@ export const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "
 export const FIXES_LIVE_HELP =
   "Only for a ticket that fixes a problem on the live server now: one sentence naming the symptom the owner sees, e.g. \"server freezes as memory climbs\". When it merges the CEO is woken, and the deploy card is headed \"Urgent: contains the fix for <symptom> (BOS-n)\", pages the owner once and sorts first. Set it by hand; never because the ticket is high priority or urgent.";
 
+/** Shared wording for the "fixes the merge check" mark (BOS-1173). */
+export const FIXES_MERGE_CHECK_HELP =
+  "True on the ticket that fixes a merge check broken for reasons no branch caused (a runner or gate fault that fails every branch). While it is open and its fix isn't merged and live, every other approved ticket in the project waits on it in Review as \"Passed, held / waits on BOS-n\": its check doesn't run, it isn't sent back, and its reviews and sign-off stand. Once the fix is merged and live (runners rebuilt, for runner code), those merges start again by themselves. False clears it. Set it only for a real gate fault, never for a branch's own failure.";
+
+/** What finished work does while it can't merge yet (BOS-1173): the one sentence every tool that moves tickets repeats. */
+export const FINISHED_STAYS_IN_REVIEW =
+  "Finished work goes to review and stays there, even when it can't merge yet: a ticket waiting on another ticket's fix (a waits-on link, or a ticket marked fixesMergeCheck) waits in review as \"Passed, held\" with its approvals kept, and merges by itself once that fix is merged and live. Don't move it out to wait.";
+
 /** The plain-words warning for a live-looking criterion that isn't marked after merge; a trailing blank line for the reply. */
 export const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
   const w = criteria?.length ? afterMergeLint(criteria) : "";
@@ -67,8 +75,8 @@ export async function refsOf(db: Db, companyId: string) {
   return <T extends { number: number | null }>({ number, ...r }: T) => ({ ref: ticketRef(c?.prefix, number), ...r });
 }
 
-export const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, ...r }: T) => {
-  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, lastActivityAt: r.lastActivityAt }, new Date());
+export const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null; stateNoteStaleReason?: string | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, stateNoteStaleReason, ...r }: T) => {
+  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, stateNoteStaleReason, lastActivityAt: r.lastActivityAt }, new Date());
   return note ? { ...r, stateNote: note } : r;
 };
 

@@ -10,6 +10,8 @@ lead: This guide uses the setup wizard to create a company, connect your account
 You need Boss Man installed (see [Install Boss Man](/guides/install-boss-man)). The wizard has eight steps. You can skip any of them and come back with **Settings > Run the setup wizard**.
 :::
 
+![Your first half hour: create the company and its project, connect the runner and your accounts, add a first task, hire your first agent, then add more tickets.](/img/first-half-hour.svg =1160x420 narrow=/img/first-half-hour-narrow.svg:360x1040 "The first half hour, from the setup wizard to your first agent and tickets.")
+
 ## 1. Your company
 
 Type a **Company name** and a sentence or two under **What it's for**. The CEO plans the work from this. Choose **Create the company**, then **Next**.

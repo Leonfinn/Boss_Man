@@ -67,7 +67,9 @@ export function checkThreads({ env = process.env, cpus = availableParallelism(),
   const usable = Math.max(1, Math.floor(Math.min(cpus, quota ?? Infinity)));
   const slots = whole(env.BOSSMAN_CHECK_SLOTS) || whole(readFile(env.CHECK_ALL_PAIR_PROOF || PROOF)) || 1;
   const byCpu = Math.min(DEFAULT_MAX, Math.floor(usable / slots));
-  const free = cgroupFreeMemory(readFile);
+  // BOSSMAN_CHECK_FREE_MEMORY (bytes) stands in for the live reading, so two readings agree (the shell test pins it).
+  const pinned = /^\s*\d{1,15}\s*$/.test(env.BOSSMAN_CHECK_FREE_MEMORY ?? "") ? Number(env.BOSSMAN_CHECK_FREE_MEMORY) : undefined;
+  const free = pinned ?? cgroupFreeMemory(readFile);
   const byMemory = free === undefined ? Infinity : Math.floor(free / slots / BYTES_PER_WORKER);
   return Math.max(1, Math.min(byCpu, byMemory));
 }

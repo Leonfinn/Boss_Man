@@ -24,6 +24,7 @@ logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 # Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
 run
 logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted"
+logged "docker tag boss-man-netguard:current boss-man-netguard:previous" || fail "the previous network guard image was not kept"
 logged "recreate-all" && fail "default recreated the runners"
 logged "compose up -d --no-build" && fail "default restarted compose runners"
 logged "docker compose build launcher" || fail "default did not rebuild the launcher"
@@ -69,6 +70,7 @@ logged "compose up -d --no-build" || fail "no restart without a launcher"
 # Rollback drains too; --now makes it immediate.
 run --rollback
 logged "docker tag boss-man-runner:previous boss-man-runner:current" || fail "rollback did not retag"
+logged "docker tag boss-man-netguard:previous boss-man-netguard:current" || fail "rollback did not restore the network guard"
 [[ -s $T/deployer/inbox/drain.json ]] || fail "rollback did not ask for a drain"
 logged "recreate-all" && fail "rollback recreated at once"
 run --rollback --now

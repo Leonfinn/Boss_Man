@@ -169,7 +169,7 @@ export async function signoffHistory(db: Db, ticketId: string, limit = 5): Promi
  * transaction, so a crash can't leave a card without its hold or a hold without its card. The card closes
  * itself once the ticket stops waiting on the sign-off (`signoffNotWaiting`, DR-021).
  */
-export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string }): Promise<string> {
+export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; /** How many files the branch changes at that head (BOS-1236); kept on the card so listing it needs no runner call. */ files?: number; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string }): Promise<string> {
   const earlier = o.earlier ? `\n\nYou approved an earlier version (${o.earlier.head.slice(0, 8)}) on ${hhmm(new Date(o.earlier.at))}; the code has changed since.` : o.changed ? `\n\nThis replaces an earlier card: since then the branch changed (${o.changed}).` : "";
   return db.transaction(async (txn) => {
     const tx = txn as unknown as Db;
@@ -179,13 +179,13 @@ export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string;
       .values({
         companyId: t.companyId,
         kind: "approval",
-        question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?${earlier}`,
+        question: `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${earlier}`,
         options: [APPROVE_MERGE, "Send it back"],
         recommendedOption: APPROVE_MERGE,
         raisedByAgentId: o.reviewerAgentId,
         tier: "owner",
         dedupeKey: `risk-review:${t.id}:${Date.now()}`,
-        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), clearWhen: [{ kind: "signoffNotWaiting", ticketId: t.id }] },
+        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), ...(o.files !== undefined ? { files: o.files } : {}), clearWhen: [{ kind: "signoffNotWaiting", ticketId: t.id }] },
       })
       .returning({ id: decisions.id });
     await addTicketDependency(tx, { companyId: t.companyId, blockedTicketId: t.id, blockerDecisionId: d!.id, actor: { type: "system" } });

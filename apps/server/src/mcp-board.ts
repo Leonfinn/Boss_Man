@@ -9,7 +9,7 @@ import type { Db } from "./db/client.js";
 import { agents, companies, milestones, objectives, projects, tickets } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { WorkError } from "./services/work.js";
-import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
+import { ageText, describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { fail, managerIn, refsOf, text, withNote, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
@@ -95,6 +95,7 @@ export function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, s
         text: z.string().max(NOTE_LIMITS.text).optional(),
         why: z.string().max(NOTE_LIMITS.why).optional(),
         reason: z.string().max(300).optional(),
+        reviewBy: z.string().nullable().optional().describe("save or update: a YYYY-MM-DD day after which the note shows 'review due' (null on update clears it). Set one for anything that can go out of date, such as a plan that is pending."),
       },
     },
     async (input) => {
@@ -104,7 +105,7 @@ export function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, s
       try {
         if (input.action === "list") {
           const all = await notes.withOrigin(scope.companyId, agentId);
-          return text(all.length ? `${all.length} of ${NOTE_LIMITS.count} notes:\n${all.map((n) => `- [${n.id}] ${describeNote(n)}, ${originOf(n)}`).join("\n")}` : `No notes yet (up to ${NOTE_LIMITS.count}).`);
+          return text(all.length ? `${all.length} of ${NOTE_LIMITS.count} notes:\n${all.map((n) => `- [${n.id}] ${describeNote(n)}, ${originOf(n)}; ${ageText(n, new Date())}`).join("\n")}` : `No notes yet (up to ${NOTE_LIMITS.count}).`);
         }
         if (input.action === "requests") {
           const waiting = await notes.pending(scope.companyId, agentId);
@@ -137,7 +138,7 @@ export function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, s
         if (input.action === "save") {
           if (!input.title || !input.text || !input.why) return fail("save needs title, text and why.");
           const said = await quoted(input.why);
-          const n = await notes.save(scope.companyId, agentId, { title: input.title, text: input.text, why: input.why }, said.ticketId ? { source: "ticket", runId: scope.runId, ticketId: said.ticketId } : { source: "chat", runId: scope.runId });
+          const n = await notes.save(scope.companyId, agentId, { title: input.title, text: input.text, why: input.why, reviewBy: input.reviewBy }, said.ticketId ? { source: "ticket", runId: scope.runId, ticketId: said.ticketId } : { source: "chat", runId: scope.runId });
           await announce(said, `Saved a note: ${describeNote(n)}.`);
           return text(`Saved note ${n.id}. It shows in your next chats and runs.`);
         }
@@ -149,7 +150,7 @@ export function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, s
           // A changed note must rest on something the owner said now, like a new one.
           if (!input.why) return fail(`update needs why: the owner's words ${chat ? "from this chat" : "from one of their ticket messages"} that call for the change.`);
           const said = await quoted(input.why);
-          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why }, by, { source: said.ticketId ? "ticket" : "chat", ticketId: said.ticketId });
+          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why, reviewBy: input.reviewBy }, by, { source: said.ticketId ? "ticket" : "chat", ticketId: said.ticketId });
           await announce(said, `Updated a note. Was ${describeNote(n)}. Now ${describeNote(after)}.`);
           return text(`Updated note ${after.id}.`);
         }

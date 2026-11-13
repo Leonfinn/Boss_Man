@@ -24,7 +24,7 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, re
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, DEPLOY_REF, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -931,6 +931,59 @@ export class Workspaces {
     }
   }
 
+  /** Paths in `git status --porcelain -z` output (git() trims, so the first entry may have lost its leading space). */
+  private static statusPaths(out: string): string[] {
+    return out
+      .split("\0")
+      .filter(Boolean)
+      .map((e) => (e[2] === " " ? e.slice(3) : e.slice(2)));
+  }
+
+  /**
+   * What in the ticket's copy isn't on its branch, or null when nothing is (BOS-1231). Callers hold the repo lock.
+   *
+   * A copy can fall behind its own branch. An agent that checks the branch out in another ticket's folder and commits
+   * there moves the branch, while this folder's index and files stay at the old commit (BOS-1128 and BOS-1130, 11 Nov).
+   * `git status` here then shows everything since as uncommitted: the target's newer files, and the agent's own commits
+   * undone. The merge told the author to commit all of it, which is other tickets' code.
+   *
+   * The sign is the copy's index: it is still exactly an older commit on the branch's first-parent line (a commit
+   * made in this folder would have moved it along). Then the folder is moved from that commit to the branch head
+   * with git's own two-tree switch (`read-tree -m -u`, what `git checkout` does): files the author changed and the
+   * branch didn't are kept, and it refuses rather than overwrite one that clashes. Whatever is still uncommitted after
+   * that is the author's own. If the switch refuses, the files that differ only because the branch moved on are
+   * `foreign`: never offered to the author, who would be committing other tickets' code.
+   *
+   * The ticket's own commits made elsewhere count as moved-on too: their content is on the branch already.
+   */
+  private async uncommitted(repo: string, dir: string): Promise<Uncommitted | null> {
+    const status = async () => Workspaces.statusPaths(await this.git(["status", "--porcelain", "-z", "--no-renames"], { cwd: dir, repo }));
+    const files = await status();
+    if (!files.length) return null;
+    const behind = await this.staleAt(repo, dir);
+    if (!behind) return { status: "uncommitted", files };
+    const moved = await this.gitCode(["read-tree", "-m", "-u", behind, "HEAD"], { cwd: dir, repo });
+    if (moved.code === 0) {
+      console.warn(`[runner] ticket copy ${dir} was behind its own branch (at ${behind.slice(0, 8)}); moved it to the branch head (BOS-1231)`);
+      const left = await status();
+      return left.length ? { status: "uncommitted", files: left } : null;
+    }
+    const movedOn = new Set((await this.git(["diff", "--name-only", "--no-renames", "-z", behind, "HEAD"], { cwd: dir, repo })).split("\0").filter(Boolean));
+    const foreign = files.filter((f) => movedOn.has(f));
+    return { status: "uncommitted", files: files.filter((f) => !movedOn.has(f)), foreign };
+  }
+
+  /** The older commit on the branch's first-parent line whose tree the copy's index still is, or null (BOS-1231). */
+  private async staleAt(repo: string, dir: string): Promise<string | null> {
+    // write-tree only adds tree objects; it fails with unmerged entries, which is never a stale copy.
+    const index = await this.gitCode(["write-tree"], { cwd: dir, repo });
+    if (index.code !== 0 || !index.stdout) return null;
+    const line = await this.git(["log", "--first-parent", "--max-count=2000", "--format=%H %T", "HEAD"], { cwd: dir, repo });
+    const [head, ...older] = line.split("\n").map((l) => l.split(" "));
+    if (!head || head[1] === index.stdout) return null;
+    return older.find(([, t]) => t === index.stdout)?.[0] ?? null;
+  }
+
   /**
    * Frees the worktree. Uncommitted work, tracked or not, is saved as a patch first and put
    * back the next time the ticket's workspace is made. The branch and its commits stay.
@@ -1252,9 +1305,24 @@ export class Workspaces {
    * pnpm store on the workspaces volume (BOS-655), so its install doesn't fill the root disk under the runner's HOME; only the
    * file fence is missing (the same fallback sessions have).
    */
+  /** NODE_PATH and PLAYWRIGHT_BROWSERS_PATH from the runner's own env, for a check that runs the real-browser web tests. */
+  private browserToolEnv(): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (this.baseEnv.NODE_PATH) out.NODE_PATH = this.baseEnv.NODE_PATH;
+    if (this.baseEnv.PLAYWRIGHT_BROWSERS_PATH) out.PLAYWRIGHT_BROWSERS_PATH = this.baseEnv.PLAYWRIGHT_BROWSERS_PATH;
+    return out;
+  }
+
+  /** The folders behind browserToolEnv that exist, to grant read-only inside a fence. */
+  private browserToolDirs(): string[] {
+    return [...(this.baseEnv.NODE_PATH ?? "").split(":"), this.baseEnv.PLAYWRIGHT_BROWSERS_PATH ?? ""].filter((d) => d && path.isAbsolute(d) && existsSync(d));
+  }
+
   private jobFenceFor(repo: string, dir: string, home: string): { env: Record<string, string>; wrap?: (bin: string, args: string[]) => { bin: string; args: string[] } } {
     const tmp = this.jobTmpDir(path.basename(home));
     mkdirSync(tmp, { recursive: true, mode: 0o700 });
+    // BOS-1095: the temp folder used to sit inside home, so making it made home too. Now it sits apart (BOS-1087), so make home itself.
+    mkdirSync(home, { recursive: true, mode: 0o700 });
     const env: Record<string, string> = { HOME: home, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, XDG_CACHE_HOME: path.join(home, ".cache"), XDG_CONFIG_HOME: path.join(home, ".config"), BOSSMAN_CHECK_STORE: "off", GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: "/dev/null", GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false", GIT_CONFIG_KEY_2: "gc.auto", GIT_CONFIG_VALUE_2: "0" };
     const readWrite: string[] = [];
     if (this.jobFence?.pnpmStore) {
@@ -1262,9 +1330,12 @@ export class Workspaces {
       env.npm_config_store_dir = this.jobFence.pnpmStore;
       readWrite.push(this.jobFence.pnpmStore);
     }
+    // BOS-1095: the web tests find Playwright through NODE_PATH (a global npm tool) and its browsers through
+    // PLAYWRIGHT_BROWSERS_PATH. The job used to get neither, so those tests skipped ("Cannot find module 'playwright'").
+    Object.assign(env, this.browserToolEnv());
     if (!this.jobFence || this.jobFence.level === "unavailable") return { env };
     const pathDirs = (this.baseEnv.PATH ?? "").split(":").filter((d) => d && existsSync(d));
-    const readOnly = [...pathDirs];
+    const readOnly = [...pathDirs, ...this.browserToolDirs()];
     // BOS-1039: a PATH entry is often a folder of links (npm's bin/ holds opencode -> ../lib/node_modules/opencode-ai/bin/...).
     // Landlock checks the real file, so a grant on the link's folder alone leaves the binary unreadable and a check that runs
     // a fenced agent fails with "permission denied". Grant the real folder of each agent binary found on PATH, read-only.
@@ -1320,7 +1391,7 @@ export class Workspaces {
       const queueEnv = this.coordDir ? checkQueueEnv(this.coordDir, this.baseEnv.BOSSMAN_CHECK_SLOT) : null;
       const jobTakesSlot = !!job && !!queueEnv?.BOSSMAN_CHECK_SLOT && existsSync(path.join(dir, "scripts", "check-all.sh"));
       const jobQueueEnv = jobTakesSlot && queueEnv ? { CHECK_ALL_LOCK: queueEnv.CHECK_ALL_LOCK, CHECK_ALL_PAIR_PROOF: queueEnv.CHECK_ALL_PAIR_PROOF, BOSSMAN_CHECK_SLOT: queueEnv.BOSSMAN_CHECK_SLOT } : { BOSSMAN_CHECK_NO_LOCK: "1" };
-      let env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(job ? jobQueueEnv : queueEnv ?? {}), ...storeEnv } as NodeJS.ProcessEnv;
+      let env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...this.browserToolEnv(), ...(job ? jobQueueEnv : queueEnv ?? {}), ...storeEnv } as NodeJS.ProcessEnv;
       // BOS-614: a tree that takes part in the check line (it has scripts/check-all.sh) waits for its slot through the runner's
       // own check-slot.sh, not through the branch's copy of the queue rules: a branch based on older main brought older rules,
       // and old and new waiters jammed with both slots free. Inside, the branch's script gets a private lock and goes straight on.
@@ -1362,7 +1433,22 @@ export class Workspaces {
       let queued = false;
       let slotTaken = false;
       let lastPlace = "";
+      // BOS-1228: a queued job also keeps the start and the end of the whole log (middle cut once it is too big), for check_log.
+      let logHead = "";
+      let logRest = "";
+      let logCut = 0;
+      const keepLog = (chunk: string) => {
+        const toHead = Math.max(0, FULL_LOG_HEAD - logHead.length);
+        logHead += chunk.slice(0, toHead);
+        logRest += chunk.slice(toHead);
+        const room = FULL_LOG_MAX - FULL_LOG_HEAD - 200;
+        if (logRest.length > room * 1.2) {
+          logCut += logRest.length - room;
+          logRest = logRest.slice(-room);
+        }
+      };
       const onData = (chunk: string) => {
+        if (job) keepLog(chunk);
         tail = (tail + chunk).slice(-8192);
         job?.onOutput?.(tail);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
@@ -1389,7 +1475,9 @@ export class Workspaces {
         clearTimeout(hardKill);
         killGroup("SIGKILL"); // strays left behind by a check that has already exited
         if (tmp) rmSync(tmp, { recursive: true, force: true });
-        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced });
+        // Only a log that is going to be kept is cut and redacted (a pass is not stored); a stop by the server adds its own line after.
+        const fullLog = job && !(exitCode === 0 && !timedOut) ? prepareFullLog(logHead + (logCut ? `\n[... ${logCut} characters cut from the middle of the log ...]\n` : "") + logRest).log : undefined;
+        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced, ...(fullLog !== undefined ? { fullLog } : {}) });
       };
       let timer: NodeJS.Timeout;
       const arm = (ms: number) => {
@@ -1428,7 +1516,7 @@ export class Workspaces {
     mkdirSync(checkHome);
     const out: NodeJS.ProcessEnv = { ...env, HOME: checkHome, TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp };
     const readWrite: string[] = [];
-    const readOnly = [this.baseEnv.NPM_CONFIG_PREFIX, this.baseEnv.PLAYWRIGHT_BROWSERS_PATH].filter((p): p is string => !!p);
+    const readOnly = [this.baseEnv.NPM_CONFIG_PREFIX, ...this.browserToolDirs()].filter((p): p is string => !!p);
     if (pnpmStore) {
       mkdirSync(pnpmStore, { recursive: true });
       // pnpm keeps the store's location in HOME's config; without this it starts a new store in the copy.
@@ -1464,8 +1552,8 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const branch = `refs/heads/${branchFor(spec.ticketId)}`;
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, dir);
+        if (dirty) return dirty;
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1499,8 +1587,8 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
       const ticketDir = this.ticketDir(spec.ticketId);
       if (existsSync(path.join(ticketDir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, ticketDir);
+        if (dirty) return dirty;
         // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
         if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
@@ -1559,8 +1647,8 @@ export class Workspaces {
       const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
         const ticketDir = this.ticketDir(spec.ticketId);
         if (existsSync(path.join(ticketDir, ".git"))) {
-          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
-          if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+          const dirty = await this.uncommitted(repo, ticketDir);
+          if (dirty) return dirty;
           if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
@@ -1822,8 +1910,8 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const name = branchFor(spec.ticketId);
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
-        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        const dirty = await this.uncommitted(repo, dir);
+        if (dirty) return dirty;
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);

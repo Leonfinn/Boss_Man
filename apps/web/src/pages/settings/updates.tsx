@@ -1,7 +1,7 @@
 import { when } from "../Runs";
 
 export type UpdateRow = { at: string; title: string; body: string; state: "ok" | "resolved" | "problem"; todo: string | null };
-export type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null };
+export type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null; swap?: { retryAt: string | null; tries: number } | null; swapFailed?: string | null; guard?: { reason: string; since: string | null } | null };
 export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
@@ -36,11 +36,23 @@ export function LiveState({ r }: { r: LiveRow }) {
   return (
     <li style={{ listStyle: "none" }}>
       <strong>{r.name}</strong>{" "}
-      {connected ? <span className="tag green">Connected</span> : <span className="tag red">Not connected</span>}{" "}
+      {connected ? (
+        <span className="tag green">Connected</span>
+      ) : r.swap ? (
+        <span className="tag amber">Updating</span>
+      ) : r.swapFailed ? (
+        <span className="tag red">Update failed</span>
+      ) : r.guard ? (
+        <span className="tag red">Paused: network guard</span>
+      ) : (
+        <span className="tag red">Not connected</span>
+      )}{" "}
       <span className="muted">
         {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
         {connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
         {r.fault ? ` · ${r.fault}` : ""}
+        {!connected && r.swapFailed ? ` · ${r.swapFailed}` : ""}
+        {!connected && !r.swap && !r.swapFailed && r.guard ? ` · ${r.guard.reason}` : ""}
       </span>
     </li>
   );

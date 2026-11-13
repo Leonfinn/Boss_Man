@@ -146,7 +146,7 @@ services:
       BOSSMAN_LAUNCHER_URL: http://launcher:3105
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
       # Session cookies are Secure per request: over HTTPS through the trusted proxy below, not on plain
-      # LAN http. Setting this to 1 turns Secure off everywhere (older setups); you no longer need it.
+      # LAN http. With no trusted proxy set, cookies are always Secure, so a plain-http install (staging too) needs 1 here.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
       # Exact address(es) of the proxy whose X-Forwarded-* headers are believed (deploy/tailscale.yml). Empty = none.
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
@@ -224,12 +224,15 @@ services:
 
   # Only here so `docker compose build` makes boss-man-netguard:current, which the launcher starts
   # beside each runner (BOS-324) to block private networks. It exits at once if run.
+  # BOS-1156: its own "build" profile, so `docker compose up` (even with the launcher profile on) never starts it
+  # and leaves no "Exited (0)" container in the dashboard. `docker compose build netguard` (named, as the guides
+  # and scripts do) still builds it, because naming a service turns its profile on.
   netguard:
     build:
       context: .
       dockerfile: apps/netguard/Dockerfile
     image: boss-man-netguard:current
-    profiles: ["launcher"]
+    profiles: ["build"]
     restart: "no"
     command: ["--build-only"]
     network_mode: none

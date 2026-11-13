@@ -27,7 +27,7 @@ import { pruneRunnerEvents } from "../src/services/housekeeping.js";
 // recent runs 127 ms there, 49 ms and 25 ms on a dev machine; board is 45 ms here), so CI gets 300 ms: still a tenth of
 // the 3-4 s freeze this test exists for.
 const LIMIT_MS = process.env.GITHUB_ACTIONS === "true" ? 300 : 100;
-const ITERATIONS = 5;
+const ITERATIONS = 7;
 const COUNTS = { runs: 20_000, costEvents: 50_000, decisions: 2_000, tickets: 1_000 };
 
 /** Looser ceiling for KNOWN_SLOW items: still catches a real regression (the BOS-643 dateIn loop blocked 3-4 s). Removing the entry tightens the item to LIMIT_MS. */
@@ -154,6 +154,31 @@ async function measure(fn: () => Promise<unknown>) {
   return { block: median(blocks), wall: median(walls) };
 }
 
+// BOS-1217: the merge gate runs up to 3 checks at once, so a fixed limit read "board 106 ms, limit 100" on a loaded box
+// (board is 45 ms idle). Every item's limit is scaled by how much slower this machine is right now than at its quietest in
+// this run: a fixed CPU workload (spin) is timed before and after each item and compared to the fastest time seen in the
+// run. The scale is at least 1 (never tighter than LIMIT_MS) and at most MAX_LOAD_SCALE.
+// What it still catches: one query that scans or joins far too much (shown on the board route: a self-join of runs
+// blocked 3.6 s against a limit of 244 ms), and the BOS-643 freeze (3-4 s). The scale is capped at 2.5, so the limit never
+// exceeds 250 ms. Many small queries in a row (an N+1 loop) are NOT caught: the query yield in setup() splits them.
+const MAX_LOAD_SCALE = 2.5;
+let quietestSpinMs = Infinity;
+/** Time of a fixed CPU workload: the best of 3 short runs, so one preempted slice doesn't read as load. */
+function spinCost(): number {
+  let best = Infinity;
+  for (let r = 0; r < 3; r++) {
+    const t0 = performance.now();
+    let x = 0;
+    for (let i = 0; i < 2_000_000; i++) x = (x + i * 31) % 1_000_003;
+    if (x < 0) throw new Error("unreachable");
+    best = Math.min(best, performance.now() - t0);
+  }
+  quietestSpinMs = Math.min(quietestSpinMs, best);
+  return best;
+}
+/** How many times slower than the quietest moment so far, between 1 and MAX_LOAD_SCALE. */
+const loadScale = (spinMs: number) => Math.min(MAX_LOAD_SCALE, Math.max(1, spinMs / quietestSpinMs));
+
 let seqNo = 0;
 const ingest = (event: RunnerEvent) => ctx.runners.ingest(ctx.runner, { seq: ++seqNo + 1_000_000, at: new Date().toISOString(), event });
 
@@ -241,12 +266,15 @@ describe("hot-path budget (BOS-653)", () => {
 
   it(`keeps every item under ${LIMIT_MS} ms of event-loop block`, async () => {
     const over: string[] = [];
+    spinCost();
     for (const [name, fn] of Object.entries(list)) {
       const slow = KNOWN_SLOW[name];
-      const limit = slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS;
+      const before = spinCost();
       const m = await measure(fn);
-      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms${slow ? `   (known slow, ${slow}; ceiling ${limit} ms)` : ""}`);
-      if (m.block > limit) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${limit})`);
+      const scale = loadScale(Math.min(before, spinCost())); // the lower of the two: the item's own garbage must not raise its own limit
+      const limit = (slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS) * scale;
+      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}${slow ? `   (known slow, ${slow}; ceiling ${limit.toFixed(0)} ms)` : ""}`);
+      if (m.block > limit) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${limit.toFixed(0)})`);
     }
     expect(over).toEqual([]);
   }, 90_000);

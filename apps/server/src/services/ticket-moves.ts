@@ -2,12 +2,12 @@
 // set_ticket_state, the owner's move and updateTicket all come through here, so the rules (the column,
 // the WIP limit, the field rules, the history line, the merge line's "left" event and the steps that follow
 // a real change) can't drift apart again. Wakes stay with the callers: they differ by cause.
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, tickets, workflowColumns } from "../db/schema.js";
 import { record } from "./activity.js";
-import { agentWipHold, countWip, isWipHeldNote } from "./agent-wip.js";
+import { agentWipHold, cantMoveSql, countWip } from "./agent-wip.js";
 import { lineEvent } from "./merge-line.js";
 import { WorkError } from "./ticket-links.js";
 
@@ -121,7 +121,7 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
     const col = cols.find((c) => c.id === columnId);
     if (col?.wipLimit != null) {
       // The same counting rule as the agent's limit: tickets in this column and state, not counting this one.
-      const inCol = await countWip(db, and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)), t.id);
+      const inCol = await countWip(db, and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState), col.systemState === "in_progress" ? sql`not ${cantMoveSql}` : undefined), t.id);
       if (inCol >= col.wipLimit) throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
     }
   }
@@ -130,7 +130,10 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   const changed = target !== t.systemState;
   const fields: Partial<typeof tickets.$inferInsert> = { ...opts.fields };
   if (held) Object.assign(fields, { stateNote: held, stateNoteAt: at, stateNoteStaleAt: null });
-  else if (target === "in_progress" && fields.stateNote === undefined && isWipHeldNote(t.stateNote)) fields.stateNote = null;
+  else if (target === "in_progress" && fields.stateNote === undefined && t.wipHeldAt) fields.stateNote = null;
+  // The hold is a field, so a later state note can't erase it (BOS-1180): set when held, kept while the ticket stays in Ready, cleared on leaving it.
+  if (held) fields.wipHeldAt = t.systemState === "ready" && t.wipHeldAt ? t.wipHeldAt : at; // the first hold's time, so "held for 30 minutes" isn't reset by each refusal
+  else if (target !== "ready") fields.wipHeldAt = null;
   if (t.noCode && t.mergeCommit && !opts.internal && fields.noCode === undefined && changed && REOPEN_STATES.has(target)) fields.noCode = false;
   const set: Partial<typeof tickets.$inferInsert> = {
     ...fields,

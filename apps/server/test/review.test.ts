@@ -245,6 +245,34 @@ describe("approval lands in the background (B)", () => {
     expect(landingText({ outcome: "conflicts", detail: { files: ["a.ts"] } }, ctx)).toBe("Approved, but not merged: the work conflicts with main in a.ts. It's gone back to Engineer to sort out.");
     expect(landingText({ outcome: "uncommitted", detail: { files: ["b.ts"] } }, ctx)).toContain("isn't saved to the branch yet (b.ts)");
   });
+
+  // BOS-1220: a failed check always names what failed; never "exit code undefined".
+  it("names the failed step and test, and never prints an undefined exit code", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const output = "PASS  merge check\nFAIL  related tests (exit 1)\n       FAIL  test/foo.test.ts > foo > does the thing\ncheck-quick: FAILED\n";
+    const failed = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output } }, ctx);
+    expect(failed).toContain('exit code 1; step that failed: "related tests (exit 1)"');
+    expect(failed).toContain("first failing test: test/foo.test.ts > foo > does the thing");
+    // The migration-number bounce is also verify_failed and has no exit code or log.
+    const migration = landingText({ outcome: "verify_failed", detail: { why: ["0123 is taken by main"] } }, ctx);
+    expect(migration).not.toMatch(/undefined/);
+    expect(migration).toContain("migration number is already taken (0123 is taken by main)");
+    // A check stopped before it reported (null exit code) says so plainly.
+    const stopped = landingText({ outcome: "verify_failed", detail: { exitCode: null, output: "" } }, ctx);
+    expect(stopped).toContain("was stopped before it reported");
+    expect(stopped).not.toMatch(/undefined|null/);
+  });
+
+  // BOS-1228: the bounce says where the whole log is and how to open it; no pointer when none was kept.
+  it("names the kept full log in a failed-check bounce", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    const jobId = "11111111-2222-4333-8444-555555555555";
+    const ticketId = "66666666-7777-4888-8999-000000000000";
+    const withLog = landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x", keptLog: { jobId, ticketId, chars: 300_000 } } }, ctx);
+    expect(withLog).toContain(`tickets tool with action check_log, ticketId ${ticketId} and jobId ${jobId}`);
+    expect(withLog).toMatch(/293 KB, kept 14 days/);
+    expect(landingText({ outcome: "verify_failed", detail: { exitCode: 1, output: "x" } }, ctx)).not.toContain("check_log");
+  });
 });
 
 describe("landing an approved ticket (R46, R47)", () => {
@@ -416,6 +444,25 @@ describe("server-owned check queue (BOS-316)", () => {
       await finishOpenJob(c, { state: "passed", exitCode: 0 });
       expect((await second).json()).toMatchObject({ outcome: "merged" });
       expect(await cards(c)).toHaveLength(0);
+    });
+
+    it("cancels the ticket's leftover running merge job when its merge starts again, leaving exactly one live job (BOS-1289)", async () => {
+      const c = (ctx = await setup({ answers: { merge: mergeAnswers } }));
+      await on(c);
+      // The old process's job: still running, for a tree main has since moved past.
+      const [old] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: c.ticket.id, kind: "merge", scope: "full", commit: "e".repeat(40), tree: "8".repeat(40), command: "pnpm test", state: "running", startedAt: new Date() }).returning();
+      const res = approve(c);
+      // Wait for the cancel itself (it lands a step after the new job appears), with a deadline.
+      const deadline = Date.now() + 20_000;
+      const oldState = async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, old!.id)))[0]?.state;
+      while (Date.now() < deadline && (await oldState()) !== "cancelled") await new Promise((r) => setTimeout(r, 50));
+      const rows = await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id));
+      const live = rows.filter((r) => r.state === "queued" || r.state === "running");
+      expect(live).toHaveLength(1);
+      expect(live[0]!.tree).toBe(prepared.tree);
+      expect(rows.find((r) => r.id === old!.id)).toMatchObject({ state: "cancelled", reason: expect.stringContaining("newer commit") });
+      await finishOpenJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
     });
 
     it("tries again with a fresh merge when main moved to a different tree", async () => {
@@ -789,6 +836,22 @@ describe("server-owned check queue (BOS-316)", () => {
     c.answers.merge = { status: "uncommitted", files: ["draft.ts"] };
     expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
     expect((await c.db.select().from(wakes))[0]!.note).toMatch(/aren't committed: draft\.ts\. Commit your work/);
+  });
+
+  it("never asks the author to commit main's files showing in the copy: the CEO hears, the ticket stays in review (BOS-1231)", async () => {
+    const c = (ctx = await setup({ answers: { merge: { status: "uncommitted", files: ["packages/shared/test/plan.test.ts"], foreign: ["apps/server/src/main.ts", "apps/launcher/src/launcher.ts"] } } }));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
+    const sent = await c.db.select().from(wakes);
+    expect(sent.filter((w) => w.agentId === c.worker.id)).toEqual([]);
+    expect(sent.filter((w) => w.agentId === c.ceo.id)).toEqual([expect.objectContaining({ reason: "copy not clean", ticketId: c.ticket.id })]);
+    expect(sent.find((w) => w.agentId === c.ceo.id)!.note).toContain("apps/server/src/main.ts");
+    const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(t.pullRequestNote).toContain("never touched");
+    // The same reason again (the sweep's retry) doesn't wake the CEO a second time.
+    await c.db.delete(wakes);
+    await approve(c);
+    expect(await c.db.select().from(wakes)).toEqual([]);
   });
 
   it("tells the agent to change approach when the same check failure comes back a third time (R50)", async () => {

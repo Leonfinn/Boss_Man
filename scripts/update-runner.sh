@@ -21,7 +21,9 @@
 #
 # The canary runs a real Claude Code session inside the new image against a stand-in model
 # served from the same container, with networking off, so it needs no credentials. The
-# image that was running is kept as boss-man-runner:previous until the next update.
+# image that was running is kept as boss-man-runner:previous until the next update. The network
+# guard's image is kept the same way (boss-man-netguard:previous); --rollback restores both, and a drain's
+# swap that keeps failing puts that company's runner back on boss-man-runner:previous by itself.
 # Run it from the repository root, where docker-compose.yml is.
 set -euo pipefail
 
@@ -152,6 +154,8 @@ fi
 if ((ROLLBACK)); then
   docker image inspect "$IMAGE:previous" >/dev/null 2>&1 || { echo "No previous image to roll back to." >&2; exit 1; }
   docker tag "$IMAGE:previous" "$IMAGE:current"
+  # The network guard goes back with it, when the last update kept the one before (BOS-382).
+  if docker image inspect boss-man-netguard:previous >/dev/null 2>&1; then docker tag boss-man-netguard:previous boss-man-netguard:current; fi
   # A runner is not started without its network guard (BOS-324); build it if this host has lost it.
   docker image inspect boss-man-netguard:current >/dev/null 2>&1 || docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
   move_runners
@@ -164,6 +168,8 @@ stamp="$(date -u +%Y%m%d%H%M)"
 # Empty outside a git checkout, and then the runner reports none and the ask is made as before.
 commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
+# The one before is kept as boss-man-netguard:previous, so --rollback undoes the whole update (BOS-382).
+if docker image inspect boss-man-netguard:current >/dev/null 2>&1; then docker tag boss-man-netguard:current boss-man-netguard:previous; fi
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
 echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
