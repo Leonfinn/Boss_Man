@@ -67,6 +67,7 @@ import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { applyPortalAnswer } from "./feature-portal.js";
 import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
@@ -214,6 +215,8 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   /** The follow-up after a feature ships: did it move its key result? */
   | { type: "goal_check"; featureId: string }
+  /** A feature held off the portal (the security guess or a keep-off mark): the owner keeps it off or publishes it (BOS-1358). */
+  | { type: "feature_portal_hold"; featureId: string }
   /**
    * An approved decision whose next step is the owner's own (BOS-122): a deploy whose target has to be
    * applied by hand. It stays open as a to-do on the owner's queue until they mark it done or the live
@@ -386,6 +389,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "ticket_cap",
   "rule_proposal",
   "goal_check",
+  "feature_portal_hold",
 ]);
 
 /**
@@ -3414,6 +3418,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (p && answer === HARD_STOP) await db.update(budgetPolicies).set({ onLimit: "pause" }).where(eq(budgetPolicies.id, p.id));
       } else if (ctx.type === "goal_check") {
         await recordGoalAnswer(db, ctx.featureId, answer, now());
+      } else if (ctx.type === "feature_portal_hold") {
+        await applyPortalAnswer(db, ctx.featureId, answer, now());
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {

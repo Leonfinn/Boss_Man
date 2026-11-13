@@ -1516,6 +1516,8 @@ export const features = pgTable(
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),
+    /** Why someone chose to keep the feature off the portal, in their own words; null when nobody said why. */
+    keepOffReason: text("keep_off_reason"),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
     /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */

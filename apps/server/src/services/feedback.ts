@@ -35,6 +35,8 @@ type FeaturePatch = {
   objectiveId?: string | null;
   portalVisible?: boolean;
   keepOffPortal?: boolean;
+  /** Why the feature is kept off the portal, in the author's own words. */
+  keepOffReason?: string | null;
   publicSummary?: string | null;
   /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
   publicTitle?: string | null;
@@ -258,6 +260,8 @@ export function feedbackService(
       const publicTitle = input.publicTitle?.trim() || null;
       if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const keepOffPortal = input.keepOffPortal ?? false;
+      // Why someone kept it off, said in their own words; only kept with the mark, and cleared when the mark is.
+      const keepOffReason = keepOffPortal ? input.keepOffReason?.trim().slice(0, 500) || null : null;
       // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
       // The public-summary gate only holds it back from visitors; the tick stays on, so writing a summary later shows it.
       const facts = await portalFacts(companyId, input.areaId, input.driverScores);
@@ -280,6 +284,7 @@ export function feedbackService(
           objectiveId: input.objectiveId ?? null,
           portalVisible: input.portalVisible ?? mayGoOn,
           keepOffPortal,
+          keepOffReason,
           publicSummary,
           publicTitle,
           showPublicly: input.showPublicly ?? false,
@@ -299,10 +304,13 @@ export function feedbackService(
       if (driverScores) for (const [k, v] of Object.entries(driverScores)) if (v === null) delete driverScores[k];
       // Marking a feature "keep off the portal (sensitive)" takes it off at once; clearing the mark leaves the tick alone.
       const portalVisible = patch.keepOffPortal ? false : patch.portalVisible;
+      // The reason travels with the mark: set it when the mark goes on, clear it when the mark comes off.
+      const keepOffReason = patch.keepOffPortal === true ? (patch.keepOffReason?.trim().slice(0, 500) || f.keepOffReason) : patch.keepOffPortal === false ? null : undefined;
       const [u] = await db
         .update(features)
         .set({
           ...patch,
+          ...(keepOffReason !== undefined ? { keepOffReason } : {}),
           ...(portalVisible !== undefined ? { portalVisible } : {}),
           ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
           ...(patch.publicTitle !== undefined ? { publicTitle: patch.publicTitle?.trim() || null } : {}),
