@@ -87,4 +87,4 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE). Any code adapted from Paperclip (MIT) keeps its MIT notice.
+Apache-2.0. See [LICENSE](LICENSE).
