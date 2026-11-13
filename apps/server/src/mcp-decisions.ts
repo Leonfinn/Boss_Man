@@ -10,6 +10,7 @@ import { record } from "./services/activity.js";
 import { AnswerError, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
 import { ReviewError, type HoldInput } from "./services/review.js";
+import { checkQueue } from "./services/check-queue.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { activeRows, latestRows } from "./services/review-kinds.js";
 import { signoffLine, signoffState } from "./services/signoff.js";
@@ -50,6 +51,9 @@ export function registerDecisionTools(
         reasonLink: z.string().max(400).optional(),
         changeId: z.string().uuid().optional(),
         reason: z.string().max(500).optional(),
+        /** withdraw (DR-058): what takes the card's place: card:<id>, ticket:<ref> with `when`, or none (the note must then say why, 30+ characters). */
+        replacedBy: z.string().max(80).optional(),
+        when: z.string().max(300).optional(),
         triedFirst: z.string().max(1000).optional(),
         adviceNeeded: z.string().max(1000).optional(),
         adviceDeny: z.string().max(1000).optional(),
@@ -217,9 +221,10 @@ export function registerDecisionTools(
       }
       if (input.action === "withdraw") {
         if (!isCeo || !scope.agentId) return fail("Only the CEO withdraws a card.");
-        if (!input.id || !input.note) return fail("Give the card's id and a note: the reason, at least 10 characters.");
+        if (!input.id) return fail("Give the card's id, a note (the reason, at least 10 characters) and replacedBy (card:<id>, ticket:<ref> with when, or none).");
+        // DR-058 B: both the reason (note) and what replaces the card are required, so the owner is told.
         try {
-          const r = await decisions.withdrawCard({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, note: input.note });
+          const r = await decisions.withdrawCard({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, note: input.note ?? "", replacement: { replacedBy: input.replacedBy, when: input.when } });
           return r ? text(`Withdrawn ${r.id}. The owner sees why in their audit list.`) : fail("That card has already been settled.");
         } catch (err) {
           if (err instanceof AnswerError) return fail(err.message);
@@ -296,9 +301,9 @@ export function registerDecisionTools(
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a waiting merge next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
       inputSchema: {
-        action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold"]),
+        action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold", "prioritise_merge"]),
         ticketId: z.string().uuid(),
         verdict: z.enum(["approved", "approved_hold", "changes_requested"]).optional(),
         holdReason: z.string().max(1000).optional().describe("With verdict approved_hold: why the merge must wait."),
@@ -331,8 +336,15 @@ export function registerDecisionTools(
         const parts = open.map((r) => (nameOf(r) ? `${r.kind} review is with ${nameOf(r)}` : `${r.kind} review has no reviewer set`));
         return fail(`This ticket's ${parts.join(" and its ")}. ${open.some(nameOf) ? "Nudge them, or ask the CEO to add you." : "Ask the CEO."}`);
       }
-      if ((input.action === "sequence" || input.action === "overrule" || input.action === "retry_merge") && me.role !== "ceo") return fail("Only your company's CEO can do that.");
+      if ((input.action === "sequence" || input.action === "overrule" || input.action === "retry_merge" || input.action === "prioritise_merge") && me.role !== "ceo") return fail("Only your company's CEO can do that.");
       try {
+        if (input.action === "prioritise_merge") {
+          if (!input.reason?.trim()) return fail("Give your reason.");
+          const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
+          if (!t) return fail("No such ticket in your company.");
+          const job = await checkQueue(db).moveToFront(scope.companyId, input.ticketId, me.name, input.reason.trim());
+          return job ? text("This merge is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a merge already running is not stopped.") : fail("That merge isn't waiting for a check slot (it may be running, held, or not approved yet), so there is nothing to move.");
+        }
         if (input.action === "release_hold" || input.action === "cancel_hold") {
           const by = { name: me.name, agentId: scope.agentId, isCeo: me.role === "ceo" };
           if (input.action === "cancel_hold") return text(`Hold cancelled: ${(await review.cancelHold(input.ticketId, by, { companyId: scope.companyId })).delivered}. Your pass no longer counts; the reviewer is asked to review it again.`);

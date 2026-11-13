@@ -132,11 +132,17 @@ async function seed() {
   await q(ctx, "analyze");
 }
 
-/** Median of the longest loop stall, and of the wall time, over ITERATIONS runs after one warm-up. */
+const median = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)]!;
+
+/**
+ * Median of the longest loop stall, and of the wall time, over ITERATIONS runs after one warm-up. `spins` holds a
+ * spinCost() reading before every run and one after the last, so run i sits between spins[i] and spins[i + 1].
+ */
 async function measure(fn: () => Promise<unknown>) {
   await fn();
   const blocks: number[] = [];
   const walls: number[] = [];
+  const spins: number[] = [spinCost()];
   for (let i = 0; i < ITERATIONS; i++) {
     const h = monitorEventLoopDelay({ resolution: 1 });
     h.enable();
@@ -149,35 +155,46 @@ async function measure(fn: () => Promise<unknown>) {
     await new Promise((r) => setTimeout(r, 20));
     h.disable();
     blocks.push(h.max / 1e6);
+    spins.push(spinCost());
   }
-  const median = (a: number[]) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)]!;
-  return { block: median(blocks), wall: median(walls) };
+  return { block: median(blocks), wall: median(walls), blocks, spins };
 }
 
 // BOS-1217: the merge gate runs up to 3 checks at once, so a fixed limit read "board 106 ms, limit 100" on a loaded box
-// (board is 45 ms idle). Every item's limit is scaled by how much slower this machine is right now than at its quietest in
-// this run: a fixed CPU workload (spin) is timed before and after each item and compared to the fastest time seen in the
-// run. The scale is at least 1 (never tighter than LIMIT_MS) and at most MAX_LOAD_SCALE.
+// (board is 45 ms idle). Each sample's limit is scaled by how much slower this machine was right then than at its quietest
+// in this run: a fixed CPU workload (spin) is timed next to every sample and compared to the fastest spin of the whole run.
+// The scale is at least 1 (never tighter than LIMIT_MS) and at most MAX_LOAD_SCALE.
+// BOS-1321: the first version took the best of 3 short spins (~9 ms) once before and once after an item's 7 samples. A
+// short spin usually fits in one scheduler slice, so the best of 3 dodged exactly the CPU sharing that the 45-100 ms route
+// stall sat through: on a loaded gate it read x1.01 while board took 106 ms. Now each spin is one ~20 ms run (preemption
+// counts), it is taken between every two samples, and each sample is judged against its own neighbours' scale; the item
+// passes when the median of block / scaled limit is at most 1.
 // What it still catches: one query that scans or joins far too much (shown on the board route: a self-join of runs
 // blocked 3.6 s against a limit of 244 ms), and the BOS-643 freeze (3-4 s). The scale is capped at 2.5, so the limit never
-// exceeds 250 ms. Many small queries in a row (an N+1 loop) are NOT caught: the query yield in setup() splits them.
+// exceeds 250 ms, and a route that blocks 100 ms+ on a quiet machine fails as before. Many small queries in a row (an
+// N+1 loop) are NOT caught: the query yield in setup() splits them.
 const MAX_LOAD_SCALE = 2.5;
 let quietestSpinMs = Infinity;
-/** Time of a fixed CPU workload: the best of 3 short runs, so one preempted slice doesn't read as load. */
+/** Wall time of one fixed CPU workload (~20 ms warm): a single run, so time spent preempted by other jobs reads as load. */
 function spinCost(): number {
-  let best = Infinity;
-  for (let r = 0; r < 3; r++) {
-    const t0 = performance.now();
-    let x = 0;
-    for (let i = 0; i < 2_000_000; i++) x = (x + i * 31) % 1_000_003;
-    if (x < 0) throw new Error("unreachable");
-    best = Math.min(best, performance.now() - t0);
-  }
-  quietestSpinMs = Math.min(quietestSpinMs, best);
-  return best;
+  const t0 = performance.now();
+  let x = 0;
+  for (let i = 0; i < 4_000_000; i++) x = (x + i * 31) % 1_000_003;
+  if (x < 0) throw new Error("unreachable");
+  const ms = performance.now() - t0;
+  quietestSpinMs = Math.min(quietestSpinMs, ms);
+  return ms;
 }
-/** How many times slower than the quietest moment so far, between 1 and MAX_LOAD_SCALE. */
+/** How many times slower than the quietest spin of the run, between 1 and MAX_LOAD_SCALE. */
 const loadScale = (spinMs: number) => Math.min(MAX_LOAD_SCALE, Math.max(1, spinMs / quietestSpinMs));
+/**
+ * Per-sample scale: the lower of the spins either side (the item's own garbage must not raise its own limit). Returns
+ * the median of block / (limit x scale), which passes at <= 1, and the median scale for the report.
+ */
+function judge(m: { blocks: number[]; spins: number[] }, limitMs: number) {
+  const scales = m.blocks.map((_, i) => loadScale(Math.min(m.spins[i]!, m.spins[i + 1]!)));
+  return { ratio: median(m.blocks.map((b, i) => b / (limitMs * scales[i]!))), scale: median(scales) };
+}
 
 let seqNo = 0;
 const ingest = (event: RunnerEvent) => ctx.runners.ingest(ctx.runner, { seq: ++seqNo + 1_000_000, at: new Date().toISOString(), event });
@@ -266,15 +283,16 @@ describe("hot-path budget (BOS-653)", () => {
 
   it(`keeps every item under ${LIMIT_MS} ms of event-loop block`, async () => {
     const over: string[] = [];
-    spinCost();
-    for (const [name, fn] of Object.entries(list)) {
+    for (let i = 0; i < 3; i++) spinCost(); // warm the spin's JIT so its first reading isn't taken as load
+    const measured: Array<[string, Awaited<ReturnType<typeof measure>>]> = [];
+    for (const [name, fn] of Object.entries(list)) measured.push([name, await measure(fn)]);
+    // Judged after every item ran, so every sample is compared to the quietest spin of the whole run.
+    for (const [name, m] of measured) {
       const slow = KNOWN_SLOW[name];
-      const before = spinCost();
-      const m = await measure(fn);
-      const scale = loadScale(Math.min(before, spinCost())); // the lower of the two: the item's own garbage must not raise its own limit
-      const limit = (slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS) * scale;
-      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}${slow ? `   (known slow, ${slow}; ceiling ${limit.toFixed(0)} ms)` : ""}`);
-      if (m.block > limit) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${limit.toFixed(0)})`);
+      const base = slow ? KNOWN_SLOW_CEILING_MS : LIMIT_MS;
+      const { ratio, scale } = judge(m, base);
+      report.push(`${name.padEnd(34)} block ${m.block.toFixed(0).padStart(5)} ms   wall ${m.wall.toFixed(0).padStart(5)} ms   load x${scale.toFixed(2)}   ${(ratio * 100).toFixed(0)}% of limit${slow ? `   (known slow, ${slow}; ceiling ${base} ms)` : ""}`);
+      if (ratio > 1) over.push(`${name}: ${m.block.toFixed(0)} ms (limit ${(base * scale).toFixed(0)} at median load x${scale.toFixed(2)}, ${(ratio * 100).toFixed(0)}% of its scaled limit)`);
     }
     expect(over).toEqual([]);
   }, 90_000);

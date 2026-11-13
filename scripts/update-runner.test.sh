@@ -11,6 +11,7 @@ cat >"$T/bin/docker" <<'FAKE'
 echo "docker $*" >>"$FAKE_LOG"
 case "$*" in
   "run --rm"*) exit "${CANARY_RC:-0}" ;;
+  "image inspect --format"*) echo sha256:oldguard ;;
   "ps -q"*) [[ ${HAVE_LAUNCHER:-1} == 1 ]] && echo launcher-1 || true ;;
 esac
 FAKE
@@ -24,6 +25,7 @@ logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 # Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
 run
 logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted"
+logged "docker tag sha256:oldguard boss-man-netguard:previous" || fail "the previous network guard image was not kept"
 logged "recreate-all" && fail "default recreated the runners"
 logged "compose up -d --no-build" && fail "default restarted compose runners"
 logged "docker compose build launcher" || fail "default did not rebuild the launcher"
@@ -69,6 +71,7 @@ logged "compose up -d --no-build" || fail "no restart without a launcher"
 # Rollback drains too; --now makes it immediate.
 run --rollback
 logged "docker tag boss-man-runner:previous boss-man-runner:current" || fail "rollback did not retag"
+logged "docker tag boss-man-netguard:previous boss-man-netguard:current" || fail "rollback did not restore the network guard"
 [[ -s $T/deployer/inbox/drain.json ]] || fail "rollback did not ask for a drain"
 logged "recreate-all" && fail "rollback recreated at once"
 run --rollback --now
@@ -111,6 +114,7 @@ logged "--build-arg BOSSMAN_IMAGE_COMMIT=$head " || fail "the build did not stam
 # A failed canary promotes nothing and asks for nothing.
 if CANARY_RC=1 run; then fail "a failed canary succeeded"; fi
 logged "docker tag boss-man-runner:candidate" && fail "a failed canary was promoted"
+logged "boss-man-netguard:previous" && fail "a failed canary moved the network guard's :previous tag"
 [[ ! -e $T/deployer/inbox/drain.json ]] || fail "a failed canary asked for a drain"
 if ./update-runner.sh --bogus >/dev/null 2>&1; then fail "unknown flag accepted"; fi
 echo "update-runner.test.sh: ok"

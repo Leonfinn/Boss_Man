@@ -10,6 +10,7 @@ import { decisions, deploys, deployTargets, engagements, ticketDependencies, tic
 import { issueRunToken } from "../src/mcp.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { ownerActed, STALE_REASON } from "../src/services/stale-requests.js";
+import { workService } from "../src/services/work.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -193,6 +194,18 @@ describe("stale requests (BOS-123)", () => {
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
   });
 
+  it("stamps a fresh note and the activity time from one instant, so a clock that ticks mid-write leaves it fresh (BOS-1343)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    // A clock that advances on every read: if the write reads it twice, the activity time lands after the note's.
+    let clock = new Date("2026-11-13T10:00:00Z");
+    const work = workService(c.db, { now: () => (clock = new Date(clock.getTime() + 3)) });
+    await work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
+    const [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteAt!.getTime()).toBe(row!.lastActivityAt.getTime());
+    expect(stateNoteLine({ stateNote: row!.stateNote, stateNoteAt: row!.stateNoteAt, stateNoteStaleAt: row!.stateNoteStaleAt, lastActivityAt: row!.lastActivityAt }, new Date("2026-11-13T10:05:00Z"))).not.toContain("(may be out of date)");
+  });
+
   it("does not refuse a fresh question because of an unrelated permission answer on the ticket", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Fix the footer", c.worker.id);
@@ -321,7 +334,7 @@ describe("stale requests (BOS-123)", () => {
     await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
 
     const mcp = await c.mcp(c.other.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved", replacedBy: "none" } });
     expect(isError(r)).toBe(true);
     expect(textOf(r)).toMatch(/another flow/i);
 
@@ -336,7 +349,7 @@ describe("stale requests (BOS-123)", () => {
     const t = await c.ticket("Pick a colour", c.worker.id);
     const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Blue or navy?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Read the brand guide" });
     const mcp = await c.mcp(c.worker.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue, so this question is no longer needed.", replacedBy: "none" } });
     expect(isError(r)).toBe(false);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");

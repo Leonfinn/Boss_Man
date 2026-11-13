@@ -160,6 +160,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunLimits": "Server and runner",
   "pages/Settings.tsx>WipLimits": "Server and runner",
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
+  "pages/Settings.tsx>PrivateDetails": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
   "pages/settings/System.tsx>WrapUpAction": "Server and runner",

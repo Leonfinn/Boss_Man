@@ -5,6 +5,7 @@
 //
 // Host values come from the host deployer's report (host-facts.ts), never from text: authors write
 // `{{host.env.file}}` or `{{host.compose.cmd}} restart <service>`, and the card shows this server's real values.
+import { type CompanyFacts, fillCompanyFacts } from "./company-facts.js";
 import { type HostFacts, type LintFinding, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillServerHost, lintLines, lintOwnerSteps } from "./steps.js";
 
 /**
@@ -24,7 +25,7 @@ export const HOST_FACT_LABELS: Readonly<Record<string, string>> = {
 
 /** What authors are told to write, for refusals and tool help. */
 export const HOST_TOKEN_HELP =
-  "Name host files and commands with tokens, never a host path, address or container name: {{host.env.file}} (the .env the stack starts with), {{host.compose.cmd}} restart <service> (the docker compose command for this host), {{host.paths.install}}, {{host.paths.src}}, {{host.paths.deployer}}, {{host.ntfy.container}}. Boss Man fills in this server's values when the card goes out; a button in the app is written as its path (Settings → …).";
+  "Name host files and commands with tokens, never a host path, address or container name: {{host.env.file}} (the .env the stack starts with), {{host.compose.cmd}} restart <service> (the docker compose command for this host), {{host.paths.install}}, {{host.paths.src}}, {{host.paths.deployer}}, {{host.ntfy.container}}. Boss Man fills in this server's values when the card goes out; a button in the app is written as its path (Settings → …). A step on one of Boss Man's forms (a deploy target, tool server, secret or funding source) gives every field's value; another company's deploy target is {{company.<slug>.deployTarget.name}} (also kind, address, tagName), and a value only that company knows cites engagement:<id> of their answer.";
 
 const TOKEN = /\{\{\s*host\.([A-Za-z0-9_.]{1,80})\s*\}\}/g;
 /** A value that can go into a step as it is: one line, no backtick (it would end inline code). */
@@ -52,7 +53,8 @@ export function fillOwnerSetup(steps: readonly string[], values: Readonly<Record
   return { steps: out, generic };
 }
 
-export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[] };
+/** `company` (DR-057): other companies' records for `{{company.…}}` tokens, branches and R18b (company-facts.ts). */
+export type OwnerSetupFacts = { values?: Record<string, string>; serverHost?: string | null; hosts?: HostFacts[]; company?: CompanyFacts };
 
 /** The facts both checks use, read from the host-facts service: every recorded fact's value, the server's
  * reported name and the hosts for R6. The same inputs raise_decision gives checkAsk. */
@@ -80,10 +82,16 @@ export type OwnerSetupCheck = {
  *   dev install, an older deployer). At go-live it stays, and the steps go to the CEO rather than the owner.
  */
 export function checkOwnerSetup(steps: readonly string[], facts: OwnerSetupFacts, mode: "write" | "raise"): OwnerSetupCheck {
-  const filled = fillOwnerSetup(steps, facts.values ?? {});
+  // Company facts first (DR-057): a branch the record settles is dropped before anything else reads the steps.
+  const company = fillCompanyFacts(steps, facts.company, mode);
+  const filled = fillOwnerSetup(company.steps, facts.values ?? {});
   const shown = fillServerHost(filled.steps, facts.serverHost);
-  const { refuse, warn } = lintOwnerSteps(shown, { ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
-  const knownGap = (f: LintFinding) => f.rule === "R4" && Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "");
+  const lint = lintOwnerSteps(shown, { ...(facts.hosts ? { hosts: facts.hosts } : {}), ...(facts.serverHost ? { serverHost: facts.serverHost } : {}) });
+  const refuse = [...company.findings, ...lint.refuse];
+  const warn = lint.warn;
+  // When written, a company token may have no record yet (the other company adds its target before go-live); a
+  // known host fact may be unreported. At go-live both stay, and the steps go to the CEO.
+  const knownGap = (f: LintFinding) => f.rule === "R4" && (Object.hasOwn(HOST_FACT_LABELS, /^has \{\{host\.([A-Za-z0-9_.]+)\}\}/.exec(f.problem)?.[1] ?? "") || /^has \{\{company\.[a-z0-9-]+\.deployTarget\.(?:name|kind|address|tagName)\}\}/.test(f.problem));
   const kept = refuse.filter((f) => f.rule !== "R11" && !(mode === "write" && knownGap(f)));
   return { steps: shown, generic: filled.generic, hard: kept.filter((f) => NOT_OVERRIDABLE.has(f.rule)), soft: kept.filter((f) => !NOT_OVERRIDABLE.has(f.rule)), warn };
 }

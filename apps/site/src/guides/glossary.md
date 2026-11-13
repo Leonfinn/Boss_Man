@@ -44,6 +44,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 
 ## F
 
+- **Feature**: Something users would notice or ask for, kept on the **Features** page with a status, demand, effort and priority. A feature does no work itself: one or more tasks deliver it. Agents also call it a feature request. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Flag**: The notification level that shows on the Notifications page and as a browser notification. ([Guide 8](/guides/phone-notifications#notification-levels))
 - **Funding source**: A named account that pays for agents, such as your Claude Max plan, added under **Settings > Funding**. Boss Man uses it to track cost and quota. ([Guide 3](/guides/first-company-and-ticket#7-what-pays-for-the-ceo))
 
@@ -60,6 +61,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 ## L
 
 - **Launcher**: The part of Boss Man that starts each company's runner for you. `BOSSMAN_LAUNCHER=1` in `.env` turns it on. ([Guide 2](/guides/install-boss-man#4-write-the-settings-file))
+- **Let the CEO question me first**: A button on the New task and New feature form. It sends your draft to the CEO's chat, where the CEO asks you a few questions and then adds the task or feature for you. ([Guide 3](/guides/first-company-and-ticket#let-the-ceo-question-you-first))
 
 ## M
 
@@ -83,7 +85,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Penpot**: An open-source design tool that Boss Man can run for your designer agents, on your home network only. ([Guide 9](/guides/add-ons#penpot-a-design-tool-for-your-designer-agents))
 - **Permission card**: A card on Decisions that asks whether an agent may run a command or use a tool, with buttons such as **Allow once** and **Deny**. If nobody answers within 10 minutes, the request counts as denied. ([Guide 6](/guides/permissions#answering-a-permission-card))
 - **Plan**: An agent's outline of how it will do a ticket, approved before the work starts. The CEO approves plans for low and medium risk, and you approve them for high and critical. ([Guide 7](/guides/reviews-and-merge-queue#risk-levels))
-- **Project**: One git repository that a company's agents work in. Each project has its own board. ([Guide 1](/guides/how-boss-man-works#projects-and-tickets))
+- **Project**: One git repository that a company's agents work in. Each project has its own board. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 
 ## Q
 
@@ -109,14 +111,16 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Setup wizard**: The eight steps that open after you make the owner account, to create a company, connect your accounts and start a first ticket. Run it again with **Settings > Run the setup wizard**. ([Guide 3](/guides/first-company-and-ticket))
 - **Sign-off**: Your approval before Boss Man merges high or critical work, asked for on a card after the reviewer approves. The card lists the reviews, the last quick check and how many files changed. Choose **Approve and merge** or **Send it back**. ([Guide 7](/guides/reviews-and-merge-queue#your-sign-off))
 - **Standing rules**: A block of text, up to 2,000 characters, that every agent reads at the start of each run. Edit them under **Settings > Reviews and CEO**. ([Guide 6](/guides/permissions#standing-rules))
+- **Sub-task**: A task under a bigger task, used where the work splits naturally. The parent task waits until its sub-tasks are done. A sub-task cannot have sub-tasks of its own. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Synthetic**: A model provider (synthetic.new) for OpenCode agents. Add its key as **Synthetic API key**. ([Guide 5](/guides/agents-and-models#synthetic))
 
 ## T
 
 - **Tailnet**: Your private Tailscale network: the devices that can reach each other through Tailscale. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
 - **Tailscale**: An add-on that gives Boss Man an HTTPS address that only your own devices can reach. You need it for phone notifications. ([Guide 9](/guides/add-ons#tailscale-https-from-anywhere-on-your-tailnet))
+- **Task**: One piece of work an agent does in a project, with a title, a description, a risk level and Done when lines. One or more tasks deliver a feature, and work that is not a feature is a task with no feature. Add one with **Add task**. Also called a ticket. ([Guide 1](/guides/how-boss-man-works#features-tasks-and-sub-tasks))
 - **Thinking**: How hard the model thinks before it answers, from **Default** and **Low** up to **Max**. Not every model offers every level. ([Guide 5](/guides/agents-and-models#choose-a-thinking-level))
-- **Ticket**: One piece of work in a project, with a title, a description, a risk level and Done when lines. The button that makes one says **Add task**. ([Guide 1](/guides/how-boss-man-works#projects-and-tickets))
+- **Ticket**: Another name for a task. See **Task**. ([Guide 1](/guides/how-boss-man-works#projects-and-tasks))
 
 ## U
 

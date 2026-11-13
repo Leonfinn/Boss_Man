@@ -9,7 +9,8 @@ import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
-import { HOST_TOKEN_HELP, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
+import { HOST_TOKEN_HELP, type OwnerSetupFacts, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
+import { loadCompanyFacts } from "./services/company-facts.js";
 import { splitSteps } from "./services/runner-image.js";
 import { EngagementError } from "./services/engagements.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
@@ -20,7 +21,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { addTicketDependency } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
-import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
+import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
 /** The state note after update_ticket replaces the criteria: the old note's verdicts belong to the old list, so none carries over. */
@@ -40,7 +41,14 @@ const LINT_OVERRIDE = z.string().max(500).optional().describe("CEO only: the rea
 async function checkSetupWrite(db: Db, hostFacts: Services["hostFacts"] | undefined, scope: Scope, ownerSetup: string | null | undefined, lintOverride: string | undefined) {
   const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
   const steps = splitSteps(ownerSetup ?? "");
-  return ownerSetupWriteCheck(steps, steps.length && hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride, byCeo: me?.role === "ceo" });
+  return ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride, byCeo: me?.role === "ceo" });
+}
+
+/** Host facts (DR-052) and other companies' records (DR-057) for a write-time setup check. */
+async function setupFacts(db: Db, hostFacts: Services["hostFacts"] | undefined, companyId: string, steps: string[]): Promise<OwnerSetupFacts> {
+  if (!steps.length) return {};
+  const company = await loadCompanyFacts(db, companyId, steps);
+  return { ...(hostFacts ? await ownerSetupFacts(hostFacts) : {}), ...(company ? { company } : {}) };
 }
 
 /** Whether the caller is the CEO and Boss Man's card to fix this live ticket's setup steps is open (DR-052). */
@@ -290,7 +298,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
     "update_ticket",
     {
       description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or mark it urgent (urgent true: it always passes the subscription quota hold; false to clear it), or add or clear the owner's setup steps (ownerSetup: what they do once this is live, in plain words by button path; null to clear; once the ticket is merged these are frozen and only the owner can change them on the ticket page), or mark that it fixes a live problem (fixesLive: one sentence naming the symptom; null to clear), or mark it as the fix for a broken merge check (fixesMergeCheck true: other approved work waits on it in review instead of being checked and sent back; false to clear), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first), or (CEO only) set a plan with a deadline (ceoPlan and ceoPlanDeadline: the looks-stuck alert stays quiet until the deadline plus a grace, then one card says it passed; ceoPlan null clears it). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+        "For CEOs and managers (a product manager may use only featureId, to attach any ticket to a feature or take it out): reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or mark it urgent (urgent true: it always passes the subscription quota hold; false to clear it), or add or clear the owner's setup steps (ownerSetup: what they do once this is live, in plain words by button path; null to clear; once the ticket is merged these are frozen and only the owner can change them on the ticket page), or mark that it fixes a live problem (fixesLive: one sentence naming the symptom; null to clear), or mark it as the fix for a broken merge check (fixesMergeCheck true: other approved work waits on it in review instead of being checked and sent back; false to clear), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first), or (CEO only) set a plan with a deadline (ceoPlan and ceoPlanDeadline: the looks-stuck alert stays quiet until the deadline plus a grace, then one card says it passed; ceoPlan null clears it). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
       inputSchema: {
         ticketId: z.string().uuid(),
         project: z.string().min(1).optional(),
@@ -322,7 +330,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       const manager = await isManager();
       const otherChange = project !== undefined || featureId !== undefined || parentTicketId !== undefined || title !== undefined || body !== undefined || assignee !== undefined || noCode !== undefined || ownerSetup !== undefined || urgent !== undefined || fixesLive !== undefined || size !== undefined || acceptanceCriteria !== undefined || ceoPlan !== undefined || ceoPlanDeadline !== undefined || fixesMergeCheck !== undefined;
       // A ticket's own assignee may order their own ticket (BOS-989): waitsOn alone, nothing else.
-      if (!manager && (otherChange || waitsOn === undefined || !scope.agentId)) return fail("Only your company's CEO or a manager can reorganise tickets. Your own ticket's assignee can change its waitsOn.");
+      // A product manager may attach a task to a feature or detach it (BOS-1359): featureId alone, on any ticket; nothing else.
+      const featureOnly = !manager && featureId !== undefined && (await planningIn(db, scope)) && project === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && fixesLive === undefined && size === undefined && acceptanceCriteria === undefined && ceoPlan === undefined && ceoPlanDeadline === undefined && fixesMergeCheck === undefined && waitsOn === undefined;
+      if (!manager && !featureOnly && (otherChange || waitsOn === undefined || !scope.agentId)) return fail("Only your company's CEO or a manager can reorganise tickets. Your own ticket's assignee can change its waitsOn. A product manager can attach a ticket to a feature or detach it (featureId alone).");
       const planGiven = ceoPlan !== undefined || ceoPlanDeadline !== undefined;
       if (planGiven) {
         const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -344,7 +354,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (waitsOn?.until && !waitsOn.add?.length) return fail("waitsOn until goes with add.");
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
-      if (!manager && t.assignee !== scope.agentId) return fail("Only your company's CEO or a manager, or the ticket's own assignee, can change what a ticket waits on.");
+      if (!manager && !featureOnly && t.assignee !== scope.agentId) return fail("Only your company's CEO or a manager, or the ticket's own assignee, can change what a ticket waits on.");
       // Each named ticket in waitsOn resolves to an id in this company before anything is written.
       const waitIds = { add: [] as string[], remove: [] as string[] };
       for (const [list, key] of [[waitsOn?.add, "add"], [waitsOn?.remove, "remove"]] as const) {
@@ -491,7 +501,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       if (!setup && state === "review" && !sameState) {
         const [stored] = await db.select({ ownerSetup: tickets.ownerSetup, override: tickets.ownerSetupOverride }).from(tickets).where(eq(tickets.id, ticketId));
         const steps = splitSteps(stored?.ownerSetup ?? "");
-        const again = steps.length ? ownerSetupWriteCheck(steps, hostFacts ? await ownerSetupFacts(hostFacts) : {}, { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
+        const again = steps.length ? ownerSetupWriteCheck(steps, await setupFacts(db, hostFacts, scope.companyId, steps), { lintOverride: stored?.override ?? undefined, byCeo: true }) : null;
         if (again && again.error !== null) return fail(`${again.error}\nFix them with set_ticket_state ownerSetup, then move to review again.`);
       }
       const note = summary ?? withCriteria.current;

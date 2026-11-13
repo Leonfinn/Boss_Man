@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewerRef, type ReviewKindName, type ReviewPolicy } from "../api";
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
+import { Loader } from "./Loader";
 
 // Mirrors the server's defaults (packages/shared/src/review-policy.ts) for "Reset to defaults".
 const DEFAULTS: ReviewPolicy = {
@@ -144,7 +145,7 @@ export function CompanyReviews({ companyId, agents }: { companyId: string; agent
       setBusy(false);
     }
   };
-  if (!form) return <p className="muted">Loading…</p>;
+  if (!form) return <Loader label="Loading the review policy" />;
   return (
     <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <ReviewPolicyTable value={form} onChange={setForm} agents={agents} idPrefix="co" />

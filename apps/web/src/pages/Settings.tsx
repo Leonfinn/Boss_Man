@@ -12,7 +12,7 @@ import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settin
 import { Watchdog } from "./settings/Watchdog";
 import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, StopAllWork, SelfDeploy, WrapUpAction } from "./settings/System";
+import { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -26,7 +26,7 @@ export { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settin
 export { Watchdog } from "./settings/Watchdog";
 export { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
 export { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-export { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, StopAllWork, SelfDeploy, WrapUpAction, TrialLines, useNow } from "./settings/System";
+export { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction, TrialLines, useNow } from "./settings/System";
 export { ServerPanel, ThisHost, NetguardAllow, deployerScriptLine } from "./settings/ThisHost";
 export { Devices } from "./settings/Devices";
 export { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -199,7 +199,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     </button>
   );
   const menu = (
-    <nav aria-label="Settings" className="set-nav">
+    <nav aria-label="Settings" className={current ? "set-nav" : "set-nav set-nav-index"}>
       {SETTINGS_GROUPS.map((g) => (
         <div key={g.label} className="set-group">
           <h2 id={`set-group-${g.label.replace(/\W+/g, "-").toLowerCase()}`} className="set-group-label">
@@ -317,6 +317,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
         <ThisHost />
         <NetguardAllow />
         <Devices />
+        <PrivateDetails />
       </>
     ),
     transfer: (

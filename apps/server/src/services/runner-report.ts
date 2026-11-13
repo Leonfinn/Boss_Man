@@ -5,7 +5,7 @@
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, runners as runnersTable, settings } from "../db/schema.js";
-import type { LastUpdate } from "./maintenance.js";
+import { getHold, SWAP_PUT_BACK, SWAP_PUT_BACK_FAILED, SWAP_PUT_BACK_RUNNING, SWAP_WINDOW_MS, type Hold, type LastUpdate } from "./maintenance.js";
 
 /** Whether the runner's image is the one an update installed, or newer (both are date-time stamps, so they sort as strings). */
 export function imageAtLeast(have: string | null | undefined, want: string | null | undefined): boolean | null {
@@ -29,7 +29,16 @@ export type RunnerLive = {
   imageVersion: string | null;
   /** The launcher's own words when it can't give a state for this company (e.g. it is down). */
   fault: string | null;
+  /** BOS-382: a planned runner swap for this company is under way (the update hold is on, and it hasn't failed). */
+  swap?: { retryAt: string | null; tries: number } | null;
+  /** BOS-382: the swap for this company failed while the hold is on, in the drain's own words. */
+  swapFailed?: string | null;
+  /** BOS-382 slice A: the launcher froze this runner because its network guard isn't healthy. */
+  guard?: { reason: string; since: string | null } | null;
 };
+
+/** What the panel shows now: drives the tag colour and whether Start runner may be pressed. */
+export type LiveState = "connected" | "updating" | "paused" | "failed" | "offline" | "none";
 
 export type UpdateReport = {
   at: string;
@@ -82,13 +91,16 @@ export function judgeUpdate(last: LastUpdate | null, live: Record<string, Runner
     // Nothing it named is still wrong: the runner came back, so this is history.
     return { ...base, state: "resolved", todo: null };
   }
-  const todo = broken.some((b) => /reach the launcher/i.test(b))
-    ? "The launcher isn't answering: start it, then try Settings → Runner again."
-    : broken.some((b) => /Creating the runner failed|Removing the runner failed/i.test(b))
-      ? "A runner couldn't be replaced: start it again from Settings → Runner."
-      : broken.some((b) => /still not connected/i.test(b))
-        ? "A runner hasn't connected since: start it again from Settings → Runner."
-        : "Nothing to do: this was a one-off and runs are starting normally.";
+  // Most specific first: slice C (BOS-382) quotes the launcher error inside its own words.
+  const rules: Array<[RegExp, string]> = [
+    [/reach the launcher/i, "The launcher isn't answering: start it, then try Settings → Runner again."],
+    [new RegExp(SWAP_PUT_BACK_FAILED, "i"), "The update failed and the runner couldn't be put back: press Start runner in Settings → Runner."],
+    [new RegExp(SWAP_PUT_BACK, "i"), "Nothing to do now: the runner is running its previous version, and the next runner update tries again."],
+    [/network guard/i, "The runner's network guard wouldn't start: press Restart in Settings → Runner."],
+    [/Creating the runner failed|Removing the runner failed/i, "A runner couldn't be replaced: start it again from Settings → Runner."],
+    [/still not connected/i, "A runner hasn't connected since: start it again from Settings → Runner."],
+  ];
+  const todo = rules.find(([re]) => broken.some((b) => re.test(b)))?.[1] ?? "Nothing to do: this was a one-off and runs are starting normally.";
   return { ...base, state: "problem", todo };
 }
 
@@ -98,12 +110,41 @@ export function clock(iso: string): string {
 }
 
 /** The live state in one line: "Runner connected since 16:23 · image 202611040849", or red "Not connected since …". */
-export function describeLive(r: RunnerLive | null): { ok: boolean; text: string } {
-  if (!r || !r.registered) return { ok: false, text: "No runner is registered for this company yet." };
-  if (r.connected) return { ok: true, text: `Runner connected${r.at ? ` since ${clock(r.at)}` : ""}${r.imageVersion ? ` · image ${r.imageVersion}` : ""}` };
+export function describeLive(r: RunnerLive | null): { ok: boolean; text: string; state: LiveState } {
+  if (!r || !r.registered) return { ok: false, text: "No runner is registered for this company yet.", state: "none" };
+  if (r.connected) return { ok: true, text: `Runner connected${r.at ? ` since ${clock(r.at)}` : ""}${r.imageVersion ? ` · image ${r.imageVersion}` : ""}`, state: "connected" };
+  // BOS-382: away because of a planned swap is not a fault, and pressing Start mid-swap would race it.
+  if (r.swap) {
+    const again = r.swap.retryAt ? ` The last try failed; trying again at ${clock(r.swap.retryAt)} (try ${r.swap.tries + 1}).` : "";
+    return { ok: true, text: `Updating: swapping to the new runner.${again} It starts by itself; no need to press anything.`, state: "updating" };
+  }
+  // The swap failed but the launcher put the old runner back: it is starting by itself, so don't invite a second press.
+  if (r.swapFailed && new RegExp(SWAP_PUT_BACK_RUNNING, "i").test(r.swapFailed)) {
+    return { ok: true, text: "The update failed, so the runner was put back on its previous version and is starting by itself. No need to press anything.", state: "updating" };
+  }
+  if (r.swapFailed) return { ok: false, text: `Update failed: ${r.swapFailed}. Press Start runner below.`, state: "failed" };
+  if (r.guard) return { ok: false, text: `Paused: the network guard isn't working (${r.guard.reason}). Boss Man keeps retrying it and the runner carries on by itself once it works. If this lasts, press Restart below.`, state: "paused" };
   // A runner that is down always says what to do, whether or not an update problem is also recorded.
   const when = r.at ? ` since ${clock(r.at)}` : "";
-  return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.` };
+  return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.`, state: "offline" };
+}
+
+/**
+ * This company's part of the update hold, if any (BOS-382). A company is "swapping" only while its own swap
+ * is in progress: it was recreated within the dial-in window, or it is on its retry schedule. A hold that is
+ * only waiting for busy agents, a wrap-up hold, or a runner that crashed after it was swapped is not a swap:
+ * that runner is just down, and Start runner must stay available.
+ */
+export function swapFor(hold: Hold | null, slug: string | undefined, nowMs: number = Date.now()): Pick<RunnerLive, "swap" | "swapFailed"> {
+  const none = { swap: null, swapFailed: null };
+  if (!hold || !slug || hold.kind === "wrapup") return none;
+  const failed = hold.failed?.[slug];
+  if (failed) return { swap: null, swapFailed: failed };
+  const t = hold.tries?.[slug];
+  if (t) return { swap: { retryAt: t.next, tries: t.n }, swapFailed: null };
+  const at = hold.swapped?.[slug];
+  if (at && nowMs - new Date(at).getTime() < SWAP_WINDOW_MS) return { swap: { retryAt: null, tries: 0 }, swapFailed: null };
+  return none;
 }
 
 type MaintenanceLike = { status: () => Promise<{ last?: LastUpdate | null }> };
@@ -114,7 +155,7 @@ export type RunnerReportDeps = {
   /** When its current connection opened (runnersService.connectedSince). */
   connectedSince: (runnerId: string) => Date | null;
   /** The launcher's view of a company's container; absent or null when the launcher is off (launcherService.status). */
-  launcher?: (companyId: string) => Promise<{ slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null>;
+  launcher?: (companyId: string) => Promise<{ slug: string; container: { state: string; status: string; image: string; guardReason?: string; guardSince?: string } | null; error?: string } | null>;
 };
 
 const SLUG_KEY = "runner-slug:";
@@ -126,27 +167,41 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
     return new Map(rows.map((r) => [r.key.slice(SLUG_KEY.length), r.value as string]));
   }
 
-  async function liveOne(companyId: string, runner: (typeof runnersTable.$inferSelect) | null): Promise<RunnerLive> {
+  const nowMs = () => Date.now();
+
+  async function liveOne(companyId: string, runner: (typeof runnersTable.$inferSelect) | null, slug?: string, hold?: Hold | null): Promise<RunnerLive> {
     let fault: string | null = null;
-    if (deps.launcher) fault = (await deps.launcher(companyId).catch(() => null))?.error ?? null;
+    let guard: RunnerLive["guard"] = null;
+    if (deps.launcher) {
+      const l = await deps.launcher(companyId).catch(() => null);
+      fault = l?.error ?? null;
+      if (l?.container?.guardReason) guard = { reason: l.container.guardReason, since: l.container.guardSince ?? null };
+    }
     if (!runner) return { registered: false, connected: false, at: null, imageVersion: null, fault };
     const connected = deps.isConnected(runner.id);
     const since = connected ? deps.connectedSince(runner.id) : null;
-    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault };
+    return { registered: true, connected, at: (since ?? runner.lastSeenAt)?.toISOString() ?? null, imageVersion: runner.imageVersion, fault, guard, ...swapFor(hold ?? null, slug, nowMs()) };
   }
 
   return {
+    /** Whether this company's own runner swap is under way right now (server_status `swapping`). */
+    async swappingFor(companyId: string): Promise<boolean> {
+      const slug = (await slugs()).get(companyId);
+      return !!swapFor(await getHold(db), slug, nowMs()).swap;
+    },
+
     /** The update panel: every runner's live state first, then the last update as history. */
     async updatePanel() {
       const list = await db.select({ id: companies.id, name: companies.name }).from(companies);
       const slugOf = await slugs();
+      const hold = await getHold(db);
       const rows = await db.select().from(runnersTable);
       const live: Record<string, RunnerLive> = {};
       const now: Array<{ slug: string; name: string } & RunnerLive> = [];
       for (const c of list) {
         const slug = slugOf.get(c.id);
         const runner = rows.find((r) => r.companyId === c.id) ?? null;
-        const l = await liveOne(c.id, runner);
+        const l = await liveOne(c.id, runner, slug, hold);
         if (slug) {
           live[slug] = l;
           now.push({ slug, name: c.name, ...l });
@@ -162,7 +217,7 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
       if (!c) return null;
       const [runner] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, companyId));
       const slug = (await slugs()).get(companyId);
-      const live = await liveOne(companyId, runner ?? null);
+      const live = await liveOne(companyId, runner ?? null, slug, await getHold(db));
       const { last } = await maintenance.status();
       // A company a problem's lines don't name gets no blame for it; a named one is judged by what its runner is doing now.
       const named = !!last && !last.ok && !reportNames(last, slug) && !!slug;

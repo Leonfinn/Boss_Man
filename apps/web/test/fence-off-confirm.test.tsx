@@ -57,11 +57,29 @@ describe("Agent fence in Settings", () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("says why the fence is Off: the owner's choice, the host, or the old default", async () => {
-    stub("unavailable");
+  it("says agent work is held on a host that can't fence until the owner chooses Off, and the button records that choice (BOS-373)", async () => {
+    const calls = stub("unavailable");
+    vi.stubGlobal("confirm", vi.fn(() => true));
     const { unmount } = render(<FenceSetting company={company({ fenceMode: "off" })} onChanged={() => {}} />);
-    expect(await screen.findByText(`The fence is Off because this host can't fence agents. ${FENCE_OFF_CONSEQUENCE}`)).toBeTruthy();
+    expect(await screen.findByText(`Nobody chose Off, so agent work is held while this host can't fence. Choose Off below only if you accept: ${FENCE_OFF_CONSEQUENCE}`)).toBeTruthy();
+    expect(screen.getByText(/Agent work is held until the host can fence, or you choose Off/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("fence-choose-off"));
+    await vi.waitFor(() => expect(patches(calls)).toEqual([expect.objectContaining({ body: { fenceMode: "off" } })]));
     unmount();
+    // A Watch the host can't keep: held too, and Off from the list is the way out.
+    stub("unavailable");
+    render(<FenceSetting company={company({ fenceMode: "watch", fenceModeChosenAt: "2026-11-09T10:00:00Z" })} onChanged={() => {}} />);
+    expect(await screen.findByText(/Agent work is held until the host can fence, or you choose Off/)).toBeTruthy();
+    expect(screen.queryByTestId("fence-choose-off")).toBeNull();
+    cleanup();
+    // The owner's Off on such a host: agents run, unfenced, as chosen.
+    stub("unavailable");
+    render(<FenceSetting company={company({ fenceMode: "off", fenceModeChosenAt: "2026-11-09T10:00:00Z" })} onChanged={() => {}} />);
+    expect(await screen.findByText(/Agents run unfenced, as you chose\./)).toBeTruthy();
+    cleanup();
+  });
+
+  it("says why the fence is Off: the owner's choice or the old default", async () => {
     stub("full");
     render(<FenceSetting company={company({ fenceMode: "off" })} onChanged={() => {}} />);
     expect(await screen.findByText(`Nobody chose Off: it was Boss Man's old default. ${FENCE_OFF_CONSEQUENCE}`)).toBeTruthy();
