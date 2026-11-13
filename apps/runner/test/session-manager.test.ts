@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { SessionManager } from "../src/session-manager.js";
 import { RepoLockTimeout, Workspaces } from "../src/workspace.js";
-import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
+import { LONG_STEP_MARKER, WRAP_UP_MARKER, startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 import { startMcpServer, type McpCall } from "./mcp-server.js";
 import { claudeAdapterBin } from "./claude-adapter.js";
 
@@ -35,7 +35,7 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { expectError?: boolean; skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; lockRetryMs?: number; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { prompt?: string; expectError?: boolean; skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; lockRetryMs?: number; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
@@ -83,7 +83,7 @@ function harness(model: string | null, opts: { expectError?: boolean; skills?: A
     model,
     fundingSourceId,
     cwd,
-    prompt: "Run the spike scenario.",
+    prompt: opts.prompt ?? "Run the spike scenario.",
     mcpToken: "bm_sess_test",
     ...(opts.resumeSessionId ? { resumeSessionId: opts.resumeSessionId } : {}),
     ...(opts.freshPrompt ? { freshPrompt: opts.freshPrompt } : {}),
@@ -100,6 +100,20 @@ const sessionStarted = (events: RunnerEvent[]) =>
       if (events.some((e) => e.type === "run.started")) {
         clearInterval(t);
         resolve();
+      }
+    }, 20);
+  });
+
+const waitFor = (ok: () => boolean, ms: number) =>
+  new Promise<void>((resolve, reject) => {
+    const until = Date.now() + ms;
+    const t = setInterval(() => {
+      if (ok()) {
+        clearInterval(t);
+        resolve();
+      } else if (Date.now() > until) {
+        clearInterval(t);
+        reject(new Error("timed out waiting"));
       }
     }, 20);
   });
@@ -127,6 +141,29 @@ describe.skipIf(!claude)("SessionManager with Claude Code over ACP (stub model)"
     expect(h.events.some((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered")).toBe(false);
     expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "cancelled" });
   }, 60_000);
+
+  it("hands a steered message to a turn stuck in a long command, without cancelling it (BOS-1016)", async () => {
+    const h = harness(null, { prompt: `${LONG_STEP_MARKER}: run the long check.` });
+    // Wait until the 60 s command is really running.
+    const started = Date.now();
+    await waitFor(() => h.events.some((e) => e.type === "run.update" && (e.update as { kind?: string; status?: string }).kind === "tool_call_update" && (e.update as { status?: string }).status === "in_progress") || stubLog.some((l) => l.step === "long-step"), 30_000);
+    await new Promise((r) => setTimeout(r, 2000));
+    const sentAt = Date.now();
+    h.manager.handle({ type: "run.message", runId: h.runId, text: `${WRAP_UP_MARKER}: please wrap up.`, interrupt: false, steer: true });
+    await h.ended;
+    const endedAt = Date.now();
+    const delivered = h.events.filter((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered");
+    // Delivered once, inside the turn.
+    expect(delivered).toHaveLength(1);
+    expect((delivered[0] as { update: { steered?: boolean } }).update.steered).toBe(true);
+    // The model saw the message and answered it; the run ended normally, well before the command would have.
+    expect(stubLog.some((l) => l.step === "wrapped")).toBe(true);
+    // Claude Code moved the running command to the background rather than killing it.
+    expect(stubLog.find((l) => l.step === "wrapped")?.raw).toMatch(/moved to the background[^"]*it was not interrupted/);
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
+    expect(endedAt - sentAt).toBeLessThan(30_000);
+    expect(endedAt - started).toBeLessThan(55_000);
+  }, 90_000);
 
   it("runs a turn end to end: permissions via the server, MCP passthrough, cost deltas", async () => {
     const h = harness(null);

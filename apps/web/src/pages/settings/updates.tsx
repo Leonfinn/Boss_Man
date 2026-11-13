@@ -5,7 +5,8 @@ export type LiveRow = { slug: string; name: string; registered: boolean; connect
 export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
-export type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null };
+/** `gotMessage` and `step` (BOS-1016) are absent from an older server. */
+export type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null; gotMessage?: boolean; step?: { title: string; sinceMinutes: number } | null };
 /** The owner's wrap-up ask is on: its own hold, or asked while an update waits (BOS-988), which keeps the update's kind. */
 export type WrapUpStatus = MaintenanceView & { on: true; wrapAsked?: boolean; minutes?: number; notRespondingAfter: number; runsList: WrapUpRun[] };
 
