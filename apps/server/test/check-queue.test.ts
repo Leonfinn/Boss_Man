@@ -135,14 +135,16 @@ describe("check queue", () => {
     const a = (await s.req({ tree: "t1", kind: "pre_review", scope: "full" })).job;
     await s.q.claimNext(null);
     await s.q.complete(a.id, { commit: a.commit, exitCode: 0, logTail: "", runnerId: null });
-    const merge = await s.req({ tree: "t1" });
-    expect(merge.reused).toBe("passed");
-    expect(merge.job.id).toBe(a.id);
+    expect((await s.req({ tree: "t1", kind: "pre_review", scope: "quick" })).reused).toBe("passed");
     const q2 = (await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).job;
     await s.q.claimNext(null);
     await s.q.complete(q2.id, { commit: q2.commit, exitCode: 0, logTail: "", runnerId: null });
-    expect((await s.req({ tree: "t2", scope: "full" })).reused).toBeNull();
+    expect((await s.req({ tree: "t2", kind: "pre_review", scope: "full" })).reused).toBeNull();
     expect((await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).reused).toBe("passed");
+    // BOS-1043: a pre-review pass ran without the owner's list, so it never answers a merge request.
+    const merge = await s.req({ tree: "t1" });
+    expect(merge.reused).toBeNull();
+    expect(merge.job.id).not.toBe(a.id);
     await s.close();
   });
 
@@ -154,6 +156,29 @@ describe("check queue", () => {
     expect(b.reused).toBe("live");
     expect(b.job.id).toBe(a.job.id);
     expect(b.job.kind).toBe("merge");
+    await s.close();
+  });
+
+  it("a merge request is never answered by a running pre-review job, which ran without the owner's list (BOS-1043)", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const a = await s.req({ ticketId, tree: "r1", kind: "pre_review", scope: "full" });
+    await s.q.claimNext(null);
+    const b = await s.req({ ticketId, tree: "r1", kind: "merge" });
+    expect(b.reused).toBeNull();
+    expect(b.job.id).not.toBe(a.job.id);
+    expect(b.job.kind).toBe("merge");
+    await s.close();
+  });
+
+  it("a merge pass answers a later merge request on the same tree (BOS-1043)", async () => {
+    const s = await setup();
+    const m = (await s.req({ tree: "m1", kind: "merge" })).job;
+    await s.q.claimNext(null);
+    await s.q.complete(m.id, { commit: m.commit, exitCode: 0, logTail: "", runnerId: null });
+    const again = await s.req({ tree: "m1", kind: "merge" });
+    expect(again.reused).toBe("passed");
+    expect(again.job.id).toBe(m.id);
     await s.close();
   });
 
