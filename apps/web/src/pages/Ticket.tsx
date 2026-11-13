@@ -237,6 +237,27 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
   );
 }
 
+export type BuildResult = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total: number | null; url: string | null; sha: string };
+const BUILD_WORDS = { passed: "passed", failed: "failed", pending: "running", none: "no checks reported yet" } as const;
+/** One line on the host's build result, or nothing when the host reported none (BOS-1418). */
+export function BuildLine({ ci }: { ci: BuildResult | null }) {
+  if (!ci) return null;
+  return (
+    <p className="muted" data-testid="build-result" style={{ overflowWrap: "anywhere" }}>
+      Build on {ci.sha.slice(0, 7)}: <strong>{BUILD_WORDS[ci.state]}</strong>
+      {ci.state === "failed" && ci.failing.length ? ` (${ci.failing.join(", ")})` : ""}
+      {ci.url && (
+        <>
+          {" · "}
+          <a href={ci.url} target="_blank" rel="noopener noreferrer">
+            View run
+          </a>
+        </>
+      )}
+    </p>
+  );
+}
+
 type Landing =
   | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean; phase?: string }
   | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
@@ -465,6 +486,27 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       clearInterval(timer);
     };
   }, [running, id]);
+  // The git host's build result on the branch head (BOS-1418). Null means nothing to show: no CI, no host, or the host said no.
+  const [ci, setCi] = useState<BuildResult | null>(null);
+  const hasBranch = !!ticket.data?.branch && !ticket.data?.mergeCommit;
+  useEffect(() => {
+    if (!hasBranch) {
+      setCi(null);
+      return;
+    }
+    let stopped = false;
+    const load = () =>
+      api<{ ci: BuildResult | null }>(`/api/tickets/${id}/ci`).then(
+        (r) => !stopped && setCi(r.ci),
+        () => undefined,
+      );
+    void load();
+    const timer = setInterval(() => void load(), 60_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [id, hasBranch]);
   const refreshLanding = async () => {
     try {
       const r = await api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`);
@@ -822,7 +864,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </Fold>
 
           {t.repoUrl && (
-            <Fold title="Changes" hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}` : undefined}>
+            <Fold title="Changes" hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}${ci ? ` · build ${BUILD_WORDS[ci.state]}` : ""}` : undefined}>
+              <BuildLine ci={ci} />
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
                 <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
                   {diff && range === "base" ? "Refresh all changes" : "All changes"}
