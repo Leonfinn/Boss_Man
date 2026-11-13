@@ -1,13 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { parseTrustedProxies, portalClientAddress } from "../src/portal-ip.js";
+import { parseClientHeader, parseTrustedProxies, portalClientAddress } from "../src/portal-ip.js";
 
 const proxy = "203.0.113.10";
 const m = (raw: string) => parseTrustedProxies(raw).matcher;
 const who = (peer: string, headers: Record<string, string | string[]>, list = proxy) => portalClientAddress(peer, headers, m(list));
 
 describe("portalClientAddress (BOS-1386)", () => {
-  it("takes CF-Connecting-IP from a trusted proxy", () => {
-    expect(who(proxy, { "cf-connecting-ip": "198.51.100.7" })).toBe("198.51.100.7");
+  it("takes CF-Connecting-IP from a trusted proxy only when that header is chosen", () => {
+    expect(portalClientAddress(proxy, { "cf-connecting-ip": "198.51.100.7" }, m(proxy), "cf-connecting-ip")).toBe("198.51.100.7");
+  });
+  it("ignores a forged CF-Connecting-IP from a trusted non-Cloudflare proxy (default header)", () => {
+    expect(who(proxy, { "cf-connecting-ip": "6.6.6.6" })).toBe(proxy);
+    expect(who(proxy, { "cf-connecting-ip": "6.6.6.6", "x-forwarded-for": "198.51.100.7" })).toBe("198.51.100.7");
+    expect(portalClientAddress(proxy, { "cf-connecting-ip": "6.6.6.6", "x-forwarded-for": "198.51.100.7" }, m(proxy), "x-forwarded-for")).toBe("198.51.100.7");
+  });
+  it("with cf-connecting-ip chosen, ignores X-Forwarded-For and a peer that is not trusted", () => {
+    expect(portalClientAddress(proxy, { "x-forwarded-for": "198.51.100.7" }, m(proxy), "cf-connecting-ip")).toBe(proxy);
+    expect(portalClientAddress("198.51.100.99", { "cf-connecting-ip": "198.51.100.7" }, m(proxy), "cf-connecting-ip")).toBe("198.51.100.99");
+  });
+  it("reads the header setting: empty and unknown values mean X-Forwarded-For", () => {
+    expect(parseClientHeader(undefined)).toEqual({ header: "x-forwarded-for", bad: null });
+    expect(parseClientHeader(" CF-Connecting-IP ")).toEqual({ header: "cf-connecting-ip", bad: null });
+    expect(parseClientHeader("x-real-ip")).toEqual({ header: "x-forwarded-for", bad: "x-real-ip" });
   });
   it("ignores both headers from an address that is not a trusted proxy", () => {
     expect(who("198.51.100.99", { "cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "192.0.2.1" })).toBe("198.51.100.99");
@@ -41,12 +55,11 @@ describe("portalClientAddress (BOS-1386)", () => {
       expect([bad.slice(0, 20), who(proxy, { "x-forwarded-for": bad })]).toEqual([bad.slice(0, 20), proxy]);
     }
     for (const bad of ["garbage", "", "198.51.100.7, 198.51.100.8", "198.51.100.7:1"]) {
-      expect([bad, who(proxy, { "cf-connecting-ip": bad })]).toEqual([bad, proxy]);
+      expect([bad, portalClientAddress(proxy, { "cf-connecting-ip": bad }, m(proxy), "cf-connecting-ip")]).toEqual([bad, proxy]);
     }
   });
-  it("lets CF-Connecting-IP win over X-Forwarded-For, and a bad one does not fall through to it", () => {
-    expect(who(proxy, { "cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "192.0.2.1" })).toBe("198.51.100.7");
-    expect(who(proxy, { "cf-connecting-ip": "garbage", "x-forwarded-for": "192.0.2.1" })).toBe(proxy);
+  it("with cf-connecting-ip chosen, a bad one does not fall through to X-Forwarded-For", () => {
+    expect(portalClientAddress(proxy, { "cf-connecting-ip": "garbage", "x-forwarded-for": "192.0.2.1" }, m(proxy), "cf-connecting-ip")).toBe(proxy);
   });
   it("uses the connecting address when a trusted proxy sends no header", () => {
     expect(who(proxy, {})).toBe(proxy);

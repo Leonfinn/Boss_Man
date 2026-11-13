@@ -14,7 +14,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { assetPathOf, IMPORTANCE, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
-import { parseTrustedProxies, portalClientAddress } from "./portal-ip.js";
+import { parseClientHeader, parseTrustedProxies, portalClientAddress } from "./portal-ip.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 
 export const PORTAL_CSP = "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
@@ -154,16 +154,17 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
 }
 
 /** A listener with only the portal: its page, its assets and its API. Nothing else answers. */
-export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean; trustedProxies?: string[]; limits?: Partial<PortalLimits> }) {
+export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean; trustedProxies?: string[]; clientHeader?: string; limits?: Partial<PortalLimits> }) {
   const app = Fastify({ logger: opts.logger ?? false, trustProxy: false });
   await app.register(cookie);
   // BOSSMAN_PORTAL_TRUSTED_PROXY: empty means the connecting address is the visitor, as before.
   const { matcher } = parseTrustedProxies(opts.trustedProxies);
+  const { header } = parseClientHeader(opts.clientHeader);
   await portalRoutes(app, {
     feedback: opts.feedback,
     secureCookies: opts.secureCookies,
     limits: opts.limits,
-    clientAddress: matcher.size ? (req) => portalClientAddress(req.socket.remoteAddress ?? req.ip, req.headers, matcher) : undefined,
+    clientAddress: matcher.size ? (req) => portalClientAddress(req.socket.remoteAddress ?? req.ip, req.headers, matcher, header) : undefined,
   });
   if (opts.webDir) {
     await app.register(fastifyStatic, {

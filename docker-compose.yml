@@ -119,6 +119,8 @@ services:
       # The portal's reverse proxy: its own address(es) or CIDRs, e.g. 203.0.113.10, 10.0.0.0/8. Only a connection from one
       # of them may name the visitor (CF-Connecting-IP, X-Forwarded-For). Empty = the connecting address is the visitor.
       BOSSMAN_PORTAL_TRUSTED_PROXY: ${BOSSMAN_PORTAL_TRUSTED_PROXY:-}
+      # Which header names the visitor: x-forwarded-for (default) or cf-connecting-ip (only when Cloudflare is the proxy).
+      BOSSMAN_PORTAL_CLIENT_HEADER: ${BOSSMAN_PORTAL_CLIENT_HEADER:-}
       # JS heap cap in MiB (BOS-410). The live heap measured 89-100 MiB; 1536 leaves ~15x headroom. Raise it in .env if
       # the memory log ("memory" lines, heapUsed) ever nears it. Keep it below BOSSMAN_SERVER_MEMORY when that is set.
       NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}

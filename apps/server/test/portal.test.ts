@@ -165,10 +165,10 @@ describe("feedback portal", () => {
   // BOS-1386: behind a reverse proxy every visitor arrives from the proxy's address.
   describe("BOSSMAN_PORTAL_TRUSTED_PROXY", () => {
     const proxy = "203.0.113.10";
-    async function portalBehind(trustedProxies: string[]) {
+    async function portalBehind(trustedProxies: string[], clientHeader?: string) {
       const c = await setup();
       const { portalToken } = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true })).json();
-      const portal = await buildPortalApp({ feedback: t!.feedback, secureCookies: true, trustedProxies, limits: { readsPerIpPerMinute: 2, writesPerIpPerHour: 1 } });
+      const portal = await buildPortalApp({ feedback: t!.feedback, secureCookies: true, trustedProxies, clientHeader, limits: { readsPerIpPerMinute: 2, writesPerIpPerHour: 1 } });
       const hit = (from: string, headers: Record<string, string> = {}) => portal.inject({ method: "GET", url: "/api/portal", remoteAddress: from, headers });
       const write = (from: string, headers: Record<string, string> = {}) => portal.inject({ method: "POST", url: "/api/portal/ideas", remoteAddress: from, headers: { "x-portal-token": portalToken, ...headers }, payload: { title: "T", text: "t" } });
       return { portal, hit, write };
@@ -185,11 +185,25 @@ describe("feedback portal", () => {
       try {
         expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "198.51.100.1" })).toEqual([404, 404, 429]);
         expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "198.51.100.2" })).toEqual([404, 404, 429]);
-        expect(await codes((h) => hit(proxy, h), { "cf-connecting-ip": "198.51.100.3" })).toEqual([404, 404, 429]);
         // The same visitor, however the header arrives, is still one visitor.
         expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "6.6.6.6, 198.51.100.1" }, 1)).toEqual([429]);
       } finally {
         await portal.close();
+      }
+    });
+
+    it("cannot be dodged with a CF-Connecting-IP a non-Cloudflare proxy passed through, unless that header is chosen", async () => {
+      const { portal, hit } = await portalBehind([proxy]);
+      const cf = await portalBehind([proxy], "cf-connecting-ip");
+      try {
+        const forged: number[] = [];
+        for (let i = 0; i < 4; i++) forged.push((await hit(proxy, { "cf-connecting-ip": `192.0.2.${i}` })).statusCode);
+        expect(forged).toEqual([404, 404, 429, 429]);
+        expect(await codes((h) => cf.hit(proxy, h), { "cf-connecting-ip": "198.51.100.3" })).toEqual([404, 404, 429]);
+        expect(await codes((h) => cf.hit(proxy, h), { "cf-connecting-ip": "198.51.100.4" })).toEqual([404, 404, 429]);
+      } finally {
+        await portal.close();
+        await cf.portal.close();
       }
     });
 

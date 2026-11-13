@@ -60,7 +60,7 @@ The portal is the only part of Boss Man meant for people other than you.
 
   Your login, API, MCP and runner endpoints don't exist on that port. Expose the portal's port if you need to, **never the owner's** (`BOSSMAN_HOST_PORT`, 3100 by default).
 - **What visitors can do.** They vote on features you've shown, with an importance, and can add a comment or suggest an idea, optionally with a name and email. A visitor is remembered by an HttpOnly cookie, so they can change or remove their vote. They can't see anyone else's votes.
-- **Behind a reverse proxy.** The limits below count per visitor address. Behind a proxy that is the proxy's address, so list it in `BOSSMAN_PORTAL_TRUSTED_PROXY` (addresses or CIDRs, empty = off) and each visitor gets their own limit, taken from `CF-Connecting-IP` or `X-Forwarded-For`, and only when the connection comes from a listed address. See `docs/06-install-truenas.md`.
+- **Behind a reverse proxy.** The limits below count per visitor address. Behind a proxy that is the proxy's address, so list it in `BOSSMAN_PORTAL_TRUSTED_PROXY` (addresses or CIDRs, empty = off) and each visitor gets their own limit, taken from `X-Forwarded-For` (or, only when Cloudflare is the proxy, `CF-Connecting-IP`, chosen with `BOSSMAN_PORTAL_CLIENT_HEADER=cf-connecting-ip`), and only when the connection comes from a listed address. Only the chosen header is read: Nginx Proxy Manager, Caddy and Traefik pass a visitor-sent `CF-Connecting-IP` through, so it is never trusted unless chosen. See `docs/06-install-truenas.md`.
 - **Limits.**
   - 40 writes an hour per address and 600 per portal;
   - 120 reads a minute per address;

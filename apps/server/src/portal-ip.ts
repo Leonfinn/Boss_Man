@@ -69,18 +69,35 @@ function headerText(v: string | string[] | undefined): string | null {
   return Array.isArray(v) ? v.join(",") : v;
 }
 
+export type ClientHeader = "x-forwarded-for" | "cf-connecting-ip";
+
+/**
+ * Reads BOSSMAN_PORTAL_CLIENT_HEADER. Only Cloudflare sets and cleans CF-Connecting-IP; other
+ * proxies pass a visitor-sent copy through, so it is used only when chosen. Empty or anything
+ * unknown means X-Forwarded-For (`bad` is set so the server can warn).
+ */
+export function parseClientHeader(raw: string | undefined): { header: ClientHeader; bad: string | null } {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "x-forwarded-for") return { header: "x-forwarded-for", bad: null };
+  if (v === "cf-connecting-ip") return { header: "cf-connecting-ip", bad: null };
+  return { header: "x-forwarded-for", bad: (raw ?? "").trim() };
+}
+
 /**
  * The visitor's address. `peer` is the connecting address. With no trusted proxy, or a peer that
- * is not one, the headers are ignored completely. From a trusted peer: CF-Connecting-IP if
- * present (it must be one valid address), else the right-most X-Forwarded-For entry that is not
- * itself a trusted proxy. Anything malformed falls back to the peer.
+ * is not one, the headers are ignored completely. From a trusted peer only the chosen header is
+ * read (default X-Forwarded-For: the right-most entry that is not itself a trusted proxy;
+ * CF-Connecting-IP: one valid address). The other header is never read. Anything malformed falls
+ * back to the peer.
  */
-export function portalClientAddress(peer: string, headers: Record<string, string | string[] | undefined>, matcher: ProxyMatcher): string {
+export function portalClientAddress(peer: string, headers: Record<string, string | string[] | undefined>, matcher: ProxyMatcher, header: ClientHeader = "x-forwarded-for"): string {
   const peerAddr = normaliseAddress(peer);
   if (matcher.size === 0 || !matcher.has(peerAddr)) return peerAddr;
 
-  const cf = headerText(headers["cf-connecting-ip"]);
-  if (cf !== null) return validAddress(cf) ?? peerAddr;
+  if (header === "cf-connecting-ip") {
+    const cf = headerText(headers["cf-connecting-ip"]);
+    return cf === null ? peerAddr : validAddress(cf) ?? peerAddr;
+  }
 
   const xff = headerText(headers["x-forwarded-for"]);
   if (xff === null) return peerAddr;
