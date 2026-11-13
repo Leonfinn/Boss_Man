@@ -12,8 +12,10 @@
 // branches, config and hooks to itself, so one ticket can't plant code the runner later runs for
 // another, or delete another ticket's branch. Its branch is fetched back into the shared repo
 // (syncBranch), where merges, pushes and other tickets read it. Every operation handles both
-// kinds; BOSSMAN_TICKET_COPIES=clone makes new copies clones. Worktrees stay the default until
-// every runner image in use understands clones, so rolling an image back can't lose one.
+// kinds; a new copy is a clone by default (BOS-343), turning a ticket's existing worktree into one
+// in place at its next run. An image at or after BOS-323 keeps clones; rolling back to one older than
+// BOS-323 deletes them (and their uncommitted work) at housekeeping, so roll back no further than that.
+// BOSSMAN_TICKET_COPIES=worktree keeps the old kind for that rollback; =clone says it outright.
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
@@ -145,6 +147,15 @@ const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr 
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
+
+/**
+ * What a new copy is made as (BOS-343): clones by default. An image at or after BOS-323 keeps clones;
+ * rolling back past it deletes them and their uncommitted work, so `BOSSMAN_TICKET_COPIES=worktree`
+ * keeps the old kind only for that rollback (never to an older image); `=clone` says it outright.
+ * Anything else, or unset, is a clone. The value is trimmed and lowercased so `Worktree` or a stray
+ * space still rolls back as intended instead of silently giving clones.
+ */
+export const copiesAreClones = (env: NodeJS.ProcessEnv = process.env) => env.BOSSMAN_TICKET_COPIES?.trim().toLowerCase() !== "worktree";
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
@@ -589,7 +600,7 @@ export class Workspaces {
   }
 
   /** What a new copy is made as (see the top of this file). */
-  private newCopiesAreClones = () => this.baseEnv.BOSSMAN_TICKET_COPIES === "clone";
+  private newCopiesAreClones = () => copiesAreClones(this.baseEnv);
 
   /**
    * An empty clone of the shared repo at tmp, with nothing checked out: it borrows the shared
@@ -1801,7 +1812,8 @@ export class Workspaces {
 
   /**
    * Whether the ticket's branch still merges into the target (BOS-426): the same merge-tree try as a
-   * merge, but nothing is built or pushed. A branch that is gone here, or a failed git call, throws:
+   * merge, but nothing is built or pushed. A clone's branch is synced first (BOS-832), so it reads the
+   * ticket's real head, not a stale one. A branch that is gone here, or a failed git call, throws:
    * the caller must not read "couldn't tell" as "clean".
    */
   async clash(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<{ clashes: boolean; files: string[] }> {
