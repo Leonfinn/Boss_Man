@@ -8,18 +8,11 @@ import type { TraceBody } from "@boss-man/shared";
 // Renders the real Chat page (Vite plus Playwright), every `/api/*` read answered from fixtures.
 // Skipped, not failed, where no browser or Vite is installed.
 
-type Page = Awaited<ReturnType<Browser["newPage"]>> & {
-  route: (u: string, f: (r: any) => unknown) => Promise<void>;
-  goto: (u: string, o?: { waitUntil?: string }) => Promise<unknown>;
-  waitForSelector: (s: string, o?: { timeout?: number }) => Promise<unknown>;
-  evaluate: <T>(fn: () => T) => Promise<T>;
-  screenshot: (o?: { path?: string }) => Promise<unknown>;
-  close: () => Promise<void>;
-};
 type Browser = {
-  newPage: (opts?: { viewport?: { width: number; height: number }; deviceScaleFactor?: number; hasTouch?: boolean; isMobile?: boolean }) => Promise<Page>;
+  newPage: (opts?: { viewport?: { width: number; height: number }; deviceScaleFactor?: number; hasTouch?: boolean; isMobile?: boolean }) => Promise<any>;
   close: () => Promise<void>;
 };
+type Page = Awaited<ReturnType<Browser["newPage"]>>;
 
 async function launch(): Promise<Browser | null> {
   let chromium: { launch: (opts?: { executablePath?: string; args?: string[] }) => Promise<Browser> };
@@ -119,7 +112,7 @@ const baseApi = (live?: TraceBody) => ({
 async function open(width: number, height: number, hasTouch: boolean, live?: TraceBody): Promise<Page> {
   const api = baseApi(live);
   const page = await browser!.newPage({ viewport: { width, height }, hasTouch, isMobile: hasTouch });
-  await page.route("**/api/**", (route) => {
+  await page.route("**/api/**", (route: { request: () => { url: () => string }; fulfill: (o: { status: number; contentType: string; body: string }) => unknown }) => {
     const path = new URL(route.request().url()).pathname;
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify((api as Record<string, unknown>)[path] ?? {}) });
   });
@@ -144,7 +137,7 @@ describe.skipIf(!browser || !server)("the Thinking trace in a real browser (BOS-
       await page.evaluate(() => (document.querySelector(".chat-msg.assistant.has-trace .trace-head") as HTMLElement).click());
       await page.waitForSelector(".chat-msg.assistant.has-trace .trace-steps .step-row", { timeout: 5000 });
       const rows = await page.evaluate(() => [...document.querySelectorAll(".chat-msg.assistant.has-trace .step-row")].map((el) => ({ cls: el.className, text: el.querySelector(".sum")?.textContent })));
-      expect(rows.map((r) => r.cls)).toEqual([expect.stringContaining("k-think"), expect.stringContaining("k-look"), expect.stringContaining("k-run")]);
+      expect(rows.map((r: { cls: string }) => r.cls)).toEqual([expect.stringContaining("k-think"), expect.stringContaining("k-look"), expect.stringContaining("k-run")]);
       expect(rows[1]!.text).toContain("Read ticket BOS-1276");
       // Open a step: its detail shows.
       await page.evaluate(() => (document.querySelector(".chat-msg.assistant.has-trace .step-row.k-run") as HTMLElement).click());

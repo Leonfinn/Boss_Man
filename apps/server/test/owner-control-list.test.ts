@@ -94,6 +94,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/TicketOutputs.tsx": "Ticket",
   "components/TicketRelated.tsx": "Ticket",
   "components/TicketReviews.tsx": "Ticket",
+  // The Thinking trace above each agent reply, rendered in the Chat page (BOS-1368).
+  "components/ThinkingTrace.tsx": "Chat",
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
