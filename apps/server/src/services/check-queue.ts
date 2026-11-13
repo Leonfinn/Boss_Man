@@ -185,9 +185,9 @@ export function checkQueue(db: Db) {
     const ids = [...new Set(queued.map((j) => j.ticketId))];
     // BOS-1403: a ticket whose assignee holds a background-lane job title sorts after the ordinary ones (never above Move to front).
     const rows = ids.length
-      ? await db.select({ id: tickets.id, urgent: tickets.urgent, title: tickets.title, agentTitle: agents.title }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(inArray(tickets.id, ids))
+      ? await db.select({ id: tickets.id, urgent: tickets.urgent, fixesMergeCheck: tickets.fixesMergeCheck, title: tickets.title, agentTitle: agents.title }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(inArray(tickets.id, ids))
       : [];
-    const marks = new Map(rows.map((t) => [t.id, checkPriority({ urgent: t.urgent, title: t.title, background: isBackgroundLaneTitle(t.agentTitle) })]));
+    const marks = new Map(rows.map((t) => [t.id, checkPriority({ urgent: t.urgent, fixesMergeCheck: t.fixesMergeCheck, title: t.title, background: isBackgroundLaneTitle(t.agentTitle) })]));
     const prio = (j: CheckJob) => marks.get(j.ticketId) ?? j.priority;
     return queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain))

@@ -22,20 +22,21 @@ export function isBackgroundLaneTitle(agentTitle: string | null | undefined): bo
  * ordinary tickets, 2 for background-lane tickets, which go last (BOS-1403). It only orders the start; every merge still runs
  * its full check, and a lane ticket with nothing ahead of it starts at once. The owner's Move to front sorts above all of this.
  */
-export function checkPriority(t: { urgent?: boolean | null; title?: string | null; background?: boolean | null }): number {
+export function checkPriority(t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null; background?: boolean | null }): number {
   if (t.urgent) return 0;
+  if (t.fixesMergeCheck) return 0;
   if (/^\s*arch fix\b/i.test(t.title ?? "")) return 0;
   return t.background ? 2 : 1;
 }
 
 /** checkPriority for a ticket row, looking up the assignee's job title for the lane. */
-export async function ticketCheckPriority(db: Db, t: { urgent?: boolean | null; title?: string | null; assigneeAgentId?: string | null }): Promise<number> {
+export async function ticketCheckPriority(db: Db, t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null; assigneeAgentId?: string | null }): Promise<number> {
   let background = false;
   if (t.assigneeAgentId) {
     const [a] = await db.select({ title: agents.title }).from(agents).where(eq(agents.id, t.assigneeAgentId));
     background = isBackgroundLaneTitle(a?.title);
   }
-  return checkPriority({ urgent: t.urgent, title: t.title, background });
+  return checkPriority({ urgent: t.urgent, fixesMergeCheck: t.fixesMergeCheck, title: t.title, background });
 }
 
 type Waiter = { priority: number; seq: number; alone: boolean; grant: () => void; cancelled: boolean };
