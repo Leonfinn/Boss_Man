@@ -68,6 +68,17 @@ logged "pnpm --filter @boss-man/web exec vitest related --run src/a.ts" "web"
 logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
+# BOS-979: the secrets scan runs only when the branch has the script, and a finding fails the check.
+notlogged "scan-added-lines" "no scan script, no scan step"
+mkdir -p "$repo/scripts"; echo "// stub" >"$repo/scripts/scan-added-lines.mjs"; g add -A; g commit -q -m "scan script"
+run 0 "scan step" env
+logged "node scripts/scan-added-lines.mjs origin/main" "scan step"
+grep -q "^PASS  secrets scan" "$t/out" || fail "scan PASS line"
+run 1 "scan finding" env FAIL_ON=scan-added-lines
+grep -q "^FAIL  secrets scan" "$t/out" || fail "scan FAIL line"
+# The owner's list is never handled here (the runner scans with its own copy): a stray variable is not turned into a file.
+run 0 "scan list" env BOSSMAN_SCAN_DENYLIST="ip	192.0.2.77"
+notlogged "scanenv" "no list handling in this script"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
 # One CPU budget (BOS-674) reaches every step, inside the slot and out: the stub node prints nothing, so the fallback 2 applies;
 # BOSSMAN_CHECK_THREADS sets it.
@@ -379,6 +390,13 @@ run 0 "journal-only clash" env REBASE_OUT="$(printf '0141_mine -> 0142_mine\nreb
 grep -q "^PASS  merge with origin/main is clean" "$t/out" || fail "clash: merge step not PASS: $(cat "$t/out")"
 grep -q "migration 0141 (mine) will be renumbered to 0142 by the merge gate" "$t/out" || fail "clash: no renumber line: $(cat "$t/out")"
 grep -q "^PASS  migration lint (on the tree the gate will build)" "$t/out" || fail "clash: lint not run on the rebuilt tree: $(cat "$t/out")"
+# BOS-1258: this tree has no node_modules, and rebase-migrations.mjs needs tsx from it: the install must come first.
+[ ! -d "$repo/node_modules" ] || fail "clash fixture has node_modules"
+ilines="$(grep -n '^pnpm install' "$LOG" | head -1 | cut -d: -f1)"; nline="$(grep -n '^node scripts/rebase-migrations.mjs' "$LOG" | head -1 | cut -d: -f1)"
+if ! { [ -n "$ilines" ] && [ -n "$nline" ] && [ "$ilines" -lt "$nline" ]; }; then fail "clash: install must run before rebase-migrations: $(cat "$LOG")"; fi
+# A failed install is named as such, not counted as a migration clash.
+run 1 "clash, install fails" env FAIL_ON=install REBASE_OUT="$(printf '0141_mine -> 0142_mine\nrebuilt tree: %s' "$tree")"
+grep -q "package install failed (not a clash" "$t/out" || fail "clash: failed install not named: $(cat "$t/out")"
 # the old plain merge-tree step failed on exactly this tree
 g merge-tree --write-tree origin/main HEAD >/dev/null 2>&1 && fail "clash fixture is not a real conflict"
 start="$(g rev-parse origin/main)"

@@ -36,7 +36,7 @@ const board: FeatureRoadmapCompany[] = [
     features: [
       feature({ id: "f1", title: "Dark mode", status: "in_progress", column: "now", rank: 2, milestones: [{ id: "m1", title: "Beta", targetDate: "2026-12-01", pinned: null }] }),
       feature({ id: "f2", title: "CSV export" }),
-      feature({ id: "f3", title: "Mobile app", column: "later", objective: null }),
+      feature({ id: "f3", title: "Mobile app", column: "later", objective: null, tickets: { total: 2, done: 0 } }),
       feature({ id: "f4", title: "Sign-in", status: "released", column: "released", releasedAt: "2026-10-01T00:00:00Z" }),
     ],
   },
@@ -76,7 +76,12 @@ describe("Roadmap page (BOS-206)", () => {
     expect(within(dark).getByText("In progress")).toBeTruthy();
     expect(within(dark).getByText("P2")).toBeTruthy();
     expect(within(dark).getByText("Priority 3.0")).toBeTruthy();
-    expect(within(dark).getByText("4 of 7 tickets done")).toBeTruthy();
+    expect(within(dark).getByText("4 of 7 done")).toBeTruthy();
+    // BOS-1126 Q13: nothing done reads "Not started", and the intro is said once (the tab's help line, not also under the title).
+    const mobile = within(table).getByRole("link", { name: "Mobile app" }).closest("li")!;
+    expect(within(mobile).getByText("Not started")).toBeTruthy();
+    expect(screen.getAllByText(/Features in Now, Next and Later/).length).toBe(1);
+    expect(screen.queryByText(/Features grouped by objective/)).toBeNull();
 
     // Released is a folded list until opened.
     const released = screen.getByText("Released (1)").closest("details")!;

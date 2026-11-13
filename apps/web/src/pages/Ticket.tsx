@@ -978,7 +978,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 {t.assignee ? ` · ${t.assignee}` : ""}
               </span>
             )}
-            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
+            <button type="button" className="btn props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
               {propsCollapsed ? "Show" : "Hide"}
             </button>
           </div>
@@ -986,7 +986,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <dl>
             <dt>Status</dt>
             <dd>
-              <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
+              <span className={`tag ${t.systemState === "review" && (t.signoff === "waiting" || t.signoff === "missing") ? "amber" : (STATE_TONE[t.systemState] ?? "")}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
               <select aria-label="Change status" value="" onChange={(e) => e.target.value && void moveTo(e.target.value)}>
                 <option value="">Change…</option>
                 {Object.entries(STATE_LABEL).map(([k, label]) => (

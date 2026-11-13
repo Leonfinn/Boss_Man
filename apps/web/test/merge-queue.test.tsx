@@ -158,7 +158,7 @@ describe("merge queue screen in server mode (BOS-597)", () => {
 
 // The Merge queue's attention layout (BOS-1239, design BOS-1207).
 const base = { risk: "low", urgent: false, failedCheck: false, decisionId: null, actor: "system" as const, stuck: false, minutes: 10, next: "Boss Man merges it.", signedOffAt: null };
-const checkRow = (over: Record<string, unknown>) => ({ id: "j1", ticketId: "t1", ref: "APP-1", title: "A check", kind: "quick", requestedBy: "Bungle", state: "waiting", position: 1, minutes: 22, fixesMain: false, heldBy: null, ...over });
+const checkRow = (over: Record<string, unknown>) => ({ id: "j1", ticketId: "t1", ref: "APP-1", title: "A check", kind: "quick", requestedBy: "Bungle", state: "waiting", position: 1, minutes: 22, fixesMain: false, heldBy: null, ...over, heldByMain: String(over.heldBy ?? "").startsWith("main is red") });
 function serve(merge: unknown, checks: unknown) {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => (String(url).includes("/check-queue") ? json(checks) : json(merge))));
 }
@@ -189,6 +189,26 @@ describe("merge queue attention layout (BOS-1239)", () => {
     expect(screen.queryByText(/Nothing needs you/)).toBeNull();
     // The right-hand "waiting to merge" sentence is gone; the Merges tab carries the count.
     expect(screen.queryByText("4 waiting to merge")).toBeNull();
+  });
+
+  it("14 checks queued for a busy slot are not 'held': no red banner, no pill (BOS-1262)", async () => {
+    const queued = Array.from({ length: 14 }, (_, i) => checkRow({ id: `q${i}`, ticketId: `t${i}`, ref: `APP-${i}`, position: i + 1, heldBy: "all 3 check slots are busy" }));
+    const running = [1, 2, 3].map((n) => checkRow({ id: `r${n}`, state: "running", position: null }));
+    serve(calm, { mode: "server", slots: 3, running: 3, rows: [...running, ...queued] });
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-13");
+    expect(container.querySelector("[data-main-red]")).toBeNull();
+    expect(container.textContent).not.toMatch(/held|Main is red|failing its check/i);
+  });
+
+  it("main red: only the checks main holds are counted as held (BOS-1262)", async () => {
+    const rows = [checkRow({ id: "a", position: 1, heldBy: "all 2 check slots are busy" }), checkRow({ id: "h1", ticketId: "t2", ref: "APP-2", position: null, heldBy: "main is red" }), checkRow({ id: "h2", ticketId: "t3", ref: "APP-3", position: null, heldBy: "main is red" })];
+    serve(calm, { mode: "server", slots: 2, running: 0, rows });
+    goTo("#/merge-queue/c1/checks");
+    const { container } = render(<MergeQueue companies={[company]} companyId="c1" />);
+    await screen.findByText("APP-3");
+    expect(container.querySelector("[data-main-red]")!.textContent).toMatch(/2 checks are held/);
   });
 
   it("a pill on the Merges tab moves focus to its target", async () => {
@@ -240,7 +260,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const merges = await screen.findByRole("tab", { name: /Merges/ });
     await waitFor(() => expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2")).toBeTruthy());
-    expect(within(merges).getByText("3").className).toContain("warn");
+    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287).
+    expect(within(merges).getByText("4").className).toContain("warn");
     expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2").className).toContain("warn");
   });
 
@@ -282,6 +303,30 @@ describe("merge queue attention layout (BOS-1239)", () => {
     const empty = await screen.findByText("No checks queued.");
     expect(empty.parentElement!.textContent).toBe("No checks queued. When an agent or the merge gate asks for a check, it shows here until it finishes. Both slots are free.");
     expect(screen.queryByText(/Main is failing/)).toBeNull();
+  });
+
+  it("free-slot wording names the count when there are three slots", async () => {
+    goTo("#/merge-queue/c1/checks");
+    const wording = async (slots: number, running: number) => {
+      serve(calm, { mode: "server", slots, running, rows: [] });
+      render(<MergeQueue companies={[company]} companyId="c1" />);
+      const empty = await screen.findByText("No checks queued.");
+      const text = empty.parentElement!.textContent!;
+      cleanup();
+      return text.replace(/^.*finishes\. /, "");
+    };
+    expect(await wording(3, 0)).toBe("All 3 slots are free.");
+    expect(await wording(3, 2)).toBe("1 of 3 slots are free.");
+    expect(await wording(3, 1)).toBe("2 of 3 slots are free.");
+    expect(await wording(3, 3)).toBe("No slot is free.");
+    expect(await wording(1, 0)).toBe("The slot is free.");
+  });
+
+  it("a Needs you row with no card gets an Open ticket button to the ticket", async () => {
+    serve({ ...data, waitingCount: 1, waiting: [{ ...base, ticketId: "z", ref: "APP-7", title: "No card", state: "needs_you", label: "stopped: needs you", actor: "owner", decisionId: null }] }, noChecks);
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    const card = await screen.findByRole("region", { name: "Needs you" });
+    expect(within(card).getByRole("link", { name: "Open ticket" }).getAttribute("href")).toBe("#/tickets/z");
   });
 
   it("arrow keys move between the tabs and keep the tab in the address", async () => {

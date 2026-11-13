@@ -188,7 +188,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * fence: run the check inside the fence (BOS-323), like run.start's. A runner that can't fence runs
    * it as before and says so (VerifyResult.fenced); an older runner ignores it.
    */
-  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional(), scanList: z.string().max(60_000).optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
@@ -233,7 +233,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
    * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
    */
-  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional() }),
+  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional(), scanList: z.string().max(60_000).optional() }),
   /** Stop a check job. Only the server sends this; agents have no way to. */
   z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
   /** The server has recorded this job’s result; the runner can stop re-sending it. */
@@ -242,8 +242,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
    * turn is stopped first. The max leaves room for the prefix the server adds to a longest-allowed owner message (BOS-502).
+   * With steer, an agent that supports ACP steering gets it inside the running turn instead, without a cancel (BOS-1016);
+   * others queue it as usual. Optional, so either side can be older.
    */
-  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean() }),
+  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean(), steer: z.boolean().optional() }),
   z.object({ type: z.literal("permission.decide"), runId: Uuid, requestId: z.string(), verdict: z.enum(["allow", "deny"]) }),
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
@@ -288,7 +290,7 @@ export const RunnerMessage = z.discriminatedUnion("type", [
   /** A running check job printed something: the log tail so far (BOS-316). */
   z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
   /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
-  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000) }),
+  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional() }),
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
@@ -328,7 +330,7 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 /** fenced: set only when the check was asked to run fenced, saying whether it was. */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean; /** BOS-1228: the whole log of a server-queued job, cut and redacted by the runner (see prepareFullLog). */ fullLog?: string; /** BOS-1228: set by the server when the failed job's whole log is kept (read with the check_log tool). */ keptLog?: { jobId: string; chars: number; ticketId: string } };
 /**
  * A ticket's kept scratch (BOSSMAN_SCRATCH, BOS-592): one folder per ticket on the workspaces disk, so a proof
  * or a check log outlives the runner and the temp sweep. Kept a week, or a few hours once the ticket's work is gone.
@@ -365,6 +367,14 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 /** The outcome of merging a ticket's branch (R46). */
 export type MigrationRenamed = { from: string; to: string };
 
+/**
+ * The ticket's copy holds changes its branch doesn't (R46). `files` are the author's to commit. `foreign` (BOS-1231): the
+ * copy fell behind its own branch (the branch moved on from another folder) and couldn't be moved up safely; these files
+ * differ only because the branch moved on, so they are never the author's to commit. While any are there, the CEO is
+ * told instead of the author.
+ */
+export type Uncommitted = { status: "uncommitted"; files: string[]; foreign?: string[] };
+
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
   | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
@@ -372,7 +382,7 @@ export type MergeResult =
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] }
+  | Uncommitted
   /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
   | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
@@ -388,7 +398,7 @@ export type CarriedTicket = { ticketId: string; branch: string; contained?: bool
 export type CarriedResult = { carried: CarriedTicket[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
-export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };
+export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
 
 /** The answer to workspace.resolve (DR-033). `commit` is null when the ref names no commit (an image tag, say). */
 export type ResolveResult = { commit: string | null; onBase: boolean; branches: string[]; error?: string };

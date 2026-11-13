@@ -62,7 +62,7 @@ Downtime is only steps 3 to 5, about 30 to 60 minutes, mainly the final data cop
 5. **Switch over.** Start Tailscale with the moved state, update the address you use (bookmarks, phone app, ntfy subscription, `BOSSMAN_PORTAL_URL`, any webhook that points at the old address). Boss Man then checks: server status, live commit, runner health, a test run, login over `ts.net`, an ntfy test push.
 6. **Retire the old host** only after you sign off, after a trial period you choose.
 
-**Rollback until step 6:** first, on the new host, stop everything, before you start anything on the old host. In this order: Tailscale (`docker compose stop tailscale`), ntfy with its own flags (the same command as below, ending `stop`; skip if you do not run it), then everything else (`docker compose stop`). Only when all of that is stopped, on the old host mirror stage 4: run `docker compose start db`; under blue/green run `docker compose start proxy server-<live colour> launcher netguard` (plus any other service you ran, but **not** the other colour and not a plain `docker compose start`, which would start the standby colour and let an older image take the leader lock), send the leader signal if the live colour is green (same command as stage 4), and check `/api/ready`; under a single server a plain `docker compose start` is fine. Start ntfy again with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy start`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it). Last, `docker compose start tailscale` (the new host's was stopped above, or the two fight for the name). If the new host has already used the Tailscale state (it may have rotated the keys), the old host's copy can be rejected and need a fresh login: follow `docs/20-https-tailscale.md` to sign in again, and remove any duplicate machine in the Tailscale admin console. Then turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
+**Rollback until step 6:** first, on the new host, stop everything, before you start anything on the old host. In this order: Tailscale (`docker compose stop tailscale`), ntfy with its own flags (the same command as below, ending `stop`; skip if you do not run it), then everything else (`docker compose stop`). Only when all of that is stopped, on the old host mirror stage 4: run `docker compose start db`; under blue/green run `docker compose start proxy server-<live colour> launcher` (plus any other service you ran, but **not** the other colour and not a plain `docker compose start`, which would start the standby colour and let an older image take the leader lock), send the leader signal if the live colour is green (same command as stage 4), and check `/api/ready`; under a single server a plain `docker compose start` is fine. Start ntfy again with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy start`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it). Last, `docker compose start tailscale` (the new host's was stopped above, or the two fight for the name). If the new host has already used the Tailscale state (it may have rotated the keys), the old host's copy can be rejected and need a fresh login: follow `docs/20-https-tailscale.md` to sign in again, and remove any duplicate machine in the Tailscale admin console. Then turn the old host's deployer scheduled job back on (and the new host's off). The old host's data is exactly as it was at step 3. Anything written on the new host after the switch is lost unless you take a backup there first and load it back on the old host; the switch-over stage says so when it asks you.
 
 ## 4. The commands
 
@@ -171,7 +171,7 @@ Backups and the files copied in stage 3 are usually readable by root only, while
 docker compose stop tailscale
 ```
 
-List what is still running, then stop each remaining service except `db` by name (under blue/green: `server-blue server-green`, `proxy`, `launcher`, `netguard`):
+List what is still running, then stop each remaining service except `db` by name (under blue/green: `server-blue server-green`, `proxy`, `launcher`):
 
 ```sh
 docker compose ps --services --filter status=running
@@ -255,7 +255,7 @@ If the live colour is green, green starts as a standby and needs the leader sign
 docker compose kill -s SIGUSR2 server-green
 ```
 
-Then start the proxy and the other services except Tailscale (name them: for example `docker compose up -d --no-deps proxy launcher netguard`; the service names are in your compose files). **Do not start Tailscale yet**: it starts in stage 5, after these checks.
+Then start the proxy and the other services except Tailscale (name them: for example `docker compose up -d --no-deps proxy launcher`; the service names are in your compose files). **Do not start Tailscale yet**: it starts in stage 5, after these checks.
 
 The app answers on port 3100 (the feedback portal is 3101, and has no `/api/ready`):
 

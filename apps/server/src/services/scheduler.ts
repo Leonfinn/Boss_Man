@@ -7,11 +7,12 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
 import { pickAccount } from "./claude-accounts.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agentSkills, agents, checkJobs, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -122,6 +123,20 @@ const LOOP_EXCHANGES = 4;
 export const CARRY_ON_MS = 15 * 60_000;
 export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
+/**
+ * True while the agent has its own check job queued or running on the ticket (request_check, DR-003).
+ * The job's end always wakes the agent that asked (check-dispatcher.ts ended(), for every end state),
+ * so a carry-on wake meanwhile only makes it look at a check still in line and stop (BOS-1273).
+ */
+async function ownCheckLive(db: Db, ticketId: string, agentId: string) {
+  const [j] = await db
+    .select({ id: checkJobs.id })
+    .from(checkJobs)
+    .where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.requestedBy, agentId), inArray(checkJobs.state, ["queued", "running"])))
+    .limit(1);
+  return !!j;
+}
+
 /** Wakes held for a full subscription window: re-checked every pass, so adding or reordering an account releases them (BOS-449). */
 const QUOTA_HOLD_LIKE = "subscription % nearly used up%";
 
@@ -228,7 +243,8 @@ export function schedulerService(
     notifyOwner?: (input: { companyId: string | null; level: "note" | "flag" | "page" | "ask"; title: string; body?: string | null; link: string }) => Promise<unknown>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
-    log?: (msg: string) => void;
+    /** Server errors; a company id files the line under that company's recent errors in server_status. */
+    log?: (msg: string, companyId?: string) => void;
   },
 ) {
   const limits = { ...DEFAULT_LIMITS, ...deps.limits };
@@ -695,6 +711,11 @@ export function schedulerService(
         await log("Cleared the scheduled check: the ticket is no longer being worked");
         continue;
       }
+      // Only Boss Man's own carry-on wake gives way to a live check; a check the agent set itself still fires.
+      if (x.monitorNote === CARRY_ON_NOTE && (await ownCheckLive(db, x.id, x.assigneeAgentId))) {
+        await log("Skipped the carry-on wake: the agent's own check is still queued or running, and its result will wake them");
+        continue;
+      }
       if (x.monitorAttempts >= x.monitorMax) {
         const [{ name: agent } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, x.assigneeAgentId));
         await log(`Checked ${x.monitorMax} times and still not resolved: ${x.monitorNote}`);
@@ -1029,8 +1050,31 @@ export function schedulerService(
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
     const [previous] = w.resumeRunId && agent.agentKind === "claude" ? await db.select({ acpSessionId: runs.acpSessionId }).from(runs).where(eq(runs.id, w.resumeRunId)) : [];
-    // The agent's skills (R71) go with the run; chat runs have no built-in tools to use them.
-    const { give: skillSet, withheld } = !chat && agent.agentKind === "claude" ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
+    // The agent's skills (R71) and tool servers go with every run, whatever woke it. The owner chat is the one exception: the board-only chats
+    // (CEO, Scrum Master, PA) have no built-in tools to use them. An ordinary agent's chat has the same set as its ticket runs (BOS-1300).
+    const caps = runCapabilities(agent, !!chat);
+    const withTools = caps.skillsAndToolServers;
+    let { give: skillSet, withheld } = withTools && agent.agentKind === "claude" ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
+    // A skill held back on the stored add-on report is checked once more against the runner now: a report that is stale or was never taken
+    // would otherwise drop the skill (Penpot) from a run that could have used it (BOS-1300).
+    if (withheld.length && deps.runners.isConnected(runner.id)) {
+      const fresh = await Promise.race([deps.runners.checkAddons(runner.id).catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), 8000).unref())]);
+      if (fresh) ({ give: skillSet, withheld } = await skillsForRun(db, agent.id, fresh));
+    }
+    // Said at the top of the run and kept in the server's recent errors, so the agent doesn't find out mid-task (BOS-1300).
+    let withheldNote = "";
+    if (withheld.length) {
+      const list = withheld.map((h) => `"${h.name}" (needs the ${h.missing.join(" and ")} add-on)`).join(", ");
+      withheldNote = `\n\nHeads-up: ${withheld.length === 1 ? "one of your skills is" : "some of your skills are"} NOT loaded in this run: ${list}. This runner doesn't report ${withheld.length === 1 ? "that add-on" : "those add-ons"} as working. Say so plainly to the owner if you needed it, and don't pretend it is there.`;
+      deps.log?.(`${agent.name}'s run started without ${list}: the runner doesn't report the add-on as working.`, w.companyId);
+    } else if (withTools && agent.agentKind !== "claude") {
+      // Only Claude Code loads skills; an agent on another harness that was given some would otherwise find them missing mid-task.
+      const [given] = await db.select({ n: sql<number>`count(*)::int` }).from(agentSkills).where(eq(agentSkills.agentId, agent.id));
+      if (given && given.n > 0) {
+        withheldNote = `\n\nHeads-up: your ${given.n} assigned skill${given.n === 1 ? " is" : "s are"} NOT loaded in this run: this agent's harness (${agent.agentKind}) can't load skills. Say so plainly to the owner if you needed one.`;
+        deps.log?.(`${agent.name}'s run started without its ${given.n} skill(s): the ${agent.agentKind} harness can't load skills.`, w.companyId);
+      }
+    }
     for (const h of withheld) {
       // Told once per skill and missing set. shortcut: never re-told after the add-on recovers and breaks again; clear the key on a healthy report (docs/12 step 2).
       const told = await db.insert(settings).values({ key: `addon-missing:${runner.id}:${h.name}:${h.missing.join(",")}`, value: true }).onConflictDoNothing().returning();
@@ -1041,7 +1085,7 @@ export function schedulerService(
           ticketId: w.ticketId,
         });
     }
-    const toolServers = chat ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
+    const toolServers = !withTools ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
@@ -1054,13 +1098,13 @@ export function schedulerService(
       fundingSourceId: onSource ?? agent.fundingSourceId,
       cwd: chat ? chat.cwd(w.companyId, w.agentId) : runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply }),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
-      ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
+      ...(caps.boardToolsOnly ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
       // A plan-first ticket starts in plan mode until its plan is approved (R40). Plan mode is the assignee's: a reviewer is never put in it (BOS-371).
       ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
-      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : ""),
+      prompt: (chapter?.prompt ?? wakePrompt) + (noCheckout ? noCheckoutNote(runFolder(workspaceRoot, agent.id, { ticketId: workTicketId, reply })) : "") + withheldNote,
       mcpToken,
       // Every run gets the Boss Man tools; a runner that can't reach them stops the run loudly
       // rather than let it work blind (BOS-552). An older runner ignores it and behaves as before.
@@ -1490,6 +1534,7 @@ export function schedulerService(
       if (t.systemState !== "in_progress" || t.monitorAt) return;
       const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, run.agentId), eq(wakes.ticketId, t.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
       if (queued) return;
+      if (await ownCheckLive(db, t.id, run.agentId)) return;
       const at = new Date(now().getTime() + CARRY_ON_MS);
       await db.update(tickets).set({ monitorAt: at, monitorNote: CARRY_ON_NOTE, monitorAttempts: 0 }).where(and(eq(tickets.id, t.id), isNull(tickets.monitorAt)));
       const [{ name } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId));

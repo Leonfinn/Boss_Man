@@ -8,8 +8,11 @@ import { Section, useAction } from "./shared";
 import { UpdateHistory, type UpdateRow } from "./updates";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
-type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" } | null; error?: string } | null;
-type CompanyReport = { live: { ok: boolean; text: string }; last: UpdateRow | null };
+type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen" } | null; error?: string } | null;
+/** BOS-382: "updating" is a planned runner swap; Start, Restart and Stop wait until it is over. */
+type RunnerLiveState = "connected" | "updating" | "paused" | "failed" | "offline" | "none";
+type CompanyReport = { live: { ok: boolean; text: string; state?: RunnerLiveState }; last: UpdateRow | null };
+const liveTag = (l: CompanyReport["live"]) => (l.state === "updating" ? "tag amber" : l.ok ? undefined : "tag red");
 type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
 
 function RunnerAddons({ report }: { report: AddonReport[] | null }) {
@@ -98,6 +101,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
   if (launched) {
     const c = launched.container;
     const connected = s?.registered && s.connected;
+    const swapping = s?.report?.live.state === "updating";
     return (
       <Section id="runner-h" title="Runner">
         <p className="muted" style={{ fontSize: 14 }}>
@@ -107,7 +111,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           <dt>Now</dt>
           <dd data-testid="runner-now">
             {s?.report ? (
-              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
+              <span className={liveTag(s.report.live)}>{s.report.live.text}</span>
             ) : (
               <>
                 {connected ? (
@@ -160,17 +164,18 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           <button
             type="button"
             className="btn primary"
-            disabled={act.busy}
+            disabled={act.busy || swapping}
+            title={swapping ? "A runner update is swapping this runner; it starts by itself." : undefined}
             onClick={() => (!c || window.confirm("Reconnect the runner? It gets a new token and a fresh container; work in progress resumes from its journal.")) && void launch("POST", "launch", c ? "Reconnecting…" : "Starting…")}
           >
             {c ? "Reconnect runner" : "Start runner"}
           </button>
           {c && (
             <>
-              <button type="button" className="btn" disabled={act.busy} onClick={() => void launch("POST", "restart", "Restarting…")}>
+              <button type="button" className="btn" disabled={act.busy || swapping} onClick={() => void launch("POST", "restart", "Restarting…")}>
                 Restart
               </button>
-              <button type="button" className="btn" disabled={act.busy} onClick={() => window.confirm("Stop and remove the runner? Its workspaces and sessions stay on disk; agents can't run until it's started again.") && void launch("DELETE", "launch", "Stopped.")}>
+              <button type="button" className="btn" disabled={act.busy || swapping} onClick={() => window.confirm("Stop and remove the runner? Its workspaces and sessions stay on disk; agents can't run until it's started again.") && void launch("DELETE", "launch", "Stopped.")}>
                 Stop
               </button>
             </>
@@ -189,7 +194,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           <dt>Now</dt>
           <dd data-testid="runner-now">
             {s.report ? (
-              <span className={s.report.live.ok ? undefined : "tag red"}>{s.report.live.text}</span>
+              <span className={liveTag(s.report.live)}>{s.report.live.text}</span>
             ) : (
               <>
                 {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />

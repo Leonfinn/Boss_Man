@@ -91,15 +91,47 @@ Cards are newest first, with these exceptions:
 - an urgent Boss Man update, one that carries the fix for a problem on your live server, also goes to the top
 - cards waiting on an agent sit at the bottom under "Waiting, nothing to do yet"
 
-Each card shows a score for how much it holds up: what it blocks, how soon it is due and how long it has waited. The score does not change the order.
+Small labels at the top of a card say why it matters:
+
+- **Moss is waiting on you**: the agent named is paused until you answer
+- **Holds up BOS-12**: the ticket this card blocks, with **+2 more** if it blocks others too
+- **Due 14 Nov**: the date the answer is due
+
+A card with none of these labels holds nothing up. The labels do not change the order.
+
+### Being re-checked
+
+An amber **Being re-checked** strip means someone is confirming the card is still needed, for example because the work moved on since it was raised. If it is not needed, the card closes by itself. You can still answer it now.
+
+A red **Not re-checked** strip means nobody re-checked the card in time. It says who should have.
 
 ## Answering a card
 
 ![A Decisions card showing what is being asked, what the agent already tried, a recommended option and the option buttons.](/img/card-wide.webp =1600x567 "A Decisions card, with its options as buttons.")
 
-1. Read the card. It says what the agent wants, what it already tried and which option it recommends.
-2. Choose an option button.
-3. Or choose **Write my own answer**, type it, and choose **Send my answer**.
-4. If you need more, choose **Not enough detail?**, then **Ask the CEO for advice**.
+1. Read the card. The heading is the question. The text under it says what the agent wants and what it already tried.
+2. Look under **Your answer**. The recommended button is marked **Recommended**. On plan, sign-off, permission and stalled-run cards, a line under each button says what happens if you press it.
+3. Choose a button.
+4. Or, on a question card, choose **Write my own answer**, type it, and choose **Send my answer**.
+5. If you need more, choose **Not enough detail?**, then **Ask the CEO for advice**.
+
+On a plan or sign-off card, a note box sits under the buttons. What you type there is sent with **Keep planning** or **Send it back**.
 
 If you run more than one company, the **All companies** filter shows cards from every company together.
+
+### The sign-off card
+
+For high and critical work, the sign-off card lists what was checked, so you can decide without opening the ticket:
+
+- **Reviews**: each reviewer and their verdict, such as "✓ Passed" or "✗ Changes asked"
+- **Quick check**: whether the agent's last quick check passed, on which commit and when
+- **Change**: how many files changed, and the risk level
+- **Built by**: the agent who built it, with a link to the ticket
+
+**Approve and merge** runs the full check and merges the work. If that check fails, the ticket goes back to the agent, not to you. **Send it back** returns it to the agent with your note, and the reviews start again when it comes back.
+
+### Closed cards
+
+Cards closed in the last 30 days are folded at the bottom under **Closed in the last 30 days**. Each line starts with what happened: **Answered**, **Allowed**, **Denied**, **Withdrawn** or **Replaced**.
+
+A plan marked **Replaced** says who wrote the newer plan and when. Choose **Open the newer card** to go to it.

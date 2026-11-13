@@ -1,0 +1,4 @@
+# Reviewed allow-list for the merge-line secrets scan (scripts/scan-added-lines.mjs, BOS-979).
+# One genuine false positive per line, tab-separated:  <path>  <rule>  <fingerprint>  <reason>
+# The fingerprint is printed in the scan's BLOCKED message. A line without a reason is ignored.
+# Any change to this file needs a review: the runner installs its own copy of it, from main.

@@ -161,7 +161,7 @@ describe("agents look tickets up (R77)", () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What's in the wiki?", agentId: c.worker.id });
     await c.scheduler.tick();
-    const chatRun = c.starts().find((s) => s.boardToolsOnly)!;
+    const chatRun = c.starts().find((s) => s.agentId === c.worker.id)!;
     const client = await c.mcp(chatRun.runId);
     const names = (await client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual(expect.arrayContaining(["board", "create_ticket", "skills", "tickets", "wiki"]));
