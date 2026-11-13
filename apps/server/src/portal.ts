@@ -53,6 +53,11 @@ type Feedback = ReturnType<typeof feedbackService>;
 export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
   const counter = windowCounter(deps.now ?? (() => Date.now()));
+  // BOS-1407: the per-portal caps live apart from the per-address ones. In one shared Map a flood of
+  // reads from new addresses evicted the oldest key, usually `portal:<id>`, and reset the portal's
+  // write cap. Portal keys are only made after the token checks out, so this Map holds one key per
+  // live portal and its 20,000 bound is never reached.
+  const portalCounter = windowCounter(deps.now ?? (() => Date.now()));
   const Text = (max: number) => z.string().trim().min(1).max(max);
   const Who = { name: z.string().trim().max(100).nullable().optional(), email: z.string().trim().email().max(320).nullable().optional().or(z.literal("")) };
 
@@ -74,7 +79,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     return voter;
   }
   function allowWrite(req: FastifyRequest, reply: FastifyReply, companyId: string) {
-    if (counter.take(`ip:${req.ip}`, limits.writesPerIpPerHour, 3_600_000) && counter.take(`portal:${companyId}`, limits.writesPerPortalPerHour, 3_600_000)) return true;
+    if (counter.take(`ip:${req.ip}`, limits.writesPerIpPerHour, 3_600_000) && portalCounter.take(`portal:${companyId}`, limits.writesPerPortalPerHour, 3_600_000)) return true;
     reply.code(429).send({ error: "too_many", message: "That's a lot of feedback in a short time. Please try again later." });
     return false;
   }
