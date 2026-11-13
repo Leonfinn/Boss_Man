@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 /** A shared repo whose origin/main is the base, and a commit on top of it that adds `content` to notes.txt. */
-function setup(content: string) {
+function setup(content: string | Record<string, string | Buffer>) {
   const bare = tmp("bm-scan-origin-");
   git(bare, "init", "-q", "--bare", "-b", "main");
   const seed = tmp("bm-scan-seed-");
@@ -41,7 +41,8 @@ function setup(content: string) {
   const repo = path.join(root, "repos", `${projectId}.git`);
   git(root, "clone", "-q", "--bare", bare, repo);
   git(repo, "update-ref", "refs/remotes/origin/main", "refs/heads/main");
-  writeFileSync(path.join(seed, "notes.txt"), content);
+  const files = typeof content === "string" ? { "notes.txt": content } : content;
+  for (const [name, data] of Object.entries(files)) writeFileSync(path.join(seed, name), data);
   git(seed, "add", ".");
   git(seed, "commit", "-qm", "work");
   git(seed, "push", "-q", "origin", "HEAD:refs/heads/work");
@@ -49,7 +50,7 @@ function setup(content: string) {
   return { root, commit: git(seed, "rev-parse", "HEAD") };
 }
 
-const job = (n: number) => `0000000${n}-0000-4000-8000-000000000000`;
+const job = (n: number) => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
 const probe = 'printf "ran list=[%s] file=[%s]" "$BOSSMAN_SCAN_DENYLIST" "$BOSSMAN_SCAN_DENYLIST_FILE"';
 
 describe("runner-owned scan before the check command", () => {
@@ -99,6 +100,53 @@ describe("runner-owned scan before the check command", () => {
     const r = await ws.runCommitCheck({ projectId, jobId: job(5), commit }, "node scripts/scan-added-lines.mjs || true; echo COMMAND-REACHED", 60_000);
     expect(r.ok).toBe(false);
     expect(r.output).not.toContain("COMMAND-REACHED");
+  });
+
+  // BOS-1043 point 1: lines git would show only as "Binary files differ" are still scanned.
+  it("blocks a key and a listed IP in a file the branch's .gitattributes marks -diff", async () => {
+    const { root, commit } = setup({ ".gitattributes": "*.ts -diff\n", "x.ts": `const t = "${fakeToken}"; // ${listedIp}\n` });
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
+    const r = await ws.runCommitCheck({ projectId, jobId: job(7), commit }, "echo COMMAND-REACHED", 60_000, { scanList: `ip\t${listedIp}` });
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("BLOCKED github-token at x.ts:1");
+    expect(r.output).toContain("BLOCKED listed-private-ip at x.ts:1");
+    expect(r.output).not.toContain("COMMAND-REACHED");
+  });
+
+  it("blocks a key in a file that holds a NUL byte (a UTF-16 config)", async () => {
+    const { root, commit } = setup({ "conf.txt": Buffer.from(`\0a\0\nkey = ${fakeToken}\n`) });
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
+    const r = await ws.runCommitCheck({ projectId, jobId: job(8), commit }, "echo COMMAND-REACHED", 60_000);
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("BLOCKED github-token at conf.txt:2");
+  });
+
+  it("blocks a key on a NUL-carrying line of an image-named file", async () => {
+    const { root, commit } = setup({ "x.png": Buffer.from(`\0${fakeToken}\0\n`) });
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
+    const r = await ws.runCommitCheck({ projectId, jobId: job(9), commit }, "echo COMMAND-REACHED", 60_000);
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("BLOCKED github-token at x.png:1");
+  });
+
+  // BOS-1043 point 2: the list is never written to a file.
+  it("never writes the owner's list to a file under the temp folder while the scan runs", async () => {
+    const { root, commit } = setup("host is 192.168.1.50\n");
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
+    const seen = new Set<string>();
+    const poll = setInterval(() => {
+      for (const n of readdirSync(tmpdir())) if (n.startsWith("bm-scan-")) seen.add(n);
+    }, 2);
+    const r = await ws.runCommitCheck({ projectId, jobId: job(10), commit }, "echo ran", 60_000, { scanList: `ip\t${listedIp}` });
+    clearInterval(poll);
+    expect(r.ok).toBe(true);
+    // Only dirs of this test file's own repos are named bm-scan-origin/seed/root; a scan scratch dir would be a bare bm-scan-XXXXXX.
+    const scratch = [...seen].filter((n) => !/^bm-scan-(origin|seed|root)-/.test(n));
+    expect(scratch).toEqual([]);
+    // And the list still reaches the scanner: a listed IP is found.
+    const bad = setup(`host ${listedIp}\n`);
+    const r2 = await new Workspaces(bad.root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER }).runCommitCheck({ projectId, jobId: job(11), commit: bad.commit }, "echo ran", 60_000, { scanList: `ip\t${listedIp}` });
+    expect(r2.output).toContain("BLOCKED listed-private-ip");
   });
 
   it("a runner without the scanner installed runs the command as before", async () => {

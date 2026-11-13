@@ -9,6 +9,7 @@ import type { Company } from "../api";
 import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
+import { Loader } from "../components/Loader";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
@@ -444,18 +445,18 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <p className="muted mq-calm">Nothing needs you. Everything here is moving by itself.</p>
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
-        {tabButton("merges", "Merges", data ? data.waitingCount : null, needsYou.length > 0)}
+        {tabButton("merges", "Merges", data ? data.waitingCount + data.running.length : null, needsYou.length > 0)}
         {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, heldChecks > 0)}
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
-          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <p className="muted">Loading…</p>}
+          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <Loader label="Loading the queued checks" />}
         </div>
       ) : (
         <div role="tabpanel" id="mq-panel-merges" aria-labelledby="mq-tab-merges">
           {mq.error ? <p className="banner" role="alert">Couldn't load the merge queue. It will try again shortly.</p> : null}
           {!data && !mq.error ? (
-            <p className="muted">Loading…</p>
+            <Loader label="Loading the merge queue" />
           ) : data ? (
             <>
               <NeedsYou rows={needsYou} />

@@ -9,7 +9,7 @@
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
-import { checkPriority } from "./check-gate.js";
+import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 
@@ -105,10 +105,14 @@ export function checkQueue(db: Db) {
       .orderBy(asc(checkJobs.queuedAt));
     // The same command must have passed: a quick script, or the first of several merge commands, never stands in for another.
     const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null);
-    const passed = sameTree.find((j) => j.state === "passed" && wide(j));
+    // BOS-1043: only merge jobs are dispatched with the owner's private-details list, so a merge request is answered only by a
+    // merge-kind job. A pass or running job of another kind was scanned without the list and must not stand in for the gate.
+    // (A queued job lifted to merge below is dispatched as merge, so it does get the list.)
+    const listScanned = (j: CheckJob) => input.kind !== "merge" || j.kind === "merge";
+    const passed = sameTree.find((j) => j.state === "passed" && wide(j) && listScanned(j));
     if (passed) return { job: passed, reused: "passed" };
     // The same ticket already has a live job on this tree that is wide enough: it is the answer.
-    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j));
+    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j) && (listScanned(j) || j.state === "queued"));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
@@ -183,7 +187,11 @@ export function checkQueue(db: Db) {
     // BOS-1384: urgency is read from the ticket now, not from the priority stored when the job was queued, so marking a ticket urgent
     // while it waits moves it up at once and clearing it puts it back by its join time (queuedAt is never touched).
     const ids = [...new Set(queued.map((j) => j.ticketId))];
-    const marks = new Map((ids.length ? await db.select({ id: tickets.id, urgent: tickets.urgent, title: tickets.title }).from(tickets).where(inArray(tickets.id, ids)) : []).map((t) => [t.id, checkPriority(t)]));
+    // BOS-1403: a ticket whose assignee holds a background-lane job title sorts after the ordinary ones (never above Move to front).
+    const rows = ids.length
+      ? await db.select({ id: tickets.id, urgent: tickets.urgent, fixesMergeCheck: tickets.fixesMergeCheck, title: tickets.title, agentTitle: agents.title }).from(tickets).leftJoin(agents, eq(agents.id, tickets.assigneeAgentId)).where(inArray(tickets.id, ids))
+      : [];
+    const marks = new Map(rows.map((t) => [t.id, checkPriority({ urgent: t.urgent, fixesMergeCheck: t.fixesMergeCheck, title: t.title, background: isBackgroundLaneTitle(t.agentTitle) })]));
     const prio = (j: CheckJob) => marks.get(j.ticketId) ?? j.priority;
     return queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain))

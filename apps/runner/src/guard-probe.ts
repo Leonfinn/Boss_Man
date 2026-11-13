@@ -44,6 +44,23 @@ export function classify(r: { outcome: string; errno: string | null; ms: number 
   return r.outcome === "error" && r.errno === "EHOSTUNREACH" && r.ms < 1000 ? "on" : "absent";
 }
 
+/**
+ * The launcher starts the runner with no network (BOS-576) and connects it once the guard has loaded, so for a few
+ * seconds after start there is no default route. That is not "absent": wait for the route (up to waitMs), then probe.
+ * A network that never arrives still ends as absent, so this never reports "on" for a guard that doesn't come up.
+ */
+export async function probeGuardWhenReady(opts: { routeFile?: string; port?: number; timeoutMs?: number; waitMs?: number; pollMs?: number } = {}): Promise<GuardReport> {
+  const waitMs = opts.waitMs ?? 60_000;
+  const pollMs = opts.pollMs ?? 1000;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const report = await probeGuard(opts);
+    if (report.reason !== "no default gateway found") return report;
+    if (Date.now() >= deadline) return { ...report, reason: `no default gateway found after ${Math.round(waitMs / 1000)} s` };
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
 export async function probeGuard(opts: { routeFile?: string; port?: number; timeoutMs?: number } = {}): Promise<GuardReport> {
   let gateway: string | null = null;
   try {
