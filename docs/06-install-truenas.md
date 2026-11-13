@@ -905,6 +905,8 @@ grep -E '^BOSSMAN_PORTAL_' .env
 
 `BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI.
 
+**Behind a reverse proxy (optional).** If the portal is reached through a reverse proxy (Nginx Proxy Manager, Cloudflare, Caddy, Traefik), the portal only sees the proxy's address, so every visitor would share one limit (120 reads a minute, 40 writes an hour). `BOSSMAN_PORTAL_TRUSTED_PROXY` fixes that: a comma-separated list of the proxy's **own** addresses or CIDRs, for example `BOSSMAN_PORTAL_TRUSTED_PROXY=203.0.113.10, 10.0.0.0/8`. Only a connection from a listed address may say who the visitor is, by `CF-Connecting-IP` (Cloudflare sets it) or else the right-most address in `X-Forwarded-For` that is not itself listed (most proxies add it). From any other address those headers are ignored. A malformed header or list entry is ignored too (a `/0` entry is refused), and an empty setting (the default) means the connecting address is the visitor, as before. List only the proxy, never a range that includes the internet, and keep the portal port reachable only through the proxy. Worked example for a proxy container on the NAS's Docker network 172.16.0.0/12 in front of `192.168.1.50:3111`: `setenv BOSSMAN_PORTAL_TRUSTED_PROXY 172.16.0.0/12`, then recreate the server as below.
+
 Then recreate the server so it picks up the new port (single-server install), and check it:
 
 ```sh
