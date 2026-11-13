@@ -796,7 +796,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, showPublicly, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO and product managers also triage (a product manager gives a reason, kept in the activity log): link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, publicSummary, publicTitle, showPublicly, portalVisible, keepOffPortal (true only: marking a feature sensitive; clearing that mark is the owner's job in the app), and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column. publicSummary is the feature's public roadmap blurb (up to 2000 plain characters): visitors see it, so use plain words with no internal names or secrets. showPublicly puts the summary on the public roadmap; it needs a publicSummary, so write the summary first. On the feedback portal visitors see the public summary and, as its title, the public title (publicTitle, up to 200 plain characters) or the public summary's first line; portalVisible cannot be turned on for a feature that reads as security work (only the owner can do that in the app).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         effort: z.number().int().min(1).max(5).optional(),
@@ -935,12 +935,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           });
           return text(`Logged as note ${n.id}.`);
         }
-        const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-        if (me?.role !== "ceo") return fail("Only your company's CEO triages feedback. You can log it and read it.");
-        const by = (await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId!)))[0]?.name ?? "the CEO";
+        // The CEO and product managers triage (BOS-1359); every change is logged below.
+        const [me] = scope.agentId ? await db.select({ role: agents.role, template: agents.template, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        if (me?.role !== "ceo" && me?.template !== "product-manager") return fail("Only your company's CEO or a product manager triages feedback. You can log it and read it.");
+        const by = me.name ?? "the CEO";
+        if (me.role !== "ceo" && !input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+        const logTriage = (summary: string) => record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: null, kind: "feedback_triaged", summary: `${by} ${summary}${input.reason ? `: ${input.reason}` : ""}` });
         if (input.action === "link") {
           if (!input.noteId || !input.featureId) return fail("Give noteId and featureId.");
           await feedback.link(input.noteId, { featureId: input.featureId, importance: input.importance ?? "important", highlight: input.highlight ?? null, createdBy: by }, scope.companyId);
+          await logTriage(`linked a feedback note to feature ${input.featureId}`);
           return text("Linked.");
         }
         if (input.action === "create_feature") {
@@ -948,10 +952,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title!.toLowerCase());
           if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; link to it.`);
           const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, createdByAgentId: scope.agentId });
+          await logTriage(`created the feature "${f.title}"`);
           return text(`Created feature ${f.id}.`);
         }
         if (!input.noteId || !input.state) return fail("Give noteId and state.");
         await feedback.updateNote(input.noteId, { state: input.state }, scope.companyId);
+        await logTriage(`marked a feedback note ${input.state}`);
         return text(`Marked ${input.state}.`);
       } catch (err) {
         if (err instanceof FeedbackError) return fail(err.message);
