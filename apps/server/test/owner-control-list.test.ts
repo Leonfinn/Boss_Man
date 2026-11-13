@@ -94,6 +94,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/TicketOutputs.tsx": "Ticket",
   "components/TicketRelated.tsx": "Ticket",
   "components/TicketReviews.tsx": "Ticket",
+  // The Board's filters panel, opened by its Filter button (BOS-1194).
+  "components/FilterPanel.tsx": "Board",
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
@@ -205,6 +207,9 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Merge queue": ["Merges", "Queued checks"],
   // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
   Agents: ["Retire"],
+  // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
+  // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
+  Board: ["Working now"],
 };
 
 function skipString(s: string, i: number): number {
@@ -448,6 +453,8 @@ describe("OWNER_CONTROLS matches the web app", () => {
     expect(tsx.some((f) => /\bconfirm\(/.test(readFileSync(f, "utf8")))).toBe(true);
     const approveLabel = readFileSync(join(WEB, "pages/Ticket.tsx"), "utf8").match(/const approveLabel = (.*);/)?.[1] ?? "";
     expect(shown(approveLabel).sort()).toEqual([...NOT_FROM_BUTTONS.Ticket!].sort());
+    // The Board's "Working now" is a switch in its filter panel, named by the panel's own heading (BOS-1194).
+    expect(readFileSync(join(WEB, "components/FilterPanel.tsx"), "utf8")).toMatch(/role="switch"[^>]*aria-labelledby="filter-working-label/);
     const stale = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).flatMap((s) =>
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );

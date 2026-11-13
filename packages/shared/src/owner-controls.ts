@@ -56,6 +56,9 @@ export const OWNER_CONTROLS = {
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
     "Show all done tasks", "Run now", "Discard draft",
+    // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
+    // and the way out of a column emptied by filters.
+    "Filter", "Clear all", "Clear filters",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
