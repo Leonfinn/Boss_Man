@@ -1296,9 +1296,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   )}
                                 </div>
                                 {/* The note keeps its place under the answers, and names the button that sends it (BOS-1236). */}
-                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
+                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed" || (o === "Edit" && d.options.includes("Add"))) && (
                                   <div className="field">
-                                    <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
+                                    <label htmlFor={`note-${d.id}`}>{d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
                                     <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
                                   </div>
                                 )}

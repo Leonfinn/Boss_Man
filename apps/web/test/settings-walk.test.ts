@@ -36,6 +36,7 @@ function answer(p: string): unknown {
   if (p === "/api/self-deploy") return { enabled: true, status: null, available: null };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
+  if (p === "/api/private-details") return { total: 0, counts: {} };
   if (p === "/api/netguard-allow") return { report: null };
   if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
   if (p === "/api/companies/c1/projects") return [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }];
@@ -97,6 +98,49 @@ async function launch(): Promise<any | null> {
   }
   console.warn("settings-walk: no Chromium could be launched; the browser walk was skipped");
   return null;
+}
+
+/** Wait for a smooth scroll to come to rest, then report where the target is: "ok", "missing", or "off screen
+ *  (top N)". It waits, with a deadline, until the scroll position and the page's drawn height have both held still
+ *  for a moment: a section that loads its own answer ("Loading…" first) grows the page after the click, which can
+ *  leave the jump short (BOS-1319). No fixed sleep; the hold is what tells "still scrolling" from "at rest". */
+async function settleScroll(page: any, target: string, timeout = 10_000, holdMs = 300): Promise<string> {
+  await page
+    .waitForFunction(
+      (hold: number) => {
+        const w = window as unknown as { __s?: { y: number; h: number; since: number } };
+        const y = window.scrollY;
+        const h = document.documentElement.scrollHeight;
+        const t = Date.now();
+        if (!w.__s || w.__s.y !== y || w.__s.h !== h) w.__s = { y, h, since: t };
+        return t - w.__s.since >= hold;
+      },
+      holdMs,
+      { timeout, polling: 100 },
+    )
+    .catch(() => undefined);
+  return sectionPlacement(page, target);
+}
+
+/** Where the target is in the window: "ok" when part of it shows, else "missing" or "off screen (top N)". Visible
+ *  means the window's real height (the visual viewport when the browser draws one, as on a phone), not
+ *  window.innerHeight. */
+function sectionPlacement(page: any, target: string): Promise<string> {
+  return page.evaluate((t: string) => {
+    const el = document.getElementById(t);
+    if (!el) return "missing";
+    const r = el.getBoundingClientRect();
+    const vv = window.visualViewport;
+    const seenTop = vv?.offsetTop ?? 0;
+    const seenBottom = seenTop + (vv?.height ?? window.innerHeight);
+    return Math.min(r.bottom, seenBottom) > Math.max(r.top, seenTop) ? "ok" : `off screen (top ${Math.round(r.top)})`;
+  }, target);
+}
+
+/** Whether there is any page left below the window: when there is none, a click cannot move a section up any more,
+ *  so the walk stops retrying and the assertion says where the section is (BOS-1336). */
+function canScrollFurther(page: any): Promise<boolean> {
+  return page.evaluate(() => window.scrollY < document.documentElement.scrollHeight - window.innerHeight - 2);
 }
 
 /** Each page and the section headings the old → new map puts on it (headings as the app shows them). */
@@ -169,27 +213,36 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
           const hrefs: string[] = await page.locator(".set-jump a").evaluateAll((as: any[]) => as.map((a) => a.getAttribute("href").slice(1)));
           expect(hrefs.length, `${vp.name}/${id} has jump links`).toBeGreaterThan(3);
           for (const target of hrefs) {
-            await page.locator(`.set-jump a[href="#${target}"]`).click();
-            // Wait for the smooth scroll to bring the section into view (not a fixed sleep); a miss falls through to the assertion below, which reports it.
-            await page
-              .waitForFunction(
-                (t: string) => {
-                  const el = document.getElementById(t);
-                  if (!el) return false;
-                  const r = el.getBoundingClientRect();
-                  return r.bottom > 0 && r.top < window.innerHeight;
-                },
-                target,
-                { timeout: 10_000 },
-              )
-              .catch(() => undefined);
+            // Bring the section into view and confirm it settles there (BOS-1319/BOS-1336). A single click + "is it
+            // in view once" is not enough: the page can still be growing (a section above shows "Loading…" until
+            // its own answer arrives), so the smooth scroll may be aimed at a shorter layout and the section drifts
+            // off screen afterwards. Wait for the scroll and page height to settle, and if the section is not in
+            // view after that, click its jump link again (what a reader would do) — retrying until a deadline.
+            // The same wait runs for every section on every page at every size, so no section name has its own
+            // treatment and none can flake on its own.
+            const link = page.locator(`.set-jump a[href="#${target}"]`);
+            const deadline = Date.now() + 10_000;
+            let inView = "missing";
+            for (;;) {
+              await link.click();
+              await page
+                .waitForFunction(
+                  (t: string) => {
+                    const el = document.getElementById(t);
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.bottom > 0 && r.top < window.innerHeight;
+                  },
+                  target,
+                  { timeout: 5_000, polling: 50 },
+                )
+                .catch(() => undefined);
+              inView = await settleScroll(page, target);
+              // Clicking again cannot bring a section any higher once the browser is at the end of the page, so a
+              // miss there is answered by the assertion below (with where the section actually is), not a retry.
+              if (inView === "ok" || Date.now() >= deadline || !(await canScrollFurther(page))) break;
+            }
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
-            const inView = await page.evaluate((t: string) => {
-              const el = document.getElementById(t);
-              if (!el) return "missing";
-              const r = el.getBoundingClientRect();
-              return r.bottom > 0 && r.top < window.innerHeight ? "ok" : `off screen (top ${Math.round(r.top)})`;
-            }, target);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
             // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
             if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {

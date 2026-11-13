@@ -260,7 +260,8 @@ describe("merge queue attention layout (BOS-1239)", () => {
     render(<MergeQueue companies={[company]} companyId="c1" />);
     const merges = await screen.findByRole("tab", { name: /Merges/ });
     await waitFor(() => expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2")).toBeTruthy());
-    expect(within(merges).getByText("3").className).toContain("warn");
+    // The badge counts every merge on the tab: 3 waiting + 1 running (BOS-1287).
+    expect(within(merges).getByText("4").className).toContain("warn");
     expect(within(screen.getByRole("tab", { name: /Queued checks/ })).getByText("2").className).toContain("warn");
   });
 

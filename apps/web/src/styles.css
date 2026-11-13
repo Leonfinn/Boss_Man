@@ -144,11 +144,14 @@ p { margin: 0; }
 
 /* ---------- Cards and states ---------- */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
-.tag { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; background: var(--grey-soft); color: var(--grey-ink); }
-.tag.red { background: var(--red-soft); color: var(--red-ink); }
-.tag.amber { background: var(--amber-soft); color: var(--amber-ink); }
-.tag.blue { background: var(--accent-soft); color: var(--accent-ink); }
-.tag.green { background: var(--green-soft); color: var(--green-ink); }
+/* One shared status tag (BOS-1124, Q5): sentence case, 12px body font, a coloured dot plus the word.
+   Amber waits on you, red failed or blocked, green done; blue is kept for links and the main action,
+   so the blue and purple tones read as neutral grey tags with a grey dot. The code font stays on IDs and figures. */
+.tag, .type { --dot: var(--grey-ink); display: inline-flex; align-items: center; gap: 6px; font-family: var(--sans); font-size: 12px; font-weight: 500; line-height: 1.4; letter-spacing: 0; text-transform: none; padding: 2px 8px; border-radius: 6px; background: var(--grey-soft); color: var(--grey-ink); }
+.tag::before, .type::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dot); }
+.tag.red { --dot: var(--red-ink); background: var(--red-soft); color: var(--red-ink); }
+.tag.amber { --dot: var(--amber-ink); background: var(--amber-soft); color: var(--amber-ink); }
+.tag.green { --dot: var(--green-ink); background: var(--green-soft); color: var(--green-ink); }
 .state { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 40px 16px; }
 .state img { max-height: 240px; max-width: 100%; }
 .state h2 { font-size: 20px; font-weight: 600; }
@@ -207,8 +210,9 @@ p { margin: 0; }
 .decision .actions.stacked { flex-direction: column; flex-wrap: nowrap; gap: 10px; align-items: stretch; }
 .decision .actions.stacked .answer { display: grid; grid-template-columns: minmax(150px, max-content) minmax(0, 1fr); gap: 4px 14px; align-items: center; }
 .decision .actions.stacked .answer .effect { margin: 0; font-size: 14px; color: var(--muted); }
-.decision .rec-tag { text-transform: uppercase; font-size: 10px; margin-left: 6px; }
-.decision .btn.primary .rec-tag { background: rgba(255, 255, 255, 0.22); color: #fff; }
+.decision .rec-tag { margin-left: 6px; }
+/* On the filled button a darker chip keeps white text above 4.5:1 (a lighter one dropped it to about 3.9). */
+.decision .btn.primary .rec-tag { background: rgba(0, 0, 0, 0.28); color: #fff; }
 /* A question's own options: full-width rows, left-aligned, long text wrapping inside. */
 .decision .actions.wide { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
 .decision .actions.wide .btn { width: 100%; text-align: left; height: auto; white-space: normal; overflow-wrap: anywhere; }
@@ -291,9 +295,8 @@ p { margin: 0; }
 .ticket .row .who { display: inline-flex; align-items: center; gap: 6px; }
 .ticket .note { font-size: 12px; color: var(--muted); }
 .ticket .note a { color: var(--type-ink); }
-.type { align-self: flex-start; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; background: var(--type-soft); color: var(--type-ink); }
-.type.sub { padding: 0 6px; border: 1px solid var(--type-line); background: none; }
-.type.feature { background: var(--purple-soft); color: var(--purple-ink); }
+.type { align-self: flex-start; }
+.type.sub { background: none; border: 1px solid var(--line-strong); }
 .fchip { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12px; padding: 2px 8px 2px 3px; border-radius: 999px; background: var(--purple-soft); color: var(--purple-ink); }
 /* One line, cut with an ellipsis; the full title is the chip's tooltip. */
 .fchip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -629,11 +632,10 @@ table.features tr.group th { padding-top: 16px; font-family: var(--sans); font-s
 .feature-fold { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
 .feature-fold:hover { text-decoration: underline; }
 .feature-work { white-space: nowrap; }
-/* What visitors read as a feature's portal title, under its name (BOS-997). The title line is cut at two lines and the
-   "from the summary" note always shows under it, so a long summary can't stretch the table and the note is never lost. */
-.feature-visitors { font-size: 12px; white-space: normal; }
-.feature-visitors small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; }
-.feature-visitors small.muted { font-size: 11px; }
+/* What visitors read as a feature's portal title, under its name (BOS-997). One line, cut with an ellipsis; the
+   whole text and where it comes from are in the tooltip (BOS-1257). */
+.feature-visitors { display: block; font-size: 12px; white-space: normal; }
+.feature-visitors small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .feature-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input.search { flex: 1; min-height: 40px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--field); color: var(--ink); }
 
@@ -798,8 +800,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 
 /* Dashboard (R74) */
 .section-label { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; font-weight: 500; }
-.tag.purple { background: var(--purple-soft); color: var(--purple-ink); }
-.tag.grey { background: var(--ground); color: var(--muted); }
+.tag.grey { --dot: var(--muted); background: var(--ground); color: var(--muted); }
 .dash-agents { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .dash-agent { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; min-width: 0; }
 .dash-agent p { margin: 0; }
@@ -849,6 +850,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .dash-list li > a { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
 .dash-list li > span.muted { white-space: nowrap; font-size: 13px; }
 .dash-list time { white-space: nowrap; font-size: 12px; }
+/* Shared feed item (BOS-1124, Q6): small line above, headline cut cleanly under it, full text on hover. */
+.feed-item { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.feed-small { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.feed-title { display: block; min-width: 0; font-size: 14px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-title.two { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.dash-list li.feed-li > .feed-item { flex: 1; }
 @media (max-width: 760px) { .dash-lists { grid-template-columns: minmax(0, 1fr); } .dash-list li > span.muted { display: none; } }
 
 /* Company switcher and grouped navigation (R72, R75) */
@@ -1010,8 +1017,49 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 /* ---------- Agents (R62) ---------- */
 .agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .agent-card { display: flex; flex-direction: column; gap: 12px; }
-.agent-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
-.agent-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* Row = avatar | head (name, job, pill) | buttons, then the doing and stats lines (BOS-1256). */
+.agent-line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "av head act" "av body body"; column-gap: 12px; row-gap: 4px; align-items: center; }
+.agent-line > .avatar { grid-area: av; align-self: start; }
+.agent-head { grid-area: head; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.agent-actions { grid-area: act; display: flex; gap: 8px; align-items: center; }
+.agent-body { grid-area: body; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.agent-name { all: unset; box-sizing: border-box; font-size: 16px; font-weight: 700; cursor: pointer; padding: 4px 0; min-height: 24px; }
+.agent-name:hover { text-decoration: underline; }
+.agent-name:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 4px; }
+.agent-star { color: var(--amber-ink); flex: none; }
+.agent-job { font-size: 14px; }
+.agent-doing { font-size: 14px; }
+.agent-stats { font-size: 13px; }
+.over-limit { color: var(--red-ink); font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--grey-soft); color: var(--grey-ink); }
+.pill.green { background: var(--green-soft); color: var(--green-ink); }
+.pill.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.pill-mark { display: inline-block; flex: none; width: 8px; height: 8px; }
+/* Paused: two bars (❚❚) drawn in CSS, so it never depends on a font having the glyph. */
+.pill.paused .pill-mark { height: 10px; background: linear-gradient(90deg, currentColor 0 3px, transparent 3px 5px, currentColor 5px 8px); }
+.pill.working .pill-mark, .pill.idle .pill-mark, .pill.retired .pill-mark { border-radius: 50%; }
+.pill.working .pill-mark { background: currentColor; }
+.pill.idle .pill-mark, .pill.retired .pill-mark { border: 2px solid currentColor; box-sizing: border-box; }
+.row-menu { position: relative; display: inline-flex; }
+.row-menu-btn { padding-left: 10px; padding-right: 10px; }
+.row-menu-dim { display: none; }
+.row-menu-head { display: none; }
+.row-menu-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; min-width: 260px; background: var(--card); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); padding: 4px; }
+.row-menu-item { all: unset; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 1px; width: 100%; min-height: 40px; padding: 4px 12px; border-radius: 6px; cursor: pointer; color: var(--ink); font-size: 14px; }
+.row-menu-item small { font-size: 12px; color: var(--muted); }
+.row-menu-item:hover, .row-menu-item:focus-visible { background: var(--ground); }
+.row-menu-item:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+.row-menu-item.danger { color: var(--red-ink); }
+.row-menu-sep { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+@media (max-width: 640px) {
+  .agent-line { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "av head act" "body body body"; }
+  .agent-line > .avatar { align-self: center; }
+  .agent-actions .btn { min-width: 44px; }
+  .row-menu-dim { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.55); }
+  .row-menu-list { position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 41; min-width: 0; border-radius: 14px 14px 0 0; padding: 8px 8px calc(12px + env(safe-area-inset-bottom)); }
+  .row-menu-head { display: block; padding: 8px 12px 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .row-menu-item { min-height: 48px; }
+}
 .agent-edit { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
 .template-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
 .template { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 14px; }
@@ -1191,3 +1239,54 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
+
+/* ---------- Features table: values read as text, cards on a phone (BOS-1257) ---------- */
+.cell { position: relative; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 32px; padding: 2px 6px; border: 1px solid transparent; border-radius: 6px; }
+.cell-text { color: var(--ink); font-size: 13px; }
+.cell.empty .cell-text { color: var(--muted); }
+.cell-caret { font-size: 10px; color: var(--muted); opacity: 0; }
+.cell-select { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; margin: 0; opacity: 0; cursor: pointer; font-size: 16px; }
+.cell:hover, .cell:focus-within { border-color: var(--line-strong); background: var(--field); }
+.cell:hover .cell-caret, .cell:focus-within .cell-caret { opacity: 1; }
+.cell:has(.cell-select:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+table.features .num, table.features th.num { text-align: right; }
+table.features .num .cell { justify-content: flex-end; }
+.feature-priority { font-size: 15px; font-weight: 700; color: var(--head); }
+.feature-blocked { display: block; font-size: 12px; color: var(--amber-ink); white-space: nowrap; }
+.fcards-area { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.fcard-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.fcard { display: flex; flex-direction: column; gap: 10px; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+.fcard.sub { margin-left: 16px; border-left: 3px solid var(--line-strong); }
+.fcard-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.fcard-title { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; overflow-wrap: anywhere; }
+.fcard-title a { font-weight: 600; }
+.fcard-priority { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+.fcard-priority b { font-size: 24px; color: var(--head); line-height: 1.1; }
+.fcard-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.fcard-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fcard-grid .cell { justify-content: flex-start; min-height: 44px; border-color: var(--line); }
+.fcard-grid .cell-text { flex: 1; }
+.fcard-grid .mono { display: flex; align-items: center; min-height: 44px; padding: 2px 6px; }
+.fcard-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.fcard-foot .portal-tick-word { min-height: 44px; }
+.fcard-foot .feature-fold { min-height: 44px; }
+
+/* Features page: vertical space (BOS-1257). Compact rows, the Feature column takes the spare width, headings at most
+   two lines, and one bar for New feature, sort, toggles and links. Kept apart from the .cell/.fcard block above. */
+.features-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 8px 12px; font-size: 14px; }
+.features-add { display: flex; flex: 1 1 420px; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.features-add .field { margin: 0; }
+.features-toolbar-tools { display: contents; }
+table.features { width: 100%; }
+table.features td, table.features th { padding: 4px 8px; white-space: nowrap; }
+/* max-width: 0 stops the one-line "Visitors will see" text from setting the column's minimum width */
+table.features td.feature-name, table.features th.feature-name { width: 99%; min-width: 200px; max-width: 0; white-space: normal; }
+table.features td.feature-name a { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+table.features th { vertical-align: bottom; }
+.th-clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 84px; margin-left: auto; white-space: normal; line-height: 1.25; text-align: right; }
+table.features .cell { min-height: 26px; }
+.fcard-top > .fcard-title { flex: 1 1 0; }
+.fcard-title > * { max-width: 100%; }
+@media (max-width: 640px) {
+  .features-add { flex-basis: 100%; }
+}

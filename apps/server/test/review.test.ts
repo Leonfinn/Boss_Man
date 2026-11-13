@@ -838,6 +838,22 @@ describe("server-owned check queue (BOS-316)", () => {
     expect((await c.db.select().from(wakes))[0]!.note).toMatch(/aren't committed: draft\.ts\. Commit your work/);
   });
 
+  it("never asks the author to commit main's files showing in the copy: the CEO hears, the ticket stays in review (BOS-1231)", async () => {
+    const c = (ctx = await setup({ answers: { merge: { status: "uncommitted", files: ["packages/shared/test/plan.test.ts"], foreign: ["apps/server/src/main.ts", "apps/launcher/src/launcher.ts"] } } }));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
+    const sent = await c.db.select().from(wakes);
+    expect(sent.filter((w) => w.agentId === c.worker.id)).toEqual([]);
+    expect(sent.filter((w) => w.agentId === c.ceo.id)).toEqual([expect.objectContaining({ reason: "copy not clean", ticketId: c.ticket.id })]);
+    expect(sent.find((w) => w.agentId === c.ceo.id)!.note).toContain("apps/server/src/main.ts");
+    const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(t.pullRequestNote).toContain("never touched");
+    // The same reason again (the sweep's retry) doesn't wake the CEO a second time.
+    await c.db.delete(wakes);
+    await approve(c);
+    expect(await c.db.select().from(wakes)).toEqual([]);
+  });
+
   it("tells the agent to change approach when the same check failure comes back a third time (R50)", async () => {
     const c = (ctx = await setup({ answers: { verify: { ok: false, exitCode: 1, timedOut: false, output: "FAIL src/limit.test.ts (12 ms)\n  expected 1000 got 100", ms: 12 } } }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
@@ -48,7 +49,10 @@ describe("check queue", () => {
     const pre = (await s.req({ tree: "a", kind: "pre_review", scope: "quick" })).job;
     const m1 = (await s.req({ tree: "b" })).job;
     const m2 = (await s.req({ tree: "c" })).job;
-    const urgent = (await s.req({ tree: "d", priority: 0 })).job;
+    // BOS-1384: urgency is read from the ticket when the queue serves, not from the priority stored at enqueue.
+    const urgentTicket = await s.ticket();
+    await (await shared).db.update(tickets).set({ urgent: true }).where(eq(tickets.id, urgentTicket));
+    const urgent = (await s.req({ tree: "d", ticketId: urgentTicket })).job;
     const first = await s.q.claimNext(null);
     expect(first.map((j) => j.id)).toEqual([urgent.id]);
     expect(await s.q.claimNext(null)).toEqual([]); // the one slot is taken

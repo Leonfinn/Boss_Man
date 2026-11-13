@@ -69,6 +69,9 @@ export type WaitingRow = {
   carried?: CarriedHold[];
   /** The card that holds the merge (BOS-1078), so the screen names it and links straight to it. */
   card?: HoldingCardView | null;
+  /** BOS-1384: place among the queued checks (1 is next) and why it is ahead ("urgent", "moved to front by …"); null when not queued. */
+  place?: number | null;
+  why?: string | null;
   /** When the owner's sign-off for this round was given, if it was: a merge held by another card says so. */
   signedOffAt?: string | null;
 };
@@ -239,7 +242,11 @@ export function mergeQueueService(
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
+    /** This company's running check jobs, oldest start first: what really holds a slot (server mode). */
+    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string }>>;
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
+    /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
+    places?: (companyId: string) => Promise<Map<string, { place: number; why: string | null }>>;
     now?: () => Date;
   },
 ) {
@@ -377,8 +384,20 @@ export function mergeQueueService(
       const prefix = company?.prefix ?? null;
 
       // Running now: this process's merges (the same markers the ticket page shows), with their phase.
-      const live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
       const limit = await deps.limit();
+      // In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
+      // after a restart is only queued until the check queue starts it. Slots are numbered by start order among
+      // the running checks, so each is unique and never past the limit.
+      const slotOf = new Map<string, number>();
+      const restarted = new Set<string>();
+      const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
+      if (deps.runningChecks && queueMode?.mode === "server") {
+        const held = await deps.runningChecks(companyId);
+        held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) slotOf.set(j.ticketId, i + 1); });
+        for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+        live = live.filter((l) => slotOf.has(l.ticketId));
+      }
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
         ? new Map((await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, liveIds))).map((r) => [r.id, r]))
@@ -396,7 +415,7 @@ export function mergeQueueService(
           startedBy: l.startedBy,
           minutes: mins(elapsed),
           what: "merge_check",
-          slot: (i % Math.max(1, limit)) + 1,
+          slot: slotOf.get(l.ticketId) ?? (i % Math.max(1, limit)) + 1,
           overLimit: elapsed > RUNNING_LIMIT_MS,
         };
       });
@@ -492,17 +511,27 @@ export function mergeQueueService(
           waiting.push({ ...base, state: "check_failed_retrying", label: `check failed: retrying (${failingStep(check!.detail) ?? "no output recorded"})`, stuck: true, next: "Boss Man sends it back to the agent with the failure.", actor: "agent", decisionId: null });
           continue;
         }
+        const why = restarted.has(r.id) ? "; the server restarted during this merge, so it is starting again" : "";
         if (held) {
-          waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for the server update", stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the server update${why}`, stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
           continue;
         }
         if (queue?.mode === "server" && queue.waiting > 0) {
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;
         }
-        waiting.push({ ...base, state: "waiting_for_slot", label: "waiting for a check slot", stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+        waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
-      waiting.sort((a, b) => Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
+      // BOS-1384: the order the check queue will serve them in (a fix for main, a move to front, urgent, then oldest), with why.
+      const places = deps.places ? await deps.places(companyId).catch(() => null) : null;
+      for (const w of waiting) {
+        const p = places?.get(w.ticketId);
+        if (p) {
+          w.place = p.place;
+          w.why = p.why;
+        }
+      }
+      waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
       return {
         companyId,

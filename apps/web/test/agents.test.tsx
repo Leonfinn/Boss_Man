@@ -81,7 +81,7 @@ describe("instructions from the template", () => {
         }),
       );
       render(<Agents company={company} onChanged={() => {}} />);
-      fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+      fireEvent.click(await screen.findByRole("button", { name: agent.name }));
       fireEvent.click(await screen.findByRole("button", { name: label }));
       expect((screen.getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe(text);
       cleanup();
@@ -102,7 +102,7 @@ describe("reviews line (BOS-198)", () => {
       }),
     );
     render(<Agents company={company} onChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Ada" }));
     expect(await screen.findByText(/Code \(Low\+\), Security \(High\+\)/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Change in Settings › Reviews" }).getAttribute("href")).toBe("#/settings/c1/reviews");
     // The old setting is gone: nothing on the agent page chooses reviews.
