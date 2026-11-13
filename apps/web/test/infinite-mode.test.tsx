@@ -47,7 +47,7 @@ describe("model picker infinite group (BOS-279)", () => {
       vi.fn(async (url: string) => json(url.includes("agent-templates") ? { templates: [] } : url.includes("/models") ? models : url.includes("funding-sources") ? [{ id: "fs1", name: "Synthetic Big", kind: "subscription", provider: "synthetic" }] : url.includes("/history") ? [] : url.includes("/agents") ? [agent] : [])),
     );
     render(<Agents company={company} onChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Backend" }));
     // The default model picker groups it under its own label, so it's never mistaken for a normal model.
     const option = await screen.findByRole("option", { name: "Infinite mode — free, slow (Synthetic Big plan)" });
     expect((option as HTMLOptionElement).value).toBe(INF);

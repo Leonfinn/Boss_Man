@@ -560,7 +560,7 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
         {(t.risk === "high" || t.risk === "critical") && (
           <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
-            {t.risk} risk
+            {t.risk === "critical" ? "Critical" : "High"} risk
           </span>
         )}
         {t.size && (

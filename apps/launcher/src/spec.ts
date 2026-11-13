@@ -4,8 +4,6 @@
 import path from "node:path";
 
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
-/** The runner image. The launcher never pulls: scripts/update-runner.sh builds and tags it. */
-export const IMAGE = "boss-man-runner:current";
 export const LABEL = "boss-man.launcher";
 export const COMPANY_LABEL = "boss-man.company";
 /** The network guard (BOS-324): a sidecar in each runner's network namespace that blocks private networks. */
@@ -62,6 +60,10 @@ export type LauncherConfig = {
   pnpmStoreDir?: string;
   /** How long to wait for a new guard to load its rules (default 20 s). */
   guardReadyMs?: number;
+  /** DR-007: how long a paused runner waits for its guard before it's reported frozen (default 2 min). For tests. */
+  guardFreezeAfterMs?: number;
+  /** The clock, for tests. */
+  now?: () => number;
 };
 
 export type GuardMode = "auto" | "enforce" | "off";
@@ -107,6 +109,8 @@ const prefix = (stack?: string) => (stack ? `boss-man-${stack}` : "boss-man");
 export const containerName = (slug: string, stack?: string) => `${prefix(stack)}-runner-${slug}`;
 export const netguardName = (slug: string, stack?: string) => `${prefix(stack)}-netguard-${slug}`;
 export const runnerImage = (stack?: string) => `${prefix(stack)}-runner:current`;
+/** The image the runner ran before the last update (scripts/update-runner.sh keeps it): what a failed swap goes back to (BOS-382). */
+export const previousRunnerImage = (stack?: string) => `${prefix(stack)}-runner:previous`;
 export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current`;
 /** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
 export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
@@ -163,13 +167,13 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image?: string) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = companyDir(cfg, slug);
   return {
-    Image: runnerImage(cfg.stack),
+    Image: image ?? runnerImage(cfg.stack),
     User: "1000:1000",
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,

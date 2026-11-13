@@ -425,7 +425,9 @@ export function mergeQueueService(
         // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
         const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
         if (hold) {
-          waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
+          // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
+          if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
+          else waiting.push({ ...base, state: "held", label: `held by ${hold.reviewer ?? "a reviewer"}: ${hold.label}`, stuck: false, next: hold.ready ? "What it waited for is done; the reviewer re-checks and releases it." : "Boss Man wakes the reviewer once what it waits on has closed.", actor: "agent", decisionId: null });
           continue;
         }
         const view = (kind: HoldingCardView["kind"], staleHintText: string | null = null): HoldingCardView => ({ id: card!.id, kind, question: shortQuestion(card!.question), raisedBy: card!.raisedBy, raisedAt: card!.raisedAt.toISOString(), staleHint: staleHintText });
