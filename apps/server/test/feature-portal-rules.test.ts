@@ -115,6 +115,8 @@ describe("features land on the roadmap and the portal (BOS-1358)", () => {
     expect(card!.question).toContain("Internal pilot");
     expect((await ctx.answer(card!.id, PORTAL_KEEP_OFF)).statusCode).toBe(200);
     expect((await ctx.req("GET", `/api/features/${held.id}`)).json().feature).toMatchObject({ portalVisible: false, keepOffPortal: true });
+    // It is still held off, but the owner was already asked: a later pass asks nothing more.
+    expect((await ctx.sweep()).portalHolds.raised).toBe(0);
   });
 
   it("recommends Publish when the feature already has a public summary", async () => {

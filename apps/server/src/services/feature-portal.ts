@@ -110,13 +110,15 @@ export async function raiseHeldPortalCards(db: Db, at: Date): Promise<{ raised: 
 
 /** Applies the owner's answer to the feature: publish puts it on the portal; keep off marks it keep-off by hand. */
 export async function applyPortalAnswer(db: Db, featureId: string, answer: string, at: Date): Promise<{ title: string; published: boolean } | null> {
-  const [f] = await db.select({ id: features.id, title: features.title, publicSummary: features.publicSummary }).from(features).where(eq(features.id, featureId));
+  const [f] = await db.select({ id: features.id, title: features.title, publicSummary: features.publicSummary, keepOffReason: features.keepOffReason }).from(features).where(eq(features.id, featureId));
   if (!f) return null;
   if (answer === PORTAL_PUBLISH) {
     // Publish clears the hand-kept mark and ticks it on; without a summary it stays hidden until one is written.
     await db.update(features).set({ portalVisible: true, keepOffPortal: false, keepOffReason: null, updatedAt: at }).where(eq(features.id, featureId));
     return { title: f.title, published: !!f.publicSummary?.trim() };
   }
-  await db.update(features).set({ keepOffPortal: true, portalVisible: false, keepOffReason: "kept off by the owner", updatedAt: at }).where(eq(features.id, featureId));
+  // Keep off: mark it keep-off by hand, keeping any reason already given.
+  const reason = f.keepOffReason?.trim() || "kept off by the owner";
+  await db.update(features).set({ keepOffPortal: true, portalVisible: false, keepOffReason: reason, updatedAt: at }).where(eq(features.id, featureId));
   return { title: f.title, published: false };
 }
