@@ -1743,9 +1743,12 @@ export function reviewService(
       // maps it back to the project's own command for messages and check results.
       const fullNext = needsDeep && !!deepVerifyCommand && !!verifyCommand && deepVerifyCommand !== verifyCommand;
       const project = verifyCommand && fullNext ? `export ${FULL_CHECK_NEXT}=1; ${verifyCommand}` : verifyCommand;
-      const named = (command: string) => (command === project && verifyCommand ? verifyCommand : command);
+      // BOS-1365: the server queue runs both checks as ONE job (project check, then deep check), so no merge lands between them.
+      const combinedCommand = fullNext ? `${project} && ${deepVerifyCommand}` : null;
+      const combinedName = fullNext ? `${verifyCommand} && ${deepVerifyCommand}` : null;
+      const named = (command: string) => (combinedCommand && command === combinedCommand ? combinedName! : command === project && verifyCommand ? verifyCommand : command);
       const checks = opts?.skipChecks ? [] : [project, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
-      const kindOf = (command: string) => (named(command) === deepVerifyCommand && named(command) !== verifyCommand ? "deep_verify" : "verify");
+      const kindOf = (command: string) => (command === combinedCommand ? "deep_verify" : named(command) === deepVerifyCommand && named(command) !== verifyCommand ? "deep_verify" : "verify");
       // A merge check through a slot, timed for the merge-line record (BOS-769): queued, started when `slot` grants it,
       // ended with `verdict` (or null when it threw, as when the runner went away mid-check).
       const timedCheck = async <T>(check: string, way: CheckWay, slot: (w: () => Promise<T>) => Promise<T>, verdict: (r: T) => boolean | null, work: () => Promise<T>): Promise<T> => {
@@ -1852,10 +1855,10 @@ export function reviewService(
           const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
           return row?.value !== false && row?.value !== "false";
         };
-        // BOS-1365: one job per merge. When the deep check runs, it alone is queued: two jobs on one tree each waited for a slot
-        // and a quick merge landed in between. check-all.sh runs the migration lint and script tests the project check
-        // would have run (the merged-clean step is moot: the tree is already the prepared merge).
-        const queuedChecks = needsDeep && deepVerifyCommand ? [deepVerifyCommand] : checks;
+        // BOS-1365: one job per merge. Two jobs on one tree each waited for a slot and a quick merge landed in between. When the
+        // deep check differs from the project check, one job runs both (project check first, with FULL_CHECK_NEXT so it skips what
+        // the deep check repeats). The deep check is "also", never instead. skipChecks leaves `checks` empty, so nothing is queued.
+        const queuedChecks = combinedCommand && checks.length > 1 ? [combinedCommand] : [...new Set(checks)];
         for (let round = 0; round < 3; round++) {
           let prep = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message, phase: "prepare" }), MERGE_WAIT_MS);
           if (prep.status !== "prepared") return prep;

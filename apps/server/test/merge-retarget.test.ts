@@ -120,13 +120,14 @@ describe("a waiting merge takes the new main (BOS-1344)", () => {
     await res;
   });
 
-  it("queues one job for a high-risk merge (the deep check alone, BOS-1365) and moves it to the new main", async () => {
+  it("queues one job for a high-risk merge that runs the project check and the deep check (BOS-1365) and moves it to the new main", async () => {
     const c = await setup();
     await c.db.update(projects).set({ deepVerifyCommand: "pnpm test:e2e" });
     await c.db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, c.ticket.id));
     const res = approveAndWait(c.req, c.ticket.id);
     const job = await c.jobOf();
-    expect(job.command).toBe("pnpm test:e2e");
+    expect(job.command).toContain("pnpm test && pnpm test:e2e");
+    expect(job.command).toContain("BOSSMAN_FULL_CHECK_NEXT=1");
     c.state.mainMoved = true;
     const moved = await c.waitFor(async () => (await c.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]!.tree === NEW.tree);
     expect(moved).toBe(true);
