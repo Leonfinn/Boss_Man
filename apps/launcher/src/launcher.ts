@@ -410,6 +410,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
             console.error(JSON.stringify({ at: new Date(now()).toISOString(), msg: `network guard ${state}`, slug: r.slug, reason, runnerKept: true }));
           };
           if (!sameStart && !paused) {
+            // Off the network first: if this host refuses both pause and stop, the runner must not sit with its network and no rules.
+            await holdNetwork(c.Id).catch(() => undefined);
             try {
               await docker.pause(c.Id);
             } catch (pauseErr) {
