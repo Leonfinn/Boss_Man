@@ -309,6 +309,11 @@ type RunState = {
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
   /** Owner or CEO messages waiting to be sent as the next prompt (R37). */
   queued: string[];
+  /**
+   * Hands a message to the turn that is running, without a cancel (ACP `_session/steering`, BOS-1016).
+   * Set only when the agent advertises steering and its session is open. "queue" means it wasn't injected.
+   */
+  steer?: (text: string) => Promise<"injected" | "queue">;
 };
 
 /** Stops an adapter and everything it started; escalates to SIGKILL if the group lingers. */
@@ -718,6 +723,23 @@ export class SessionManager {
         const run = this.runs.get(command.runId);
         if (!run) {
           this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${command.runId} arrived after it ended.` });
+          return;
+        }
+        const steer = run.steer;
+        if (command.steer && steer && !command.interrupt) {
+          // Not awaited, so handle stays synchronous. Queue only when the steer didn't inject, so the
+          // message is never delivered twice; a run that ended meanwhile gets nothing.
+          const runId = command.runId;
+          const text = command.text;
+          void steer(text).then((outcome) => {
+            if (outcome === "injected") {
+              this.opts.emit({ type: "run.update", runId, update: { kind: "message_delivered", text: text.slice(0, 4000), fullLength: text.length, steered: true } });
+            } else if (this.runs.get(runId) === run) {
+              run.queued.push(text);
+            } else {
+              this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${runId} arrived after it ended.` });
+            }
+          });
           return;
         }
         run.queued.push(command.text);
@@ -1291,6 +1313,20 @@ export class SessionManager {
       if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
+      // Steering (BOS-1016): claude-agent-acp and codex-acp advertise it; OpenCode doesn't, so its messages wait for the turn to end.
+      // promptRequired makes the adapter hand an idle session's message back to us instead of starting a detached turn,
+      // so our own turn loop (checkpoints, token counts) still runs it.
+      if ((init as { _meta?: { steering?: { supported?: unknown } } })._meta?.steering?.supported === true) {
+        state.steer = async (text) => {
+          try {
+            const r = (await agent.request("_session/steering", { sessionId: session.sessionId, prompt: [{ type: "text", text }], _meta: { steering: { idleBehavior: "promptRequired" } } } as never)) as { outcome?: string } | null;
+            return r?.outcome === "injected" ? "injected" : "queue";
+          } catch (err) {
+            this.opts.log?.(`run ${cmd.runId}: steering refused (${String((err as Error)?.message ?? err).slice(0, 300)}); the message waits for the turn to end`);
+            return "queue";
+          }
+        };
+      }
 
       let model = cmd.model;
       // Setting an option answers with the session's options again; the thinking levels on offer depend on the model.
