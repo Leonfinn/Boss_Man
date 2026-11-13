@@ -23,6 +23,20 @@ describe("merge train: seats and order", () => {
     expect(tr.list().map((m) => m.ticketId)).toEqual(["b", "u"]);
   });
 
+  it("seats a head-only ticket (a clash with a member ahead) only once the train ahead has drained, holding those behind it", () => {
+    const tr = train(3);
+    tr.join("a", { priority: 1, place: 1 });
+    expect(tr.seated("a")).toBe(true);
+    tr.join("h", { priority: 1, place: 2, headOnly: true });
+    tr.join("z", { priority: 1, place: 3 });
+    expect(tr.seated("h")).toBe(false);
+    expect(tr.seated("z")).toBe(false);
+    tr.landed("a");
+    expect(tr.seated("h")).toBe(true);
+    expect(tr.isHead("h")).toBe(true);
+    expect(tr.seated("z")).toBe(true);
+  });
+
   it("joining twice keeps the first place", () => {
     const tr = train(1);
     tr.join("a", { priority: 1, place: 10 });

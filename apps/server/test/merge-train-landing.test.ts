@@ -43,6 +43,8 @@ function fakeGit() {
     main: root,
     pushes: [] as Array<{ ticket: string; commit: string; parent: string | null }>,
     seen: [] as Array<{ phase: string; ticket: string; base?: string; expectBase?: string }>,
+    /** Pairs of tickets whose changes conflict. */
+    clashes: [] as Array<[string, string]>,
     treeOf: (has: string[]) => `tree:${[...has].sort().join(",")}`,
     has: (c: string) => commits.get(c)?.has ?? [],
     onMain(c: string): boolean {
@@ -52,6 +54,7 @@ function fakeGit() {
     prepare(ticket: string, base?: string) {
       const on = base ?? g.main;
       if (!commits.has(on) || !g.onMain(on)) return { status: "main_moved" };
+      if (g.clashes.some(([x, y]) => (x === ticket && g.has(on).includes(y)) || (y === ticket && g.has(on).includes(x)))) return { status: "conflicts", files: ["src/a.ts"] };
       const has = [...new Set([...g.has(on), ticket])];
       const commit = hex(n++);
       commits.set(commit, { base: on, has });
@@ -221,6 +224,25 @@ describe("merge train landings (BOS-1366)", () => {
     expect(c.runs.get("B")).toBe(1);
     expect(await c.events(a, "rerun")).toEqual([expect.objectContaining({ passed: true })]);
     expect(await c.events(b, "restacked")).toEqual([]);
+  });
+
+  it("a clash with a ticket ahead doesn't send the one behind back: it waits to land on main alone, which is the real answer", async () => {
+    const c = await setup();
+    c.git.clashes.push(["A", "B"]);
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    // A's check fails for real, so A never lands; B, clean on main alone, lands.
+    const stop = c.runJobs((_has, who) => who === "A");
+    expect(await c.outcome(a)).toBe("verify_failed");
+    expect(await c.outcome(b)).toBe("merged");
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["B"]);
+    // B's first try was stacked on A; the one that landed was on main.
+    const bPrepares = c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B");
+    expect(bPrepares[0]!.base).toBeDefined();
+    expect(bPrepares.at(-1)!.base).toBeUndefined();
   });
 
   it("main moving outside the train: the head prepares again on the new main and everyone behind restacks, then all land", async () => {
