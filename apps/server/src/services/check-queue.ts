@@ -158,6 +158,16 @@ export function checkQueue(db: Db) {
     return { job: job!, reused: null };
   }
 
+  /**
+   * BOS-1344: main moved while a merge job waited, so the job takes the new merged commit and tree before it starts. One UPDATE
+   * guarded on state = 'queued': a job a runner has claimed is never changed under it (null then). The place in line (queuedAt)
+   * stays. Nothing here pushes; "finish" still needs the tree to equal the checked one.
+   */
+  async function retarget(jobId: string, to: { commit: string; tree: string }): Promise<CheckJob | null> {
+    const [row] = await db.update(checkJobs).set({ commit: to.commit, tree: to.tree }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "queued"), eq(checkJobs.kind, "merge"))).returning();
+    return row ?? null;
+  }
+
   /** The queued jobs in serving order, leaving out those a red main holds back. */
   async function servable(now = new Date()): Promise<CheckJob[]> {
     const queued = await db.select().from(checkJobs).where(eq(checkJobs.state, "queued"));
@@ -371,5 +381,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
   }
 
-  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, retarget, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

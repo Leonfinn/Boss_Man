@@ -716,6 +716,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   // BOS-1371: tickets already picked up in the current promotion pass-series, so a merge that ended without landing is not started again by the next 10 s pass.
   let resumedFor = 0;
+  // shortcut: lost on restart, harmless because a restarted server runs the resume pass afresh and a merge already done is found and closes the ticket.
   const resumed = new Set<string>();
   async function resumeMergesOnPromotion(promotedAt: Date) {
     if (!opts.resumeLand) return { started: 0, waiting: 0 };
@@ -761,6 +762,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     }
     return { started, waiting, ...(capped ? { capped } : {}) };
   }
+  // shortcut: lost on restart, harmless because a restarted server retrying a merge once more is safe: a merge already done is found and closes the ticket.
   const restartedFull = new Set<string>();
 
   async function unmergedApprovals(t: Date) {
