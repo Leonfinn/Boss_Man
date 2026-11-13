@@ -301,7 +301,8 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     const data = await queue(c);
     const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
     expect(row).toMatchObject({ state: "waiting_for_check_capacity" });
-    expect(row.label).toMatch(/waiting for a check slot \(1 ahead\)/);
+    // Its own check is the only one queued, so it is next up (BOS-1405: the label is its place, not the queue length).
+    expect(row.label).toMatch(/waiting for a check slot \(next up\)/);
   });
 
   it("gives each waiting merge its own place in the label, not the queue length (BOS-1405)", async () => {
