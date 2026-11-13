@@ -16,9 +16,9 @@ type Work = ReturnType<typeof workService>;
 
 /** The wording that reads as "someone else will do the next bit". Edit this list only; the tests sample it against ordinary summaries. */
 const SUBJECT_NOT_A_NAME = "(?:It|This|That|They|There|We|I|The|These|Those|He|She|You|Tests|All|Nothing|Everything)";
-const HAND_ON_VERBS = "(?:attach|create|open|file|add|write|pick up|follow up|take over|take it|handle|finish|build|do the|do it|decide|fix|schedule|raise)";
+const HAND_ON_VERBS = "(?:attach|create|open|file|add|write|pick up|follow up|take over|take it|handle|finish|build|do the|do it|decide|fix|schedule|raise|wire)";
 export const HAND_OFF_WORDING: readonly { label: string; re: RegExp }[] = [
-  { label: '"the CEO will / to / should"', re: /\bceo (?:will|to|should|needs to|must|can)\b/i },
+  { label: '"the CEO will / should / needs to"', re: /\bceo (?:will|should|needs to|must)\b/i },
   { label: '"for <someone> to <do something>"', re: new RegExp(`\\bfor (?:the )?[\\w-]+ to ${HAND_ON_VERBS}\\b`, "i") },
   { label: '"hand(ed) (off/over) to"', re: /\bhand(?:ed|s|ing)?\s+(?:it |this |that |them |the work |the rest )?(?:off |over )?to\b/i },
   { label: '"next: <someone>"', re: /\bnext:\s*\S/i },
