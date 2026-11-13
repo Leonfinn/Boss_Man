@@ -219,7 +219,9 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
-    const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug, image));
+    // A daemon that won't say (or a fake in a test) just means "unknown" in the runner's platform fingerprint.
+    const host = await docker.hostInfo().catch(() => null);
+    const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug, image, host));
     try {
       await holdNetwork(id);
       await docker.start(id);

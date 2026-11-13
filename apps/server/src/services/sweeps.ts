@@ -26,7 +26,7 @@ import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type Signoff
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
-import { fenceDefaultSweep } from "./fence-default.js";
+import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -1407,6 +1407,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // The fence cards: one asking about an old unchosen Off (BOS-940), one per episode of agent work held because
       // the runner can't fence (BOS-373), which goes by itself when the episode ends.
       await fenceDefaultSweep(db, t).catch(() => ({ raised: 0, heldCards: 0, released: 0 }));
+      // And one per episode of a runner whose network guard isn't proven on (DR-049 point 1, BOS-938).
+      await guardHoldSweep(db, t).catch(() => ({ raised: 0, released: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);

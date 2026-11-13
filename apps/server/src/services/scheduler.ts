@@ -7,7 +7,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel,parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
-import { fenceHold } from "./fence-default.js";
+import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
@@ -244,6 +244,11 @@ export function schedulerService(
     notifyOwner?: (input: { companyId: string | null; level: "note" | "flag" | "page" | "ask"; title: string; body?: string | null; link: string }) => Promise<unknown>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
+    /**
+     * The gate holds a run until its runner's latest report proves the fence and the network guard (DR-049 point 1,
+     * BOS-938). The server's main.ts turns this on; tests that connect a stand-in runner with no report leave it off.
+     */
+    requireRunnerProof?: boolean;
     /** Server errors; a company id files the line under that company's recent errors in server_status. */
     log?: (msg: string, companyId?: string) => void;
   },
@@ -1736,13 +1741,14 @@ export function schedulerService(
       // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
       // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
       const fenceRows = await db
-        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, runnerId: runners.id, level: sql<string | null>`${runners.sandbox}->>'level'` })
+        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, fenceOffFingerprint: companies.fenceOffFingerprint, guardOffChosenAt: companies.guardOffChosenAt, guardOffFingerprint: companies.guardOffFingerprint, runnerId: runners.id, sandbox: runners.sandbox, sandboxCheckedAt: runners.sandboxCheckedAt })
         .from(companies)
         .innerJoin(runners, eq(runners.companyId, companies.id));
       const fenceHeld = new Map<string, string>();
       for (const r of fenceRows) {
         if (!deps.runners.isConnected(r.runnerId)) continue;
-        const why = fenceHold(r, r.level);
+        // The one gate (DR-049 point 1): the fence and the network guard, each proven by the runner's latest report or chosen off by the owner.
+        const why = agentHold(r, r.sandbox, r.sandboxCheckedAt, { requireProof: !!deps.requireRunnerProof, now: t });
         if (why) fenceHeld.set(r.companyId, why);
       }
       // A board-tools-only run (the CEO's or Scrum Master's chat, the PA) has no file or shell tools, so the fence hold

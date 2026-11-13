@@ -84,6 +84,14 @@ export const companies = pgTable("companies", {
    * unchosen Off gets the card.
    */
   fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
+  /**
+   * The runner platform (kernel, Docker version, OS type) the owner was on when they answered the fence card with
+   * "Run agents without the fence" (DR-049 point 1). A different platform asks again. Null for an Off chosen in Settings.
+   */
+  fenceOffFingerprint: text("fence_off_fingerprint"),
+  /** When the owner chose to run agents without the network guard, and on which runner platform; a different platform asks again (DR-049 point 1). */
+  guardOffChosenAt: timestamp("guard_off_chosen_at", { withTimezone: true }),
+  guardOffFingerprint: text("guard_off_fingerprint"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */

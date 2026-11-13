@@ -36,6 +36,9 @@ function fakeDocker() {
       const c = containers.get(name);
       return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
     },
+    async hostInfo() {
+      return { dockerVersion: "27.0.1", osType: "linux" };
+    },
     async imageId(ref) {
       if (fail.guardImage && ref.includes("netguard")) return null;
       if (fail.noPrevious && ref.endsWith(":previous")) return null;
