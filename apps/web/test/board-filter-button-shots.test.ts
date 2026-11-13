@@ -117,5 +117,52 @@ describe.skipIf(!can)("Board Filter button (BOS-1194)", () => {
       await saveShot(`bos1194-${size.name}-filter.png`, page);
       await page.close();
     }, 60_000);
+
+    it.skipIf(!out)(`saves a filter turned on at ${size.name}`, async () => {
+      const page = await open(size);
+      await page.getByRole("button", { name: /^Filter/ }).click();
+      // Turn Working now on: the button counts it, wide screens show a chip, and columns leave only working cards.
+      await page.getByRole("switch").click();
+      await page.waitForTimeout(300);
+      // Close the panel (wide: Escape; phone: Show N tasks) so the bar and columns show with the filter on.
+      if (size.width <= 640) await page.getByRole("button", { name: /Show \d+ tasks?/ }).click();
+      else await page.keyboard.press("Escape");
+      await page.waitForTimeout(200);
+      // The filter is visible on arrival: the button counts it, and wide screens show it as a chip.
+      expect(await page.locator(".filter-count").innerText()).toBe("1");
+      expect(await page.locator(".filter-chip").count()).toBe(size.width <= 640 ? 0 : 1);
+      await saveShot(`bos1194-${size.name}-filtered.png`, page);
+      await page.close();
+    }, 60_000);
   }
+
+  it("lines up the four group labels on the left, at all sizes", async () => {
+    for (const size of [SIZES[1], SIZES[0]]) {
+      const page = await open(size);
+      try {
+        await page.getByRole("button", { name: /^Filter/ }).click();
+        const xs: number[] = [];
+        for (const name of ["Show", "Assigned to", "Feature", "Working now"]) {
+          const box = await page.locator(".filter-label", { hasText: name }).first().boundingBox();
+          xs.push(box!.x);
+        }
+        // Every label starts within a pixel of the first: none is centred.
+        for (const x of xs) expect(Math.abs(x - xs[0]!), `${size.name}: labels flush left`).toBeLessThanOrEqual(1);
+      } finally {
+        await page.close();
+      }
+    }
+  });
+
+  it("fits the popover on screen at the Brave 1667×724 fold", async () => {
+    const page = await open(SIZES[2]);
+    try {
+      await page.getByRole("button", { name: /^Filter/ }).click();
+      const panel = await page.locator("#filter-panel").boundingBox();
+      expect(panel, "the panel is on screen").not.toBeNull();
+      expect(panel!.y + panel!.height, "the popover's bottom is inside the 724 px viewport").toBeLessThanOrEqual(724);
+    } finally {
+      await page.close();
+    }
+  });
 });

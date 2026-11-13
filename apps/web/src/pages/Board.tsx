@@ -936,7 +936,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               Add task
             </button>
           )}
-          <input type="search" className="board-search" aria-label="Search tasks" placeholder={`Search: ${company?.ticketPrefix || "HOL"}-12, title, words…`} value={query} onChange={(e) => setQuery(e.target.value)} />
+          <span className="search-field">
+            <svg width="16" height="16" {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+            <input type="search" className="board-search" aria-label="Search tasks" placeholder={`Search: ${company?.ticketPrefix || "HOL"}-12, title, words…`} value={query} onChange={(e) => setQuery(e.target.value)} />
+          </span>
           <span className="filter-wrap">
           <button
             type="button"

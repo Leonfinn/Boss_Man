@@ -60,6 +60,26 @@ export function FilterPanel(p: FilterPanelProps) {
     };
   }, [triggerRef]);
 
+  // On a wide screen the popover must fit between the button and the bottom of the window, even when the bar
+  // sits low (a strip above it, a short window). Its top is only known at layout time, so cap its height here.
+  useEffect(() => {
+    if (phone) return;
+    const place = () => {
+      const box = ref.current;
+      const trigger = triggerRef.current;
+      if (!box || !trigger) return;
+      const room = window.innerHeight - trigger.getBoundingClientRect().bottom - 8 - 12;
+      box.style.maxHeight = `${Math.max(200, Math.round(room))}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [phone, triggerRef]);
+
   useEffect(() => {
     const down = (e: MouseEvent) => {
       const t = e.target as Node;
