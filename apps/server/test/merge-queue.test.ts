@@ -304,6 +304,39 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     expect(row.label).toMatch(/waiting for a check slot \(1 ahead\)/);
   });
 
+  it("gives each waiting merge its own place in the label, not the queue length (BOS-1405)", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    const ids: string[] = [];
+    for (let i = 1; i <= 4; i++) {
+      const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: `Queued ${i}` })).json() as { id: string };
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", round: 1, status: "approved" });
+      await job(c, t.id, "queued", String(i).repeat(40).slice(0, 40));
+      ids.push(t.id);
+    }
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => [],
+      limit: async () => 2,
+      queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 6 }),
+      // Two other checks wait ahead of these merges, so their places are 3, 4, 5, 6.
+      places: async () => new Map(ids.map((id, i) => [id, { place: i + 3, why: null }])),
+    });
+    const data = await service.get(c.company.id);
+    const labels = ids.map((id) => data.waiting.find((w) => w.ticketId === id)!.label);
+    expect(labels).toEqual(["waiting for a check slot (2 ahead)", "waiting for a check slot (3 ahead)", "waiting for a check slot (4 ahead)", "waiting for a check slot (5 ahead)"]);
+    // The first in line reads "next up".
+    const first = mergeQueueService(c.db, {
+      runningMerges: () => [],
+      limit: async () => 2,
+      queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 4 }),
+      places: async () => new Map(ids.map((id, i) => [id, { place: i + 1, why: null }])),
+    });
+    const d2 = await first.get(c.company.id);
+    expect(d2.waiting.find((w) => w.ticketId === ids[0])!.label).toBe("waiting for a check slot (next up)");
+    expect(d2.waiting.find((w) => w.ticketId === ids[1])!.label).toBe("waiting for a check slot (1 ahead)");
+  });
+
   it("keeps a plain wait with an empty queue, and counts only this company's jobs", async () => {
     const c = (ctx = await setup());
     await serverMode(c);
