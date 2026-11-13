@@ -2123,7 +2123,10 @@ export async function buildApp(opts: AppOptions) {
       if (hit && Date.now() - hit.at < 30_000) return { ci: hit.value };
       const r = await review.branchChecks(id);
       const value = r ? { state: r.state, failing: r.failing, total: r.total ?? null, url: r.url ?? null, sha: r.sha } : null;
+      ciCache.delete(id);
       ciCache.set(id, { at: Date.now(), value });
+      // Bounded: past 200 tickets the oldest answer goes (Map keeps insertion order).
+      if (ciCache.size > 200) ciCache.delete(ciCache.keys().next().value as string);
       return { ci: value };
     });
     // A reviewer's hold on the merge (BOS-808): the owner can release it (the normal approval and merge follow) or cancel it (the pass is withdrawn).
