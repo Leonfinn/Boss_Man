@@ -90,6 +90,7 @@ import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/schedu
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
+import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
@@ -262,6 +263,7 @@ export async function buildApp(opts: AppOptions) {
   });
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
+  const privateDetails = privateDetailsService(db, master);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
@@ -310,7 +312,7 @@ export async function buildApp(opts: AppOptions) {
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
-  const checks = checkDispatcher(db, { send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -889,6 +891,7 @@ export async function buildApp(opts: AppOptions) {
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
+    scanList: () => privateDetails.forRunner(),
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
   });
@@ -1254,6 +1257,17 @@ export async function buildApp(opts: AppOptions) {
     // Notifications (R44): the feed.
     notificationRoutes(owner, { notes });
     // The run and WIP limits and the check-queue and merged-result settings: routes/settings-limits.ts, on this owner scope.
+    // Private details the merge-line scan blocks (BOS-979). The list is write-only: reading it back gives a count per kind.
+    owner.get("/api/private-details", async () => privateDetails.summary());
+    owner.put("/api/private-details", async (req, reply) => {
+      const { text } = z.object({ text: z.string().max(60_000) }).parse(req.body);
+      try {
+        return await privateDetails.save(text);
+      } catch (err) {
+        if (err instanceof PrivateDetailsRejected) return reply.code(400).send({ error: err.message });
+        throw err;
+      }
+    });
     settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.

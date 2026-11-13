@@ -68,6 +68,17 @@ logged "pnpm --filter @boss-man/web exec vitest related --run src/a.ts" "web"
 logged "pnpm --filter @boss-man/web build" "web"
 notlogged "@boss-man/server" "web"
 notlogged "check-shell" "web"
+# BOS-979: the secrets scan runs only when the branch has the script, and a finding fails the check.
+notlogged "scan-added-lines" "no scan script, no scan step"
+mkdir -p "$repo/scripts"; echo "// stub" >"$repo/scripts/scan-added-lines.mjs"; g add -A; g commit -q -m "scan script"
+run 0 "scan step" env
+logged "node scripts/scan-added-lines.mjs origin/main" "scan step"
+grep -q "^PASS  secrets scan" "$t/out" || fail "scan PASS line"
+run 1 "scan finding" env FAIL_ON=scan-added-lines
+grep -q "^FAIL  secrets scan" "$t/out" || fail "scan FAIL line"
+# The owner's list is never handled here (the runner scans with its own copy): a stray variable is not turned into a file.
+run 0 "scan list" env BOSSMAN_SCAN_DENYLIST="ip	192.0.2.77"
+notlogged "scanenv" "no list handling in this script"
 grep -q "^PASS  typecheck @boss-man/web" "$t/out" || fail "PASS line"
 # One CPU budget (BOS-674) reaches every step, inside the slot and out: the stub node prints nothing, so the fallback 2 applies;
 # BOSSMAN_CHECK_THREADS sets it.
