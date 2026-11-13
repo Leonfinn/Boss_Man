@@ -56,6 +56,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
       for (const job of await queue.claimNext(runner.id, new Date(), companyId)) {
+        // BOS-1043: only the merge gate's job carries the list. An agent-requested check reports its scan result back to the
+        // agent, so a listed value named by file and line would let it test guesses against the owner's list.
+        const sendList = !!list && job.kind === "merge";
         const sent = deps.send(runner.id, {
           type: "check.run",
           jobId: job.id,
@@ -64,7 +67,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           commit: job.commit,
           command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
           timeoutMs: deps.timeoutMs ?? (job.scope === "full" ? FULL_TIMEOUT : DEFAULT_TIMEOUT),
-          ...(list ? { scanList: list } : {}),
+          ...(sendList ? { scanList: list } : {}),
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
       }

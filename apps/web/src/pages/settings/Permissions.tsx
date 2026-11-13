@@ -14,17 +14,22 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
   const status = usePoll((signal) => api<FenceStatus>(`/api/companies/${company.id}/runner`, { signal }), 30_000, `fence-${company.id}`);
   const mode = company.fenceMode ?? "off";
   const sb = status.data?.sandbox ?? null;
+  // Agents never run unfenced unless the owner chose Off (BOS-373): on a host that can't fence, work is held until then.
+  const chosenOff = mode === "off" && !!company.fenceModeChosenAt;
+  const held = sb?.level === "unavailable" && !chosenOff;
   const hostLine = !status.data?.registered
     ? "This company has no runner yet."
     : !sb
       ? "This host hasn't reported its fence level yet. It reports each time the runner starts."
       : sb.level === "unavailable"
-        ? "This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). Agents run as before."
+        ? `This host can't fence agents (its kernel doesn't offer Landlock, or the container blocks it). ${held ? "Agent work is held until the host can fence, or you choose Off. Chat with the CEO still works." : "Agents run unfenced, as you chose."}`
         : `This host fences agents ${sb.level === "full" ? "fully" : "partly"}${sb.missing.length ? ` (not covered: ${sb.missing.join(", ")})` : ""}.${sb.probe === false ? " Its self-test did not see a write outside the agent's folders refused." : ""} Last checked ${status.data?.sandboxCheckedAt ? when(status.data.sandboxCheckedAt) : "never"}.`;
   // What the fence means for runs reading each other (BOS-555): said plainly, so Off never looks safe.
   const isolationLine =
-    mode === "off" || sb?.level === "unavailable"
-      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys."
+    held
+      ? null
+      : mode === "off" || sb?.level === "unavailable"
+      ? "Agent runs are not isolated: one run can read another run's memory and start-up keys, and can read the runner's key and this company's git login."
       : !sb
         ? null
         : sb.level === "partial"
@@ -36,9 +41,17 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
       ? null
       : company.fenceModeChosenAt
         ? `You chose Off. ${FENCE_OFF_CONSEQUENCE}`
-        : sb?.level === "unavailable"
-          ? `The fence is Off because this host can't fence agents. ${FENCE_OFF_CONSEQUENCE}`
+        : held
+          ? `Nobody chose Off, so agent work is held while this host can't fence. Choose Off below only if you accept: ${FENCE_OFF_CONSEQUENCE}`
           : `Nobody chose Off: it was Boss Man's old default. ${FENCE_OFF_CONSEQUENCE}`;
+  const chooseOff = () => {
+    if (!window.confirm(`Run agents without the fence? ${FENCE_OFF_CONSEQUENCE} Agent runs can also read each other's memory and start-up keys.`)) return;
+    void act.run(async () => {
+      await api(`/api/companies/${company.id}`, { method: "PATCH", body: { fenceMode: "off" } });
+      onChanged();
+      return "Saved. Held agent work starts now, without the fence.";
+    });
+  };
   return (
     <Section id="fence-h" title="Agent fence">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -73,7 +86,7 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
             });
           }}
         >
-          <option value="off">Off: agents run unfenced</option>
+          <option value="off">Off: agents run unfenced and can read the runner's key and this company's git login</option>
           <option value="watch" disabled={sb?.level === "unavailable" && mode !== "watch"}>
             {sb?.level === "unavailable" ? "Watch: not available, this host can't fence agents" : "Watch: agents run inside the fence and every refusal is logged"}
           </option>
@@ -81,6 +94,12 @@ export function FenceSetting({ company, onChanged }: { company: Company; onChang
             Enforce: not available yet (waiting for a security fix, BOS-323)
           </option>
         </select>
+        {/* An unchosen Off already shows Off in the list, so picking it there changes nothing: this records the choice (BOS-373). */}
+        {held && mode === "off" && (
+          <button type="button" disabled={act.busy} onClick={chooseOff} data-testid="fence-choose-off">
+            Choose Off: run agents without the fence
+          </button>
+        )}
       </div>
       <details style={{ marginTop: 10 }}>
         <summary>Setting up a host</summary>

@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, noLooserThan, normalisePolicyMarked, REVIEW_KINDS, ReviewPolicySchema, repoUrlAllowed, findCredential, DAEMON_ONLY_SECRET_REFUSAL, isDaemonOnlySecret,THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewKind, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, wikiRevisions, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -81,7 +81,7 @@ const Plan = z.object({
     .max(5000)
     .default([]),
 });
-const ToolServer = z.object({ name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/).refine((n) => n !== "bossman"), url: str(500).refine((u) => /^https?:\/\//.test(u)), transport: z.enum(["http", "sse"]), headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/).default("Authorization"), headerValue: str(200).default("Bearer {secret}"), secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable().optional() }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), "the header value must contain {secret}");
+const ToolServer = z.object({ name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/).refine((n) => n !== "bossman"), url: str(500).refine((u) => /^https?:\/\//.test(u)), transport: z.enum(["http", "sse"]), headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/).default("Authorization"), headerValue: str(200).default("Bearer {secret}"), secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).refine((n) => !isDaemonOnlySecret(n), DAEMON_ONLY_SECRET_REFUSAL).nullable().optional() }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), "the header value must contain {secret}");
 const Secret = z.object({ name: z.string().trim().min(1).max(200), kind: str(64), envName: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), agents: z.array(str(120)).max(500).default([]) });
 const WikiMeta = z.object({ slug: z.string().min(1).max(300), title: z.string().trim().min(1).max(300), folder: str(300).default(""), ticket: opt(100) });
 const Ticket = z.object({

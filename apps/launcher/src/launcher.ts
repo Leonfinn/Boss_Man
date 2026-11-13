@@ -409,7 +409,11 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
             trouble.set(r.slug, { state, reason, since, tries, next: now() + backoff(tries) });
             console.error(JSON.stringify({ at: new Date(now()).toISOString(), msg: `network guard ${state}`, slug: r.slug, reason, runnerKept: true }));
           };
+          let held = false;
           if (!sameStart && !paused) {
+            // Off the network first: if this host refuses both pause and stop, the runner must not sit with its network and no rules.
+            await holdNetwork(c.Id).catch(() => undefined);
+            held = true;
             try {
               await docker.pause(c.Id);
             } catch (pauseErr) {
@@ -423,7 +427,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
           }
           try {
             // Off the network while the guard loads (BOS-576); a runner whose rules are still in force (same start) keeps its network.
-            if (!sameStart) await holdNetwork(c.Id).catch(() => undefined);
+            if (!sameStart && !held) await holdNetwork(c.Id).catch(() => undefined);
             await guard(r.slug, c.Id);
             if (!sameStart || !onNetwork(c)) await releaseNetwork(r.slug, c.Id);
           } catch (err) {

@@ -213,6 +213,7 @@ describe("BOS-149 round 15/16 regressions (BOS-186)", () => {
       action: "withdraw",
       id: a.id,
       note: "This is a duplicate of the other identical card.",
+      replacedBy: "none",
     });
     expect(isError(r), textOf(r)).toBe(false);
     expect((await row(a.id)).status).toBe("withdrawn");
