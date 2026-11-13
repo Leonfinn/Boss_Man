@@ -137,6 +137,8 @@ export const OWNER_CONTROLS = {
     "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
+    // Outgoing email (BOS-1387).
+    "Turn off", "Send test email",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -247,6 +249,8 @@ export const OWNER_FIELDS = {
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
     // Workspace disk.
     "Disk cap (GB)",
+    // Settings → Server and runner → Outgoing email (BOS-1387).
+    "Server", "Port", "Security", "Username", "Password or token", "From address", "From name (optional)", "Send a test email to",
   ],
   // Tool servers and deploy targets.
   "Tools and deploys": [

@@ -229,6 +229,7 @@ sections:
   - Facts only you can give
   - Network guard
   - Now
+  - Outgoing email
   - Private details to block
   - Runner
   - Runner update
@@ -254,6 +255,7 @@ reads:
   - /api/runner-report
   - /api/self-deploy
   - /api/settings/check-queue
+  - /api/settings/email
   - /api/wip-limits
 
 ## #/settings/<company>/team
