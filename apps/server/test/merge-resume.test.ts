@@ -142,6 +142,23 @@ describe("a server that takes charge keeps live merge checks and caps the restar
     }, { timeout: 20_000, interval: 200 });
     expect(order).toEqual(ids);
   }, TIMEOUT);
+
+  it("the stuck-merge sweep does not restart the merges the cap is holding back", async () => {
+    const c = await setup({ resumeRestartsAtOnce: 1 });
+    c.connect();
+    let release!: () => void;
+    c.behave.merge = () => new Promise<void>((r) => (release = r));
+    // Approved far longer ago than the sweep's quiet time, so it would retry each of them.
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) ids.push((await c.approved((300 - i) * MIN)).id);
+    const spy = vi.spyOn(c.built.review, "startLanding");
+    expect(await c.built.sweeps.resumeMergesOnPromotion(new Date())).toEqual({ started: 1, waiting: 2, capped: 2 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await c.built.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(spy).toHaveBeenCalledTimes(1);
+    release();
+  }, TIMEOUT);
 });
 
 describe("a server that takes charge restarts approved merges (DR-026)", () => {

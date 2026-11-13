@@ -748,8 +748,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (!live && restarting >= limits.resumeRestartsAtOnce) {
         waiting++;
         capped++;
+        heldByCap.add(ticket.id);
         continue;
       }
+      heldByCap.delete(ticket.id);
       const ok = await opts.resumeLand(ticket.id, live ? { commit: live.commit, tree: live.tree } : undefined).then(() => true, () => false);
       if (!ok) continue;
       started++;
@@ -764,12 +766,16 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
   // shortcut: lost on restart, harmless because a restarted server retrying a merge once more is safe: a merge already done is found and closes the ticket.
   const restartedFull = new Set<string>();
+  // BOS-1371: merges held back by the restart cap. The 30-minute stuck sweep leaves them alone, or it would restart them all at once and undo the cap.
+  // shortcut: lost on restart, harmless because a restarted server runs the resume pass afresh and the stuck sweep then covers them as before.
+  const heldByCap = new Set<string>();
 
   async function unmergedApprovals(t: Date) {
     let raised = 0;
     for (const ticket of await approvedUnmerged()) {
       // Quiet is measured from the last approval (BOS-362).
       if (ticket.approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
+      if (heldByCap.has(ticket.id)) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
         await opts.retryLand(ticket.id).catch(() => undefined);
