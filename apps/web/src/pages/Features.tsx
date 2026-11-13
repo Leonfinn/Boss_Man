@@ -808,8 +808,16 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // title to visitors (BOS-991).
   const publicTitleDraftKey = `feature-public-title/${id}`;
   const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
+  // Why the feature is kept off the portal is saved with the mark (BOS-1358), so the owner's card says why.
+  const keepOffReasonDraftKey = `feature-keep-off-reason/${id}`;
+  const [keepOffReasonDraft, setKeepOffReasonDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
+  const saveKeepOffReason = (reason: string) =>
+    void api(`/api/features/${id}`, { method: "PATCH", body: { keepOffPortal: true, keepOffReason: reason.trim() || null } }).then(
+      () => (setError(null), setKeepOffReasonDraft(null), clearDraft(keepOffReasonDraftKey), data.reload()),
+      (err: Error) => setError(err.message),
+    );
   const saveSummary = (summary: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
@@ -1016,6 +1024,29 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
           Keep off the portal (sensitive)
         </label>
+        {f.keepOffPortal && (
+          <div className="field">
+            <label htmlFor="f-keep-off-reason">Why it's kept off (optional)</label>
+            <DraftTextarea
+              draftKey={keepOffReasonDraftKey}
+              id="f-keep-off-reason"
+              rows={2}
+              maxLength={500}
+              placeholder="A short reason; the owner sees it if they are asked about this feature"
+              value={keepOffReasonDraft ?? f.keepOffReason ?? ""}
+              onChange={setKeepOffReasonDraft}
+            />
+            <button
+              type="button"
+              className="btn small"
+              style={{ alignSelf: "flex-start" }}
+              disabled={keepOffReasonDraft === null || keepOffReasonDraft.trim() === (f.keepOffReason ?? "")}
+              onClick={() => saveKeepOffReason(keepOffReasonDraft!)}
+            >
+              Save reason
+            </button>
+          </div>
+        )}
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.
