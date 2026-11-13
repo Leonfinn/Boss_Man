@@ -9,6 +9,8 @@
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
+import { checkPriority } from "./check-gate.js";
+import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 
 export const CHECK_SLOTS_KEY = "check_slots";
@@ -125,6 +127,7 @@ export function checkQueue(db: Db) {
     // started the landing again) keeps the earlier job's place in line. Only jobs still live or ended in the last PLACE_KEEP_MS
     // count, and failed or stuck ones never do, so a fixed branch queues as new.
     let inheritedAt: Date | null = null;
+    let inheritedFront: { at: Date; by: string | null } | null = null;
     if (input.kind === "merge") {
       const since = Date.now() - PLACE_KEEP_MS;
       const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
@@ -132,6 +135,8 @@ export function checkQueue(db: Db) {
         (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
       );
       for (const j of earlier) if (!inheritedAt || j.queuedAt < inheritedAt) inheritedAt = j.queuedAt;
+      // BOS-1384: a "move to front" goes with the place in line.
+      for (const j of earlier) if (j.frontAt && (!inheritedFront || j.frontAt > inheritedFront.at)) inheritedFront = { at: j.frontAt, by: j.frontBy };
     }
     if (stale.length)
       await db
@@ -153,6 +158,7 @@ export function checkQueue(db: Db) {
         fixesMain: input.fixesMain ?? false,
         requestedBy: input.requestedBy ?? null,
         ...(inheritedAt ? { queuedAt: inheritedAt } : {}),
+        ...(inheritedFront ? { frontAt: inheritedFront.at, frontBy: inheritedFront.by } : {}),
       })
       .returning();
     return { job: job!, reused: null };
@@ -174,16 +180,36 @@ export function checkQueue(db: Db) {
     const red = new Set((await db.select({ id: projects.id }).from(projects).where(eq(projects.mainState, "red"))).map((p) => p.id));
     // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
     const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS);
+    // BOS-1384: urgency is read from the ticket now, not from the priority stored when the job was queued, so marking a ticket urgent
+    // while it waits moves it up at once and clearing it puts it back by its join time (queuedAt is never touched).
+    const ids = [...new Set(queued.map((j) => j.ticketId))];
+    const marks = new Map((ids.length ? await db.select({ id: tickets.id, urgent: tickets.urgent, title: tickets.title }).from(tickets).where(inArray(tickets.id, ids)) : []).map((t) => [t.id, checkPriority(t)]));
+    const prio = (j: CheckJob) => marks.get(j.ticketId) ?? j.priority;
     return queued
       .filter((j) => !(red.has(j.projectId) && j.kind === "merge" && !j.fixesMain))
       .sort(
         (a, b) =>
           Number(b.fixesMain) - Number(a.fixesMain) ||
           Number(withMerges(b)) - Number(withMerges(a)) ||
-          a.priority - b.priority ||
+          (b.frontAt?.getTime() ?? 0) - (a.frontAt?.getTime() ?? 0) ||
+          prio(a) - prio(b) ||
           a.queuedAt.getTime() - b.queuedAt.getTime() ||
           a.id.localeCompare(b.id),
       );
+  }
+
+  /**
+   * BOS-1384: put a waiting merge next in line (below a fix for a red main). Only a merge job still queued can move; a running one is
+   * never touched, and nothing here skips a check: the job runs in full when it is served. Returns the job, or null if none waits.
+   */
+  async function moveToFront(companyId: string, ticketId: string, by: string, reason?: string, now = new Date()): Promise<CheckJob | null> {
+    const [row] = await db
+      .update(checkJobs)
+      .set({ frontAt: now, frontBy: by })
+      .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))
+      .returning();
+    if (row) await record(db, { companyId, ticketId, kind: "reorganised", summary: `${by} moved this merge to the front of the line${reason ? `: ${reason}` : ""}`, detail: { jobId: row.id, by, reason: reason ?? null }, at: now });
+    return row ?? null;
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
@@ -341,7 +367,7 @@ export function checkQueue(db: Db) {
     const limit = await slots();
     const prefix = (await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId)))[0]?.p ?? null;
     const live = await db
-      .select({ job: checkJobs, number: tickets.number, title: tickets.title, requester: agents.name })
+      .select({ job: checkJobs, number: tickets.number, title: tickets.title, urgent: tickets.urgent, requester: agents.name })
       .from(checkJobs)
       .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
       .leftJoin(agents, eq(agents.id, checkJobs.requestedBy))
@@ -368,6 +394,8 @@ export function checkQueue(db: Db) {
         position,
         minutes: minutes(j.state === "running" ? j.startedAt : j.queuedAt),
         fixesMain: j.fixesMain,
+        // BOS-1384: why this one is ahead of the others, in the owner's words (null for an ordinary place).
+        why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
         heldBy,
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
@@ -381,5 +409,5 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
   }
 
-  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, retarget, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }
