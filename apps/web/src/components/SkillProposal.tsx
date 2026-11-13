@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { Loader } from "./Loader";
 
 export type SkillFindingView = { file: string; lineStart: number; lineEnd: number; title: string; severity: string; confidence: string; behaviour: string; harm: string; fix: string; blocks: boolean };
 export type SkillProposalView = {
@@ -33,7 +34,7 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
     return () => ctl.abort();
   }, [companyId, proposalId]);
   if (error) return <p className="muted">Couldn't load the skill: {error}</p>;
-  if (!p) return <p className="muted">Loading the skill…</p>;
+  if (!p) return <Loader label="Loading the skill" />;
   const against = p.verdict === "advise_against";
   return (
     <div className="skill-proposal" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>

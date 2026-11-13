@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, it } from "vitest";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
-import { agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { activity, agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY } from "../src/services/check-queue.js";
-import { checkRequestService, CheckRequestError } from "../src/services/check-request.js";
+import { CHECK_REUSED_KIND, checkRequestService, CheckRequestError } from "../src/services/check-request.js";
 
 const shared = openPglite();
 afterAll(async () => (await shared).close());
@@ -38,6 +39,22 @@ describe("request_check", () => {
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(await s.db.select().from(checkJobs)).toHaveLength(1);
+  });
+  it("a reused request leaves one check_reused row (no agent) for the check-line export; a fresh one leaves none (BOS-1309)", async () => {
+    const s = await setup();
+    const mine = () => s.db.select().from(activity).where(and(eq(activity.ticketId, s.ticket), eq(activity.kind, CHECK_REUSED_KIND)));
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(await mine()).toHaveLength(0);
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    await s.db.update(checkJobs).set({ state: "passed" });
+    expect(await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket })).toMatch(/Already answered/);
+    const rows = await mine();
+    // Sorted by value, not time: two rows can share a millisecond.
+    expect(rows.map((r) => r.detail).sort((a, b) => String(a!.reused).localeCompare(String(b!.reused)))).toEqual([
+      { reused: "live", scope: "quick", outcome: "queued" },
+      { reused: "passed", scope: "quick", outcome: "passed" },
+    ]);
+    expect(rows.every((r) => r.agentId === null && r.companyId === s.co)).toBe(true);
   });
   it("an urgent ticket's check gets the urgent priority (0), ahead of a normal one", async () => {
     const s = await setup();

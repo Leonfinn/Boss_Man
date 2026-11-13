@@ -11,6 +11,7 @@ import { away } from "../server-watch";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { NotFoundBlock } from "../components/NotFoundBlock";
+import { Loader } from "../components/Loader";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null; size?: number };
@@ -279,7 +280,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           {/* Every save is kept, so the oldest is always reachable: page further back to find it (BOS-496). */}
           {hasMore && (
             <button type="button" className="btn" disabled={older.busy} onClick={() => void showMore()}>
-              {older.busy ? "Loading…" : `Show older versions (${(p.revisionCount ?? versions.length) - versions.length} more)`}
+              {older.busy ? <Loader label="Loading versions" size={16} /> : `Show older versions (${(p.revisionCount ?? versions.length) - versions.length} more)`}
             </button>
           )}
           {older.error && (

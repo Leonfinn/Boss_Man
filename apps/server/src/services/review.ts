@@ -167,7 +167,8 @@ export function highestRisk(risks: Array<RiskTier | null | undefined>): RiskTier
 type CarriedInfo = CarriedTicket & { title: string; risk: RiskTier | null };
 
 /** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
-export type LandOptions = { skipChecks?: boolean };
+/** `adopt` (BOS-1371): a server that took charge picks up a merge whose check job is still live: skip "prepare" and wait on the job for this commit and tree; "finish" still pushes only if that exact tree is what the merge gives now. */
+export type LandOptions = { skipChecks?: boolean; adopt?: { commit: string; tree: string } };
 
 /**
  * A merge that can't start because the owner's sign-off card is still open (BOS-471): the ticket waits for
@@ -1352,7 +1353,8 @@ export function reviewService(
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
-      if (lineRow) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
+      // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
+      if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -1964,16 +1966,22 @@ export function reviewService(
       let flakyCheck: string | null = null;
       // Server mode: build the merge commit, queue a merge job for its tree, wait on the job's row, then push exactly what was checked.
       const serverMerge = async (): Promise<ServerMergeEnd> => {
+        // BOS-1371: the first round of an adopted merge uses the live job's commit and tree; any trouble falls back to a normal prepare.
+        // The train doesn't adopt: it re-prepares, and the same tree reuses the live job through enqueue.
+        let adopted = opts?.adopt;
         for (let round = 0; round < 3; round++) {
-          const prep = await prepare();
+          const prep: MergeResult = adopted ? { status: "prepared", commit: adopted.commit, tree: adopted.tree, targetSha: "" } : await prepare();
           if (prep.status !== "prepared") return prep;
+          const wasAdopted = !!adopted;
+          adopted = undefined;
           const ref = { prep };
           const r = await runRound(ref, { refresh: retargetOn });
           if (r.status === "restack") continue; // only the train restacks; kept for the type
           if (r.status !== "passed") return r;
           await touch();
-          const fin = await finish(ref.prep);
-          if (fin.status !== "main_moved") return fin;
+          // The runner may have lost the adopted commit (it restarted too): prepare again rather than fail. A runner that went away stays an error.
+          const fin = wasAdopted ? await finish(ref.prep).catch((err: Error) => { if (err instanceof RunnerGone) throw err; return null; }) : await finish(ref.prep);
+          if (fin && fin.status !== "main_moved") return fin;
         }
         return { status: "main_moved" };
       };

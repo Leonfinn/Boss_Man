@@ -9,6 +9,7 @@ import type { Company } from "../api";
 import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
+import { Loader } from "../components/Loader";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
@@ -449,13 +450,13 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
-          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <p className="muted">Loading…</p>}
+          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <Loader label="Loading the queued checks" />}
         </div>
       ) : (
         <div role="tabpanel" id="mq-panel-merges" aria-labelledby="mq-tab-merges">
           {mq.error ? <p className="banner" role="alert">Couldn't load the merge queue. It will try again shortly.</p> : null}
           {!data && !mq.error ? (
-            <p className="muted">Loading…</p>
+            <Loader label="Loading the merge queue" />
           ) : data ? (
             <>
               <NeedsYou rows={needsYou} />

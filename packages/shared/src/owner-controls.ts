@@ -88,9 +88,11 @@ export const OWNER_CONTROLS = {
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
     // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
     "What's holding work up …", "Show all …", "Show fewer",
+    // BOS-1306: the labelled Hide / Show button at the right end of that heading.
+    "Hide", "Show",
   ],
   Wiki: [
-    "Show older versions", "Loading",
+    "Show older versions",
     "Write", "Preview", "Cancel", "Edit", "New page here", "History …", "Delete", "Put this version back",
     "Back to the current one", "Re-embed all", "Test", "Hide pages", "Show pages", "New page", "Discard draft",
   ],
@@ -143,7 +145,7 @@ export const OWNER_CONTROLS = {
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
   "Team and CEO": ["Cancel", "Edit", "Start a new chapter", "Clear", "Undo last change", "Discard draft", "Save", "Run a retro now"],
   // The permission rules page, its advice mode, the second opinion and the fence.
-  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test"],
+  Permissions: ["Delete", "Ask the CEO to draft it", "Add rule", "Check", "Test", "Choose Off: run agents without the fence"],
   // The Scrum Master's watchdog: its limits, its record-only rehearsal and its safety cap.
   Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
