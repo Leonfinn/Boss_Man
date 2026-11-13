@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { demandScore, keywords, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures } from "../src/index.js";
+import { demandScore, keywords, looksLikeSecurity, looksLikeSecurityPhrase, portalTitle, portalVerdict, priorityScore, suggestFeatures } from "../src/index.js";
 
 describe("demandScore", () => {
   it("counts each customer once, at their most important level", () => {
@@ -59,6 +59,17 @@ describe("portalVerdict", () => {
   it("does not trip on ordinary words that merely look close", () => {
     expect(looksLikeSecurity("Keyboard shortcut keys and sorting keys")).toBe(false);
     expect(portalVerdict({ title: "Keyboard shortcuts", hasPublicSummary: true })).toMatchObject({ onPortal: true });
+  });
+  it("does not hold ordinary features off just because a criterion is named Security (BOS-1260)", () => {
+    // The company scores every feature on a criterion called "Security" ("how much this improves security"), so a
+    // row graded on it is ordinary work, not security work. The owner saw these two wrongly marked "kept off: security".
+    expect(portalVerdict({ title: "Release log", criteria: ["Improves Boss Man", "Reach", "Reduces owner", "Security"], hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+    expect(portalVerdict({ title: "Public changelog page (from the Release log)", criteria: ["Improves Boss Man", "Reach", "Reduces owner", "Security"], hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+  });
+  it("still holds a real security title off, whatever its criteria say (BOS-991 guard)", () => {
+    expect(portalVerdict({ title: "Rotate the host-deployer token", criteria: ["Reach", "Security"], hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(looksLikeSecurityPhrase("Keeps the agent fence sound")).toBe(true);
+    expect(looksLikeSecurityPhrase("Security")).toBe(false);
   });
   it("splits hyphenated and possessive words, matching the migration's SQL rule", () => {
     expect(looksLikeSecurity("Token-based login")).toBe(true);

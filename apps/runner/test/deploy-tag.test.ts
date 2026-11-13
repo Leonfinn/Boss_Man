@@ -3,7 +3,7 @@
 // the remote ever changes.
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -145,6 +145,55 @@ describe("moving the deploy tag (DR-033)", () => {
     expect(r.result).toBe("failed");
     expect(r.error).toMatch(/protected tag/);
     expect(o.tagAt()).toBe(o.A);
+  });
+});
+
+describe("a repointed shared repo (BOS-373)", () => {
+  /** An agent (unfenced, say) rewrites the shared repo's remote.origin.url to a host it controls: here, a decoy repo. */
+  const repoint = (ws: Workspaces, decoy: string) => git(ws.repoDir(project), "config", "remote.origin.url", decoy);
+  const decoyRepo = () => {
+    const d = mkdtempSync(path.join(tmpdir(), "bm-tag-decoy-"));
+    git(d, "init", "-q", "--bare", "-b", "main");
+    return d;
+  };
+
+  it("moves the tag on the address Boss Man recorded, and the decoy gets nothing", async () => {
+    const o = origin();
+    const decoy = decoyRepo();
+    const ws = workspaces();
+    const spec = { projectId: project, repoUrl: o.url, baseRef: "main" };
+    await ws.resolve({ ...spec, ref: "main" });
+    repoint(ws, decoy);
+    expect(await ws.tag({ ...spec, name: "live-deployed", commit: o.B })).toEqual({ result: "moved", from: o.A, to: o.B });
+    expect(o.tagAt()).toBe(o.B);
+    expect(git(decoy, "for-each-ref")).toBe("");
+  });
+
+  it("resolves a branch that only the recorded address has", async () => {
+    const o = origin();
+    const decoy = decoyRepo();
+    const ws = workspaces();
+    const spec = { projectId: project, repoUrl: o.url, baseRef: "main" };
+    await ws.resolve({ ...spec, ref: "main" });
+    repoint(ws, decoy);
+    // A branch pushed to upstream after the repoint: only a fetch from the recorded address can see it.
+    const seed = mkdtempSync(path.join(tmpdir(), "bm-tag-late-"));
+    git(seed, "clone", "-q", o.url, ".");
+    writeFileSync(path.join(seed, "late.txt"), "late\n");
+    git(seed, "add", ".");
+    git(seed, "commit", "-qm", "late");
+    git(seed, "push", "-q", "origin", "HEAD:late");
+    const late = git(seed, "rev-parse", "HEAD");
+    expect(await ws.resolve({ ...spec, ref: "late" })).toMatchObject({ commit: late, onBase: false });
+  });
+
+  it("no git call in workspace.ts that sends the login names the config's `origin` remote", () => {
+    const src = readFileSync(path.join(import.meta.dirname, "..", "src", "workspace.ts"), "utf8");
+    const offenders = src
+      .split("\n")
+      .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+      .filter(({ line }) => /\[\s*"(fetch|push|ls-remote|pull)"/.test(line) && /"origin"/.test(line));
+    expect(offenders).toEqual([]);
   });
 });
 

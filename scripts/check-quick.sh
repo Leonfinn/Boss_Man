@@ -171,6 +171,11 @@ done
     if [ -n "$lint_dir" ] && [ -d "$lint_dir" ]; then step "migration lint (on the tree the gate will build)" node scripts/lint-migrations.mjs "$lint_dir"; rm -rf "$lint_dir"
     else step "migration lint" node scripts/lint-migrations.mjs; fi
   fi
+  # BOS-979: a hand run's early warning for the secret rules (it has no owner's list). Convenience only: the merge line's
+  # scan is the runner's own installed copy, run before this script starts, and it does not depend on this step.
+  if [ -f scripts/scan-added-lines.mjs ]; then
+    step "secrets scan" node scripts/scan-added-lines.mjs "$base"
+  fi
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi

@@ -167,7 +167,8 @@ stamp="$(date -u +%Y%m%d%H%M)"
 commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
 # The one before is kept as boss-man-netguard:previous, so --rollback undoes the whole update (BOS-382).
-if docker image inspect boss-man-netguard:current >/dev/null 2>&1; then docker tag boss-man-netguard:current boss-man-netguard:previous; fi
+# Remember the id now; it is tagged :previous only after the canary passes, together with the runner's own :previous.
+NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:current 2>/dev/null || true)"
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
 echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
@@ -187,6 +188,9 @@ if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privile
 fi
 
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
+# The guard's :previous is tagged here too (not before the build), so a failed canary and a re-run can't leave --rollback
+# pairing the old runner with the failed guard build. NETGUARD_PREV holds the id of the guard that was current before this update.
+if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:previous; fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.

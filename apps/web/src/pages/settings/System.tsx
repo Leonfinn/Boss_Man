@@ -3,6 +3,7 @@ import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
 import { when } from "../Runs";
+import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
 
@@ -431,6 +432,51 @@ export function StopAllWork() {
           </button>
         </div>
       )}
+      {act.view}
+    </Section>
+  );
+}
+
+/**
+ * Settings → Server and runner → Private details to block (BOS-979): the owner's real IPs, host names, NAS paths and personal
+ * email that the merge-line check must keep out of the repo. Write-only: the saved list is never shown again, only how many
+ * entries of each kind it holds.
+ */
+export function PrivateDetails() {
+  const view = usePoll((signal) => api<{ total: number; counts: Record<string, number> }>("/api/private-details", { signal }), 30_000, "private-details");
+  const act = useAction();
+  const [text, setText] = useState("");
+  const d = view.data;
+  // Drawn at once, before the count arrives: a box that appears late pushes "This host" down mid-jump (the On this page link then stops short).
+  const total = d?.total ?? 0;
+  const kinds = Object.entries(d?.counts ?? {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  return (
+    <Section id="private-details-h" title="Private details to block">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The merge check stops any change that adds one of these to the code, so they can't be published when the repository goes public. Paste your real home IP addresses, host names, NAS or host folder paths and personal email addresses, one per line. Start a line with ip:, host:, path: or email: to say what it is, or just paste it and Boss Man guesses. An address ending in a dot (192.168.7.) blocks the whole range. Made-up examples such as 192.168.1.50, example.com and myserver are never blocked unless you list them. An entry is matched as plain text, so write each value the way it appears in the code; use at least 3 characters, and avoid short words such as "nas" that would match inside other words. It is stored encrypted, never shown again and never put in the repository or in a check log, and it is only given to the runner's own scan, never to the branch's code. The check for keys, tokens and passwords runs whether or not you add anything here.
+      </p>
+      <p style={{ fontSize: 14 }} data-testid="private-details-state">
+        {!d ? "Loading…" : total === 0 ? "Nothing listed yet." : `${total} entr${total === 1 ? "y" : "ies"} saved (${kinds}). Saving a new list replaces it.`}
+      </p>
+      <label htmlFor="private-details-text">New list (replaces the saved one; leave empty and save to clear it)</label>
+      <DraftTextarea draftKey={null} noDraft="holds the owner's real home details, which must not be kept in the browser" id="private-details-text" rows={6} value={text} onChange={setText} autoComplete="off" spellCheck={false} style={{ width: "100%", maxWidth: 520, fontFamily: "monospace" }} />
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !d || (text.trim() === "" && total === 0)}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<{ total: number }>("/api/private-details", { method: "PUT", body: { text } });
+              setText("");
+              view.reload();
+              return r.total === 0 ? "List cleared." : `Saved ${r.total} entr${r.total === 1 ? "y" : "ies"}.`;
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
       {act.view}
     </Section>
   );
