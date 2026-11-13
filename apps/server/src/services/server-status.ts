@@ -34,6 +34,8 @@ export type ServerStatusDeps = {
   colours?: () => Promise<BlueGreen>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
+  /** Whether this company's own runner swap is under way (runner-report swappingFor); absent: any hold counts. */
+  swapping?: (companyId: string) => Promise<boolean>;
   errors: ErrorBuffer;
   /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
   stalls?: () => StallSummary;
@@ -145,10 +147,11 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     async status(companyId: string) {
       const at = now();
       const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, imageCommit: runners.imageCommit, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
-      // Mid-swap: an update hold is on and the runner is away, or it only just came back and is
-      // starting its queued runs. "Never started" alerts wait while this is true.
+      // swapping: an update hold is on and the runner is away (mid-swap). It clears the moment the runner connects (BOS-382).
+      // settling: the runner only just came back and is starting its queued runs; "never started" alerts wait while this is true.
       const connected = runner ? deps.isConnected(runner.id) : false;
-      const swapping = runner ? (connected ? !!deps.isSettling?.(runner.id, at) : !!(await deps.hold())) : false;
+      const swapping = runner ? !connected && (deps.swapping ? await deps.swapping(companyId) : !!(await deps.hold())) : false;
+      const settling = runner ? connected && !!deps.isSettling?.(runner.id, at) : false;
 
       // The ticket each waiting wake is for, and whether it's Urgent, so an urgent wake that is
       // waiting can be found and its reason read (BOS-253).
@@ -239,6 +242,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
               connected: deps.isConnected(runner.id),
               connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
               swapping,
+              settling,
               lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, imageCommit: runner.imageCommit, harnessVersions: runner.harnessVersions ?? null,
               // When and why the runner last restarted (BOS-594): update, setting change, owner restart, host, crash or out of memory.
               lastRestart: await lastRestart(db, runner.id),

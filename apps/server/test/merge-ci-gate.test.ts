@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 // Hoisted so it is set before review.ts reads it: a landing in server mode re-reads its check job row this often.
-vi.hoisted(() => { process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20"; });
+// The retarget interval is short too, so a refresh that shouldn't happen (CI gating on) would show within the test.
+vi.hoisted(() => {
+  process.env.BOSSMAN_CHECK_JOB_POLL_MS = "20";
+  process.env.BOSSMAN_MERGE_RETARGET_MS = "20";
+});
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -295,6 +299,22 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       // Round two built the same tree: its queued check is the passed one again, and CI isn't asked for twice.
       expect(c.merges()).toEqual(["prepare", "publish", "finish", "prepare", "finish", "unpublish"]);
       expect(c.gh.reads.get(MERGE)).toBe(1);
+    });
+
+    it("a queued check isn't moved to a new main while CI gates the merge (BOS-1344 retarget stays off)", async () => {
+      const c = (ctx = await setup());
+      await serverMode(c);
+      let done = false;
+      c.gh.state.ci = (sha) => (sha === MERGE && !done ? running() : green());
+      const res = approveAndWait(c.req, c.ticket.id);
+      for (let i = 0; i < 200 && !(await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, c.ticket.id))).length; i++) await new Promise((r) => setTimeout(r, 10));
+      // Many retarget intervals pass with the job queued: no fresh prepare, since CI was published for this commit only.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(c.merges()).toEqual(["prepare", "publish"]);
+      done = true;
+      await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
     });
   });
 

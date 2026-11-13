@@ -242,8 +242,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
    * turn is stopped first. The max leaves room for the prefix the server adds to a longest-allowed owner message (BOS-502).
+   * With steer, an agent that supports ACP steering gets it inside the running turn instead, without a cancel (BOS-1016);
+   * others queue it as usual. Optional, so either side can be older.
    */
-  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean() }),
+  z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(RUN_MESSAGE_MAX), interrupt: z.boolean(), steer: z.boolean().optional() }),
   z.object({ type: z.literal("permission.decide"), runId: Uuid, requestId: z.string(), verdict: z.enum(["allow", "deny"]) }),
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;

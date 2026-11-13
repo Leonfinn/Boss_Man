@@ -29,6 +29,11 @@ export type RunnerWatchDeps = {
   alert: (input: AlertInput) => Promise<unknown>;
   /** Companies whose runner the launcher means to keep running (plus those it has never been given); null = unknown (no launcher, or it can't be reached), so all count. */
   wantedCompanies?: () => Promise<Set<string> | null>;
+  /**
+   * BOS-382 (DR-007): why the launcher keeps this company's runner paused because its network guard won't start, or null when it
+   * isn't ("retrying"/"frozen" in the launcher's list). Asked only when a notice is about to be sent. A failed call counts as null.
+   */
+  guardFault?: (companyId: string) => Promise<string | null>;
   now?: () => Date;
   log?: (msg: string) => void;
 };
@@ -54,6 +59,10 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
 
   const steps = (name: string) => `Open Settings > Server and runner, find ${name}'s runner and click "Reconnect runner" (or "Start runner" if it is stopped). Do not use "Update runners" for this. If it goes offline again, tell the CEO what the page says.`;
 
+  const guardFaultOf = async (companyId: string) => (await deps.guardFault?.(companyId).catch(() => null)) ?? null;
+  /** A runner kept paused because its network guard won't start: pressing Start would not help, so the advice differs (BOS-382). */
+  const frozenAdvice = (name: string, reason: string) => `${name}'s runner is paused on purpose, with its work kept, because its network guard will not start (${reason}). Boss Man keeps trying and the runner carries on by itself once the guard works. Nothing is lost. If this lasts, open Settings > Server and runner and click "Restart" on ${name}'s runner, and tell the CEO what the page says.`;
+
   async function clear(runnerId: string, name: string, back = true) {
     const cleared = await db
       .update(decisions)
@@ -68,11 +77,12 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
   }
 
   /** Pages the owner once per outage: the outage is named by the runner's lastSeenAt, which only a reconnect changes. */
-  async function pageOnce(r: { id: string; name: string; lastSeenAt: Date }, minutes: number) {
+  async function pageOnce(r: { id: string; companyId: string; name: string; lastSeenAt: Date }, minutes: number) {
     const mark = r.lastSeenAt.toISOString();
     const [prev] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, runnerPagedKey(r.id)));
     if (prev?.value !== mark) {
-      await deps.notify({ companyId: null, level: "page", title: `${r.name}'s runner is offline`, body: `It has been offline for ${minutes}+ minutes, so ${r.name}'s work cannot start. ${steps(r.name)}`, link: "#/settings" });
+      const fault = await guardFaultOf(r.companyId);
+      await deps.notify({ companyId: null, level: "page", title: `${r.name}'s runner is offline`, body: `It has been offline for ${minutes}+ minutes, so ${r.name}'s work cannot start. ${fault ? frozenAdvice(r.name, fault) : steps(r.name)}`, link: "#/settings" });
       await db.insert(settings).values({ key: runnerPagedKey(r.id), value: mark }).onConflictDoUpdate({ target: settings.key, set: { value: mark } });
     }
     paged.add(r.id);
@@ -144,12 +154,13 @@ export function runnerWatchService(db: Db, deps: RunnerWatchDeps) {
         const from = Math.max(offlineSince.get(r.id)!, liftedAt);
         if (t - from < OFFLINE_REPORT_MS) continue;
         const minutes = Math.max(1, Math.round((t - from) / 60_000));
-        if (!paged.has(r.id)) await pageOnce({ id: r.id, name: r.name, lastSeenAt: r.lastSeenAt }, minutes);
+        if (!paged.has(r.id)) await pageOnce({ id: r.id, companyId: r.companyId, name: r.name, lastSeenAt: r.lastSeenAt }, minutes);
         if (carded.has(r.id)) continue;
         try {
+          const fault = await guardFaultOf(r.companyId);
           await deps.alert({
             companyId: r.companyId,
-            question: `Your company's runner is offline (${minutes}+ minutes), so your agents cannot start work. Boss Man has told the owner. The owner's fix: ${steps(r.name)} This card clears by itself when the runner reconnects.`,
+            question: `Your company's runner is offline (${minutes}+ minutes), so your agents cannot start work. Boss Man has told the owner. ${fault ? frozenAdvice(r.name, fault) : `The owner's fix: ${steps(r.name)}`} This card clears by itself when the runner reconnects.`,
             from: "ceo",
             kind: "alert",
             dedupeKey: runnerOfflineKey(r.id),
