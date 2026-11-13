@@ -25,6 +25,7 @@ import { AnswerError, APPROVE_PLAN, KEEP_PLANNING, checkAsk, FIXES_LIVE_MAX, fix
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
+import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
 import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
@@ -402,7 +403,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
       if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}) });
+      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {

@@ -95,6 +95,20 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/restart?t=30`);
       if (r.status !== 204) fail(r, "Restarting the runner failed");
     },
+    /** Freezes every process in the container (cgroup freezer); its memory, files and network namespace stay as they are (DR-007). */
+    async pause(id: string) {
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/pause`);
+      if (r.status !== 204) fail(r, "Pausing the runner failed");
+    },
+    async unpause(id: string) {
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/unpause`);
+      if (r.status !== 204) fail(r, "Unpausing the runner failed");
+    },
+    /** Stops it (30 s grace) and keeps the container, so it can be started again with its data. */
+    async stop(id: string) {
+      const r = await call("POST", `/containers/${encodeURIComponent(id)}/stop?t=30`);
+      if (r.status !== 204 && r.status !== 304) fail(r, "Stopping the runner failed");
+    },
     /**
      * Stops (30 s for the runner to finish its journal write) and removes it. Volumes and binds stay.
      * Another removal finishing it ("already in progress") is not a failure: waits for it to be gone, then returns.
