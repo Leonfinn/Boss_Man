@@ -165,6 +165,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
   "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
+  "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
@@ -210,6 +211,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
   // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
   Board: ["Working now"],
+  // The Unread and Read filter chips are drawn by one helper (chip) that adds the count, so their text is a variable (BOS-1277).
+  Notifications: ["Unread", "Read"],
 };
 
 function skipString(s: string, i: number): number {

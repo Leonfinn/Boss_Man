@@ -105,10 +105,14 @@ export function checkQueue(db: Db) {
       .orderBy(asc(checkJobs.queuedAt));
     // The same command must have passed: a quick script, or the first of several merge commands, never stands in for another.
     const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null);
-    const passed = sameTree.find((j) => j.state === "passed" && wide(j));
+    // BOS-1043: only merge jobs are dispatched with the owner's private-details list, so a merge request is answered only by a
+    // merge-kind job. A pass or running job of another kind was scanned without the list and must not stand in for the gate.
+    // (A queued job lifted to merge below is dispatched as merge, so it does get the list.)
+    const listScanned = (j: CheckJob) => input.kind !== "merge" || j.kind === "merge";
+    const passed = sameTree.find((j) => j.state === "passed" && wide(j) && listScanned(j));
     if (passed) return { job: passed, reused: "passed" };
     // The same ticket already has a live job on this tree that is wide enough: it is the answer.
-    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j));
+    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j) && (listScanned(j) || j.state === "queued"));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
