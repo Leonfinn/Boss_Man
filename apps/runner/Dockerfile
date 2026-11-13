@@ -129,6 +129,13 @@ COPY --chown=node apps/runner/src apps/runner/src
 # live with "Build and update runners".
 COPY --chmod=0755 scripts/check-slot.sh /usr/local/lib/bossman/check-slot.sh
 ENV BOSSMAN_CHECK_SLOT=/usr/local/lib/bossman/check-slot.sh
+# The merge line's secrets and private-details scan (BOS-979): the runner runs this copy, and its allow-list, over a branch's
+# added lines before the branch's own check command starts, so a branch can't remove or weaken it. The owner's list is
+# handed to it in a private file the branch never sees. Same rule as above: a new copy goes live with "Build and update runners".
+COPY --chmod=0755 scripts/scan-added-lines.mjs /usr/local/lib/bossman/scan-added-lines.mjs
+COPY --chmod=0644 scripts/scan-allow.txt /usr/local/lib/bossman/scan-allow.txt
+ENV BOSSMAN_SCAN_SCRIPT=/usr/local/lib/bossman/scan-added-lines.mjs
+
 # The notice every published image carries (BOS-973).
 COPY NOTICE /NOTICE
 

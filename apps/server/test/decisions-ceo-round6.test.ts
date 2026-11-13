@@ -569,7 +569,7 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
     await c.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
     await c.db.delete(decisions).where(eq(decisions.id, d.id));
     d = await card("done");
-    const r = await ceoCall(c, { action: "withdraw", id: d.id, note: "The run's problem cleared and it finished; this is noise now." });
+    const r = await ceoCall(c, { action: "withdraw", id: d.id, note: "The run's problem cleared and it finished; this is noise now.", replacedBy: "none" });
     expect(isError(r)).toBe(false);
     expect((await row(d.id)).status).toBe("withdrawn");
   });

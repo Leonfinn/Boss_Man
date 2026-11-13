@@ -11,7 +11,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { FENCE_DENIED_PATTERN, infiniteLaunchModel, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, FENCE_UNAVAILABLE_ERROR, infiniteLaunchModel, isDaemonOnlySecret, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
@@ -68,7 +68,7 @@ export type SessionManagerOptions = {
   /**
    * The agent fence (DR-004, BOS-321), for runs started with fence: this runner's level from its
    * self-test, where each agent's own home goes, and the shared pnpm store. Without it, or on an
-   * unavailable level, such runs start unfenced, as before. Each run's temp folder goes under runTmpRoot
+   * unavailable level, such runs are refused (BOS-373), except board-tools-only ones, which start unfenced. Each run's temp folder goes under runTmpRoot
    * (default: run-tmp beside agentsRoot), outside every agent's home, so it is granted to that run alone (BOS-555).
    */
   fence?: { level: FenceLevel; agentsRoot: string; runTmpRoot?: string; pnpmStore?: string };
@@ -246,15 +246,6 @@ export function linkSharedMemory(configDir: string, cwd: string, bare: string) {
 }
 
 /**
- * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
- * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
- * that build a header), plus the forge and package-manager tokens git, Claude Code and other tools push
- * with on their own. The forge/package families match a suffix too (GITHUB_TOKEN_WORK, NPM_TOKEN_LEGACY):
- * the suffix says which repo or registry, so the whole family is withheld (BOS-396).
- */
-const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|(GH_TOKEN|GH_PAT|GITHUB_TOKEN|GITHUB_PAT|GITLAB_TOKEN|GL_TOKEN|GITEA_TOKEN|CI_JOB_TOKEN|BITBUCKET_TOKEN|ATLASSIAN_API_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN|VERCEL_TOKEN)(_[A-Z0-9_]+)?)$/;
-
-/**
  * The MCP servers as Claude Code's own config file (BOS-553). Handed over in session/new they would end up in the
  * command line of Claude Code (`--mcp-config {...Bearer bm_run_...}`), which every agent on the runner can read
  * from /proc. The adapter is told to pass this file's path instead.
@@ -269,7 +260,7 @@ export function claudeMcpConfig(servers: McpServer[]): string {
 
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(secrets).filter(([k]) => !GIT_CREDENTIAL_NAMES.test(k)));
+  return Object.fromEntries(Object.entries(secrets).filter(([k]) => !isDaemonOnlySecret(k)));
 }
 
 const require = createRequire(import.meta.url);
@@ -309,6 +300,11 @@ type RunState = {
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
   /** Owner or CEO messages waiting to be sent as the next prompt (R37). */
   queued: string[];
+  /**
+   * Hands a message to the turn that is running, without a cancel (ACP `_session/steering`, BOS-1016).
+   * Set only when the agent advertises steering and its session is open. "queue" means it wasn't injected.
+   */
+  steer?: (text: string) => Promise<"injected" | "queue">;
 };
 
 /** Stops an adapter and everything it started; escalates to SIGKILL if the group lingers. */
@@ -635,7 +631,7 @@ export class SessionManager {
         }
         const work =
           command.type === "workspace.verify"
-            ? ws.verify({ projectId: command.projectId, ticketId: command.ticketId }, command.command, undefined, undefined, command.fence)
+            ? ws.verify({ projectId: command.projectId, ticketId: command.ticketId }, command.command, undefined, undefined, command.fence, command.scanList)
             : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets): Promise<unknown> =>
                 command.type === "workspace.detect"
                   ? ws.detect({ projectId: command.projectId, repoUrl: command.repoUrl, baseRef: command.baseRef }, secrets)
@@ -718,6 +714,23 @@ export class SessionManager {
         const run = this.runs.get(command.runId);
         if (!run) {
           this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${command.runId} arrived after it ended.` });
+          return;
+        }
+        const steer = run.steer;
+        if (command.steer && steer && !command.interrupt) {
+          // Not awaited, so handle stays synchronous. Queue only when the steer didn't inject, so the
+          // message is never delivered twice; a run that ended meanwhile gets nothing.
+          const runId = command.runId;
+          const text = command.text;
+          void steer(text).then((outcome) => {
+            if (outcome === "injected") {
+              this.opts.emit({ type: "run.update", runId, update: { kind: "message_delivered", text: text.slice(0, 4000), fullLength: text.length, steered: true } });
+            } else if (this.runs.get(runId) === run) {
+              run.queued.push(text);
+            } else {
+              this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${runId} arrived after it ended.` });
+            }
+          });
           return;
         }
         run.queued.push(command.text);
@@ -878,6 +891,14 @@ export class SessionManager {
     // model and the reported one agree (BOS-279).
     if (cmd.agentKind === "opencode" && isInfiniteModel(cmd.model)) cmd = { ...cmd, model: infiniteLaunchModel(cmd.model!) };
 
+    // Fail closed (BOS-373, DR-047): a run asked to be fenced never starts unfenced on its own. Unfenced, it runs as the
+    // runner's own user and can read the runner's key and the git login of a daemon fetch. Only the owner's choice (fence
+    // Off, so no fence is asked for) runs agents unfenced. Board-tools-only runs (owner chat) have no file or shell tools.
+    if (cmd.fence && !cmd.boardToolsOnly && (this.opts.fence?.level ?? "unavailable") === "unavailable") {
+      emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: FENCE_UNAVAILABLE_ERROR });
+      return;
+    }
+
     let env: NodeJS.ProcessEnv;
     let secrets: Record<string, string>;
     try {
@@ -967,7 +988,8 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
-    // The fence (BOS-321): asked for per run; a runner that can't fence runs it as before and says so.
+    // The fence (BOS-321): asked for per run. Only a board-tools-only run reaches here on a runner that can't fence
+    // (any other was refused at the start, BOS-373); it runs unfenced and says so.
     let launch = { bin, args: adapterArgs(cmd.agentKind) };
     let fenced: boolean | undefined;
     let runTmp: string | null = null;
@@ -1244,6 +1266,12 @@ export class SessionManager {
       }
       // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       for (const m of cmd.mcpServers ?? []) {
+        // The git login never goes to the agent's harness as a header (BOS-373). The server refuses such a
+        // tool server and leaves out old ones; this covers an older server.
+        if (m.secretEnv && isDaemonOnlySecret(m.secretEnv)) {
+          emit({ type: "runner.log", level: "warn", message: `Tool server ${m.name} skipped: its secret ${m.secretEnv} is the git login, which agents may never hold.` });
+          continue;
+        }
         const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
         if (m.secretEnv && !token) continue;
         if (!supported?.[m.transport]) {
@@ -1291,6 +1319,20 @@ export class SessionManager {
       if (cmd.agentKind === "claude") dropMcp();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
+      // Steering (BOS-1016): claude-agent-acp and codex-acp advertise it; OpenCode doesn't, so its messages wait for the turn to end.
+      // promptRequired makes the adapter hand an idle session's message back to us instead of starting a detached turn,
+      // so our own turn loop (checkpoints, token counts) still runs it.
+      if ((init as { _meta?: { steering?: { supported?: unknown } } })._meta?.steering?.supported === true) {
+        state.steer = async (text) => {
+          try {
+            const r = (await agent.request("_session/steering", { sessionId: session.sessionId, prompt: [{ type: "text", text }], _meta: { steering: { idleBehavior: "promptRequired" } } } as never)) as { outcome?: string } | null;
+            return r?.outcome === "injected" ? "injected" : "queue";
+          } catch (err) {
+            this.opts.log?.(`run ${cmd.runId}: steering refused (${String((err as Error)?.message ?? err).slice(0, 300)}); the message waits for the turn to end`);
+            return "queue";
+          }
+        };
+      }
 
       let model = cmd.model;
       // Setting an option answers with the session's options again; the thinking levels on offer depend on the model.

@@ -5,7 +5,7 @@
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { companies, runners as runnersTable, settings } from "../db/schema.js";
-import { getHold, type Hold, type LastUpdate } from "./maintenance.js";
+import { getHold, SWAP_PUT_BACK, SWAP_PUT_BACK_FAILED, SWAP_PUT_BACK_RUNNING, SWAP_WINDOW_MS, type Hold, type LastUpdate } from "./maintenance.js";
 
 /** Whether the runner's image is the one an update installed, or newer (both are date-time stamps, so they sort as strings). */
 export function imageAtLeast(have: string | null | undefined, want: string | null | undefined): boolean | null {
@@ -94,8 +94,8 @@ export function judgeUpdate(last: LastUpdate | null, live: Record<string, Runner
   // Most specific first: slice C (BOS-382) quotes the launcher error inside its own words.
   const rules: Array<[RegExp, string]> = [
     [/reach the launcher/i, "The launcher isn't answering: start it, then try Settings → Runner again."],
-    [/going back to the previous runner image failed/i, "The update failed and the runner couldn't be put back: press Start runner in Settings → Runner."],
-    [/put back on the previous runner image/i, "Nothing to do now: the runner is running its previous version, and the next runner update tries again."],
+    [new RegExp(SWAP_PUT_BACK_FAILED, "i"), "The update failed and the runner couldn't be put back: press Start runner in Settings → Runner."],
+    [new RegExp(SWAP_PUT_BACK, "i"), "Nothing to do now: the runner is running its previous version, and the next runner update tries again."],
     [/network guard/i, "The runner's network guard wouldn't start: press Restart in Settings → Runner."],
     [/Creating the runner failed|Removing the runner failed/i, "A runner couldn't be replaced: start it again from Settings → Runner."],
     [/still not connected/i, "A runner hasn't connected since: start it again from Settings → Runner."],
@@ -119,7 +119,7 @@ export function describeLive(r: RunnerLive | null): { ok: boolean; text: string;
     return { ok: true, text: `Updating: swapping to the new runner.${again} It starts by itself; no need to press anything.`, state: "updating" };
   }
   // The swap failed but the launcher put the old runner back: it is starting by itself, so don't invite a second press.
-  if (r.swapFailed && /put back on the previous runner image and is running that/i.test(r.swapFailed)) {
+  if (r.swapFailed && new RegExp(SWAP_PUT_BACK_RUNNING, "i").test(r.swapFailed)) {
     return { ok: true, text: "The update failed, so the runner was put back on its previous version and is starting by itself. No need to press anything.", state: "updating" };
   }
   if (r.swapFailed) return { ok: false, text: `Update failed: ${r.swapFailed}. Press Start runner below.`, state: "failed" };
@@ -128,9 +128,6 @@ export function describeLive(r: RunnerLive | null): { ok: boolean; text: string;
   const when = r.at ? ` since ${clock(r.at)}` : "";
   return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.`, state: "offline" };
 }
-
-/** How long after a runner was recreated it still counts as mid-swap; the drain's own wait to dial in (maintenance reconnectMs). */
-const SWAP_WINDOW_MS = 5 * 60_000;
 
 /**
  * This company's part of the update hold, if any (BOS-382). A company is "swapping" only while its own swap

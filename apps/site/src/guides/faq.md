@@ -9,7 +9,7 @@ lead: Short answers to the questions people ask first.
 
 ## What is Boss Man?
 
-A web app on your own machine where AI agents build your software. You collect feedback, rank features and plan the roadmap. Agents plan, write and review the work on a ticket board, and when they need you, a card arrives on your Decisions page.
+A web app on your own machine where AI agents build your software. You collect feedback, rank features and plan the roadmap. Agents plan, write and review the work as tasks on a board ([what features and tasks are](/guides/how-boss-man-works#features-tasks-and-sub-tasks)), and when they need you, a card arrives on your Decisions page.
 
 ## What does it cost?
 

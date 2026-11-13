@@ -5,7 +5,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, companies, decisions, reviewRequests, runners, settings, tickets } from "../src/db/schema.js";
+import { activity, checkJobs, companies, decisions, reviewRequests, runners, settings, tickets } from "../src/db/schema.js";
 import { createLeader } from "../src/leader.js";
 import { MAINTENANCE_KEY } from "../src/services/maintenance.js";
 import { setInfraRetryBase } from "../src/services/review.js";
@@ -20,12 +20,12 @@ const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha
 const never = new Promise<void>(() => {});
 const MIN = 60_000;
 
-async function setup() {
+async function setup(sweepLimits?: { resumeRestartsAtOnce: number }) {
   setInfraRetryBase(1);
   const { db, close } = await openPglite();
   const lead = { on: true };
   const leader = { ...createLeader(), isLeader: () => lead.on };
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", leader });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", leader, ...(sweepLimits ? { sweepLimits } : {}) });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   ctx = { close: async () => (await built.app.close(), await close()) };
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -58,8 +58,111 @@ async function setup() {
     return t;
   };
   const row = async (id: string) => (await db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
-  return { db, built, company, lead, req, sent, behave, connect, approved, row };
+  return { db, built, company, project, lead, req, sent, behave, connect, approved, row };
 }
+
+describe("a server that takes charge keeps live merge checks and caps the restarts (BOS-1371)", () => {
+  const TIMEOUT = 30_000;
+  /** Two merge-command phases the runner saw, in order. */
+  const phases = (c: Awaited<ReturnType<typeof setup>>) => c.sent.filter((x) => x.type === "workspace.merge").map((x) => (x as { phase?: string }).phase);
+
+  it("restarts none whose check job is alive: no prepare, no new job, and each lands on its own job's commit and tree", async () => {
+    // A cap of 1 would hold back all but one restart; adopted merges are not restarts, so all three go on.
+    const c = await setup({ resumeRestartsAtOnce: 1 });
+    c.connect();
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
+    const tickets3 = [await c.approved(10 * MIN), await c.approved(9 * MIN), await c.approved(8 * MIN)];
+    const jobs = [];
+    for (const [i, t] of tickets3.entries()) {
+      const [j] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: String(i + 1).repeat(40), tree: String(i + 4).repeat(40), command: "pnpm test", state: i === 0 ? "queued" : "running", startedAt: i === 0 ? null : new Date() }).returning();
+      jobs.push(j!);
+    }
+    expect(await c.built.sweeps.resumeMergesOnPromotion(new Date())).toEqual({ started: 3, waiting: 0 });
+    // The checks are still running: nothing was asked of the runner's merge, and no job was added.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(phases(c)).toEqual([]);
+    expect(await c.db.select().from(checkJobs)).toHaveLength(3);
+    for (const j of jobs) await c.db.update(checkJobs).set({ state: "passed", exitCode: 0, endedAt: new Date() }).where(eq(checkJobs.id, j.id));
+    await vi.waitFor(async () => expect((await Promise.all(tickets3.map((t) => c.row(t.id)))).map((r) => r.systemState)).toEqual(["done", "done", "done"]), { timeout: 20_000 });
+    // Only "finish", each with the passed job's exact commit and tree: nothing lands without a full check of what is pushed.
+    const finishes = c.sent.filter((x) => x.type === "workspace.merge") as unknown as { ticketId: string; phase: string; commit: string; tree: string }[];
+    expect(finishes.map((f) => f.phase)).toEqual(["finish", "finish", "finish"]);
+    for (const [i, t] of tickets3.entries()) expect(finishes.find((f) => f.ticketId === t.id)).toMatchObject({ commit: jobs[i]!.commit, tree: jobs[i]!.tree });
+    expect(await c.db.select().from(checkJobs)).toHaveLength(3);
+  }, TIMEOUT);
+
+  it("a merge whose job already passed is not adopted: it prepares again, which reuses that pass when the tree is the same", async () => {
+    const c = await setup();
+    c.connect();
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
+    const t = await c.approved(10 * MIN);
+    const [job] = await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: "1".repeat(40), tree: "2".repeat(40), command: "pnpm test", state: "passed", exitCode: 0, endedAt: new Date() }).returning();
+    // The job is passed, so it is not "alive": it restarts normally and reuses the passed job when prepare gives its tree.
+    expect(job).toBeTruthy();
+    expect(await c.built.sweeps.resumeMergesOnPromotion(new Date())).toEqual({ started: 1, waiting: 0 });
+    await vi.waitFor(() => expect(phases(c)[0]).toBe("prepare"), { timeout: 10_000 });
+  }, TIMEOUT);
+
+  it("restarts a merge whose job died exactly once, even when the pass asks again", async () => {
+    const c = await setup();
+    c.connect();
+    const t = await c.approved(10 * MIN);
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: c.project.id, ticketId: t.id, kind: "merge", scope: "full", commit: "1".repeat(40), tree: "2".repeat(40), command: "pnpm test", state: "stuck", reason: "The runner went away.", endedAt: new Date() });
+    const promoted = new Date();
+    expect(await c.built.sweeps.resumeMergesOnPromotion(promoted)).toEqual({ started: 1, waiting: 0 });
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(await c.built.sweeps.resumeMergesOnPromotion(promoted)).toEqual({ started: 0, waiting: 0 });
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  }, TIMEOUT);
+
+  it("starts at most the cap of merges from scratch per promotion, the rest as those finish, in priority order", async () => {
+    const c = await setup({ resumeRestartsAtOnce: 2 });
+    c.connect();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    c.behave.merge = () => gate;
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) ids.push((await c.approved((30 - i) * MIN)).id);
+    const promoted = new Date();
+    const order: string[] = [];
+    const real = c.built.review.startLanding.bind(c.built.review);
+    vi.spyOn(c.built.review, "startLanding").mockImplementation(async (id, ...rest) => (order.push(id), real(id, ...rest)));
+    expect(await c.built.sweeps.resumeMergesOnPromotion(promoted)).toEqual({ started: 2, waiting: 3, capped: 3 });
+    // Asked again while the first two still run: nothing new starts.
+    expect(await c.built.sweeps.resumeMergesOnPromotion(promoted)).toEqual({ started: 0, waiting: 3, capped: 3 });
+    release();
+    await vi.waitFor(async () => expect((await c.row(ids[0]!)).systemState).toBe("done"));
+    await vi.waitFor(async () => expect((await c.row(ids[1]!)).systemState).toBe("done"));
+    // The 10 s loop in main.ts, run by hand: each pass starts what the cap now allows, until every merge has landed.
+    await vi.waitFor(async () => {
+      await c.built.sweeps.resumeMergesOnPromotion(promoted);
+      expect((await Promise.all(ids.map((id) => c.row(id)))).map((r) => r.systemState)).toEqual(ids.map(() => "done"));
+    }, { timeout: 20_000, interval: 200 });
+    expect(order).toEqual(ids);
+  }, TIMEOUT);
+
+  it("the stuck-merge sweep does not restart the merges the cap is holding back", async () => {
+    const c = await setup({ resumeRestartsAtOnce: 1 });
+    c.connect();
+    let release!: () => void;
+    c.behave.merge = () => new Promise<void>((r) => (release = r));
+    // Approved far longer ago than the sweep's quiet time, so it would retry each of them.
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) ids.push((await c.approved((300 - i) * MIN)).id);
+    const spy = vi.spyOn(c.built.review, "startLanding");
+    expect(await c.built.sweeps.resumeMergesOnPromotion(new Date())).toEqual({ started: 1, waiting: 2, capped: 2 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await c.built.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(spy).toHaveBeenCalledTimes(1);
+    // Once the resume loop gives up, the held merges go back to the stuck sweep (it retries each once).
+    c.built.sweeps.releaseHeldMerges();
+    expect(await c.built.sweeps.run()).toMatchObject({ unmergedApprovals: 2 });
+    release();
+  }, TIMEOUT);
+});
 
 describe("a server that takes charge restarts approved merges (DR-026)", () => {
   it("starts a ticket approved 5 minutes ago at once, and leaves a ticket line, not a card", async () => {

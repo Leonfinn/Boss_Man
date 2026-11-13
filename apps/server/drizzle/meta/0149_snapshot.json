@@ -1,5 +1,5 @@
 {
-  "id": "b4cda577-3e43-4181-a086-bd1e32bbd9c8",
+  "id": "01d56c7a-928b-4561-bb2e-b27572fb79d8",
   "prevId": "ef09af4e-766e-462b-b4e8-c87b3cafb965",
   "version": "7",
   "dialect": "postgresql",
@@ -1383,6 +1383,18 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "front_at": {
+          "name": "front_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "front_by": {
+          "name": "front_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "requested_by": {
           "name": "requested_by",
@@ -9348,18 +9360,6 @@
         "go_live_wait_since": {
           "name": "go_live_wait_since",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "live_marked_at": {
-          "name": "live_marked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "live_evidence": {
-          "name": "live_evidence",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
