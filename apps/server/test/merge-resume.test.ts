@@ -157,6 +157,9 @@ describe("a server that takes charge keeps live merge checks and caps the restar
     expect(await c.built.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
     await new Promise((r) => setTimeout(r, 300));
     expect(spy).toHaveBeenCalledTimes(1);
+    // Once the resume loop gives up, the held merges go back to the stuck sweep (it retries each once).
+    c.built.sweeps.releaseHeldMerges();
+    expect(await c.built.sweeps.run()).toMatchObject({ unmergedApprovals: 2 });
     release();
   }, TIMEOUT);
 });

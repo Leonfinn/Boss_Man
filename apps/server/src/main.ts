@@ -72,7 +72,10 @@ const bg = createBackground(
       // Merges held back by the restart cap (BOS-1371) keep being asked for, up to 6 hours; other waits give up after 30 minutes.
       const capped = "capped" in r && !!r.capped;
       const age = Date.now() - resumeMergesSince.getTime();
-      if (!r.waiting || age > (capped ? 6 * 3_600_000 : 30 * 60_000)) resumeMergesSince = null;
+      if (!r.waiting || age > (capped ? 6 * 3_600_000 : 30 * 60_000)) {
+        resumeMergesSince = null;
+        sweeps.releaseHeldMerges();
+      }
     } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },

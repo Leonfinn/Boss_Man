@@ -727,6 +727,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     }
     const list = (await approvedUnmerged()).filter((x) => x.approvedAt < promotedAt.getTime() && !resumed.has(x.id));
     list.sort((a, b) => checkPriority(a) - checkPriority(b) || a.approvedAt - b.approvedAt);
+    // Held-back tickets are re-listed by this pass, so a ticket that left the list (failed by another route, landed) is not kept from the stuck sweep.
+    heldByCap.clear();
     let started = 0;
     let waiting = 0;
     let capped = 0;
@@ -1434,6 +1436,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   return {
     limits,
     resumeMergesOnPromotion,
+    // The resume loop gave up: merges it still held back go back to the stuck-merge sweep, which retries or alerts.
+    releaseHeldMerges: () => heldByCap.clear(),
     resumeAfterUpdate,
     /** One pass of every sweep. Safe to call often. */
     run: async (_noProgressRun: (t: Date) => Promise<{ raised: number }> = (t) => noProgress.run(t)): Promise<Pass> => {
