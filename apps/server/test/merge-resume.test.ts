@@ -7,7 +7,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, companies, decisions, reviewRequests, runners, settings, tickets } from "../src/db/schema.js";
 import { createLeader } from "../src/leader.js";
-import { takeoverCause } from "../src/services/merge-line.js";
+import { recordTakeover, takeoverCause } from "../src/services/merge-line.js";
 import { MAINTENANCE_KEY } from "../src/services/maintenance.js";
 import { setInfraRetryBase } from "../src/services/review.js";
 
@@ -77,19 +77,25 @@ describe("a server that takes charge restarts approved merges (DR-026)", () => {
     expect(await c.db.select().from(decisions)).toHaveLength(0);
   });
 
-  it("writes one takeover row per restarted ticket, with the cause and commit, before its attempt (BOS-1399)", async () => {
+  it("writes exactly one company-level takeover row per promotion, whether no merge or several are waiting (BOS-1399)", async () => {
     const c = await setup();
-    c.connect();
-    const t = await c.approved(5 * MIN);
-    const takeover = { cause: "standby_promotion" as const, commit: "c".repeat(40) };
-    await c.built.sweeps.resumeMergesOnPromotion(new Date(), takeover);
-    await c.built.sweeps.resumeMergesOnPromotion(new Date(), takeover); // the loop asks again: no second row
-    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
-    const rows = (await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_line")))).sort((a, b) => a.at.getTime() - b.at.getTime());
-    const events = rows.map((r) => (r.detail as { event: string }).event);
-    expect(events.filter((e) => e === "takeover")).toHaveLength(1);
-    expect(rows.find((r) => (r.detail as { event: string }).event === "takeover")!.detail).toMatchObject({ event: "takeover", by: "standby_promotion", commit: takeover.commit });
-    if (events.includes("attempt")) expect(events.indexOf("takeover")).toBeLessThan(events.indexOf("attempt"));
+    const takeovers = async () => (await c.db.select().from(activity).where(eq(activity.kind, "merge_line"))).filter((r) => (r.detail as { event: string }).event === "takeover");
+    const commit = "c".repeat(40);
+    // Nothing waiting: still one row, with no ticket.
+    await recordTakeover(c.db, { cause: "deploy", commit });
+    let rows = await takeovers();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ticketId).toBeNull();
+    expect(rows[0]!.detail).toMatchObject({ event: "takeover", by: "deploy", commit });
+    // Three approved tickets waiting: the next promotion still adds only one row, and resuming adds none.
+    await c.approved(5 * MIN);
+    await c.approved(6 * MIN);
+    await c.approved(7 * MIN);
+    await recordTakeover(c.db, { cause: "standby_promotion", commit });
+    await c.built.sweeps.resumeMergesOnPromotion(new Date());
+    rows = await takeovers();
+    expect(rows.map((r) => (r.detail as { by: string }).by).sort()).toEqual(["deploy", "standby_promotion"]);
+    expect(rows.every((r) => r.ticketId === null)).toBe(true);
   });
 
   it("works out the cause: switch, standby promotion, deploy (new commit) or restart (same commit)", async () => {

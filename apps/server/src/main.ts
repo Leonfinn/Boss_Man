@@ -9,7 +9,7 @@ import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler } from "./services/check-limit.js";
 import { checkQueue } from "./services/check-queue.js";
 import { getHold } from "./services/maintenance.js";
-import { takeoverCause, type TakeoverCause } from "./services/merge-line.js";
+import { recordTakeover, takeoverCause } from "./services/merge-line.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
@@ -68,7 +68,7 @@ const bg = createBackground(
     // After a server takes charge: restart approved, unmerged merges (DR-026). Gives up after 30 minutes; the 66-minute merge sweep is the net after that. // leader-only
     { name: "resume merges", everyMs: Number(env.BOSSMAN_RESUME_MERGES_MS ?? 10_000), run: async () => {
       if (!resumeMergesSince) return;
-      const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince, takeoverCauseNow);
+      const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince);
       if (!r.waiting || Date.now() - resumeMergesSince.getTime() > 30 * 60_000) resumeMergesSince = null;
     } },
     // Stale-blocker, stalled-run and missed-work sweeps.
@@ -117,14 +117,14 @@ const bg = createBackground(
 // shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
 // BOS-1399: why this server took charge, for the merge-line "takeover" rows. SIGUSR2 is the deployer's switch.
-let takeoverCauseNow: { cause: TakeoverCause; commit: string | null; recorded?: Set<string> } = { cause: "restart", commit: null };
 let promotions = 0; // shortcut: lost on restart, harmless because a fresh process is always its first promotion (cause "restart" or "deployer_switch").
 let signalled = false; // shortcut: lost on restart, harmless because it only marks a SIGUSR2 promotion in flight and is reset right after.
 leader.onPromote(async () => {
   resumeMergesSince = new Date();
   const commit = env.BOSSMAN_COMMIT || null;
-  takeoverCauseNow = { cause: await takeoverCause(db, { first: promotions++ === 0, signalled, commit }), commit };
+  const cause = await takeoverCause(db, { first: promotions++ === 0, signalled, commit });
   signalled = false;
+  await recordTakeover(db, { cause, commit }); // one row per company, merge waiting or not
   bg.startBackground();
   void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });

@@ -27,7 +27,6 @@ import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
 import { fenceDefaultSweep } from "./fence-default.js";
-import { lineEvent, type TakeoverCause } from "./merge-line.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -712,7 +711,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * started and how many must wait (update hold on, or the company's runner not connected yet): the caller
    * asks again until none wait.
    */
-  async function resumeMergesOnPromotion(promotedAt: Date, takeover?: { cause: TakeoverCause; commit: string | null; recorded?: Set<string> }) {
+  async function resumeMergesOnPromotion(promotedAt: Date) {
     if (!opts.resumeLand) return { started: 0, waiting: 0 };
     if (await getHold(db)) return { started: 0, waiting: 1 };
     const list = (await approvedUnmerged()).filter((x) => x.approvedAt < promotedAt.getTime());
@@ -724,11 +723,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (!companyRunners.some((r) => opts.isConnected(r.id))) {
         waiting++;
         continue;
-      }
-      // BOS-1399: one merge-line row per restarted ticket, with why, written once even though this pass repeats.
-      if (takeover && !takeover.recorded?.has(ticket.id)) {
-        (takeover.recorded ??= new Set()).add(ticket.id);
-        await lineEvent(db, ticket, { event: "takeover", by: takeover.cause, commit: takeover.commit });
       }
       const ok = await opts.resumeLand(ticket.id).then(() => true, () => false);
       if (!ok) continue;

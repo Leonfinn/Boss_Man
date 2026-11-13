@@ -17,8 +17,9 @@
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
 //   merged         it merged (commit; null when there was nothing to merge)
 //   left           it left review without merging (to: the state it moved to)
-//   takeover       a server took charge and restarted this merge (by: the cause, see TakeoverCause; commit: the
-//                  live commit). One row per restarted ticket, just before the "attempt" it causes (BOS-1399).
+//   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
+//                  company per takeover, with ticket_id null, written whether or not a merge is waiting; the
+//                  "attempt" rows it causes follow it in time (BOS-1399).
 //
 // The hold's reason is in `hold`, not `reason`: wake-classes.test reads every `reason: "..."` in the source
 // as a wake reason.
@@ -29,7 +30,7 @@
 // readers that count an agent's activity never see them; the brief also skips the kind outright.
 import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity, settings } from "../db/schema.js";
+import { activity, companies, settings } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
@@ -76,6 +77,21 @@ export async function takeoverCause(db: Db, p: { first: boolean; signalled: bool
   if (p.signalled) return "deployer_switch";
   if (!p.first) return "standby_promotion";
   return before !== null && p.commit !== null && before !== p.commit ? "deploy" : "restart";
+}
+
+/**
+ * Writes one "takeover" row for each company, with no ticket, so a takeover shows in the records even when no
+ * merge is waiting. Never throws: a record of the line must never stop the line.
+ */
+export async function recordTakeover(db: Db, t: { cause: TakeoverCause; commit: string | null }, at: Date = new Date()): Promise<void> {
+  try {
+    const e: MergeLineEvent = { event: "takeover", by: t.cause, commit: t.commit };
+    for (const c of await db.select({ id: companies.id }).from(companies)) {
+      await record(db, { companyId: c.id, ticketId: null, kind: MERGE_LINE_KIND, summary: summaryOf(e), detail: e as unknown as Record<string, unknown>, at });
+    }
+  } catch {
+    // see above
+  }
 }
 
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {
