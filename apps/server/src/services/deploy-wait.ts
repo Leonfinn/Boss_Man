@@ -205,6 +205,8 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       .values({
         companyId,
         kind: "approval",
+        // The owner's own choice (keep waiting, update now, cancel), so it goes to them.
+        tier: "owner",
         question: `${where}${mem} ${choice} Until you answer, new merge checks wait and at most ${quietRuns} runs go at once.`,
         options,
         recommendedOption: recommended,
