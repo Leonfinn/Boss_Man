@@ -478,8 +478,12 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .pl-causes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .pl-causes li { overflow-wrap: anywhere; }
 .pl-causes-head { display: flex; align-items: center; }
-.pl-causes-toggle { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0; background: none; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
-.pl-causes-toggle:hover { text-decoration: underline; }
+.pl-causes-head h2 { flex: 1; min-width: 0; margin: 0; }
+.pl-causes-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 40px; padding: 0; background: none; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.pl-causes-toggle:hover .pl-causes-action { border-color: var(--muted); }
+.pl-causes-toggle:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; border-radius: 6px; }
+.pl-causes-action { flex: none; display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 2px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; font-weight: 500; }
+.card.pl-causes-folded { padding: 0 14px; gap: 0 !important; }
 .pl-arrow { color: var(--muted); width: 12px; flex: none; }
 .pl-causes-more { align-self: flex-start; min-height: 36px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .pl-causes-more:hover { border-color: var(--muted); }
