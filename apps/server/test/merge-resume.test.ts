@@ -7,6 +7,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, companies, decisions, reviewRequests, runners, settings, tickets } from "../src/db/schema.js";
 import { createLeader } from "../src/leader.js";
+import { takeoverCause } from "../src/services/merge-line.js";
 import { MAINTENANCE_KEY } from "../src/services/maintenance.js";
 import { setInfraRetryBase } from "../src/services/review.js";
 
@@ -74,6 +75,31 @@ describe("a server that takes charge restarts approved merges (DR-026)", () => {
     const lines = await c.db.select().from(activity).where(eq(activity.ticketId, t.id));
     expect(lines.some((l) => l.summary.includes("The server restarted during this merge, so it was started again"))).toBe(true);
     expect(await c.db.select().from(decisions)).toHaveLength(0);
+  });
+
+  it("writes one takeover row per restarted ticket, with the cause and commit, before its attempt (BOS-1399)", async () => {
+    const c = await setup();
+    c.connect();
+    const t = await c.approved(5 * MIN);
+    const takeover = { cause: "standby_promotion" as const, commit: "c".repeat(40) };
+    await c.built.sweeps.resumeMergesOnPromotion(new Date(), takeover);
+    await c.built.sweeps.resumeMergesOnPromotion(new Date(), takeover); // the loop asks again: no second row
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    const rows = (await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_line")))).sort((a, b) => a.at.getTime() - b.at.getTime());
+    const events = rows.map((r) => (r.detail as { event: string }).event);
+    expect(events.filter((e) => e === "takeover")).toHaveLength(1);
+    expect(rows.find((r) => (r.detail as { event: string }).event === "takeover")!.detail).toMatchObject({ event: "takeover", by: "standby_promotion", commit: takeover.commit });
+    if (events.includes("attempt")) expect(events.indexOf("takeover")).toBeLessThan(events.indexOf("attempt"));
+  });
+
+  it("works out the cause: switch, standby promotion, deploy (new commit) or restart (same commit)", async () => {
+    const { db, close } = await openPglite();
+    ctx = { close };
+    expect(await takeoverCause(db, { first: true, signalled: false, commit: "aaa" })).toBe("restart"); // nothing known before
+    expect(await takeoverCause(db, { first: true, signalled: false, commit: "aaa" })).toBe("restart"); // same commit
+    expect(await takeoverCause(db, { first: true, signalled: false, commit: "bbb" })).toBe("deploy");
+    expect(await takeoverCause(db, { first: true, signalled: true, commit: "ccc" })).toBe("deployer_switch");
+    expect(await takeoverCause(db, { first: false, signalled: false, commit: "ccc" })).toBe("standby_promotion");
   });
 
   it("starts the urgent ticket first, then the rest by approval time", async () => {

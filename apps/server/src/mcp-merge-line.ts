@@ -11,7 +11,7 @@ import { fail, text, type Scope } from "./mcp-common.js";
 
 export const MERGE_LINE_EXPORT_DEFAULT = 5000;
 export const MERGE_LINE_EXPORT_MAX = 20_000;
-export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by"] as const;
+export const MERGE_LINE_COLUMNS = ["ticket_id", "at", "event", "hold", "heldMs", "check", "passed", "by", "commit"] as const;
 
 type Row = Record<(typeof MERGE_LINE_COLUMNS)[number], string | number | boolean | null>;
 
@@ -29,6 +29,7 @@ export function exportRow(r: { ticketId: string | null; at: Date; detail: Record
     check: str(d.check),
     passed: typeof d.passed === "boolean" ? d.passed : null,
     by: str(d.by),
+    commit: str(d.commit),
   };
 }
 
@@ -45,7 +46,7 @@ export function registerMergeLineExport(server: Pick<McpServer, "registerTool">,
     "merge_line_records",
     {
       description:
-        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed and by for each row, and nothing else. since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them).`,
+        `Read-only export of your company's merge-line timeline (the rows BOS-769 records: approved, check queued/started/ended, hold started/ended, merged, and each server takeover: event "takeover" with the cause in by and the live commit in commit), oldest first. Returns ticket_id, at, event, hold, heldMs, check, passed, by and commit for each row, and nothing else. since is an ISO date or time (e.g. 2026-11-08T21:22:00Z); optional until (exclusive), format json (default) or csv, and limit (default ${MERGE_LINE_EXPORT_DEFAULT}, at most ${MERGE_LINE_EXPORT_MAX}). If the answer was cut at the limit it says so; ask again with since set to the last row's at to carry on (rows at that exact moment repeat, so drop them).`,
       inputSchema: {
         since: z.string().min(8).max(40),
         until: z.string().min(8).max(40).optional(),
