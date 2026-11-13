@@ -9,9 +9,10 @@ export const MERGE_CHECK_LIMIT_KEY = "merge_check_limit";
 export const DEFAULT_MERGE_CHECK_LIMIT = 2;
 export const MAX_MERGE_CHECK_LIMIT = 16;
 
-/** Tickets that jump the queue: owner-marked urgent work, and arch fixes (the gate's own repairs). */
-export function checkPriority(t: { urgent?: boolean | null; title?: string | null }): number {
+/** Tickets that jump the queue: owner-marked urgent work, fixes to the merge check itself, and arch fixes (the gate's own repairs). */
+export function checkPriority(t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null }): number {
   if (t.urgent) return 0;
+  if (t.fixesMergeCheck) return 0;
   if (/^\s*arch fix\b/i.test(t.title ?? "")) return 0;
   return 1;
 }
