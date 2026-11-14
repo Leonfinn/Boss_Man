@@ -2,11 +2,22 @@
 // session: it keeps going when a run ends and an agent has no command that can stop it (only the server's check.cancel).
 // The server's slots order the jobs; each job also takes a slot in the runner's own check line (BOS-805), so jobs, agents'
 // hand-run checks and the vitest guard share the machine's real limit. The runner's count caps the server's check_slots.
-import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type RunnerMessage } from "@boss-man/shared";
+import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, CheckLimits, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type RunnerMessage } from "@boss-man/shared";
 import type { Workspaces } from "./workspace.js";
 
 type Done = Extract<RunnerMessage, { type: "check.done" }>;
 const PROGRESS_EVERY_MS = 30_000;
+
+/**
+ * BOS-1435: the owner's per-check caps for this machine, as the job's environment. BOSSMAN_CHECK_THREADS is what
+ * check-all.sh and every vitest config already read as their worker cap (Playwright runs inside vitest); the memory figure
+ * is passed on for the scripts to use. Only bounded whole numbers, never free-form variables: anything else is dropped.
+ */
+export function checkLimitsEnv(limits: unknown): Record<string, string> {
+  const ok = CheckLimits.safeParse(limits ?? {});
+  if (!ok.success) return {};
+  return { ...(ok.data.threads ? { BOSSMAN_CHECK_THREADS: String(ok.data.threads) } : {}), ...(ok.data.memoryMb ? { BOSSMAN_CHECK_MEMORY_MB: String(ok.data.memoryMb) } : {}) };
+}
 
 export class CheckJobs {
   private cancels = new Map<string, () => void>();
@@ -35,7 +46,7 @@ export class CheckJobs {
     this.unsent.delete(jobId);
   }
 
-  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string }) {
+  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string; limits?: CheckLimits }) {
     if (this.cancels.has(cmd.jobId)) return; // the server asked twice
     let lastSent = 0;
     let cancelled = false;
@@ -45,6 +56,7 @@ export class CheckJobs {
     void this.workspaces
       .runCommitCheck({ projectId: cmd.projectId, jobId: cmd.jobId, commit: cmd.commit }, cmd.command, cmd.timeoutMs ?? VERIFY_TIMEOUT_MS, {
         scanList: cmd.scanList,
+        limitsEnv: checkLimitsEnv(cmd.limits),
         onStart: (kill) => {
           this.cancels.set(cmd.jobId, () => {
             cancelled = true;

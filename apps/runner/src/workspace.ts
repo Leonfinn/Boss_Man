@@ -1322,7 +1322,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string; limitsEnv?: Record<string, string> } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1337,7 +1337,11 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, { projectId: spec.projectId, list: hooks.scanList });
+        // BOS-1435: the machine's per-check caps (BOSSMAN_CHECK_THREADS / _MEMORY_MB), already bounded by checkLimitsEnv. The
+        // job's environment is a whitelist built from the fence env, so they go there.
+        const fence = this.jobFenceFor(repo, dir, home);
+        Object.assign(fence.env, hooks.limitsEnv ?? {});
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence }, null, { projectId: spec.projectId, list: hooks.scanList });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);

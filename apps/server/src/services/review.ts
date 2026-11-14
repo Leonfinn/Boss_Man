@@ -6,7 +6,7 @@ import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode } from "@boss-ma
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
@@ -268,6 +268,8 @@ export function reviewService(
     onMerged?: (ticketId: string) => Promise<unknown>;
     /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
     cancelCheck?: (jobId: string, reason: string) => Promise<unknown>;
+    /** BOS-1435: checks the company can run at once (runner plus ready check workers); the merge train's seats. Absent: the slots setting. */
+    checkCapacity?: (companyId: string) => Promise<number>;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -1942,7 +1944,9 @@ export function reviewService(
             const started = async (j: typeof job) => {
               if (j.startedAt && j.startedAt.getTime() !== seenStart) {
                 seenStart = j.startedAt.getTime();
-                await lineEvent(db, t, { event: "check_started", ...line }, j.startedAt);
+                // BOS-1435: where it runs, so the merge-line record shows a check that ran on a check worker.
+                const ranOn = j.workerId ? ((await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.id, j.workerId)))[0]?.name ?? "a check worker") : "company runner";
+                await lineEvent(db, t, { event: "check_started", ...line, ranOn }, j.startedAt);
               }
             };
             // An earlier pass of the same tree is reused as it is: it ran before this attempt, so only queued and ended are written, now.
@@ -2034,7 +2038,8 @@ export function reviewService(
        * - any exit that isn't a landing leaves the train (finally), so a seat is never held by a dead landing.
        */
       const trainMerge = async (): Promise<ServerMergeEnd> => {
-        const { train, created } = trainFor(t.projectId, await queue.slots());
+        // BOS-1435: seats grow with ready check workers; a worker that drops shrinks them, and admit never evicts a seated member.
+        const { train, created } = trainFor(t.projectId, deps.checkCapacity ? await deps.checkCapacity(t.companyId) : await queue.slots());
         if (created) {
           // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live.
           const live = await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(eq(checkJobs.projectId, t.projectId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]))).orderBy(asc(checkJobs.queuedAt));

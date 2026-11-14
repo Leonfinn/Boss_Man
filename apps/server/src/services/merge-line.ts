@@ -45,7 +45,8 @@ export type MergeLineEvent =
   | { event: "restacked"; why: "ahead_left" | "ahead_changed" | "main_moved" | "cap"; restacks: number }
   /** Merge train: a failed check that stood got its one re-run on the same tree; `passed` says how the re-run went (a flaky pass). */
   | { event: "rerun"; check: string; passed: boolean | null; failedJobId?: string }
-  | { event: "check_started"; check: string; way: CheckWay; jobId?: string }
+  /** ranOn (BOS-1435): "company runner" or the check worker's name, for a queued check. */
+  | { event: "check_started"; check: string; way: CheckWay; jobId?: string; ranOn?: string }
   | { event: "check_ended"; check: string; way: CheckWay; jobId?: string; passed: boolean | null; why?: string }
   | { event: "hold_started"; hold: HoldReason; note?: string; carried?: Array<{ ticketId: string; title: string }>; decisionId?: string | null }
   | { event: "hold_ended"; hold: HoldReason; since: string; heldMs: number }
