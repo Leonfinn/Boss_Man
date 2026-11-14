@@ -44,8 +44,9 @@ function validate(s: Partial<WorkerSettings>) {
 }
 
 export function checkWorkersService(db: Db) {
-  // Live sockets on this process (only the leader holds any). Lost on restart, like the runners' map: a worker redials.
+  // shortcut: live sockets on this process (only the leader holds any); lost on restart, harmless because a worker redials, like a runner.
   const connected = new Map<string, { send: WorkerSender; close: (code: number, why: string) => void }>();
+  // shortcut: per live socket; lost on restart, harmless because a worker sends its features again in hello.
   const features = new Map<string, string[]>();
 
   async function get(id: string): Promise<CheckWorker | null> {

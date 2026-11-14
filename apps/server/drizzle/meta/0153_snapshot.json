@@ -1,5 +1,5 @@
 {
-  "id": "e85e521d-0bdc-427e-8660-4d3329a73306",
+  "id": "f142c9aa-122f-4b77-993e-17a2e6148809",
   "prevId": "6e6799bc-fb98-4e17-ab1e-379cf3b1f806",
   "version": "7",
   "dialect": "postgresql",
@@ -1408,12 +1408,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "worker_id": {
-          "name": "worker_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "command": {
           "name": "command",
           "type": "text",
@@ -1527,27 +1521,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "check_jobs_worker_state": {
-          "name": "check_jobs_worker_state",
-          "columns": [
-            {
-              "expression": "worker_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "state",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -1609,19 +1582,6 @@
           "tableTo": "runners",
           "columnsFrom": [
             "runner_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "check_jobs_worker_id_check_workers_id_fk": {
-          "name": "check_jobs_worker_id_check_workers_id_fk",
-          "tableFrom": "check_jobs",
-          "tableTo": "check_workers",
-          "columnsFrom": [
-            "worker_id"
           ],
           "columnsTo": [
             "id"
@@ -1765,116 +1725,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.check_workers": {
-      "name": "check_workers",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "company_ids": {
-          "name": "company_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "slots": {
-          "name": "slots",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "check_threads": {
-          "name": "check_threads",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "check_memory_mb": {
-          "name": "check_memory_mb",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "image_commit": {
-          "name": "image_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "image_version": {
-          "name": "image_version",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reported_slots": {
-          "name": "reported_slots",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "features": {
-          "name": "features",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_seen_at": {
-          "name": "last_seen_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "check_workers_token_hash_unique": {
-          "name": "check_workers_token_hash_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "token_hash"
-          ]
-        }
-      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -9635,6 +9485,18 @@
         "go_live_wait_since": {
           "name": "go_live_wait_since",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "live_marked_at": {
+          "name": "live_marked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "live_evidence": {
+          "name": "live_evidence",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

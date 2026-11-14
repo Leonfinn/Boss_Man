@@ -8,6 +8,7 @@ import type { launcherService } from "../services/launcher.js";
 import type { maintenanceService } from "../services/maintenance.js";
 import type { runnerReportService } from "../services/runner-report.js";
 import type { schedulerService } from "../services/scheduler.js";
+import type { deployWaitService } from "../services/deploy-wait.js";
 import type { selfDeployService } from "../services/self-deploy.js";
 
 const Uuid = z.string().uuid();
@@ -21,10 +22,11 @@ export function serverAdminRoutes(
     runnerReport: ReturnType<typeof runnerReportService>;
     launch: ReturnType<typeof launcherService>;
     selfDeploy: ReturnType<typeof selfDeployService>;
+    deployWait: ReturnType<typeof deployWaitService>;
     deploysSvc: ReturnType<typeof deploysService>;
   },
 ) {
-  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deploysSvc } = deps;
+  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc } = deps;
 
   // Scheduling and kill switches (R30).
   owner.post("/api/agents/:id/wake", async (req, reply) => {
@@ -77,7 +79,14 @@ export function serverAdminRoutes(
     return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;
   });
 
-  owner.post("/api/self-deploy/update-runners", async (_req, reply) => {
+  // A server update waiting for a quiet machine (BOS-420): what it waits for, and the owner's cancel.
+  owner.get("/api/self-deploy/wait", async () => deployWait.status());
+  owner.post("/api/self-deploy/wait/cancel", async (_req, reply) => {
+    const r = await deployWait.cancel(); // leader-only
+    return r.tooLate ? reply.code(409).send({ error: "too_late", message: "The machine has already started this update, so it can't be cancelled. The hold lifts when it ends." }) : r;
+  });
+
+  owner.post("/api/self-deploy/update-runners",async (_req, reply) => {
     const r = await selfDeploy.updateRunners();
     // BOS-953: during the trial the refusal says when it can work, and carries the time so the panel shows it too.
     return "error" in r

@@ -49,8 +49,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
   const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
   const graceMs = deps.workerGraceMs ?? HEARTBEAT_MS * 3;
-  // A dropped worker's pending re-queue, cancelled if it says hello again in time. Lost on a server restart: a worker that
-  // comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
+  // shortcut: a dropped worker's pending re-queue, cancelled if it says hello again in time; lost on restart, harmless because
+  // a worker that comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
   const graceTimers = new Map<string, NodeJS.Timeout>();
 
   async function ended(job: CheckJob) {
