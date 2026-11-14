@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -111,14 +111,15 @@ export function feedbackService(
   }
 
   /** The features that actually reach visitors: ticked on, not marked keep-off, and with a public summary (that summary
-   * replaces the internal description and title, so internal text never reaches visitors). */
+   * replaces the internal description and title, so internal text never reaches visitors). Public text the portal rule
+   * calls security work is dropped too, a second wall behind the update_feature guard (BOS-1420): a reader never sees it. */
   async function livePortalFeatures(companyId: string) {
     const rows = await db
       .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
       .from(features)
       .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
       .orderBy(asc(features.title));
-    return rows.filter((f) => !!f.publicSummary?.trim());
+    return rows.filter((f) => !!f.publicSummary?.trim() && !looksLikeSecurity([f.publicTitle ?? "", f.publicSummary!].join(" ")));
   }
 
   /** Every feature of a company with its demand, priority and delivery, in one pass. */

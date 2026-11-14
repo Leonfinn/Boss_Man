@@ -837,6 +837,14 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -C/ -i -pe s/a/b/ etc/hosts",
     "ruby -C /srv -i -pe s/a/b/ x.rb",
     "ruby -C /srv -i.bak -pe s/a/b/ f",
+    // -C and -x[dir] inside a switch bundle change directory too (BOS-858).
+    "ruby -pC/ -i -e s/a/b/ x.rb",
+    "ruby -pC / -i -e s/a/b/ x.rb",
+    "ruby -pC/ -i.bak -e s/a/b/ x.rb",
+    "ruby -i -pC/ -e s/a/b/ x.rb",
+    "ruby -x/ -i -pe s/a/b/ x.rb",
+    "ruby -px/ -i -e s/a/b/ x.rb",
+    "ruby -x/srv -i.bak -pe s/a/b/ f",
     "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
     // ruby long options whose value is the next word must not hide the -i (security review round 3).
     "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
@@ -875,6 +883,9 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -rdate script.rb",
     // -C without -i only reads a script from another folder.
     "ruby -C /srv script.rb",
+    "ruby -pC/ -e 'p 1' x.rb",
+    "ruby -px -i -e s/a/b/ x.rb",
+    "ruby -x script.rb",
     // Long options that read a value, without -i.
     "ruby --encoding utf-8 script.rb",
     "ruby --encoding utf-8 -pe s/a/b/ x.rb",

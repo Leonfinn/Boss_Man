@@ -4,9 +4,11 @@ import type { RunnerEvent } from "@boss-man/shared";
 import { startCanaryModel } from "../src/canary.js";
 import { checkClaude } from "../src/claude-check.js";
 import { SessionManager } from "../src/session-manager.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 describe("setup-token check (R58)", () => {
-  it("passes when Claude Code answers, refusing the tool call the stand-in asks for", async () => {
+  // Claude Code lives in the Claude pack now (DR-050, BOS-972): a real Claude session runs only where a pack is pointed at.
+  it.skipIf(!claudeAdapterBin() || !process.env.CLAUDE_CODE_EXECUTABLE)("passes when Claude Code answers, refusing the tool call the stand-in asks for", async () => {
     const model = await startCanaryModel();
     try {
       const r = await checkClaude({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-stand-in", ANTHROPIC_BASE_URL: model.url, NO_PROXY: "127.0.0.1,localhost" }, { baseEnv: { PATH: process.env.PATH } });

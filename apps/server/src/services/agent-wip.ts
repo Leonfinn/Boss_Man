@@ -43,7 +43,18 @@ export const cantMoveFor = (t: TicketsOrAlias) => sql`(
 )`;
 export const cantMoveSql = cantMoveFor(tickets);
 
-export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string) => countWip(db, and(eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`, where), exceptId);
+/**
+ * The ticket's request_check job is queued or running (BOS-1479): it has nothing to do but wait for the check line,
+ * which can be 30 deep. Such a ticket is freed from the COMPANY limit only (`cantMoveForCompany`); it still counts toward
+ * its agent's own limit, so one agent can't keep starting work and adding checks to a long queue. A merge job doesn't count:
+ * a merging ticket is in review, not in progress.
+ */
+export const waitsOnCheckFor = (t: Pick<TicketsOrAlias, "id">) => sql`exists (select 1 from check_jobs cj where cj.ticket_id = ${t.id} and cj.kind = 'pre_review' and cj.state in ('queued', 'running'))`;
+export const cantMoveForCompany = (t: TicketsOrAlias) => sql`(${cantMoveFor(t)} or ${waitsOnCheckFor(t)})`;
+
+/** `scope: "company"` also frees tickets that only wait on a queued or running check (BOS-1479). */
+export const countInProgress = (db: Db, where: SQL | undefined, exceptId?: string, scope: "agent" | "company" = "agent") =>
+  countWip(db, and(eq(tickets.systemState, "in_progress"), sql`not ${scope === "company" ? cantMoveForCompany(tickets) : cantMoveSql}`, where), exceptId);
 
 export type WipExempt = "waits" | "plan" | "live";
 
@@ -87,11 +98,19 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect): Prom
     }
   }
   if (!hold && limits.company != null) {
-    const n = await countInProgress(db, eq(tickets.companyId, t.companyId), t.id);
+    const n = await countInProgress(db, eq(tickets.companyId, t.companyId), t.id, "company");
     if (n >= limits.company) hold = { limit: limits.company, scope: "company", reason: `Waiting: the company is at the limit of ${limits.company} in-progress tickets; starts when one finishes.` };
   }
   if (hold && t.urgent) return { hold: null, urgentOver: true };
   return { hold, urgentOver: false };
+}
+
+/** Ready tickets whose start a WIP limit has refused (`wip_held_at` set), with the limit that refuses each one now (BOS-1479). */
+export async function heldReadyTickets(db: Db, companyId: string): Promise<{ ticket: typeof tickets.$inferSelect; scope: "agent" | "company" | null }[]> {
+  const rows = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), sql`${tickets.wipHeldAt} is not null`));
+  const out: { ticket: typeof tickets.$inferSelect; scope: "agent" | "company" | null }[] = [];
+  for (const ticket of rows) out.push({ ticket, scope: (await agentWipHold(db, ticket)).hold?.scope ?? null });
+  return out;
 }
 
 /**
