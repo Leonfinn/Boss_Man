@@ -82,7 +82,7 @@ export const OWNER_CONTROLS = {
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
-  Projects: ["Open …", "Unarchive", "Re-detect"],
+  Projects: ["Open …", "Unarchive", "Re-detect", "Check now"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
