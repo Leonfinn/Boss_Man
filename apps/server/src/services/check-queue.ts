@@ -12,6 +12,7 @@ import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -138,11 +139,20 @@ export function checkQueue(db: Db) {
     const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j) && (listScanned(j) || j.state === "queued"));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
+      // BOS-1390: the lift is guarded on state = 'queued' too. A pump holds a different lock (check_jobs_claim), so it can claim
+      // the job between the read above and this UPDATE; without the guard that running job would become a merge-kind job the
+      // merge reuses as "live", never having been scanned with the owner's list. No row means it was claimed: fall through and
+      // queue a fresh merge job, which the gate dispatches with the list.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
-        const [lifted] = await db.update(checkJobs).set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain }).where(eq(checkJobs.id, live.id)).returning();
-        return { job: lifted ?? live, reused: "live" };
+        const [lifted] = await db
+          .update(checkJobs)
+          .set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain })
+          .where(and(eq(checkJobs.id, live.id), eq(checkJobs.state, "queued")))
+          .returning();
+        if (lifted) return { job: lifted, reused: "live" };
+      } else {
+        return { job: live, reused: "live" };
       }
-      return { job: live, reused: "live" };
     }
     // A newer commit of the same ticket replaces its queued job of the same command whose scope is no wider than the new one
     // (never a running one: that one is the runner's to finish or fail). A queued full check is never dropped by a later quick
@@ -235,8 +245,11 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
-    const limit = await slots();
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number): Promise<CheckJob[]> {
+    // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
+    if ((await softHold(db, now)).on) return [];
+    // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
+    const limit = Math.min(await slots(), runnerSlots ?? Infinity);
     const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {

@@ -56,8 +56,11 @@ export const OWNER_CONTROLS = {
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
-    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
+    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
     "Show all done tasks", "Run now", "Discard draft",
+    // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
+    // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
+    "Filter", "Clear all", "Clear filters",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
@@ -129,6 +132,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The update wait (BOS-420): the same button reads by phase.
+    "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
     // Ask every running agent to stop cleanly before an update (BOS-929).

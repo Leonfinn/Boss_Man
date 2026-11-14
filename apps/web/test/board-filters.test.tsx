@@ -43,6 +43,7 @@ function stub(extra: Record<string, unknown> = {}) {
   );
 }
 const open = () => render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+const openPanel = (name = "Filter") => fireEvent.click(screen.getByRole("button", { name }));
 const shown = () => ["Alpha", "Beta", "Gamma", "Delta"].filter((n) => screen.queryByText(`${n} task`, { selector: "h3 a" }));
 
 describe("workingFor", () => {
@@ -78,6 +79,7 @@ describe("board filters", () => {
     stub();
     open();
     await screen.findByText("Alpha task", { selector: "h3 a" });
+    openPanel();
     const select = (await screen.findByLabelText("Feature")) as HTMLSelectElement;
     await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
@@ -88,9 +90,9 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Delta"]);
     fireEvent.change(select, { target: { value: "any" } });
 
-    const working = screen.getByRole("button", { name: /^Working now/ });
+    const working = screen.getByRole("switch", { name: /^Working now/ });
     fireEvent.click(working);
-    expect(working.getAttribute("aria-pressed")).toBe("true");
+    expect(working.getAttribute("aria-checked")).toBe("true");
     expect(shown()).toEqual(["Alpha", "Gamma"]);
 
     // Both together, and with the assignee filter.
@@ -106,22 +108,127 @@ describe("board filters", () => {
     sessionStorage.setItem("board-filters", JSON.stringify({ feature: "gone", working: false }));
     stub();
     open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    openPanel();
     await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
     expect((screen.getByLabelText("Feature") as HTMLSelectElement).value).toBe("any");
+    expect(screen.getByRole("button", { name: "Filter" })).toBeTruthy();
   });
 
-  it("remembers both choices", async () => {
+  it("remembers both choices, and a saved filter shows as a count and chips on arrival", async () => {
     stub();
     open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    openPanel();
     await screen.findByRole("option", { name: "Export" }, { timeout: 5000 });
     fireEvent.change(screen.getByLabelText("Feature"), { target: { value: "f2" } });
-    fireEvent.click(screen.getByRole("button", { name: /^Working now/ }));
+    fireEvent.click(screen.getByRole("switch", { name: /^Working now/ }));
     cleanup();
     open();
-    await screen.findByText("Gamma task", { selector: "h3 a" });
+    expect(await screen.findByText("Feature: Export", { selector: ".filter-chip span" }, { timeout: 5000 })).toBeTruthy();
     expect(shown()).toEqual(["Gamma"]);
-    expect(screen.getByRole("button", { name: /^Working now/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Filter, 2 on" })).toBeTruthy();
+    expect(screen.getByText("Working now", { selector: ".filter-chip span" })).toBeTruthy();
+    openPanel("Filter, 2 on");
+    expect(screen.getByRole("switch", { name: /^Working now/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("removes a filter from its chip, and Clear all leaves the search text alone", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    openPanel();
+    fireEvent.click(screen.getByRole("switch", { name: /^Working now/ }));
+    fireEvent.change(screen.getByLabelText("Assigned to"), { target: { value: "a1" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search tasks" }), { target: { value: "task" } });
+    expect(shown()).toEqual(["Alpha"]);
+    expect(screen.getByRole("button", { name: "Filter, 2 on" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter: assigned to Developer" }));
+    expect(shown()).toEqual(["Alpha", "Gamma"]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Clear all" })[0]!);
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    expect((screen.getByRole("searchbox", { name: "Search tasks" }) as HTMLInputElement).value).toBe("task");
+    expect(screen.getByRole("button", { name: "Filter" })).toBeTruthy();
+  });
+
+  it("says why a column is empty when filters emptied it, with a way out", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    openPanel();
+    fireEvent.change(screen.getByLabelText("Assigned to"), { target: { value: "owner" } });
+    expect(shown()).toEqual([]);
+    expect(screen.getByText(/No tasks match your filters\./)).toBeTruthy();
+    // Columns that were empty anyway keep their usual hint.
+    expect(screen.getAllByText(/No tasks match your filters\./).length).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+  });
+
+  it("opens as a non-modal dialog, closes on Escape and returns focus to the Filter button", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    const button = screen.getByRole("button", { name: "Filter" });
+    expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(button);
+    const dialog = screen.getByRole("dialog", { name: "Filter tasks" });
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(dialog.getAttribute("aria-modal")).toBeNull();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(screen.getByText("Changes apply at once. Esc closes.")).toBeTruthy();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(button);
+    // A click outside closes it too.
+    fireEvent.click(button);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("closes when Tab leaves the panel without pulling focus back to Filter", async () => {
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    const button = screen.getByRole("button", { name: "Filter" });
+    fireEvent.click(button);
+    const dialog = screen.getByRole("dialog", { name: "Filter tasks" });
+    // The next focus target outside the panel, as a Tab would land on it.
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    fireEvent.blur(dialog, { relatedTarget: outside });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement, "focus is not pulled back to Filter").not.toBe(button);
+    outside.remove();
+  });
+
+  it("is a modal bottom sheet on a phone, with Clear all and a live Show N tasks", async () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q.includes("max-width: 640px"), media: q, addEventListener: () => {}, removeEventListener: () => {} }));
+    stub();
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    fireEvent.click(screen.getByRole("button", { name: "Filter" }));
+    const dialog = screen.getByRole("dialog", { name: "Filter tasks" });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(screen.getByRole("button", { name: "Show 4 tasks" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: /^Working now/ }));
+    expect(screen.getByRole("button", { name: "Show 2 tasks" })).toBeTruthy();
+    // No chips on a phone: the count on the button does that job.
+    expect(document.querySelector(".filter-chip")).toBeNull();
+    expect(screen.getByRole("button", { name: "Filter, 1 on" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    fireEvent.click(screen.getByRole("button", { name: "Show 4 tasks" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("puts the company's own prefix in the search hint", async () => {
+    stub();
+    render(<Board companies={[{ ...company, ticketPrefix: "FERN" } as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(screen.getByRole("searchbox", { name: "Search tasks" }).getAttribute("placeholder")).toBe("Search: FERN-12, title, words…");
   });
 
   it("lists runs without a ticket in a strip, shows the count, and renders agent-written text as plain text", async () => {
@@ -135,7 +242,9 @@ describe("board filters", () => {
     expect(strip.textContent).toContain("Senior Developer");
     expect(strip.querySelector("img")).toBeNull();
     expect(strip.querySelector("a[href=\"#/runs/r9\"]")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "Working now (3)" })).toBeTruthy();
+    await screen.findByText("Senior Developer", { exact: false });
+    openPanel();
+    expect(screen.getByText("Only tasks an agent is working on (3)")).toBeTruthy();
   });
 
   it("shows no strip when every working agent is on a card", async () => {

@@ -69,7 +69,9 @@ describe("runner-owned scan before the check command", () => {
     const ws = new Workspaces(root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER });
     const r = await ws.runCommitCheck({ projectId, jobId: job(2), commit }, probe, 60_000, { scanList: `ip\t${listedIp}` });
     expect(r.ok).toBe(false);
-    expect(r.output).toContain("BLOCKED listed-private-ip at notes.txt:1");
+    expect(r.output).toContain("BLOCKED a listed private detail was found in this change");
+    expect(r.output).not.toContain("notes.txt");
+    expect(r.output).not.toContain("listed-private");
     expect(r.output).not.toContain(listedIp);
   });
 
@@ -109,7 +111,10 @@ describe("runner-owned scan before the check command", () => {
     const r = await ws.runCommitCheck({ projectId, jobId: job(7), commit }, "echo COMMAND-REACHED", 60_000, { scanList: `ip\t${listedIp}` });
     expect(r.ok).toBe(false);
     expect(r.output).toContain("BLOCKED github-token at x.ts:1");
-    expect(r.output).toContain("BLOCKED listed-private-ip at x.ts:1");
+    expect(r.output).toContain("BLOCKED a listed private detail was found in this change");
+    const listedLine = r.output.split("\n").find((l) => l.includes("a listed private detail was found"));
+    expect(listedLine).not.toContain("x.ts");
+    expect(r.output).not.toContain("listed-private");
     expect(r.output).not.toContain("COMMAND-REACHED");
   });
 
@@ -146,7 +151,8 @@ describe("runner-owned scan before the check command", () => {
     // And the list still reaches the scanner: a listed IP is found.
     const bad = setup(`host ${listedIp}\n`);
     const r2 = await new Workspaces(bad.root, { ...process.env, BOSSMAN_SCAN_SCRIPT: SCANNER }).runCommitCheck({ projectId, jobId: job(11), commit: bad.commit }, "echo ran", 60_000, { scanList: `ip\t${listedIp}` });
-    expect(r2.output).toContain("BLOCKED listed-private-ip");
+    expect(r2.output).toContain("BLOCKED a listed private detail was found in this change");
+    expect(r2.output).not.toContain("listed-private");
   });
 
   it("a runner without the scanner installed runs the command as before", async () => {

@@ -1,5 +1,5 @@
 {
-  "id": "ffb9677c-7c59-4c5b-80c5-c3cc01c67b1c",
+  "id": "f142c9aa-122f-4b77-993e-17a2e6148809",
   "prevId": "6e6799bc-fb98-4e17-ab1e-379cf3b1f806",
   "version": "7",
   "dialect": "postgresql",
@@ -9488,6 +9488,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "live_marked_at": {
+          "name": "live_marked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "live_evidence": {
+          "name": "live_evidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "checked_commit": {
           "name": "checked_commit",
           "type": "text",
@@ -9651,13 +9663,6 @@
         },
         "acceptance_criteria": {
           "name": "acceptance_criteria",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "diff_files": {
-          "name": "diff_files",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,

@@ -44,6 +44,7 @@ function stub() {
 const openFeatures = async (waitTitle = "Dark mode") => {
   stub();
   render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
   fireEvent.click(await screen.findByRole("button", { name: "Features" }));
   await screen.findByRole("article", { name: `Feature ${waitTitle}` });
 };

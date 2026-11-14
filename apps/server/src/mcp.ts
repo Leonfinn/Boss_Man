@@ -313,7 +313,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         throw err;
       }
       await noteRunTicket(ticketId);
-      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, ticketId));
+      const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId, companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, ticketId));
       const notLiveWarning = t ? await liveClaimWarning(db, t, body) : null;
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
@@ -418,7 +418,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (reviewWrite) return fail(reviewWrite);
         // BOS-1021: no owner card on a merged ticket until the merge is running. Judged from merge order, so a
         // ticket merged before the wait existed is covered too.
-        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner }).from(tickets).where(eq(tickets.id, blocksTicketId));
+        const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }
@@ -885,24 +885,31 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
           // A feature the portal rule calls security work stays off the portal: agents read hostile feedback during
           // triage, so a note must not talk one into publishing it. Only the owner can tick it on in the app (BOS-991).
-          if (input.portalVisible === true) {
+          // The guard also runs when this call rewrites the public text of a feature that is already on the portal
+          // (BOS-1420), judged on the feature as it would be left, since visitors see that text too.
+          if (input.portalVisible === true || input.publicSummary !== undefined || input.publicTitle !== undefined) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
-            // Judge what a visitor would see: the stored public title and the public summary (the one being written in
-            // this call if there is one, else the stored one). update_feature never saves title/description, so the input
-            // title and description must not be used here, and they are refused above as decoys (BOS-991, BOS-1419).
-            const publicSummary = input.publicSummary !== undefined ? input.publicSummary : target.publicSummary;
-            const publicTitle = input.publicTitle !== undefined ? input.publicTitle : target.publicTitle;
-            const verdict = portalVerdict({
-              title: target.title,
-              description: target.description,
-              publicTitle,
-              publicSummary,
-              ...facts,
-              keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
-              hasPublicSummary: !!publicSummary?.trim(),
-            });
-            if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+            // Whether the feature would be on the portal after this call: the tick in this call, else the stored one.
+            const wouldBePortalVisible = (input.portalVisible ?? target.portalVisible) && !(input.keepOffPortal ?? target.keepOffPortal);
+            // A public-text edit on a feature that is off the portal saves as it always has (BOS-1420).
+            if (input.portalVisible === true || wouldBePortalVisible) {
+              // Judge what a visitor would see: the stored public title and the public summary (the one being written in
+              // this call if there is one, else the stored one). update_feature never saves title/description, so the input
+              // title and description must not be used here, and they are refused above as decoys (BOS-991, BOS-1419).
+              const publicSummary = input.publicSummary !== undefined ? input.publicSummary : target.publicSummary;
+              const publicTitle = input.publicTitle !== undefined ? input.publicTitle : target.publicTitle;
+              const verdict = portalVerdict({
+                title: target.title,
+                description: target.description,
+                publicTitle,
+                publicSummary,
+                ...facts,
+                keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
+                hasPublicSummary: !!publicSummary?.trim(),
+              });
+              if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
+            }
           }
           const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
           const parts = [
