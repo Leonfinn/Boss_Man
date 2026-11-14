@@ -225,6 +225,7 @@ sections:
   - Add-ons
   - Agents at once
   - Allowed automatically
+  - Check workers
   - Checks
   - Extra lines from your.env
   - Facts only you can give
@@ -243,6 +244,7 @@ sections:
   - Your devices
 reads: 
   - /api/bluegreen
+  - /api/companies
   - /api/companies/:id/runner
   - /api/companies/:id/runner/:id
   - /api/devices
