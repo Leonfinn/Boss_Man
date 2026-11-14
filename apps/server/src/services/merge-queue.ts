@@ -8,6 +8,7 @@ import { type RiskTier, riskOf, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
+import { softHold } from "./deploy-wait-hold.js";
 import { heldTicketIds, holdView } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 
@@ -428,6 +429,8 @@ export function mergeQueueService(
       const cards = await ownerCards(ids);
       const runningIds = new Set(running.map((r) => r.ticketId));
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
+      // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
+      const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
 
       const waiting: WaitingRow[] = [];
       const heldIds = await heldTicketIds(db, ids);
@@ -509,6 +512,10 @@ export function mergeQueueService(
           continue;
         }
         const why = restarted.has(r.id) ? "; the server restarted during this merge, so it is starting again" : "";
+        if (held) {
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the server update${why}`, stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
+          continue;
+        }
         if (queue?.mode === "server" && queue.waiting > 0) {
           waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;

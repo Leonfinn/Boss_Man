@@ -29,17 +29,20 @@ import { allowsPrivate, type HostLookup, LauncherError, launcherService, type La
 import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
 import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, maintenanceService } from "./services/maintenance.js";
+import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
+import { runnerBusy } from "./services/runner-busy.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { failuresForStatus } from "./services/merge-failures.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
 import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
@@ -327,7 +330,13 @@ export async function buildApp(opts: AppOptions) {
     notify: (n) => notes.notify({ companyId: null, agentId: null, level: n.level, title: n.title, body: n.body, link: n.link }),
     isSet: () => privateDetails.isSet(),
   };
-  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  const checks = checkDispatcher(db, {
+    // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
+    drainPending: async () => {
+      const h = runnerCardHold(await getHold(db));
+      return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
+    },
+    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -534,6 +543,7 @@ export async function buildApp(opts: AppOptions) {
     memory,
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
+    mergeFailures: (id) => failuresForStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -931,6 +941,7 @@ export async function buildApp(opts: AppOptions) {
     scanListWarning,
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
@@ -965,6 +976,35 @@ export async function buildApp(opts: AppOptions) {
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
     now: opts.now,
   });
+  // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
+  // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
+  const deployWait = deployWaitService(db, {
+    headroom: () => selfDeploy.headroom(),
+    checksRunning: async () => {
+      return review.gateState().running + (await runnerBusy(db)).checksTotal; // the same busy count the runner drain waits on (BOS-1471)
+    },
+    openRuns: async () => {
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
+      return n;
+    },
+    send: (ctx, id, o) => selfDeploy.send(ctx, id, o),
+    takeBack: (id) => selfDeploy.takeBack(id),
+    requestWaiting: (id) => selfDeploy.requestWaiting(id),
+    status: () => selfDeploy.status(),
+    available: () => selfDeploy.available(),
+    trialUntil: () => selfDeploy.trialUntil(),
+    runnerCardOpen: () => selfDeploy.runnerCardOpen(),
+    drainOn: async () => !!(await getHold(db)),
+    notify: (n) => notes.notify(n),
+    released: async () => {
+      await review.gatePump();
+      await checks.sweep();
+      await scheduler.tick();
+    },
+    now: opts.now,
+    log: (m) => app.log.warn(m),
+  });
+  decisionsSvc.setDeployWaitHook(deployWait);
   // The merge line jam alert (BOS-766): the same view the Merge queue screen reads, and the owner's own
   // notification service, so quiet hours and caps apply as for every other notification.
   const mergeJam = mergeJamService(db, {
@@ -2015,7 +2055,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2252,5 +2292,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

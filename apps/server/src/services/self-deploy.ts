@@ -3,7 +3,7 @@
 // available.json, status.json), raises an owner decision when main has moved, and on approval
 // writes one small request file (inbox) that the host script validates and acts on.
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -70,6 +70,25 @@ const Status = z.object({
   runner_changed: z.string().optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
+
+/** What the host deployer says about its memory every tick (outbox/headroom.json, BOS-420). Every field but the time is optional. */
+const Headroom = z.object({
+  version: z.literal(1),
+  writtenAt: z.string(),
+  totalMb: z.number().int().nonnegative().optional(),
+  availableMb: z.number().int().nonnegative().optional(),
+  swapTotalMb: z.number().int().nonnegative().optional(),
+  swapUsedMb: z.number().int().nonnegative().optional(),
+  needMb: z.number().int().nonnegative().optional(),
+  needFrom: z.string().max(32).optional(),
+  /** Blue/green: the room the need gives a freshly started second server, and what the live server uses now (never part of the need). */
+  newServerMb: z.number().int().nonnegative().optional(),
+  liveServerMb: z.number().int().nonnegative().optional(),
+  /** The host is leaving a request in its inbox (its memory floor). */
+  holding: z.string().max(64).optional(),
+  lastUpdate: z.object({ commit: z.string(), lowMb: z.number(), lowAt: z.string(), swapPeakMb: z.number() }).optional(),
+});
+export type Headroom = z.infer<typeof Headroom>;
 
 /** The host deployer runs every minute (cron) and rewrites host.json each time; longer than this without any sign of it, while no deploy holds its lock, is overdue (BOS-753). */
 export const DEPLOYER_LATE_MS = 10 * 60_000;
@@ -676,9 +695,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   }
 
   /** One request for the host: written beside its final name, then renamed, so the host never reads half a file. */
-  async function writeRequest(id: string, target: "server" | "runner" | "restart", commit: string) {
+  /**
+   * Writes one request beside its final name, then renames it, so the host never reads half a file.
+   * `override`: the owner chose "Update now anyway", so the host's memory floor doesn't hold it (BOS-420). An older host ignores the field.
+   */
+  async function writeRequest(id: string, target: "server" | "runner" | "restart", commit: string, opts: { override?: boolean } = {}) {
     const [o] = await db.select({ id: owners.id }).from(owners).limit(1);
-    const body = { id, target, commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner" };
+    const body = { id, target, commit, requestedAt: new Date().toISOString(), approvedBy: o?.id ?? "owner", ...(opts.override ? { quiet: "override" } : {}) };
     const tmp = `${inboxFile}.${randomBytes(4).toString("hex")}.tmp`;
     await writeFile(tmp, `${JSON.stringify(body)}\n`, { mode: 0o640 });
     await rename(tmp, inboxFile!);
@@ -1125,6 +1148,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
   return {
     enabled: !!dir,
+    /** What the host deployer last reported: its last request's result, and what is live and on main (BOS-420's wait reads both). */
+    status,
+    available,
 
     /**
      * The owner's hand-apply to-dos the host has caught up with (BOS-122): once the live commit is no
@@ -1349,11 +1375,47 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
 
-    /** Hands the approved request to the host. // leader-only */
-    async send(ctx: SelfDeployContext, decisionId: string, thenRunners = false) {
+    /** The host's memory report (BOS-420); null when there is none (an older deployer) or it can't be read. */
+    headroom: () => (dir ? readJson(path.join(dir, "outbox", "headroom.json"), Headroom) : Promise.resolve(null)),
+
+    /** When the current server update's standby window (its trial) ends, if one is running. */
+    async trialUntil(): Promise<string | null> {
+      return (await trialState(await available()))?.endsAt ?? null;
+    },
+
+    /** Whether a runner update card is open (the drain hands over to it after a server update). */
+    async runnerCardOpen(): Promise<boolean> {
+      return (await openFor("runner")).length > 0;
+    },
+
+    /**
+     * Takes back a request the host hasn't picked up yet (the owner cancelled a waiting update, BOS-420).
+     * Only our own request, by its id. False when there is none, or the host already took it.
+     */
+    async takeBack(decisionId: string): Promise<boolean> {
+      if (!(await this.requestWaiting(decisionId))) return false;
+      return rm(inboxFile!).then(() => true, () => false);
+    },
+
+    /** True when our own request (by its id) is still in the inbox, not yet picked up by the host. */
+    async requestWaiting(decisionId: string): Promise<boolean> {
+      if (!inboxFile) return false;
+      const raw = await readFile(inboxFile, "utf8").catch(() => "");
+      try {
+        return (JSON.parse(raw) as { id?: unknown }).id === decisionId;
+      } catch {
+        return false;
+      }
+    },
+
+    /**
+     * Hands the approved request to the host. // leader-only
+     * `override`: the owner chose "Update now anyway", so the host's memory floor doesn't hold it (BOS-420).
+     */
+    async send(ctx: Pick<SelfDeployContext, "target" | "commit">, decisionId: string, opts: { override?: boolean; thenRunners?: boolean } = {}) {
       // BOS-1086 combined button: remember that the runner update is wanted once this deploy's trial ends. finished()
       // turns it into the queued press when the deploy lands, and cancels it if the deploy is switched back or fails.
-      if (thenRunners && ctx.target === "server") await putSetting(RUNNERS_AFTER, { commit: ctx.commit, at: new Date().toISOString() });
+      if (opts.thenRunners && ctx.target === "server") await putSetting(RUNNERS_AFTER, { commit: ctx.commit, at: new Date().toISOString() });
       // BOS-753: the checked merges go first, so the host can deploy the newest of them if main moves on before its tick.
       // A failure here never blocks the deploy: without the list the host deploys the approved commit (still on main).
       // BOS-1086: a server deploy approved while a runner update is queued or under way waits behind it (a new deploy
@@ -1365,7 +1427,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         return;
       }
       if (ctx.target === "server") await writeChecked().catch((err: Error) => deps.log?.(`self-deploy: could not write the checked list: ${err.message}`));
-      await writeRequest(decisionId, ctx.target, ctx.commit);
+      await writeRequest(decisionId, ctx.target, ctx.commit, opts);
     },
 
     /** "Cancel" on the queued runner update (BOS-1086): the owner's press is taken back and the hold goes back to what it was. */

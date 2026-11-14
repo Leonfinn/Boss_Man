@@ -42,8 +42,10 @@ export type AlertCause = {
   /**
    * The funding source the alert is about, for account outages (one card per account, DR-017 B).
    * `auth` is set for a credential/credit failure, which closes only on a clean run (not on "room again").
+   * `resetsAt` is when the account's quota window resets, as the raises that fold into the card report it
+   * last (BOS-1425), so the folded card always names the current reset time.
    */
-  account?: { fundingSourceId: string; name: string; window?: string; auth?: boolean };
+  account?: { fundingSourceId: string; name: string; window?: string; auth?: boolean; resetsAt?: string | null };
   /** The agent ids the card names, for a grouped card's text and its clean-run closer. */
   agents?: Array<string | null | undefined>;
   /** The run a stalled/self/heartbeat alert is about, when its key doesn't carry it. */
@@ -176,10 +178,14 @@ export const ALERT_KINDS = {
     groupBy: (c) => (c.runnerId && c.bootId ? `runner-boot:${c.runnerId}:${c.bootId}` : null),
     title: (_c, n) => `${n} run${n === 1 ? "" : "s"} didn't start after a runner restart`,
   },
-  // watchdog.ts quotaHeldAlerts (BOS-450): a wake held by the subscription usage limit for too long. One card per held wake.
-  // It closes once the account has room again, by the same test the scheduler uses.
+  // watchdog.ts quotaHeldAlerts (BOS-450, BOS-1425): a wake held by the subscription usage limit for too long.
+  // One card per account and limit window, naming every held wake, not one card per wake (which buried the
+  // CEO on the night of 13–14 Nov). It closes once the account has room again, by the same test the scheduler uses.
   quota_held: {
     topRung: "ceo",
+    groupBy: (c) => (c.companyId && c.account ? `quota-held:${c.companyId}:${c.account.fundingSourceId}:${c.account.window ?? "usage"}` : null),
+    title: (c, n) =>
+      `${c.account?.name ?? "An account"} has no room: ${n} wake${n === 1 ? "" : "s"} held by its ${c.account?.window ?? "usage"} limit${c.account?.resetsAt ? `, resets ${c.account.resetsAt}` : ""}`,
     clearWhen: (c) => (c.account ? [{ kind: "limitReset", fundingSourceId: c.account.fundingSourceId }] : []),
   },
   // deploys.ts finishTag / runTag (DR-033): a deploy tag that couldn't be moved after a successful deploy,
@@ -217,6 +223,11 @@ export const ALERT_KINDS = {
   server_freezes: {
     topRung: "owner",
     clearWhen: () => [{ kind: "serverCalm", rule: "freezes" }],
+  },
+  // merge-failures.ts (BOS-1461): three failed merge attempts with the same reason in 30 minutes. Stops at the CEO;
+  // closes by itself (mergeFailuresCalm) after 30 minutes without another of that reason.
+  merge_failures: {
+    topRung: "ceo",
   },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {

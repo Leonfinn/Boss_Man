@@ -6,8 +6,12 @@ import type { RunnerEvent } from "@boss-man/shared";
 import { startCanaryModel } from "../src/canary.js";
 import { probeModels } from "../src/models-probe.js";
 import { SessionManager, withoutGitCredentials } from "../src/session-manager.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-acp.mjs");
+/** The real Claude ACP adapter now lives in the Claude pack (DR-050), not the runner's node_modules: run this
+ * only where one is pointed at (a runner with a ready pack); otherwise there is no adapter to probe. */
+const realClaudeAdapter = claudeAdapterBin();
 
 describe("models.probe", () => {
   it("emits runner.models from the session's config options and replies with them", async () => {
@@ -80,10 +84,10 @@ describe("models.probe", () => {
     await expect(probeModels("opencode", {}, { adapterBin: crash, timeoutMs: 10_000 })).rejects.toThrow(/exited \(code 1\)\. EACCES: permission denied, mkdir/);
   });
 
-  it("against the real claude-agent-acp, lists models and makes no model request", async () => {
+  it.skipIf(!realClaudeAdapter)("against the real claude-agent-acp, lists models and makes no model request", async () => {
     const model = await startCanaryModel();
     try {
-      const models = await probeModels("claude", { ANTHROPIC_API_KEY: "sk-ant-stand-in", ANTHROPIC_BASE_URL: model.url, NO_PROXY: "127.0.0.1,localhost" }, { baseEnv: { PATH: process.env.PATH, NO_PROXY: "127.0.0.1,localhost" }, timeoutMs: 120_000 });
+      const models = await probeModels("claude", { ANTHROPIC_API_KEY: "sk-ant-stand-in", ANTHROPIC_BASE_URL: model.url, NO_PROXY: "127.0.0.1,localhost" }, { baseEnv: { PATH: process.env.PATH, NO_PROXY: "127.0.0.1,localhost" }, adapterBin: realClaudeAdapter ?? undefined, timeoutMs: 120_000 });
       expect(models.length).toBeGreaterThan(0);
       expect(model.requests()).toBe(0);
     } finally {

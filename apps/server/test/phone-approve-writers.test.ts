@@ -115,7 +115,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
  * Beyond the reason given, none of them stores an approveSummary (checked below), which rule 1 needs.
  */
 const WRITERS: Record<string, { counts: Record<string, number>; why: string }> = {
-  "src/app.ts": { counts: { raise: 15 }, why: "alerts.raise (tier ceo, ladder; the GitHub watcher's one-card-per-failure alert hook, BOS-1393;incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook, the server-health hook, the OpenCode VACUUM alert, BOS-595's feature_no_ticket card, the runner watch's runner-offline alert and the deploy-tag alert hook, DR-033, one option) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
+  "src/app.ts": { counts: { raise: 15 }, why: "alerts.raise (tier ceo, ladder; the GitHub watcher's one-card-per-failure alert hook, BOS-1393; incl. the owner-replies hook, BOS-425, the watchdog's alertCeo hook, the server-health hook, the OpenCode VACUUM alert, BOS-595's feature_no_ticket card, the runner watch's runner-offline alert and the deploy-tag alert hook, DR-033, the merge-failure repeat alert, BOS-1461, one option) and decisionsSvc.raise with agentId null (import checklist; the sign-off merge-failed card moved to startLanding)" },
   "src/services/server-health.ts": { counts: { raise: 1 }, why: "deps.raise is app.ts's alerts.raise: alert kinds server_memory / server_freezes, ladder key, no raising agent" },
   "src/mcp.ts": { counts: { raise: 2 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary; submit_plan (BOS-531: blocksTicketId and plan, never eligible)" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
@@ -125,6 +125,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
     counts: { insert: 13, question: 9, todo: 2 },
     why: "merge-stuck (check_stuck, no agent), owner to-do (owner_todo, ownerMustDo), owner setup (type owner_setup, ticketId, no agent, one option), owner setup fix (DR-052: tier ceo, no agent, one option), lesson_replace x2 (tier ceo), permission/plan rows (kind permission/approval), raise() (eligible case), skill (kind skill), CEO reissue (advice), undelivered permission (no agent)",
   },
+  "src/services/deploy-wait.ts": { counts: { insert: 1 }, why: "kind approval: deploy_wait (the 30-minute card: keep waiting, update now, cancel; no raising agent, no approveSummary)" },
   "src/services/deploys.ts": { counts: { insert: 1 }, why: "kind approval: deploy" },
   "src/services/disk.ts": { counts: { insert: 1, question: 1 }, why: "no raising agent, one option" },
   "src/services/engagements.ts": { counts: { insert: 1 }, why: "kind engagement" },

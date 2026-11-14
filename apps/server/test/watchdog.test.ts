@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { activity, agents, companies, decisions, notifications, reviewHolds, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, notifications, quotaSamples, reviewHolds, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { readWatchdogSettings } from "@boss-man/shared";
@@ -927,7 +927,8 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     const QUOTA = "subscription seven_day window nearly used up";
     const held = async (ticketId: string, minutes: number, extra: Partial<typeof wakes.$inferInsert> = {}) =>
       (await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId, reason: "message", status: "deferred", statusReason: QUOTA, priority: 2, causationDepth: 0, createdAt: ctx.ago(minutes), ...extra }).returning())[0]!;
-    const alerts = () => ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "quota-held:%"));
+    const alerts = () => ctx.db.select().from(decisions).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
+    const account = async (name: string) => (await ctx.req("POST", "/api/funding-sources", { name, kind: "subscription", provider: "anthropic" })).json() as { id: string };
 
     it("a quota-held wake is not a plan: the stall rule still flags the ticket", async () => {
       await ctx.switchOn();
@@ -939,6 +940,8 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
 
     it("one alert to the CEO once a wake has been held an hour, naming agent, ticket, window and held time; none before", async () => {
       await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
       const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
       const w = await held(t.id, 59);
       await ctx.watchdog.run();
@@ -947,7 +950,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       await ctx.watchdog.run();
       const list = await alerts();
       expect(list).toHaveLength(1);
-      expect(list[0]!.dedupeKey).toBe(`quota-held:${w.id}`);
+      expect((list[0]!.context as { ladder: { groupBy: string } }).ladder.groupBy).toBe(`quota-held:${ctx.companyId}:${fs.id}:seven_day`);
       expect(list[0]!.question).toContain("Developer");
       expect(list[0]!.question).toContain("Add rate limiting");
       expect(list[0]!.question).toContain("seven_day");
@@ -991,11 +994,60 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       ctx.advance(10);
       await ctx.watchdog.run();
       expect(await alerts()).toHaveLength(1);
-      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "quota-held:%"));
+      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
       ctx.advance(10);
       await ctx.watchdog.run();
       expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "quota_held_alert"))).toHaveLength(1);
       expect(await ctx.db.select().from(decisions).where(like(decisions.question, "%usage limit%"))).toHaveLength(1);
+    });
+
+    it("with 10 wakes held by one account limit, exactly one card lists all 10 (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "seven_day", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 20 * H), observedAt: ctx.now() });
+      for (let i = 0; i < 10; i++) await held((await ctx.ticket({ title: `Held ${i}` })).id, 90);
+      await ctx.watchdog.run();
+      const list = await alerts();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.question).toMatch(/10 wake/);
+      for (let i = 0; i < 10; i++) expect(list[0]!.question).toContain(`Held ${i}`);
+      expect(list[0]!.question).toContain("resets");
+      expect((list[0]!.context as { ladder: { kind: string } }).ladder.kind).toBe("quota_held");
+    });
+
+    it("answering it doesn't bring back a card for the same wakes in the same limit window (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "seven_day", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 20 * H), observedAt: ctx.now() });
+      await held((await ctx.ticket({ title: "Held A" })).id, 90);
+      await held((await ctx.ticket({ title: "Held B" })).id, 90);
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(1);
+      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
+      for (let i = 0; i < 3; i++) {
+        ctx.advance(30);
+        await ctx.watchdog.run();
+      }
+      expect((await alerts()).filter((d) => d.status === "open")).toHaveLength(0);
+      expect(await alerts()).toHaveLength(1);
+    });
+
+    it("a different account or limit window gets its own card (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      const other = await account("Claude Team");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.update(agents).set({ fundingSourceId: other.id }).where(eq(agents.id, ctx.sm.id));
+      await held((await ctx.ticket({ title: "On Max" })).id, 90);
+      await held((await ctx.ticket({ title: "On Team" })).id, 90, { agentId: ctx.sm.id });
+      await held((await ctx.ticket({ title: "Max five hour" })).id, 90, { statusReason: "subscription five_hour window nearly used up" });
+      await ctx.watchdog.run();
+      const list = await alerts();
+      expect(list).toHaveLength(3);
+      const keys = list.map((d) => (d.context as { ladder: { groupBy: string } }).ladder.groupBy).sort();
+      expect(keys).toEqual([`quota-held:${ctx.companyId}:${fs.id}:five_hour`, `quota-held:${ctx.companyId}:${fs.id}:seven_day`, `quota-held:${ctx.companyId}:${other.id}:seven_day`].sort());
     });
   });
 

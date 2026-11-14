@@ -18,6 +18,9 @@
 //                  a merge, leaving, another hold), so a hold always closes. A retry ("attempt") or a repeat
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
 //   merged         it merged (commit; null when there was nothing to merge)
+//   attempt_failed a merge attempt did not land (reason: check_failed | landing_refused | main_moved | conflict |
+//                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
+//                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
 //   left           it left review without merging (to: the state it moved to)
 //
 // The hold's reason is in `hold`, not `reason`: wake-classes.test reads every `reason: "..."` in the source
@@ -50,7 +53,22 @@ export type MergeLineEvent =
   | { event: "hold_started"; hold: HoldReason; note?: string; carried?: Array<{ ticketId: string; title: string }>; decisionId?: string | null }
   | { event: "hold_ended"; hold: HoldReason; since: string; heldMs: number }
   | { event: "merged"; commit: string | null }
+  /** BOS-1461: a merge attempt that did not land, with why (`reason`) and the check job it was about, when there is one. */
+  | { event: "attempt_failed"; reason: FailReason; jobId?: string; note?: string }
   | { event: "left"; to: string };
+
+/** Why a merge attempt did not land (BOS-1461). */
+export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
+export type FailReason = (typeof FAIL_REASONS)[number];
+export const FAIL_REASON_TEXT: Record<FailReason, string> = {
+  check_failed: "the merge check failed",
+  landing_refused: "landing was refused (uncommitted work or a migration problem)",
+  main_moved: "main moved while the merge ran",
+  conflict: "the branch conflicts with main",
+  lock_timeout: "the merge check gave up waiting for a check slot",
+  restart: "the runner restarted or went away under the merge",
+  gate_fault: "the merge gate itself failed (check stuck or an error)",
+};
 
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {
   approved: (e) => `Merge line: approved by ${e.by}`,
@@ -66,6 +84,7 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   hold_started: (e) => `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`,
   hold_ended: (e) => `Merge line: hold (${e.hold}) ended after ${Math.round(e.heldMs / 60_000)} min`,
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
+  attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
 };
 

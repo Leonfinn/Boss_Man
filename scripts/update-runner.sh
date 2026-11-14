@@ -120,10 +120,12 @@ for a in "$@"; do
     --now) NOW=1 ;;
     --rollback) ROLLBACK=1 ;;
     --settings) SETTINGS=1 ;;
-    -*) echo "Usage: $0 [--now] [--settings | --rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
+    -*) echo "Usage: $0 [--now] [--settings | --rollback]" >&2; exit 2 ;;
     *) version="$a" ;;
   esac
 done
+# Claude Code's version is pinned in apps/runner/claude-pack/package.json now, not a build arg (DR-050, BOS-972).
+if [[ -n $version ]]; then echo "The runner image no longer takes a Claude Code version: it is pinned in apps/runner/claude-pack/package.json (DR-050)." >&2; exit 2; fi
 
 if ((SETTINGS)); then
   if ((NOW)); then
@@ -169,17 +171,19 @@ commit="$(git rev-parse HEAD 2>/dev/null || true)"
 # The one before is kept as boss-man-netguard:previous, so --rollback undoes the whole update (BOS-382).
 # Remember the id now; it is tagged :previous only after the canary passes, together with the runner's own :previous.
 NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:current 2>/dev/null || true)"
+# Hold the old guard under a name of its own while the new one is built: rebuilding :current untags it, and on a host whose image
+# store drops untagged images the bare id is gone by the time the canary has passed (BOS-1417: "No such image", exit 1).
+if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
-echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
+echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
-  ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
   --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 
-echo "Running the canary (no network): a Claude session, then each add-on..."
+echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
   echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
@@ -190,7 +194,10 @@ fi
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 # The guard's :previous is tagged here too (not before the build), so a failed canary and a re-run can't leave --rollback
 # pairing the old runner with the failed guard build. NETGUARD_PREV holds the id of the guard that was current before this update.
-if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:previous; fi
+if [[ -n "$NETGUARD_PREV" ]]; then
+  docker tag boss-man-netguard:pending-previous boss-man-netguard:previous || echo "WARNING: could not keep the old network guard as :previous; --rollback will not restore it." >&2
+  docker rmi boss-man-netguard:pending-previous >/dev/null 2>&1 || true
+fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
