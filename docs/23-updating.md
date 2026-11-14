@@ -72,6 +72,8 @@ With the launcher, Boss Man drains first: nothing new starts and runs in progres
 
 A runner update takes no backup. Runners hold no database.
 
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
+
 ## Backups
 
 A server update always takes a backup first. `scripts/deploy.sh`, the host deployer and `scripts/rebuild-live.sh` each write one to the install folder, the folder above the checkout. The file is named `bossman-YYYY-MM-DD-HHMM.sql.gz`. `scripts/deploy.sh` keeps the newest 14. `BOSSMAN_BACKUP_DIR` and `BOSSMAN_BACKUP_KEEP` change the folder and the number.

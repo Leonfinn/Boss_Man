@@ -7,7 +7,7 @@ import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
+import { agents, checkWorkers, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
@@ -286,6 +286,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     } catch {
       return "update";
     }
+  }
+
+  /**
+   * BOS-1437 (DR-060): check workers run on other hosts, so this swap doesn't touch them, and a worker built from an older commit
+   * than the runner sits idle until it is updated. The done card says so with the steps; empty when no worker is set up.
+   */
+  async function workerUpdateSteps(): Promise<string> {
+    const rows = await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.enabled, true));
+    if (!rows.length) return "";
+    const names = rows.map((w) => w.name).join(", ");
+    return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: build or pull the new worker image, set BOSSMAN_WORKER_IMAGE in its env file to it, and run docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d. The steps are in docs/26-check-workers.md; the Checks panel shows which workers are out of date.`;
   }
 
   async function end(title: string, level: NotifyInput["level"], body: string) {
@@ -596,7 +607,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const settingsDone = h.kind === "settings";
       if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
       else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
-      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.`);
+      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`);
     },
   };
   return self;

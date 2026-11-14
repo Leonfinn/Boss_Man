@@ -1,6 +1,6 @@
 # Check workers: more machines for checks
 
-A **check worker** is a small container on another Docker host that takes check jobs (quick checks and merge checks) from your Boss Man server when the check line is long. It runs no agents and never merges anything. Design: DR-060. Draft: some details below (marked *provisional*) are fixed by the worker code in BOS-1435 and BOS-1436, and this page is finished when they land.
+A **check worker** is a small container on another Docker host that takes check jobs (quick checks and merge checks) from your Boss Man server when the check line is long. It runs no agents and never merges anything. Design: DR-060. The variable names below match the worker code (BOS-1435 identity and slots, BOS-1436 code bundles).
 
 ## What it is, and what it can reach
 
@@ -16,14 +16,16 @@ A **check worker** is a small container on another Docker host that takes check 
 You need Docker with the compose plugin on the second host, and the repository's `deploy/check-worker.yml` there.
 
 1. In Boss Man: Settings → Server and runner → Checks → Add a check worker. Give it a name and the number of checks at once. Copy the token: it is shown once.
-2. On the worker host, make an env file `check-worker.env` (permission 600) next to the compose file. Never commit it.
+2. On the worker host, save the token alone in a file (for example `worker-token`, permission 600, outside any repository). The worker reads it from a file and refuses a token placed in the environment, because a check could read the environment.
+3. Make an env file `check-worker.env` (permission 600) next to the compose file. Never commit it. It holds no secret, only the address, the token file's path and the image:
    ```
    BOSSMAN_WORKER_URL=wss://boss.example.com/api/check-worker/connect
-   BOSSMAN_WORKER_TOKEN=<paste the token>
+   BOSSMAN_WORKER_TOKEN_FILE=/srv/check-worker/worker-token
    BOSSMAN_WORKER_IMAGE=<the worker image, see "The image" below>
    ```
-3. Start it: `docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d`
-4. In Boss Man, Checks shows the worker as connected within a minute. Queue a check and watch it take a job.
+   The address must end in `/api/check-worker/connect`: a runner address is refused.
+4. Start it: `docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d`
+5. In Boss Man, Checks shows the worker as connected within a minute. Queue a check and watch it take a job.
 
 Remove one: `docker compose -p boss-man-check-worker -f deploy/check-worker.yml down -v` on the host, then revoke the token in Boss Man. Nothing on your main server changes.
 
@@ -43,7 +45,7 @@ When "Build and update runners" finishes, its card lists each worker with the st
 
 ## Settings and example values
 
-Optional lines in the env file: `BOSSMAN_CHECK_SLOTS` (checks at once), `BOSSMAN_CHECK_WORKER_CPUSET` (pin to CPU threads, such as `8-15`; preferred to a CPU cap because test tools then size themselves to those threads), `BOSSMAN_CHECK_WORKER_CPUS` (a hard CPU cap), `BOSSMAN_CHECK_WORKER_MEMORY`, `BOSSMAN_CHECK_TEST_WORKERS` (test workers per check). None of these have a host-specific default in the code. Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
+Optional lines in the env file: `BOSSMAN_CHECK_SLOTS` (checks at once), `BOSSMAN_CHECK_WORKER_CPUSET` (pin to CPU threads, such as `8-15`; preferred to a CPU cap because test tools then size themselves to those threads), `BOSSMAN_CHECK_WORKER_CPUS` (a hard CPU cap), `BOSSMAN_CHECK_WORKER_MEMORY`. Test workers per check and a memory hint per check are set per worker in the Add a check worker form in Boss Man, not in the env file. The server's per-worker slot setting can lower `BOSSMAN_CHECK_SLOTS`, never raise it. None of these have a host-specific default in the code. Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
 
 ## Per-host notes
 
