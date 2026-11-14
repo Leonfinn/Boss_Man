@@ -200,8 +200,11 @@ export function settingsLimitsRoutes(
     const { id } = z.object({ id: Uuid }).parse(req.params);
     const row = await w.get(id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    // Back in line first, then the row goes (its token with it), then the socket closes; a redial gets 401.
-    await checks.onWorkerOff(id, `The owner removed the check worker "${row.name}", so this check was put back in line.`);
+    // Off first, so the pump inside onWorkerOff can't hand the re-queued jobs straight back to this worker (they would be
+    // left running with no machine once the row goes). Then back in line, then the row goes (its token with it), then the
+    // socket closes; a redial gets 401.
+    await w.update(id, { enabled: false });
+    await checks.onWorkerOff(id,`The owner removed the check worker "${row.name}", so this check was put back in line.`);
     await w.remove(id);
     w.disconnect(id, WORKER_OFF_CLOSE, "worker removed");
     return { ok: true };

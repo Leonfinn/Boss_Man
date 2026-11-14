@@ -25,7 +25,8 @@ logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 # Default: image promoted, drain requested, no runner touched, and the launcher rebuilt (BOS-335).
 run
 logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "image not promoted"
-logged "docker tag sha256:oldguard boss-man-netguard:previous" || fail "the previous network guard image was not kept"
+logged "docker tag sha256:oldguard boss-man-netguard:pending-previous" || fail "the old network guard was not held before the build (BOS-1417)"
+logged "docker tag boss-man-netguard:pending-previous boss-man-netguard:previous" || fail "the previous network guard image was not kept"
 logged "recreate-all" && fail "default recreated the runners"
 logged "compose up -d --no-build" && fail "default restarted compose runners"
 logged "docker compose build launcher" || fail "default did not rebuild the launcher"

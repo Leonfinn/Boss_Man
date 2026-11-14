@@ -3,7 +3,7 @@
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 // BOS-1435 (DR-060): check workers on other machines take jobs the company runner has no free slot for. The runner is
 // always filled first; each ready worker then claims with its own limit. With no ready worker every path is as before.
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
 import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, type RunnerCommand, type WorkerCommand, type WorkerRepos } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
@@ -60,8 +60,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
   const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
   const graceMs = deps.workerGraceMs ?? HEARTBEAT_MS * 3;
-  // A dropped worker's pending re-queue, cancelled if it says hello again in time. Lost on a server restart: a worker that
-  // comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
+  // shortcut: a dropped worker's pending re-queue, cancelled if it says hello again in time; lost on restart, harmless because
+  // a worker that comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
   const graceTimers = new Map<string, NodeJS.Timeout>();
 
   // BOS-1436, all in memory (lost on a restart, when every running job is re-queued anyway):
@@ -254,13 +254,22 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
      * A worker said hello with the jobs it is running. Jobs it was given but doesn't list go back in line (it restarted);
      * jobs it lists that the server didn't give it (re-queued while it was away, or given elsewhere) are stopped on it,
      * so a late duplicate can't run on.
+     * `helloAt` is when the hello arrived, taken before the worker was marked connected: a pump in between may already have
+     * sent it a job its hello couldn't list, and that job (started at or after `helloAt`) must not be re-queued.
      */
-    async onWorkerHello(workerId: string, running: string[] | undefined, repos?: WorkerRepos) {
+    async onWorkerHello(workerId: string, running: string[] | undefined, helloAt = new Date(), repos?: WorkerRepos) {
       const t = graceTimers.get(workerId);
       if (t) clearTimeout(t);
       graceTimers.delete(workerId);
       if (repos) haves.set(workerId, new Map(repos.map((r) => [r.projectId, r.haves])));
-      const mine = new Set((await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId)))).map((r) => r.id));
+      const mine = new Set(
+        (
+          await db
+            .select({ id: checkJobs.id })
+            .from(checkJobs)
+            .where(and(eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId), lt(checkJobs.startedAt, helloAt)))
+        ).map((r) => r.id),
+      );
       const alive = new Set(running ?? []);
       // A job whose code the runner is still packing hasn't been sent to the worker yet, so it isn't in its list: it stays.
       for (const id of mine)
