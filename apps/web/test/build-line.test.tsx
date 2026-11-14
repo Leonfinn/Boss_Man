@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { cleanup, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { BuildLine, ChangesFold, type BuildResult } from "../src/pages/Ticket";
+import { BuildLine, DetailRow, type BuildResult } from "../src/pages/Ticket";
 
 // The git host's build result on the ticket page (BOS-1418).
 afterEach(cleanup);
@@ -83,8 +83,8 @@ const shotPath = scratch ? (await import("node:path")).join(scratch, `build-line
 const failed: BuildResult = { state: "failed", failing: ["lint", "test (apps/server)"], total: 4, url: "https://example.com/runs/42", sha: "abcdef1234567890" };
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}
-body { margin: 0; background: var(--bg); } main { padding: 16px; max-width: 900px; margin: 0 auto; }
-</style></head><body><div class="app"><main>${renderToStaticMarkup(<ChangesFold hint={`on ${"bossman/abcdef1234567890-a-rather-long-branch-name"} · build failed`} ci={failed} onAll={() => {}} onTurn={() => {}} />)}</main></div></body></html>`;
+ body { margin: 0; background: var(--bg); } main { padding: 16px; max-width: 900px; margin: 0 auto; }
+</style></head><body><div class="app"><main>${renderToStaticMarkup(<DetailRow title="Changes" count="failed" open><BuildLine ci={failed} /></DetailRow>)}</main></div></body></html>`;
 
 type Measure = { resultText: string; linkHref: string | null; scrollWidth: number; innerWidth: number };
 

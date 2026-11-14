@@ -30,6 +30,8 @@ export const OWNER_CONTROLS = {
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
     "Resume",
+    // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
+    "More about this",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -66,6 +68,8 @@ export const OWNER_CONTROLS = {
     "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
     // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
     "Reload the latest",
+    // A Details row's own request failed: fetch it again (BOS-1195).
+    "Try again",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
