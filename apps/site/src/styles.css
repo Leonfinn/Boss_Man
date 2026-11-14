@@ -221,6 +221,43 @@ a { color: inherit; text-underline-offset: 3px; }
 .route li.goal { font-weight: 700; }
 .route li.goal::before { color: var(--amber-deep); }
 
+/* About (BOS-1301): the owner's photo beside the title, then the story with a short facts panel beside it. */
+.about-head { padding: 72px 0 88px; overflow: hidden; }
+.about-head .wrap { display: grid; grid-template-columns: 440px 1fr; gap: 72px; align-items: center; }
+.portrait { position: relative; isolation: isolate; }
+/* The owner's photo: 4:5, cropped to keep the face in the upper third. */
+.photo { display: block; width: 100%; height: auto; aspect-ratio: 4 / 5; object-fit: cover; object-position: 50% 20%; border-radius: 24px; background: var(--night-2); box-shadow: 0 30px 80px rgba(5, 9, 15, 0.55); }
+/* Boss Man at the owner's shoulder: the same softened, glowed drawing the hero and install use. */
+.portrait .sidekick { position: absolute; right: -96px; bottom: -40px; width: 210px; filter: saturate(0.86) brightness(0.95); }
+.portrait::after { content: ""; position: absolute; right: -150px; bottom: -70px; width: 320px; height: 320px; z-index: -1; background: radial-gradient(closest-side, rgba(240, 183, 92, 0.28), rgba(240, 183, 92, 0)); }
+.about-title h1 { font-size: 64px; }
+.about-title .lead { margin-top: 28px; font-size: 21px; line-height: 1.6; max-width: 620px; }
+/* The name signs off the intro: a short amber rule, then the name. */
+.byline { margin-top: 24px; display: flex; align-items: center; gap: 14px; font-family: var(--display); font-weight: 650; font-size: 19px; color: var(--chalk-2); }
+.byline::before { content: ""; width: 32px; height: 2px; background: var(--amber); }
+
+/* The story: one reading column at a comfortable measure, a short facts panel beside it */
+.story-band { background: var(--paper); }
+.story { display: grid; grid-template-columns: minmax(0, 680px) 340px; justify-content: space-between; gap: 72px; align-items: start; }
+.story-text { display: grid; gap: 24px; font-size: 20px; line-height: 1.65; }
+.story-text h2 { margin-bottom: 4px; }
+.story-text h3 { margin-top: 16px; font-weight: 700; font-size: 26px; }
+/* The feature list: amber squares, a little air between items so each reads on its own. */
+.has-list { margin: -8px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.has-list li { position: relative; padding-left: 28px; }
+.has-list li::before { content: ""; position: absolute; left: 4px; top: 0.62em; width: 9px; height: 9px; border-radius: 2px; background: var(--amber-deep); }
+/* Sticky on a desktop, so the facts stay beside the story; it drops under it at 840 and 390 (see the media queries). */
+.in-short { position: sticky; top: 32px; padding: 28px 28px 32px; border-radius: 18px; background: var(--board); box-shadow: 0 0 0 1px var(--line-light); }
+.in-short h2 { font-size: 24px; font-stretch: 100%; letter-spacing: 0; }
+.in-short dl { margin: 20px 0 24px; display: grid; gap: 16px; }
+.in-short dt { font-family: var(--display); font-weight: 650; font-size: 15px; color: var(--amber-deep); }
+.in-short dd { margin-top: 2px; font-size: 17px; }
+
+/* What next: the roadmap, with the mascot's thumbs-up at full size */
+.next { display: grid; grid-template-columns: 360px 1fr; gap: 72px; align-items: center; }
+.next img { width: 100%; }
+.next .actions { margin-top: 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 16px 28px; }
+
 /* Footer */
 .foot { padding: 56px 0 64px; }
 .foot .wrap { display: grid; grid-template-columns: 1fr auto; gap: 24px 48px; align-items: start; }
@@ -264,6 +301,13 @@ a { color: inherit; text-underline-offset: 3px; }
   .out { grid-template-columns: repeat(3, 1fr); }
   .install { grid-template-columns: 1fr; gap: 56px; }
   .route .boss { right: 8px; }
+  .about-head .wrap { grid-template-columns: 300px 1fr; gap: 48px; }
+  .about-title h1 { font-size: 50px; }
+  .portrait .sidekick { width: 150px; right: -56px; bottom: -32px; }
+  .story { grid-template-columns: 1fr; gap: 48px; }
+  .in-short { position: static; }
+  .in-short dl { grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+  .next { grid-template-columns: 240px 1fr; gap: 48px; }
   /* Footer: stack the brand and its line above the links. Side by side, the seven links squeezed the brand
      column to a sliver at 840 (owner, 9 Nov). */
   .foot .wrap { grid-template-columns: 1fr; gap: 20px; }
@@ -337,6 +381,21 @@ a { color: inherit; text-underline-offset: 3px; }
   .route .boss { right: 4px; top: -56px; width: 112px; height: 112px; }
   .route h3 { padding-right: 104px; }
   .install .actions .btn { width: 100%; }
+  .about-head { padding: 40px 0 56px; }
+  .about-head .wrap { grid-template-columns: 1fr; gap: 40px; }
+  .portrait { width: 72%; }
+  .photo { border-radius: 18px; }
+  .portrait .sidekick { width: 120px; right: -110px; bottom: -16px; }
+  .about-title h1 { font-size: 40px; }
+  .about-title .lead { font-size: 18px; }
+  .story-text { font-size: 18px; gap: 20px; }
+  .story-text h3 { font-size: 22px; margin-top: 8px; }
+  .has-list li { padding-left: 24px; }
+  .in-short { padding: 22px; }
+  .in-short dl { grid-template-columns: 1fr; }
+  .next { grid-template-columns: 1fr; gap: 28px; }
+  .next img { width: 200px; }
+  .next .actions .btn { width: 100%; }
   .foot .wrap { grid-template-columns: 1fr; }
 }
 

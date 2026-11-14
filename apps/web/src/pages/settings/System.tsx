@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
+import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
@@ -455,9 +456,11 @@ export function StopAllWork() {
   const paused = hold.data?.paused;
   return (
     <Section id="stop-all-h" title="Stop all work">
-      <p className="muted" style={{ fontSize: 14 }}>
-        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
-      </p>
+      <MoreAbout lead="Stops every company from starting new agent runs until you press Resume.">
+        <li>Runs already going are not cut off. They finish by themselves. To end one now, use the Runs page.</li>
+        <li>Wake-ups and messages wait in line, and start when you resume.</li>
+        <li>While work is stopped, every page shows a banner at the top. Press Resume on it to start work again.</li>
+      </MoreAbout>
       {paused === true ? (
         <p style={{ fontSize: 14 }} data-testid="stop-all-on">
           <span className="tag red">On</span> All work is stopped.
@@ -608,6 +611,128 @@ export function CheckQueueSetting() {
   );
 }
 
+type EmailView = { settings: { host: string; port: number; security: "starttls" | "tls" | "none"; username: string | null; fromAddress: string; fromName: string | null; hasPassword: boolean } | null; configured: boolean };
+
+/** Outgoing email (BOS-1387): plain authenticated SMTP. The password goes to the secret store and is never shown again. */
+export function EmailSetting() {
+  const view = usePoll((signal) => api<EmailView>("/api/settings/email", { signal }), 60_000, "email-settings");
+  const act = useAction();
+  const testAct = useAction();
+  const [edit, setEdit] = useState<{ host: string; port: string; security: "starttls" | "tls" | "none"; username: string; fromAddress: string; fromName: string; password: string } | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const d = view.data;
+  if (!d) return null;
+  const s = d.settings;
+  const v = edit ?? { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const set = (patch: Partial<typeof v>) => setEdit({ ...v, ...patch });
+  const port = Number(v.port);
+  const valid = v.host.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535 && v.fromAddress.includes("@");
+  const field = { display: "flex", flexDirection: "column", gap: 4 } as const;
+  return (
+    <Section id="email-h" title="Outgoing email">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {d.configured ? "Outgoing email is on." : "Outgoing email is off: nothing that needs email (like the portal's confirmation emails) can send until you set it up."} Use the SMTP details your mail provider gives you (for Proton Mail: smtp.protonmail.ch, port 587, STARTTLS, your address and its SMTP token). The password is kept in Boss Man's secret store and is never shown again.
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        <div style={field}>
+          <label htmlFor="email-host">Server</label>
+          <input id="email-host" value={v.host} placeholder="smtp.example.com" onChange={(e) => set({ host: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-port">Port</label>
+          <input id="email-port" type="number" min={1} max={65535} value={v.port} onChange={(e) => set({ port: e.target.value })} style={{ width: 100 }} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-security">Security</label>
+          <select id="email-security" value={v.security} onChange={(e) => set({ security: e.target.value as typeof v.security })}>
+            <option value="starttls">STARTTLS (usually port 587)</option>
+            <option value="tls">TLS from the start (usually port 465)</option>
+            <option value="none">None (not encrypted)</option>
+          </select>
+        </div>
+        <div style={field}>
+          <label htmlFor="email-user">Username</label>
+          <input id="email-user" value={v.username} autoComplete="off" onChange={(e) => set({ username: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-password">Password or token</label>
+          <input id="email-password" type="password" value={v.password} autoComplete="new-password" placeholder={s?.hasPassword ? "Saved (type to replace)" : ""} onChange={(e) => set({ password: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-from">From address</label>
+          <input id="email-from" type="email" value={v.fromAddress} placeholder="boss@example.com" onChange={(e) => set({ fromAddress: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-from-name">From name (optional)</label>
+          <input id="email-from-name" value={v.fromName} onChange={(e) => set({ fromName: e.target.value })} />
+        </div>
+      </div>
+      {v.security === "none" && <p role="note" className="error" style={{ fontSize: 14 }}>With no security the password and the mail cross the network in the clear. Use it only on a network you trust.</p>}
+      <p className="muted" style={{ fontSize: 14 }}>
+        The sending domain needs SPF, DKIM and DMARC records, or mail will land in spam. The Writer's guide has the details.
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/settings/email", { method: "PUT", body: { host: v.host, port, security: v.security, username: v.username.trim() || null, fromAddress: v.fromAddress, fromName: v.fromName.trim() || null, ...(v.password ? { password: v.password } : {}) } });
+              setEdit(null);
+              view.reload();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+        {d.configured && (
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              void act.run(async () => {
+                await api("/api/settings/email", { method: "DELETE" });
+                setEdit(null);
+                view.reload();
+                return "Outgoing email is off and the password is removed.";
+              })
+            }
+          >
+            Turn off
+          </button>
+        )}
+      </div>
+      {act.view}
+      {d.configured && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label htmlFor="email-test-to">Send a test email to</label>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input id="email-test-to" type="email" value={testTo} placeholder="you@example.com" onChange={(e) => setTestTo(e.target.value)} />
+            <button
+              type="button"
+              className="btn"
+              disabled={testAct.busy || !testTo.includes("@")}
+              onClick={() =>
+                void testAct.run(async () => {
+                  await api("/api/settings/email/test", { method: "POST", body: { to: testTo } });
+                  return `Sent. Check ${testTo} (and its spam folder).`;
+                })
+              }
+            >
+              Send test email
+            </button>
+          </div>
+          <p className="muted" style={{ fontSize: 14 }}>The test uses the saved settings, so save first.</p>
+          {testAct.view}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 /** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
 export function RunnerUpdate() {
   const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
@@ -738,17 +863,15 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
                         Finishing up
                       </span>
                     ) : step ? (
-                      <span className="tag grey" title={step.title}>
+                      <span className="tag grey" title={`It is running ${step.title}. Some agents can only read the wrap-up message when this step ends, so if you want it to stop now use Stop this run.`}>
                         In a long step: it will stop when this step ends
                       </span>
                     ) : (
                       <span className="tag grey">Working</span>
                     )}
-                    {(late || onCard) && (
-                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
-                        Stop this run
-                      </button>
-                    )}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                      Stop this run
+                    </button>
                   </li>
                 );
               })}
@@ -756,7 +879,7 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
           )}
           {s.runsList.length > 0 && (
             <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
-              Agents have been asked to save their work and finish; most finish within a few minutes. One in a long step, like a full check, may take longer. One still going {s.notRespondingAfter} minutes after being asked shows Still going next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              Agents have been asked to save their work and finish; most finish within a few minutes. One in a long step, like a full check, may take longer, and some agents can only read the message when their step ends. One still going {s.notRespondingAfter} minutes after being asked shows Still going next to its name. Boss Man won't stop an agent for you, but Stop this run is there next to every one of them: press it to end one now, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
               {s.kind === "wrapup"
                 ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
                 : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}

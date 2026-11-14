@@ -7,7 +7,11 @@ import { checkDispatcher } from "../src/services/check-dispatcher.js";
 const shared = openPglite();
 afterAll(async () => (await shared).close());
 
-async function setup(mode: "server" | "legacy" = "server", scanList?: () => Promise<string | null>) {
+async function setup(
+  mode: "server" | "legacy" = "server",
+  scanList?: () => Promise<string | null>,
+  warning?: { log?: (m: string) => void; notify?: (n: { level: string; title: string; body: string; link: string }) => Promise<unknown>; isSet?: () => Promise<boolean> },
+) {
   const { db } = await shared;
   await db.delete(checkJobs);
   await db.delete(settings);
@@ -30,6 +34,7 @@ async function setup(mode: "server" | "legacy" = "server", scanList?: () => Prom
     isConnected: () => connected,
     can: () => true,
     scanList,
+    scanListWarning: warning,
     wake: async (agentId, w) => void woken.push({ agentId, note: w.note }),
   });
   const q = checkQueue(db);
@@ -48,18 +53,85 @@ describe("check dispatcher", () => {
 
   it("hands the owner's private-details list to the runner with the job (BOS-979), and still runs without one", async () => {
     const s = await setup("server", async () => "ip\t192.0.2.77");
-    await s.req("sl1");
+    await s.req("sl1", { kind: "merge" });
     await s.d.pump();
     expect(s.sent[0]!.command.scanList).toBe("ip\t192.0.2.77");
     const none = await setup("server", async () => null);
-    await none.req("sl2");
+    await none.req("sl2", { kind: "merge" });
     await none.d.pump();
     expect(none.sent[0]!.command).not.toHaveProperty("scanList");
     const broken = await setup("server", async () => Promise.reject(new Error("no key")));
-    await broken.req("sl3");
+    await broken.req("sl3", { kind: "merge" });
     await broken.d.pump();
     expect(broken.sent[0]!.command.type).toBe("check.run");
     expect(broken.sent[0]!.command).not.toHaveProperty("scanList");
+  });
+
+  it("says so once when a set private-details list can't be read (BOS-1093)", async () => {
+    const logs: string[] = [];
+    const told: Array<{ title: string; body: string }> = [];
+    const s = await setup(
+      "server",
+      async () => {
+        throw new Error("the master key does not match");
+      },
+      { log: (m) => void logs.push(m), notify: async (n) => void told.push(n), isSet: async () => true },
+    );
+    await s.req("w1", { kind: "merge" });
+    await s.d.pump();
+    expect(s.sent[0]!.command).not.toHaveProperty("scanList");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("could not be read");
+    expect(logs[0]).toContain("the master key does not match");
+    expect(told).toHaveLength(1);
+    // A second merge in the same streak doesn't warn or tell again.
+    await s.req("w2", { kind: "merge" });
+    await s.d.pump();
+    expect(logs).toHaveLength(1);
+    expect(told).toHaveLength(1);
+  });
+
+  it("tells again after the list reads fine and then breaks once more (BOS-1093)", async () => {
+    let broken = true;
+    const told: unknown[] = [];
+    const s = await setup(
+      "server",
+      async () => {
+        if (broken) throw new Error("the master key does not match");
+        return "ip\t192.0.2.77";
+      },
+      { notify: async (n) => void told.push(n), isSet: async () => true },
+    );
+    await s.req("r1", { kind: "merge" });
+    await s.d.pump();
+    expect(told).toHaveLength(1);
+    broken = false;
+    await s.req("r2", { kind: "merge" });
+    await s.d.pump();
+    expect(told).toHaveLength(1);
+    broken = true;
+    await s.req("r3", { kind: "merge" });
+    await s.d.pump();
+    expect(told).toHaveLength(2);
+  });
+
+  it("stays silent when no private-details list is set (BOS-1093)", async () => {
+    const logs: string[] = [];
+    const told: unknown[] = [];
+    const s = await setup("server", async () => null, { log: (m) => void logs.push(m), notify: async (n) => void told.push(n), isSet: async () => false });
+    await s.req("silent", { kind: "merge" });
+    await s.d.pump();
+    expect(s.sent[0]!.command).not.toHaveProperty("scanList");
+    expect(logs).toHaveLength(0);
+    expect(told).toHaveLength(0);
+  });
+
+  it("does not hand the list to an agent-requested check (BOS-1043: no guessing oracle)", async () => {
+    const s = await setup("server", async () => "ip\t192.0.2.77");
+    await s.req("sl4"); // kind pre_review
+    await s.d.pump();
+    expect(s.sent[0]!.command.type).toBe("check.run");
+    expect(s.sent[0]!.command).not.toHaveProperty("scanList");
   });
 
   it("gives a full job a longer time limit than a quick one", async () => {

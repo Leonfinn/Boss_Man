@@ -6,7 +6,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, tickets } from "../src/db/schema.js";
+import { activity, checkJobs, tickets } from "../src/db/schema.js";
+import { CHECK_REUSED_KIND } from "../src/services/check-request.js";
 import { issueRunToken } from "../src/mcp.js";
 import { exportRow } from "../src/mcp-merge-line.js";
 
@@ -85,6 +86,33 @@ describe("merge_line_records", () => {
     expect(cut.rows).toHaveLength(2);
     expect(cut.note).toContain("since=2026-11-09T00:02:00.000Z");
     expect(textOf(await call(c, { since: "2026-11-01T00:00:00Z", format: "csv" }))).toContain(`"'=cmd,""x"""`);
+    await c.close();
+  });
+
+  it('what: "check_jobs" returns every check job and reused request by queue time, with only the named fields, own company only (BOS-1309)', async () => {
+    const job = (co: typeof ctx.mine, over: Record<string, unknown>) =>
+      ctx.db.insert(checkJobs).values({ companyId: co.company.id, projectId: co.ticket.projectId, ticketId: co.ticket.id, commit: "secretcommit", tree: "secrettree", command: "secret-cmd", logTail: "secret log", ...over } as never);
+    await job(ctx.mine, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-09T00:00:00Z"), startedAt: new Date("2026-11-09T00:04:00Z"), endedAt: new Date("2026-11-09T00:07:00Z") });
+    await job(ctx.mine, { kind: "merge", scope: "full", state: "queued", queuedAt: new Date("2026-11-09T00:02:00Z") });
+    await job(ctx.mine, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-01T00:00:00Z") });
+    await job(ctx.other, { kind: "pre_review", scope: "quick", state: "passed", queuedAt: new Date("2026-11-09T00:01:00Z") });
+    await row(ctx.mine, "2026-11-09T00:03:00Z", CHECK_REUSED_KIND, { reused: "passed", scope: "quick", outcome: "passed" });
+    await row(ctx.other, "2026-11-09T00:03:00Z", CHECK_REUSED_KIND, { reused: "live", scope: "quick", outcome: "queued" });
+    const c = await asCeo(ctx.mine);
+    const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T00:00:00Z", what: "check_jobs" }))) as { note: string; rows: Array<Record<string, unknown>> };
+    const t = ctx.mine.ticket.id;
+    expect(out.rows).toEqual([
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:00:00.000Z", started: "2026-11-09T00:04:00.000Z", finished: "2026-11-09T00:07:00.000Z", outcome: "passed", reused: null },
+      { ticket_id: t, kind: "merge", scope: "full", queued: "2026-11-09T00:02:00.000Z", started: null, finished: null, outcome: "queued", reused: null },
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:03:00.000Z", started: null, finished: null, outcome: "passed", reused: "passed" },
+    ]);
+    const cut = JSON.parse(textOf(await call(c, { since: "2026-11-08T00:00:00Z", what: "check_jobs", limit: 2 }))) as { note: string; rows: unknown[] };
+    expect(cut.rows).toHaveLength(2);
+    expect(cut.note).toContain("since=2026-11-09T00:02:00.000Z");
+    const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-09T00:01:00Z", what: "check_jobs", format: "csv" }));
+    expect(all.split("\n")[0]).toBe("ticket_id,kind,scope,queued,started,finished,outcome,reused");
+    expect(all.split("\n")).toHaveLength(4);
+    for (const leak of ["secret", "Other Co"]) expect(all).not.toContain(leak);
     await c.close();
   });
 

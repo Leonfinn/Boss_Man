@@ -427,5 +427,8 @@ describe("notification ladder (R44)", () => {
     expect(await titles("level=flag&status=unread")).toEqual(["c"]);
     expect((await c.req("GET", "/api/notifications?status=bogus")).statusCode).toBe(400);
     expect((await c.req("GET", "/api/notifications?status=unread")).json().unread).toBe(2);
+    // The counts are unread notices by level and company, whatever the filters say (BOS-1277).
+    const filtered = (await c.req("GET", "/api/notifications?level=flag&status=read")).json();
+    expect(filtered.counts).toEqual({ level: { note: 1, flag: 1 }, company: { [c.company.id]: 1, none: 1 } });
   });
 });

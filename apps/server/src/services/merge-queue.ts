@@ -529,6 +529,11 @@ export function mergeQueueService(
         if (p) {
           w.place = p.place;
           w.why = p.why;
+          // BOS-1405: the label counts this merge's own place, not the whole queue's length (place 1 is next up).
+          if (w.state === "waiting_for_check_capacity") {
+            const ahead = Math.max(0, p.place - 1);
+            w.label = w.label.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`);
+          }
         }
       }
       waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);

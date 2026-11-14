@@ -87,6 +87,28 @@ describe("portalVerdict", () => {
     // Security still wins over a missing summary: the reason it is off is the security work.
     expect(portalVerdict({ title: "Secrets manager", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "security" });
   });
+  it("judges the public title and summary once written, not the internal description (BOS-1419)", () => {
+    // The internal description names an API key, but visitors never see it, and the public copy is clean.
+    expect(portalVerdict({ title: "Add Synthetic as a model provider", description: "Store the API key in the vault.", publicSummary: "Use another provider for models.", hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+    expect(portalVerdict({ title: "Token rotation", description: "Internal.", publicTitle: "Weekly tidy-up", publicSummary: "Smaller chores each week.", hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+  });
+  it("still refuses when the public summary itself names a key, token, password, host or IP (BOS-1419)", () => {
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "Add your API key to sync.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Dark mode", publicTitle: "Rotate the token", publicSummary: "A quick weekly job.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "Store your password safely.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "Runs on 192.168.1.50.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "Tell the hostname to the team.", hasPublicSummary: true })).toEqual({ onPortal: false, reason: "security" });
+    // A three-part version number is not an address.
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "Like our 1.2.0 release notes.", hasPublicSummary: true })).toEqual({ onPortal: true, reason: null });
+  });
+  it("still judges the internal text when there is no public summary (BOS-1419)", () => {
+    expect(portalVerdict({ title: "Add Synthetic as a model provider", description: "Store the API key in the vault.", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "security" });
+    // A clean internal feature with no summary still waits for one.
+    expect(portalVerdict({ title: "Dark mode", description: "A dark theme.", hasPublicSummary: false })).toEqual({ onPortal: false, reason: "needs public summary" });
+  });
+  it("keeps a hand-marked feature off whatever its clean summary says (BOS-1357)", () => {
+    expect(portalVerdict({ title: "Dark mode", publicSummary: "A dark theme you can switch on.", keepOffPortal: true, hasPublicSummary: true })).toEqual({ onPortal: false, reason: "sensitive" });
+  });
 });
 
 describe("portalTitle", () => {
