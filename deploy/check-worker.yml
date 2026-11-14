@@ -1,0 +1,53 @@
+# A Boss Man check worker (DR-060): a container on ANY Docker host that takes check jobs from your Boss Man server.
+# It is its OWN Compose project, never merged with Boss Man's own files. Start it on the second host:
+#   docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d
+# See docs/26-check-workers.md for the steps, per-host notes and how to update it.
+#
+# It dials OUT only (a wss:// address, or a Tailscale address); no port is published. It holds no GitHub, AI or deploy
+# credentials: only the worker token from Settings > Server and runner > Checks > Add a check worker (shown once).
+# Put the token in the env file (chmod 600), never in this file, and never commit that env file.
+#
+# Required in the env file:
+#   BOSSMAN_WORKER_URL=wss://boss.example.com/api/check-worker/connect
+#   BOSSMAN_WORKER_TOKEN=<the token from the Add a check worker card>
+#   BOSSMAN_WORKER_IMAGE=<registry>/<namespace>/boss-man-check-worker:sha-<12 characters>   or a local build, see the doc
+# Optional (empty = the server's setting or the built-in default; these are examples in the doc, never defaults here):
+#   BOSSMAN_CHECK_SLOTS=2            checks at once on this host
+#   BOSSMAN_CHECK_WORKER_CPUS=       a hard CPU cap in CPUs (0 = none)
+#   BOSSMAN_CHECK_WORKER_CPUSET=     pin to CPU threads, e.g. "8-15": test tools then size to those threads (preferred to a cap)
+#   BOSSMAN_CHECK_WORKER_MEMORY=     memory limit, e.g. 14g (default 8g)
+#   BOSSMAN_CHECK_TEST_WORKERS=      cap on test workers per check (vitest threads), empty = the check's own default
+#
+# NOTE: the variable names the worker reads (URL, token, slots, test worker cap) come from the worker code of
+# BOS-1435; keep this file and that code in step.
+
+services:
+  check-worker:
+    image: ${BOSSMAN_WORKER_IMAGE:?set BOSSMAN_WORKER_IMAGE in the env file}
+    restart: unless-stopped
+    environment:
+      BOSSMAN_ROLE: check-worker
+      BOSSMAN_URL: ${BOSSMAN_WORKER_URL:?set BOSSMAN_WORKER_URL in the env file}
+      BOSSMAN_WORKER_TOKEN: ${BOSSMAN_WORKER_TOKEN:?set BOSSMAN_WORKER_TOKEN in the env file}
+      BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
+      BOSSMAN_CHECK_TEST_WORKERS: ${BOSSMAN_CHECK_TEST_WORKERS:-}
+    # Same hardening as the runner: no extra privileges, and never the Docker socket. The default Docker seccomp profile
+    # leaves Landlock (the job fence) available wherever the host kernel has it; the worker logs whether it is active.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${BOSSMAN_CHECK_WORKER_MEMORY:-8g}
+    memswap_limit: ${BOSSMAN_CHECK_WORKER_MEMORY:-8g}
+    # If the host runs out of memory, the worker goes first, not the host's other services.
+    oom_score_adj: 500
+    pids_limit: 4096
+    cpus: ${BOSSMAN_CHECK_WORKER_CPUS:-0}
+    # Empty means every thread; a cpuset is validated by Docker only when set.
+    cpuset: ${BOSSMAN_CHECK_WORKER_CPUSET:-}
+    init: true
+    # A named Docker volume, not a host folder: Docker owns its permissions and a move or reset is one command.
+    volumes:
+      - check-worker-repos:/home/node/workspaces
+    # No `ports:` on purpose.
+
+volumes:
+  check-worker-repos:
