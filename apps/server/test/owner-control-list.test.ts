@@ -138,6 +138,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
+  "pages/SetupClaude.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
@@ -442,7 +443,7 @@ describe("OWNER_CONTROLS matches the web app", () => {
 
   it("puts a component on the screens it's shown on, not its file's", () => {
     expect([...screensOf("pages/settings/Projects.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
-    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
+    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner"]);
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
     // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
     expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);
