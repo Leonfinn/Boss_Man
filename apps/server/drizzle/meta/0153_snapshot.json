@@ -1,5 +1,5 @@
 {
-  "id": "46f09f72-8ffe-40a1-8004-6a10e285073d",
+  "id": "f142c9aa-122f-4b77-993e-17a2e6148809",
   "prevId": "6e6799bc-fb98-4e17-ab1e-379cf3b1f806",
   "version": "7",
   "dialect": "postgresql",
@@ -9476,12 +9476,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "touches_runner_update": {
-          "name": "touches_runner_update",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
         "go_live_wait": {
           "name": "go_live_wait",
           "type": "text",
@@ -9491,6 +9485,18 @@
         "go_live_wait_since": {
           "name": "go_live_wait_since",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "live_marked_at": {
+          "name": "live_marked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "live_evidence": {
+          "name": "live_evidence",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
