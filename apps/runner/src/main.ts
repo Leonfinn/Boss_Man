@@ -15,6 +15,7 @@ import { SessionManager } from "./session-manager.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
+import { uploadCheckBundle } from "./check-bundle-http.js";
 
 // BOS-1435 (DR-060): the same image started with BOSSMAN_ROLE=check-worker is a check worker (check-worker.ts) and none
 // of the runner below may start: no sessions, no secrets fetch, no journal. Its socket and timers keep the process alive;
@@ -97,6 +98,7 @@ const sessions = new SessionManager({
   },
   stateFile: path.join(dataDir, "active-runs.json"),
   workspaces,
+  uploadCheckBundle: (jobId, file, meta) => uploadCheckBundle(httpBase, token, jobId, file, meta),
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,

@@ -21,13 +21,13 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -146,6 +146,24 @@ export function hasCredential(url: string): boolean {
 }
 
 const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr || (err as Error)?.message || err).trim().split("\n")[0]!.slice(0, 300);
+const lastLine = (s: string) => (s.split("\n").filter(Boolean).pop() ?? "").slice(0, 300);
+
+// Check bundles (BOS-1436).
+const UUID_RE = UUID;
+const SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+/** Job refs a check worker keeps per project as its bundle base; older ones go so the repo doesn't grow forever. */
+const CHECK_BUNDLE_KEEP_JOBS = 10;
+export type CheckBundleMade = CheckBundleInfo;
+/** Size and sha256 of a file, read as a stream (a full bundle is a few hundred MB). */
+async function fileDigest(file: string): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(file)) {
+    hash.update(chunk as Buffer);
+    bytes += (chunk as Buffer).length;
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
@@ -1440,7 +1458,8 @@ export class Workspaces {
         await this.git(["init", "--bare", "--quiet", repo]);
       }
       if (file) {
-        const verify = await this.gitCode(["bundle", "verify", "--quiet", file], { cwd: repo });
+        // No --quiet: git 2.39 then drops the "lacks these prerequisite commits" line this reads.
+        const verify = await this.gitCode(["bundle", "verify", file], { cwd: repo });
         if (verify.code !== 0) {
           const missing = /lacks these prerequisite/i.test(verify.stderr);
           return { ok: false, missing, reason: missing ? "the bundle needs commits this worker doesn't have" : `the bundle didn't verify: ${lastLine(verify.stderr)}` };
@@ -1452,21 +1471,25 @@ export class Workspaces {
             .filter((p) => p.length === 2)
             .map(([sha, name]) => [name, sha] as const),
         );
-        if (heads.get(`refs/bossman/bundle/${spec.jobId}`) !== spec.commit || heads.get(spec.mainRef) !== spec.mainCommit) {
+        // git leaves a tip out of a thin bundle when it is one of the `--not` commits (main unchanged since the last job,
+        // or the same commit checked again), so a head may be absent; one that is there must be the one named.
+        const tips = [
+          { name: `refs/bossman/bundle/${spec.jobId}`, to: jobRef, commit: spec.commit },
+          { name: spec.mainRef, to: spec.mainRef, commit: spec.mainCommit },
+        ];
+        if (tips.some((t) => heads.has(t.name) && heads.get(t.name) !== t.commit) || !tips.some((t) => heads.has(t.name))) {
           return { ok: false, missing: false, reason: "the bundle doesn't hold the job's commit and main" };
         }
-        const fetched = await this.gitCode(
-          ["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, `+refs/bossman/bundle/${spec.jobId}:${jobRef}`, `+${spec.mainRef}:${spec.mainRef}`],
-          { cwd: repo },
-        );
+        const specs = tips.filter((t) => heads.has(t.name)).map((t) => `+${t.name}:${t.to}`);
+        const fetched = await this.gitCode(["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, ...specs], { cwd: repo });
         if (fetched.code !== 0) return { ok: false, missing: /prerequisite|missing/i.test(fetched.stderr), reason: `fetching the bundle failed: ${lastLine(fetched.stderr)}` };
-      } else {
-        for (const c of [spec.commit, spec.mainCommit]) {
-          if ((await this.gitCode(["cat-file", "-e", `${c}^{commit}`], { cwd: repo })).code !== 0) return { ok: false, missing: true, reason: "the runner sent no bundle, but this worker lacks the commit" };
-        }
-        await this.git(["update-ref", jobRef, spec.commit], { cwd: repo });
-        await this.git(["update-ref", spec.mainRef, spec.mainCommit], { cwd: repo });
       }
+      // Tips not in the bundle (or no bundle at all: the worker had both) must already be here.
+      for (const c of [spec.commit, spec.mainCommit]) {
+        if ((await this.gitCode(["cat-file", "-e", `${c}^{commit}`], { cwd: repo })).code !== 0) return { ok: false, missing: true, reason: "the runner sent no bundle, but this worker lacks the commit" };
+      }
+      await this.git(["update-ref", jobRef, spec.commit], { cwd: repo });
+      await this.git(["update-ref", spec.mainRef, spec.mainCommit], { cwd: repo });
       if ((await this.git(["rev-parse", "--verify", "--quiet", `${jobRef}^{commit}`], { cwd: repo })) !== spec.commit) return { ok: false, missing: false, reason: "the job's commit didn't arrive" };
       // check-quick and the secrets scan look for origin/main or origin/HEAD.
       await this.git(["symbolic-ref", "refs/remotes/origin/HEAD", spec.mainRef], { cwd: repo });
