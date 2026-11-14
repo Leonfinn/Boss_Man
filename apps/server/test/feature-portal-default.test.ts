@@ -96,6 +96,39 @@ describe("features go on the portal by default (BOS-957)", () => {
     expect(JSON.stringify(body)).not.toContain("Internal:");
   });
 
+  it("judges the public summary once written, not the internal description (BOS-1419)", async () => {
+    const c = await setup();
+    // Written in one go: the optional public summary is what visitors would see, so the clean summary wins.
+    const clean = await c.feature({ title: "Add a model provider", description: "Store the API key in the vault.", publicSummary: "Use another provider for models." });
+    expect(clean).toMatchObject({ portalVisible: true });
+    const { portalToken } = await c.portal(c.company.id);
+    const body = (await t!.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": portalToken } })).json();
+    expect(body.features.map((x: { id: string }) => x.id)).toEqual([clean.id]);
+    expect(JSON.stringify(body)).not.toContain("API key");
+  });
+
+  it("still refuses a stored public summary that names a key, token, password, host or IP (BOS-1419)", async () => {
+    const c = await setup();
+    for (const publicSummary of ["Add your API key to sync.", "Store your password safely.", "Runs on 192.168.1.50.", "Rotate the deployment token."]) {
+      const f = await c.feature({ title: "Dark mode", description: "A dark theme.", publicSummary });
+      expect(f).toMatchObject({ portalVisible: false });
+    }
+    // A clean summary on a feature with no public summary yet is judged on its internal text, as before.
+    const noSummary = await c.feature({ title: "Dark mode", description: "Rotate the signing secrets weekly." });
+    expect(noSummary).toMatchObject({ portalVisible: false });
+    expect((await c.req("PATCH", `/api/features/${noSummary.id}`, { publicSummary: "A darker look you can switch on." })).json()).toMatchObject({ portalVisible: false });
+  });
+
+  it("still keeps a hand-marked feature off whatever its clean summary says (BOS-1357)", async () => {
+    const c = await setup();
+    const f = await c.feature({ title: "Dark mode", description: "A dark theme.", keepOffPortal: true, publicSummary: "A dark theme you can switch on." });
+    expect(f).toMatchObject({ portalVisible: false, keepOffPortal: true });
+    // Marked off by the owner after a clean summary was written: the mark still wins in the portal rule.
+    const g = await c.feature({ title: "Compact view", description: "A tighter layout.", publicSummary: "A tighter layout you can switch on." });
+    expect(g).toMatchObject({ portalVisible: true });
+    expect((await c.req("PATCH", `/api/features/${g.id}`, { keepOffPortal: true })).json()).toMatchObject({ portalVisible: false, keepOffPortal: true });
+  });
+
   it("still keeps a marked feature off even when its portalVisible flag says on", async () => {
     const c = await setup();
     const f = await c.feature({ title: "Dark mode", description: "A dark theme.", publicSummary: "A dark theme." });
