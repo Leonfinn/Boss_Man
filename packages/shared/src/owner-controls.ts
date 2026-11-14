@@ -54,10 +54,10 @@ export const OWNER_CONTROLS = {
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
-    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
+    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
     "Show all done tasks", "Run now", "Discard draft",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
-    // and the way out of a column emptied by filters.
+    // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters",
   ],
   Ticket: [
