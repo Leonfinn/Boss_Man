@@ -351,6 +351,16 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(row.label).toMatch(/^next in line for a check/);
       expect(row.label).not.toMatch(/waiting for a check slot/);
     });
+
+    it("does not claim a slot is free when slot use is unknown (legacy mode, or the lookup fails)", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const legacy = await labelOf(c, id, { queueStatus: async () => ({ mode: "legacy", slots: 2, running: 2, waiting: 1 }), queueDetail: detail(2) });
+      expect(legacy.label).toMatch(/^waiting for a check slot/);
+      expect(`${legacy.label} ${legacy.next}`).not.toMatch(/slot is free|next in line/);
+      const failed = await labelOf(c, id, { queueDetail: async () => { throw new Error("boom"); } });
+      expect(`${failed.label} ${failed.next}`).not.toMatch(/slot is free|next in line/);
+    });
   });
 
   it("gives each waiting merge its own place in the label, not the queue length (BOS-1405)", async () => {

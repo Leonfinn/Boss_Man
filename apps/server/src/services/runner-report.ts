@@ -97,7 +97,7 @@ export function judgeUpdate(last: LastUpdate | null, live: Record<string, Runner
   const where = "Settings → Server and runner → Runner";
   const start = launcherOn ? `press Start runner in ${where}` : "start the runner on your host (without the launcher there is no Start button); it connects by itself";
   const rules: Array<[RegExp, string]> = [
-    [/reach the launcher/i, `The launcher isn't answering: start it on your host, then press Start runner in ${where}.`],
+    [/reach the launcher/i, launcherOn ? `The launcher isn't answering: start it on your host, then press Start runner in ${where}.` : "The launcher isn't answering: start the runner on your host; it connects by itself."],
     [new RegExp(SWAP_PUT_BACK_FAILED, "i"), `The update failed and the runner couldn't be put back: ${start}.`],
     [new RegExp(SWAP_PUT_BACK, "i"), "Nothing to do now: the runner is running its previous version, and the next runner update tries again."],
     [/network guard/i, launcherOn ? `The runner's network guard wouldn't start: press Restart in ${where}.` : "The runner's network guard wouldn't start: restart the runner on your host."],

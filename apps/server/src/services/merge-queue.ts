@@ -547,6 +547,11 @@ export function mergeQueueService(
           waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue?.waiting ?? 0} ahead). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
           continue;
         }
+        if (!detail) {
+          // Legacy check-queue mode, or the detail lookup failed: slot use is not known, so don't claim a slot is free.
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+          continue;
+        }
         waiting.push({ ...base, state: "waiting_for_check_capacity", label: `next in line for a check${why}`, stuck: overAnHour, next: "A slot is free; Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
       // BOS-1384: the order the check queue will serve them in (a fix for main, a move to front, urgent, then oldest), with why.
