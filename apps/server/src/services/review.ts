@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { goLiveWaitWords, touchesRunnerCode } from "@boss-man/shared";
+import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode } from "@boss-man/shared";
 import { goLiveWaitOf } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -1568,7 +1568,7 @@ export function reviewService(
      * recorded sign-off for this round will do (the early check); a string: the sign-off must cover that commit,
      * and "" (the runner couldn't say) passes only an owner's own approval, which covers what is there now.
      */
-    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null) {
+    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null, because?: string) {
       const d = await derivedSignoff(db, t, head || null);
       if (d.state === "not_needed") return;
       if (d.state === "signed_off" && (head === null || head === "" || d.head === null || d.head === head)) {
@@ -1593,7 +1593,7 @@ export function reviewService(
       }
       if (d.state === "waiting") {
         // Raise its card if it went missing; either way the owner's answer is what starts the merge.
-        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null);
+        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null, because);
         throw new SignoffPendingError();
       }
       if (d.state === "reviews_pending") throw new ReviewError(409, "This ticket needs the owner's sign-off and its reviews aren't all in, so it wasn't merged.");
@@ -1689,7 +1689,23 @@ export function reviewService(
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
-      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
+      // A diff that touches a file the owner approves (scripts/check-all.sh, CLAUDE.md) is held at high risk, so the
+      // owner's sign-off is needed even if nobody raised a card (BOS-1094). The sign-off machinery does the holding.
+      // A diff that could not be read has an unknown file list, so it must not merge: it might change one of those
+      // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
+      // the retries fail too (BOS-1396).
+      if (!changed && t.branch) throw new RunnerGone("The runner couldn't say which files the ticket changes.");
+      const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
+      let because: string | undefined;
+      if (ownerFiles.length) {
+        because = `This ticket changes ${ownerFiles.join(", ")}, which the owner has to approve before it merges.`;
+        if (RISK_TIERS.indexOf(riskOf(t.risk)) < RISK_TIERS.indexOf("high")) {
+          await db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, ticketId));
+          t.risk = "high";
+          await record(db, { companyId: t.companyId, ticketId, kind: "risk_raised", summary: `${because} Its risk was raised to high so it waits for the owner's sign-off.` });
+        }
+      }
+      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null, because);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!noCode) {
