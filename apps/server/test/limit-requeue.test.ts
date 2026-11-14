@@ -4,7 +4,7 @@ import { and, eq, like } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, wakes } from "../src/db/schema.js";
+import { decisions, runners, runs, wakes } from "../src/db/schema.js";
 import { limitRequeue, LIMIT_HELD_PREFIX } from "../src/services/limit-requeue.js";
 
 // BOS-1438: a run the account refuses for a usage limit goes back in the queue as held work, once per
@@ -51,14 +51,31 @@ async function setup() {
   return { ...built, db, close, req, company, ceo, source, commands, endRun, tick, clock, release, realReset, requeue };
 }
 
-/** Starts the agent's wake and ends its run with the given error. */
-async function refuse(c: NonNullable<typeof ctx>, error: string) {
+/** Polls until `check` returns true, with a deadline (no fixed sleep: GitHub's runners are several times slower). */
+async function waitUntil(what: string, check: () => Promise<boolean>, deadlineMs = 30_000) {
+  const end = Date.now() + deadlineMs;
+  while (Date.now() < end) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/**
+ * Starts the agent's wake and ends its run with the given error, then waits for the positive signal that the
+ * run-ended handling is done: `settled` (default: the run's outcome is stored; pass a stronger one when the
+ * handler is expected to leave a held wake or a card).
+ */
+async function refuse(c: NonNullable<typeof ctx>, error: string, settled?: () => Promise<boolean>) {
   await c.scheduler.wake({ agentId: c.ceo.id, reason: "review", note: "Review BOS-1" });
   await c.tick();
   const run = c.commands.at(-1)!;
   await c.endRun(run.runId, error);
-  // The server's run-ended handling (requeue, card, early release) runs after the event is stored; wait for it to settle.
-  await new Promise((r) => setTimeout(r, 300));
+  await waitUntil("the run's outcome", async () => {
+    const [r] = await c.db.select({ outcome: runs.outcome }).from(runs).where(eq(runs.id, run.runId));
+    return !!r?.outcome;
+  });
+  if (settled) await waitUntil("the run-ended handling", settled);
   return run;
 }
 
@@ -67,7 +84,7 @@ const heldWakes = (c: NonNullable<typeof ctx>) => c.db.select().from(wakes).wher
 describe("a run refused for an account limit (BOS-1438)", () => {
   it("1. requeues its wake once, held, with the account's real reset time", async () => {
     const c = (ctx = await setup());
-    const run = await refuse(c, "Claude Max: You've hit your weekly limit");
+    const run = await refuse(c, "Claude Max: You've hit your weekly limit", async () => (await heldWakes(c)).length === 1);
     expect(run.runId).toBeTruthy();
     const held = await heldWakes(c);
     expect(held).toHaveLength(1);
@@ -77,7 +94,7 @@ describe("a run refused for an account limit (BOS-1438)", () => {
 
   it("2. does not start just because the one-hour made-up reading expires; starts after the real reset with a fresh reading", async () => {
     const c = (ctx = await setup());
-    await refuse(c, "Claude Max: You've hit your weekly limit");
+    await refuse(c, "Claude Max: You've hit your weekly limit", async () => (await heldWakes(c)).length === 1);
     const started = c.commands.length;
 
     c.clock.t = new Date(START.getTime() + 2 * HOUR); // the made-up hour is over, the real reset is not
@@ -93,7 +110,7 @@ describe("a run refused for an account limit (BOS-1438)", () => {
 
   it("3. a second refusal in the same window raises the account card and does not requeue again", async () => {
     const c = (ctx = await setup());
-    const first = await refuse(c, "Claude Max: You've hit your weekly limit");
+    const first = await refuse(c, "Claude Max: You've hit your weekly limit", async () => (await heldWakes(c)).length === 1);
     // The account shows room again (a real reading), which frees the held wake early.
     c.clock.t = new Date(START.getTime() + 2 * HOUR);
     await c.funding.recordQuota(c.source.id, [{ provider: "anthropic", window: "seven_day", utilization: 0.1, resetsAt: c.realReset, status: null, overageInUse: false }], c.clock.t);
@@ -102,15 +119,14 @@ describe("a run refused for an account limit (BOS-1438)", () => {
     const second = c.commands.at(-1)!;
     expect(second.runId).not.toBe(first.runId);
     await c.endRun(second.runId, "Claude Max: You've hit your weekly limit");
-    await new Promise((r) => setTimeout(r, 300));
+    const hasCard = async () => (await c.db.select().from(decisions).where(eq(decisions.companyId, c.company.id))).some((d) => JSON.stringify(d.context).includes("account_limit"));
+    await waitUntil("the account_limit card", hasCard);
     expect(await heldWakes(c)).toHaveLength(0); // the first one was released; no new one was made
-    const cards = await c.db.select().from(decisions).where(eq(decisions.companyId, c.company.id));
-    expect(cards.some((d) => JSON.stringify(d.context).includes("account_limit"))).toBe(true);
   });
 
   it("4. the held wake carries the label (waiting for the account until the reset) and clears when it starts", async () => {
     const c = (ctx = await setup());
-    await refuse(c, "Claude Max: You've hit your weekly limit");
+    await refuse(c, "Claude Max: You've hit your weekly limit", async () => (await heldWakes(c)).length === 1);
     const [held] = await heldWakes(c);
     expect(held!.statusReason).toBe(`${LIMIT_HELD_PREFIX} waiting for Claude Max until 2026-11-16 15:00 UTC`);
     c.clock.t = new Date(c.realReset.getTime() + 60_000);
