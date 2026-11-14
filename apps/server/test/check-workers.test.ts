@@ -172,10 +172,19 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const workers = s.workers;
     const sent: any[] = [];
     const w = await s.worker({ threads: 3, memoryMb: 7168 });
-    const d = checkDispatcher(db, { send: () => false, isConnected: () => false, can: () => true, scanList: async () => "ip\t192.0.2.77", workers: { ...workers, send: (_id, c) => (sent.push(c), true) } });
+    // The runner is connected (it packs the worker's code, BOS-1436) but takes no checks itself.
+    const d = checkDispatcher(db, {
+      send: () => false,
+      isConnected: () => true,
+      can: () => false,
+      scanList: async () => "ip\t192.0.2.77",
+      workers: { ...workers, send: (_id, c) => (sent.push(c), true) },
+      bundles: { store: { remove: () => {}, sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
+    });
     await s.req(s.co, { kind: "merge", scope: "full" });
     await d.pump();
-    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77" });
+    await d.settled();
+    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77", bundle: { bytes: 1 } });
     w.release();
   });
 
@@ -197,7 +206,8 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect((await s.job(onRunner.id)).state).toBe("running");
     // Progress from the wrong machine is ignored too.
     await s.d.onProgress(s.co.runnerId, { jobId: onWorker.id, tail: "from the runner" });
-    expect((await s.job(onWorker.id)).logTail).toBeNull();
+    // (The line it shows is still the dispatcher's own "getting the code" one, BOS-1436.)
+    expect((await s.job(onWorker.id)).logTail).toBe("Getting the code to the check worker.");
     await s.d.onWorkerProgress(w.id, { jobId: onWorker.id, tail: "from the worker" });
     expect((await s.job(onWorker.id)).logTail).toBe("from the worker");
     // The right machines answer.

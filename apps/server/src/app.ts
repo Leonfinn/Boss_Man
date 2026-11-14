@@ -322,7 +322,8 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    // Check bundles (BOS-1436) live in the leader's folder only, so a standby refuses their downloads too.
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path.startsWith("/api/check-bundles/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.

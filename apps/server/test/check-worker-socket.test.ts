@@ -63,8 +63,8 @@ const status = (url: string, token: string) =>
     });
   });
 
-function workerConn(token: string, commands: unknown[] = []) {
-  return new RunnerConnection({ url: workerUrl(), token, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: COMMIT, onCommand: (c) => void commands.push(c), runningChecks: () => [], checkWorker: { slots: 3, features: WORKER_FEATURES } });
+function workerConn(token: string, commands: unknown[] = [], features: readonly string[] = WORKER_FEATURES) {
+  return new RunnerConnection({ url: workerUrl(), token, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: COMMIT, onCommand: (c) => void commands.push(c), runningChecks: () => [], checkWorker: { slots: 3, features } });
 }
 
 describe("check worker socket (BOS-1435)", () => {
@@ -95,7 +95,8 @@ describe("check worker socket (BOS-1435)", () => {
 
   it("a worker connects, says its slots and commit in hello, and shows as connected without taking checks (no bundle support yet)", async () => {
     const { id, token } = await ctx.addWorker();
-    const conn = workerConn(token);
+    // An image from before BOS-1436: it can run checks but not fetch their code.
+    const conn = workerConn(token, [], ["check-jobs"]);
     conn.start();
     try {
       await waitFor(() => conn.isLive, Boolean);

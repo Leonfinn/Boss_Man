@@ -65,7 +65,7 @@ export async function checkBundleRoutes(
       if (!file) return reply.code(404).send({ error: "not_found" });
       // A whole download means the worker has it, so the file goes now rather than at the job's end (a first bundle is a few
       // hundred MB and a full check runs 30-50 minutes). A broken one is left to the job's end or the sweep.
-      reply.raw.on("finish", () => deps.checks.delivered(jobId));
+      reply.raw.once("finish", () => deps.checks.delivered(jobId));
       return reply.header("content-type", "application/octet-stream").header("content-length", String(file.bytes)).header("cache-control", "no-store").send(file.stream);
     });
   });
