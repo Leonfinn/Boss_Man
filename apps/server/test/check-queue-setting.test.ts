@@ -37,7 +37,17 @@ async function setup(features: string[]) {
 describe("the check queue switch (BOS-798)", () => {
   it("is legacy with one slot until the owner changes it, and names a connected runner too old to run queued checks", async () => {
     const c = (ctx = await setup([]));
-    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"] });
+    expect((await c.req("GET", "/api/settings/check-queue")).json()).toEqual({ mode: "legacy", slots: 1, runner: null, maxSlots: 8, defaultSlots: 1, runnersTooOld: ["App Co"], train: false, runnersTooOldForTrain: ["App Co"] });
+  });
+
+  it("merge train switch (BOS-1366): off by default, saved when sent, left alone by a page that doesn't send it", async () => {
+    const c = (ctx = await setup(["check-jobs", "merge-base"]));
+    expect((await c.req("GET", "/api/settings/check-queue")).json()).toMatchObject({ train: false, runnersTooOldForTrain: [] });
+    expect((await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2, train: true })).json()).toMatchObject({ train: true });
+    expect((await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2 })).json()).toMatchObject({ train: true });
+    expect(await c.queue.train()).toBe(true);
+    expect((await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2, train: false })).json()).toMatchObject({ train: false });
+    expect((await c.req("PUT", "/api/settings/check-queue", { mode: "server", slots: 2, train: "yes" })).statusCode).toBe(400);
   });
 
   it("is owner only: no session, no read and no change", async () => {
