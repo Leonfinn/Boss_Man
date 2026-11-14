@@ -26,7 +26,7 @@ async function setup() {
   const co = (await req("POST", "/api/companies", { name: "App Co" }, )).json() as { company: { id: string } };
   const project = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Customer app" })).json() as { id: string };
   const ticket = async (patch: Partial<typeof tickets.$inferInsert>) => (await db.insert(tickets).values({ companyId: co.company.id, projectId: project.id, title: "T", systemState: "in_progress", ...patch }).returning())[0]!;
-  const link = async (blocked: string, blocker: string, until: "merged" | "done") => void (await db.insert(ticketDependencies).values({ companyId: co.company.id, blockedTicketId: blocked, blockerTicketId: blocker, until }));
+  const link = async (blocked: string, blocker: string, until: "merged" | "done") => void (await db.insert(ticketDependencies).values({ blockedTicketId: blocked, blockerTicketId: blocker, until }));
   return { ...built, db, close, ticket, link };
 }
 

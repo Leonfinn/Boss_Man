@@ -2072,7 +2072,8 @@ export function schedulerService(
         return true;
       }
       if (!cur.assigneeAgentId) {
-        if (!deps.length) return false;
+        const [anyLink] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId)).limit(1);
+        if (!anyLink) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.
         if (cur.systemState === "blocked") {
           await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });
