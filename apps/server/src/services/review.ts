@@ -12,7 +12,7 @@ import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
-import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import { GitHostError, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
@@ -1099,6 +1099,26 @@ export function reviewService(
       return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
+    /** The host's checks on the ticket's branch head as data, for the ticket page (BOS-1418). Null whenever there's nothing to show, including any host error. */
+    async branchChecks(ticketId: string, companyId?: string): Promise<(CommitChecks & { sha: string }) | null> {
+      try {
+        return await this.branchChecksOrThrow(ticketId, companyId);
+      } catch {
+        return null;
+      }
+    },
+
+    async branchChecksOrThrow(ticketId: string, companyId?: string): Promise<(CommitChecks & { sha: string }) | null> {
+      const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
+      if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts) return null;
+      const a = repoUrl ? parseRepoUrl(repoUrl) : null;
+      const token = await deps.gitToken?.(t.companyId);
+      if (!a || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase || !token) return null;
+      const cfg = { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
+      const sha = await deps.gitHosts.branchHead(cfg, token, t.branch);
+      return { ...(await deps.gitHosts.checks(cfg, token, sha)), sha };
+    },
+
     /**
      * One line for `tickets read` (DR-024 #2): the host's checks on the head of the ticket's branch.
      * Null when there's nothing to say (no branch, already merged, no known host or token). A host
@@ -1106,14 +1126,10 @@ export function reviewService(
      */
     async branchChecksLine(ticketId: string, companyId?: string): Promise<string | null> {
       try {
-        const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
-        if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts) return null;
-        const a = repoUrl ? parseRepoUrl(repoUrl) : null;
-        const token = await deps.gitToken?.(t.companyId);
-        if (!a || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase || !token) return null;
-        const cfg = { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
-        const sha = await deps.gitHosts.branchHead(cfg, token, t.branch);
-        const c = await deps.gitHosts.checks(cfg, token, sha);
+        const r = await this.branchChecksOrThrow(ticketId, companyId);
+        if (!r) return null;
+        const c = r;
+        const sha = r.sha;
         const at = sha.slice(0, 8);
         const names = c.failing.join(", ");
         if (c.state === "none") return `CI on branch head ${at}: no checks reported (yet).`;

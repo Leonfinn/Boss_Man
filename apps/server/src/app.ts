@@ -2139,6 +2139,21 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    // The host's build result on the ticket's branch head (BOS-1418); null when there's nothing to show. Cached 30 s so page polls don't hammer the host.
+    const ciCache = new Map<string, { at: number; value: unknown }>();
+    owner.get("/api/tickets/:id/ci", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const hit = ciCache.get(id);
+      if (hit && Date.now() - hit.at < 30_000) return { ci: hit.value };
+      const r = await review.branchChecks(id);
+      // A host that reported no checks ("none") has nothing to show either: the page renders nothing for null (BOS-1418).
+      const value = r && r.state !== "none" ? { state: r.state, failing: r.failing, total: r.total ?? null, url: r.url ?? null, sha: r.sha } : null;
+      ciCache.delete(id);
+      ciCache.set(id, { at: Date.now(), value });
+      // Bounded: past 200 tickets the oldest answer goes (Map keeps insertion order).
+      if (ciCache.size > 200) ciCache.delete(ciCache.keys().next().value as string);
+      return { ci: value };
+    });
     // A reviewer's hold on the merge (BOS-808): the owner can release it (the normal approval and merge follow) or cancel it (the pass is withdrawn).
     owner.get("/api/tickets/:id/hold", async (req) => ({ hold: await holdView(db, IdParam.parse(req.params).id) }));
     owner.post("/api/tickets/:id/hold/release", async (req, reply) => {
