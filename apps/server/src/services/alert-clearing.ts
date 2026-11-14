@@ -59,7 +59,12 @@ export type ClearWhen =
   /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
   | { kind: "companyRanOk"; companyId: string }
   /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
-  | { kind: "serverCalm"; rule: "memory" | "freezes" };
+  | { kind: "serverCalm"; rule: "memory" | "freezes" }
+  /**
+   * The owner's held-off-portal card (BOS-1358): the feature's portal place is settled some other way —
+   * someone ticked it on, or marked it keep-off by hand — so asking is no longer needed.
+   */
+  | { kind: "featurePortalSettled"; featureId: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -116,6 +121,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "serverCalm":
         if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
+        break;
+      case "featurePortalSettled":
+        if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
         break;
       default:
         break;
@@ -274,6 +282,15 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "featurePortalSettled": {
+        // The card asks whether a held-off feature should go on the portal. It is settled once someone
+        // ticks it on (a publish by hand or by the CEO/PM), or the feature goes from record. The keep-off
+        // state the card was raised for is not itself "settled": that is the question.
+        const [f] = await db.select({ title: features.title, portalVisible: features.portalVisible, keepOffPortal: features.keepOffPortal }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        if (f.portalVisible && !f.keepOffPortal) return `"${f.title}" was put on the portal`;
+        return null;
+      }
       default:
         return null;
     }

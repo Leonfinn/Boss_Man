@@ -15,6 +15,7 @@ import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck,
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
+import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
 import { canStartNow, cantMoveFor, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { checkPriority } from "./check-gate.js";
@@ -1431,7 +1432,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
-  type Pass = { holdWakes: number; goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
+  type Pass = { holdWakes: number; goalChecks: { raised: number }; portalHolds: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
 
   return {
     limits,
@@ -1499,7 +1500,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A feature the roadmap commits to with nothing working on it (BOS-595): the CEO is asked to give
       // it a ticket. Raised after the closer, so a feature whose ticket was linked in the same pass gets none.
       const featuresWithoutTickets = (await opts.featuresWithoutTickets?.().catch(() => 0)) ?? 0;
-      return { holdWakes, noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
+      // A feature held off the portal (the security guess or a keep-off mark) is put to the owner once (BOS-1358).
+      // After the closer, so a feature already settled is not asked about.
+      const portalHolds = await raiseHeldPortalCards(db, t).catch(() => ({ raised: 0 }));
+      return { holdWakes, noProgress: noProgressResult, goalChecks, portalHolds, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
     },
   };
 }
