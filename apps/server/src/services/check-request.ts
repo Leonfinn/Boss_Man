@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { runners, tickets } from "../db/schema.js";
 import { checkQueue, type CheckScope } from "./check-queue.js";
 import { checkPriority } from "./check-gate.js";
+import { checkPlace } from "./check-wording.js";
 import { record } from "./activity.js";
 
 export class CheckRequestError extends Error {}
@@ -68,6 +69,9 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
       }
       const uncommitted = d.files.length && d.head ? " Anything you have not committed is not in this check." : "";
       if (reused === "passed") return `Already answered: the same code (commit ${job.commit.slice(0, 8)}) passed a ${job.scope} check, so nothing was queued.${uncommitted}`;
+      // BOS-1412: the same code already waits (or runs). Hand back that job and where it stands; it is not re-queued,
+      // so the agent reading its place never sends it to the back of the line.
+      if (reused === "live") return `Nothing new was queued: your ${job.scope} check of commit ${job.commit.slice(0, 8)} is already ${await checkPlace(queue, input.companyId, job)}, and its result will wake you. End your turn or carry on with other work; do not poll or start your own background loop.${uncommitted}`;
       const st = await queue.status(input.companyId);
       const place = st.queued.find((q) => q.id === job.id)?.place;
       const where = job.state === "running" ? "It is running now." : place ? `It is number ${place} in line.` : "It is waiting (a red main holds back some checks).";

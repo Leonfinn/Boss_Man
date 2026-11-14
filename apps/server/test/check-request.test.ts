@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
-import { and, eq } from "drizzle-orm";
 import { activity, agents, checkJobs, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
-import { CHECK_QUEUE_MODE_KEY } from "../src/services/check-queue.js";
+import { CHECK_QUEUE_MODE_KEY, checkQueue } from "../src/services/check-queue.js";
 import { CHECK_REUSED_KIND, checkRequestService, CheckRequestError } from "../src/services/check-request.js";
 
 const shared = openPglite();
@@ -39,6 +39,48 @@ describe("request_check", () => {
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
     expect(await s.db.select().from(checkJobs)).toHaveLength(1);
+  });
+  // BOS-1412: asking again for code that is already waiting hands back the same job and place, never a re-queue.
+  it("asking again for a commit that is already waiting keeps that job and its place", async () => {
+    const s = await setup();
+    // Another ticket is ahead in line, so this ticket's job is number 2: a re-queue would send it behind.
+    const spare = await s.db.insert(tickets).values({ companyId: s.co, projectId: (await s.db.select().from(tickets))[0]!.projectId, title: "Ahead", number: 2 } as never).returning();
+    await checkQueue(s.db).enqueue({ companyId: s.co, projectId: spare[0]!.projectId, ticketId: spare[0]!.id, kind: "pre_review", scope: "quick", commit: "c".repeat(40), tree: "t".repeat(40), command: "scripts/check-quick.sh" });
+    const first = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(first).toMatch(/number 2 in line/);
+    const [job] = await s.db.select().from(checkJobs).where(eq(checkJobs.ticketId, s.ticket));
+    const started = job!.queuedAt;
+    for (let i = 0; i < 3; i++) {
+      const again = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+      expect(again).toMatch(/already queued at no\. 2/);
+      expect(again).toMatch(/its result will wake you/);
+    }
+    const jobs = await s.db.select().from(checkJobs).where(eq(checkJobs.ticketId, s.ticket));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.state).toBe("queued");
+    expect(jobs[0]!.queuedAt.getTime()).toBe(started.getTime());
+    expect(jobs[0]!.reason).toBeNull();
+  });
+  it("a running check is handed back as running, and a different tree still supersedes the waiting one", async () => {
+    const s = await setup();
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    const [job] = await s.db.select().from(checkJobs);
+    await s.db.update(checkJobs).set({ state: "running" }).where(eq(checkJobs.id, job!.id));
+    const again = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(again).toMatch(/already running now/);
+    expect(await s.db.select().from(checkJobs)).toHaveLength(1);
+    // Other code is a new request: the running one is left to finish, and the new commit queues.
+    const moved = await setup(diff({ head: "headcommit2", tree: "tree2" }));
+    await moved.svc.request({ companyId: moved.co, agentId: moved.agent, ticketId: moved.ticket });
+    await moved.svc.request({ companyId: moved.co, agentId: moved.agent, ticketId: moved.ticket });
+    const fresh = checkRequestService(moved.db, { diff: async () => diff({ head: "headcommit3", tree: "tree3" }) });
+    await fresh.request({ companyId: moved.co, agentId: moved.agent, ticketId: moved.ticket });
+    const rows = await moved.db.select().from(checkJobs).where(eq(checkJobs.ticketId, moved.ticket));
+    expect(rows.map((r) => [r.tree, r.state]).sort()).toEqual([
+      ["tree2", "cancelled"],
+      ["tree3", "queued"],
+    ]);
+    expect(rows.find((r) => r.tree === "tree2")!.reason).toMatch(/newer commit/);
   });
   it("a reused request leaves one check_reused row (no agent) for the check-line export; a fresh one leaves none (BOS-1309)", async () => {
     const s = await setup();
