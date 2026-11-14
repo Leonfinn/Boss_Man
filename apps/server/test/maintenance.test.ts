@@ -218,6 +218,28 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false, steer: true }]);
   });
 
+  it("stops holding new runs once the deadline question waits unanswered, and shows why (BOS-1414)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    await c.wake(b);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, waiting: 1 }); // before the deadline: a drain under way, held
+    expect(await c.maint()).toMatchObject({ on: true, blocking: true });
+    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    expect(await c.open()).toHaveLength(1); // the question is open and unanswered
+    expect(await c.maint()).toMatchObject({ on: true, blocking: false });
+    // The wake held for hours is released and starts; it never keeps "update pending" as its reason.
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    expect(c.commands.map((x) => x.company)).toEqual(["App Co", "Home Lab"]);
+    expect((await c.db.select().from(wakes).where(eq(wakes.statusReason, HOLD_REASON))).length).toBe(0);
+  });
+
   it("asks the owner once at the deadline; each answer does what it says", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");

@@ -24,7 +24,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
 import { softHold } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
@@ -1693,7 +1693,12 @@ export function schedulerService(
       // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
       // may swap at any moment, so chats are held too, exactly as before.
       let pass = queue;
-      if (await getHold(db)) {
+      const hold = await getHold(db);
+      if (hold && !holdBlocksStarts(hold, t)) {
+        // BOS-1414: the drain is past its deadline and waits on the owner's answer. That is not a swap under way, so
+        // nothing is held for it; wakes it held earlier are released here with the reason shown, and launch below.
+        await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), eq(wakes.statusReason, HOLD_REASON)));
+      } else if (hold) {
         const work = await liveWorkRuns(db);
         // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
         const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];

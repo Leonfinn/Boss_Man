@@ -81,6 +81,8 @@ describe("wake classes: the table", () => {
     "runner_cannot_fence",
     // The status reason written on a wake the WIP limit refused (BOS-1180), not a wake reason.
     "held by the WIP limit",
+    // The status reason on a wake the maintenance hold stopped holding (BOS-1414), not a wake reason.
+    "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
