@@ -52,6 +52,55 @@ describe("setup wizard checks", () => {
   });
 });
 
+describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
+  const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
+
+  it("saves the setup token, makes the funding source and points the CEO at it", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
+          : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
+          : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? []
+          : {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    const box = await screen.findByLabelText("Claude setup token");
+    expect(screen.queryByLabelText("Add")).toBeTruthy(); // the general form is there, but inside the closed details
+    expect(screen.getByText("Use an API key instead").closest("details")!.open).toBe(false);
+    fireEvent.change(box, { target: { value: "sk-ant-oat01-made-up" } });
+    fireEvent.click(screen.getByText("Save the token"));
+    await screen.findByText(/stored encrypted/);
+    const mine = calls.filter((c) => c.method !== "GET" && c.url !== "/api/setup-progress");
+    expect(mine.map((c) => `${c.method} ${c.url}`)).toEqual(["POST /api/secrets", "POST /api/secrets/s1/grants", "POST /api/funding-sources", "PATCH /api/agents/a1"]);
+    expect(mine[0]!.body).toMatchObject({ kind: "claude_oauth_token" });
+    expect(mine[1]!.body).toMatchObject({ envName: "CLAUDE_CODE_OAUTH_TOKEN" });
+    expect(mine[2]!.body).toMatchObject({ kind: "subscription", provider: "anthropic", secretId: "s1" });
+    expect(mine[3]!.body).toEqual({ fundingSourceId: "f1" });
+  });
+
+  it("shows the runner as one line, with the one thing to do when it is not connected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false } : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect((await screen.findByTestId("setup-runner-line")).textContent).toContain("not connected");
+    expect(screen.getByText("Settings → Server and runner").getAttribute("href")).toBe("#/settings/c1/system");
+    expect(screen.queryByText("Add-ons")).toBeNull();
+  });
+});
+
 describe("setup wizard refresh", () => {
   it("shows Next right after the CEO's funding is saved, without waiting for a poll", async () => {
     let saved = false;
