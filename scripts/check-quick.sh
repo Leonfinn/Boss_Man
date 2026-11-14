@@ -10,6 +10,9 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
+# A runner older than the jobFenceFor fix (BOS-1095) starts a check job without creating its HOME, and tests that make temp files there fail with ENOENT.
+# Only create the folder; never move HOME or the XDG folders (that hid Playwright's browser cache from the web tests).
+[ -z "${HOME:-}" ] || [ -d "$HOME" ] || mkdir -p "$HOME" 2>/dev/null || true
 # One CPU budget for every step, the web build outside the slot included (BOS-674; see scripts/check-threads.mjs and check-all.sh).
 BOSSMAN_CHECK_THREADS="${BOSSMAN_CHECK_THREADS:-$(node scripts/check-threads.mjs 2>/dev/null || true)}"
 [[ "$BOSSMAN_CHECK_THREADS" =~ ^[1-9][0-9]{0,3}$ ]] || BOSSMAN_CHECK_THREADS=2
@@ -88,6 +91,10 @@ has() { grep -Eq "$1" <<<"$changed"; }
 #   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
 path_reads=(
   "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
+  # DR-050/BOS-972: the image-holds-no-Anthropic test reads the Dockerfile and package.json by path; the pack
+  # test reads apps/runner/claude-pack by path. Either changing must re-run its test.
+  "apps/runner test/no-anthropic-code.test.ts apps/runner/Dockerfile apps/runner/package.json"
+  "apps/runner test/claude-pack.test.ts apps/runner/claude-pack/"
 )
 path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
   local d=$1 f p hit
@@ -131,6 +138,17 @@ done
     mout="$(git merge-tree --write-tree "$base" HEAD 2>&1)" || mrc=$?
     if [ "$mrc" -ne 0 ] && [ "$mrc" -ne 1 ]; then printf '%s\n' "$mout"; return "$mrc"; fi
     if [ "$mrc" -eq 0 ] && ! has '^apps/server/drizzle/'; then return 0; fi
+    # rebase-migrations.mjs loads tsx from the runner's packages, which a fresh tree (the queued check job) does not have yet
+    # (BOS-1258). Install first, here in the light phase so it never holds a check slot; the later install step then sees
+    # node_modules and skips. If the install fails, say so: that is not a migration clash.
+    if [ ! -d node_modules ]; then
+      echo "installing packages first: the migration renumber check needs them (fresh tree, no node_modules)"
+      if ! pnpm install --frozen-lockfile --prefer-offline >"$rebuilt_tree_file.install" 2>&1; then
+        tail -n 20 "$rebuilt_tree_file.install"
+        echo "cannot tell whether the migration clash can be renumbered: the package install failed (not a clash; fix the install and run again)"
+        return 1
+      fi
+    fi
     rout="$(node scripts/rebase-migrations.mjs HEAD "$base" 2>&1)" || rrc=$?
     if [ "$rrc" -eq 0 ] && [[ "$rout" == *"rebuilt tree: "* ]]; then
       printf '%s\n' "$rout" | sed -n 's/^rebuilt tree: //p' >"$rebuilt_tree_file"
@@ -156,6 +174,11 @@ done
   if has '^apps/server/drizzle/|^scripts/lint-migrations'; then
     if [ -n "$lint_dir" ] && [ -d "$lint_dir" ]; then step "migration lint (on the tree the gate will build)" node scripts/lint-migrations.mjs "$lint_dir"; rm -rf "$lint_dir"
     else step "migration lint" node scripts/lint-migrations.mjs; fi
+  fi
+  # BOS-979: a hand run's early warning for the secret rules (it has no owner's list). Convenience only: the merge line's
+  # scan is the runner's own installed copy, run before this script starts, and it does not depend on this step.
+  if [ -f scripts/scan-added-lines.mjs ]; then
+    step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi

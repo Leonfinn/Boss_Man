@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -35,6 +35,8 @@ type FeaturePatch = {
   objectiveId?: string | null;
   portalVisible?: boolean;
   keepOffPortal?: boolean;
+  /** Why the feature is kept off the portal, in the author's own words. */
+  keepOffReason?: string | null;
   publicSummary?: string | null;
   /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
   publicTitle?: string | null;
@@ -109,14 +111,15 @@ export function feedbackService(
   }
 
   /** The features that actually reach visitors: ticked on, not marked keep-off, and with a public summary (that summary
-   * replaces the internal description and title, so internal text never reaches visitors). */
+   * replaces the internal description and title, so internal text never reaches visitors). Public text the portal rule
+   * calls security work is dropped too, a second wall behind the update_feature guard (BOS-1420): a reader never sees it. */
   async function livePortalFeatures(companyId: string) {
     const rows = await db
       .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
       .from(features)
       .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
       .orderBy(asc(features.title));
-    return rows.filter((f) => !!f.publicSummary?.trim());
+    return rows.filter((f) => !!f.publicSummary?.trim() && !looksLikeSecurity([f.publicTitle ?? "", f.publicSummary!].join(" ")));
   }
 
   /** Every feature of a company with its demand, priority and delivery, in one pass. */
@@ -164,7 +167,7 @@ export function feedbackService(
         const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
         // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
-        const portal = portalVerdict({ title: f.title, description: f.description, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
+        const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
         return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
@@ -258,10 +261,13 @@ export function feedbackService(
       const publicTitle = input.publicTitle?.trim() || null;
       if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const keepOffPortal = input.keepOffPortal ?? false;
+      // Why someone kept it off, said in their own words; only kept with the mark, and cleared when the mark is.
+      const keepOffReason = keepOffPortal ? input.keepOffReason?.trim().slice(0, 500) || null : null;
       // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
       // The public-summary gate only holds it back from visitors; the tick stays on, so writing a summary later shows it.
       const facts = await portalFacts(companyId, input.areaId, input.driverScores);
-      const verdict = portalVerdict({ title: input.title, description: input.description, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
+      // Judge what a visitor would see once a public summary is written; internal wording only counts until then (BOS-1419).
+      const verdict = portalVerdict({ title: input.title, description: input.description, publicTitle, publicSummary, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
       const mayGoOn = !(verdict.reason === "sensitive" || verdict.reason === "security");
       const [f] = await db
         .insert(features)
@@ -280,6 +286,7 @@ export function feedbackService(
           objectiveId: input.objectiveId ?? null,
           portalVisible: input.portalVisible ?? mayGoOn,
           keepOffPortal,
+          keepOffReason,
           publicSummary,
           publicTitle,
           showPublicly: input.showPublicly ?? false,
@@ -299,10 +306,13 @@ export function feedbackService(
       if (driverScores) for (const [k, v] of Object.entries(driverScores)) if (v === null) delete driverScores[k];
       // Marking a feature "keep off the portal (sensitive)" takes it off at once; clearing the mark leaves the tick alone.
       const portalVisible = patch.keepOffPortal ? false : patch.portalVisible;
+      // The reason travels with the mark: set it when the mark goes on, clear it when the mark comes off.
+      const keepOffReason = patch.keepOffPortal === true ? (patch.keepOffReason?.trim().slice(0, 500) || f.keepOffReason) : patch.keepOffPortal === false ? null : undefined;
       const [u] = await db
         .update(features)
         .set({
           ...patch,
+          ...(keepOffReason !== undefined ? { keepOffReason } : {}),
           ...(portalVisible !== undefined ? { portalVisible } : {}),
           ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
           ...(patch.publicTitle !== undefined ? { publicTitle: patch.publicTitle?.trim() || null } : {}),

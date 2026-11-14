@@ -1,16 +1,24 @@
 # Boss Man
 
-*Working name.*
-
 Boss Man runs teams of AI agents on a machine you own. Each team is a **company**: a CEO agent plans the work, other agents pick up tickets on a board, and anything that needs you lands in one **decision queue**, so you approve and steer instead of watching every step.
 
 It is for people who want AI agents doing real project work (code, docs, design) on their own Docker host, with their own keys, and who want to stay in charge of what gets merged and deployed.
 
 > **Status: alpha.** Boss Man works, and its own agents build it, but expect rough edges and breaking changes. Read [docs/23-updating.md](docs/23-updating.md) before each update.
 
+## See it working
+
+![The Boss Man board showing a team of AI agents working on a made-up website project](docs/promo/poster.jpg)
+
+<!-- Promo video (BOS-1433): after the owner uploads boss-man-promo.mp4 through GitHub's README editor, put the
+     github.com/user-attachments/assets/... link GitHub inserts on its own line here, under the picture.
+     How the video is made: docs/promo/README.md -->
+
+A one-minute tour (63 seconds), recorded from the real app with made-up data: the board, the agents, their runs, the merge queue, a decision answered from a phone, and the roadmap.
+
 ## Install
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested working with OpenRouter, Ollama, Synthetic so far). The alpha install builds the containers on your server, for the beta release pre-built docker images will be available.
 
 1. With only Docker on the host, install from the ready-made images: [docs/26-install-from-images.md](docs/26-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
 2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups and self-updates.
@@ -89,4 +97,4 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE). Any code adapted from Paperclip (MIT) keeps its MIT notice.
+Apache-2.0. See [LICENSE](LICENSE).

@@ -119,7 +119,7 @@ describe("the Decisions page heading uses the same count (BOS-969)", () => {
     const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
     expect(await within(head).findByText(/^2 decisions to do/, { exact: false })).toBeTruthy();
     // The recommended option is one click; the first card's button is the first "Yes".
-    fireEvent.click(within(head.parentElement!.parentElement!).getAllByRole("button", { name: "Yes" })[0]!);
+    fireEvent.click(within(head.parentElement!.parentElement!).getAllByRole("button", { name: /^Yes/ })[0]!);
     await waitFor(() => expect(within(head).getByText(/^1 decision to do/, { exact: false })).toBeTruthy());
     expect(onAnswered).toHaveBeenCalled();
   });

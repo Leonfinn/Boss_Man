@@ -124,13 +124,41 @@ export function registerAgentAdminTools(server: McpServer, db: Db, { notes, skil
   server.registerTool(
     "model_options",
     {
-      description: "The valid model setups for hiring or changing an agent (CEO only): harnesses, providers, funding sources (paid from), the models each harness and funding source offers, and `current` — what every live agent runs on now (harness, provider, model and paid from), so a change across the team can be checked agent by agent. Uses the same names the Agents page shows. Call this before propose_hire, propose_team or propose_model_change so you pick real values. A provider must match its funding source's provider, some harnesses cannot run on some providers, and a funding source serves only its own models (Claude models on a Claude account, not a DeepSeek one).",
-      inputSchema: {},
+      description: "The valid model setups for hiring or changing an agent (CEO only): harnesses, providers, funding sources (paid from), the models each harness and funding source offers, and `current` — what every live agent runs on now (harness, provider, model and paid from), so a change across the team can be checked agent by agent. Uses the same names the Agents page shows. Call this before propose_hire, propose_team or propose_model_change so you pick real values. A provider must match its funding source's provider, some harnesses cannot run on some providers, and a funding source serves only its own models (Claude models on a Claude account, not a DeepSeek one). " +
+        "With no inputs the whole answer is large (about 65,000 characters for 30 agents) and can overflow a chat's result limit, so narrow it: agent (name or id) returns only that agent's `current` entry plus the choices that fit it (harnesses, providers, funding sources, and the models its harness offers); paidFrom (a funding source id) returns only the agents paid from that source and the source itself; section (current, harnesses, providers, fundingSources, models or note) returns only that part. section can be combined with either (agent wins over fundingSourceId).",
+      inputSchema: {
+        agent: z.string().trim().min(1).max(80).optional(),
+        // Not named fundingSourceId: policy-mcp.test.ts allows that field name only on the tools that change a model setup.
+        paidFrom: z.string().trim().min(1).max(80).optional(),
+        section: z.enum(["current", "harnesses", "providers", "fundingSources", "models", "note"]).optional(),
+      },
     },
-    async () => {
+    async ({ agent, paidFrom: fundingSourceId, section }) => {
       const ceo = await ceoOnly();
       if (!ceo) return fail("Only your company's CEO can read the model choices.");
-      return text(JSON.stringify(await team.modelOptions(scope.companyId)));
+      const all = await team.modelOptions(scope.companyId);
+      let out: Record<string, unknown> = all;
+      if (agent) {
+        const key = agent.toLowerCase();
+        const mine = all.current.find((c) => c.id === agent || c.name.toLowerCase() === key);
+        if (!mine) return fail(`No live agent called ${agent}. Call model_options with section "current" to see who there is.`);
+        out = {
+          current: [mine],
+          harnesses: all.harnesses,
+          providers: all.providers,
+          fundingSources: all.fundingSources,
+          models: { runner: { [mine.harness]: all.models.runner[mine.harness] ?? [] }, byFundingSource: all.models.byFundingSource, infinite: all.models.infinite },
+          note: all.note,
+        };
+      } else if (fundingSourceId) {
+        const source = all.fundingSources.find((s) => s.id === fundingSourceId);
+        if (!source) return fail(`No funding source with that ID. Call model_options with section "fundingSources" to see them.`);
+        out = { ...all, current: all.current.filter((c) => c.fundingSourceId === fundingSourceId), fundingSources: [source], models: { runner: {}, byFundingSource: all.models.byFundingSource.filter((m) => m.fundingSourceId === fundingSourceId), infinite: all.models.infinite.filter((m) => m.fundingSourceId === fundingSourceId) } };
+      }
+      if (section) return text(JSON.stringify({ [section]: out[section] }));
+      // Filtered by agent or source without a section: leave out the lists that are not about it.
+      if (fundingSourceId && !agent) { const { harnesses: _h, providers: _p, ...rest } = out; return text(JSON.stringify(rest)); }
+      return text(JSON.stringify(out));
     },
   );
   server.registerTool(

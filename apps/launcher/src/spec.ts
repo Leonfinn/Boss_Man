@@ -4,8 +4,6 @@
 import path from "node:path";
 
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
-/** The runner image. The launcher never pulls: scripts/update-runner.sh builds and tags it. */
-export const IMAGE = "boss-man-runner:current";
 export const LABEL = "boss-man.launcher";
 export const COMPANY_LABEL = "boss-man.company";
 /** The network guard (BOS-324): a sidecar in each runner's network namespace that blocks private networks. */
@@ -18,6 +16,13 @@ export const MOUNTS = [
   ["claude", "/home/node/.claude"],
   ["opencode", "/home/node/.local/share/opencode"],
 ] as const;
+/**
+ * The Claude pack's named volume, mounted read-only into every runner (DR-050, BOS-972). The installer
+ * (claude-pack.ts) fills it before the runner starts; a runner on an empty/not-ready pack reports Claude
+ * absent. Named, not a company folder, so all runners of a stack share one install and none may write it.
+ */
+export const CLAUDE_PACK_TARGET = "/opt/bossman-claude";
+export const claudePackVolume = (stack?: string) => `${stack ? `boss-man-${stack}` : "boss-man"}-claude-pack`;
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 /** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
 export const DEFAULT_CPU_SHARES = 512;
@@ -72,6 +77,10 @@ export type LauncherConfig = {
    * Unset = `dataRoot` is the host path too (the build install).
    */
   hostDataRoot?: string;
+  /** DR-007: how long a paused runner waits for its guard before it's reported frozen (default 2 min). For tests. */
+  guardFreezeAfterMs?: number;
+  /** The clock, for tests. */
+  now?: () => number;
 };
 
 /** A Docker image reference: a name, with a tag or a sha256 digest. Anything else would be a way to start some other image. */
@@ -126,6 +135,8 @@ const prefix = (stack?: string) => (stack ? `boss-man-${stack}` : "boss-man");
 export const containerName = (slug: string, stack?: string) => `${prefix(stack)}-runner-${slug}`;
 export const netguardName = (slug: string, stack?: string) => `${prefix(stack)}-netguard-${slug}`;
 export const runnerImage = (stack?: string) => `${prefix(stack)}-runner:current`;
+/** The image the runner ran before the last update (scripts/update-runner.sh keeps it): what a failed swap goes back to (BOS-382). */
+export const previousRunnerImage = (stack?: string) => `${prefix(stack)}-runner:previous`;
 export const guardImage = (stack?: string) => `${prefix(stack)}-netguard:current`;
 /** What the launcher asks Docker to list: a named stack lists only its own containers; the default lists as before. */
 export const listLabel = (stack?: string) => (stack ? `${STACK_LABEL}=${stack}` : `${LABEL}=1`);
@@ -186,24 +197,26 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image?: string) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
   const dir = hostCompanyDir(cfg, slug);
   return {
-    Image: runnerImageOf(cfg),
+    Image: image ?? runnerImageOf(cfg),
     User: "1000:1000",
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,
       `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
+      // The Claude pack (DR-050): the runner reads it read-only and points CLAUDE_CODE_EXECUTABLE at it.
+      `BOSSMAN_CLAUDE_PACK=${CLAUDE_PACK_TARGET}`,
       ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
     ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
-      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`],
+      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${path.join(dir, "runner.token")}:${TOKEN_TARGET}:ro`, `${claudePackVolume(cfg.stack)}:${CLAUDE_PACK_TARGET}:ro`],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],

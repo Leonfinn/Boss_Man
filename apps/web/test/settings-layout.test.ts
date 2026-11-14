@@ -41,6 +41,7 @@ function answer(p: string): unknown {
   if (p === "/api/self-deploy") return { enabled: false };
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
+  if (p === "/api/private-details") return { total: 0, counts: {} };
   if (p === "/api/devices") return [];
   if (p === "/api/netguard-allow") return { report: null };
   if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
@@ -128,7 +129,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const errors: string[] = [];
         page.on("pageerror", (e: any) => errors.push(String(e)));
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
         await new Promise((r) => setTimeout(r, 400));
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
@@ -146,8 +147,11 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const overflow = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.scrollWidth - el.clientWidth);
         expect(overflow, `${vp.name}: menu does not scroll sideways`).toBeLessThanOrEqual(1);
         // Rows are big enough to press.
-        const row = await page.locator("nav[aria-label='Settings'] a").first().boundingBox();
-        expect(row && row.height, `${vp.name}: rows are at least 40 px`).toBeGreaterThanOrEqual(vp.touch || vp.width < 900 ? 44 : 40);
+        // (Below 900 px a page has no menu; BOS-1224 checks that below.)
+        if (vp.width >= 900) {
+          const row = await page.locator("nav[aria-label='Settings'] a").first().boundingBox();
+          expect(row && row.height, `${vp.name}: rows are at least 40 px`).toBeGreaterThanOrEqual(vp.touch ? 44 : 40);
+        }
         await saveShot(`settings-${vp.name}.png`, page);
         await saveShot(`settings-${vp.name}-full.png`, page, true);
         await page.close();
@@ -164,7 +168,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       for (const vp of [sizes[0]!, sizes[1]!, sizes[2]!]) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: 1, hasTouch: vp.touch });
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
         await new Promise((r) => setTimeout(r, 300));
         const nav = await page.locator("nav[aria-label='Settings']").boundingBox();
         const pageBox = await page.locator(".set-page").boundingBox();
@@ -175,19 +179,64 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         } else {
           // Below 900 px a page starts with "‹ Settings", and the menu column is gone.
           expect(await page.locator(".set-back").isVisible(), `${vp.name}: back link shows`).toBe(true);
+          // BOS-1224: the whole menu is not drawn above the page, so the page starts near the top.
+          expect(await page.locator("nav[aria-label='Settings']").isVisible(), `${vp.name}: no menu above a page`).toBe(false);
+          expect(pageBox!.y, `${vp.name}: the page starts high`).toBeLessThan(400);
         }
+        // The "All companies" tag stays on one line (Server and runner is a company-wide page).
+        await page.goto(`${base}/#/settings/c1/system`);
+        await page.waitForSelector(".set-scope", { timeout: 8000 });
+        await new Promise((r) => setTimeout(r, 300));
+        const tag = await page.locator(".set-scope").boundingBox();
+        expect(tag!.height, `${vp.name}: tag is one line`).toBeLessThan(30);
+        await saveShot(`system-${vp.name}.png`, page);
         await page.close();
       }
       // The phone's opening screen is the menu itself, each row with its hint.
       const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
       await phone.goto(`${base}/#/settings`);
-      await phone.waitForSelector("nav[aria-label='Settings']", { timeout: 8000 });
+      await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
       await new Promise((r) => setTimeout(r, 300));
       expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: nine rows").toBe(9);
       expect(await phone.locator("nav[aria-label='Settings'] .set-item-hint").first().isVisible(), "phone menu: hints show").toBe(true);
       expect(await phone.getByText("Run the setup wizard").count(), "phone menu: the wizard button").toBeGreaterThanOrEqual(1);
       expect(await phone.locator(".set-page").count(), "phone menu: no page shown yet").toBe(0);
       await saveShot("settings-phone-menu.png", phone);
+      await phone.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("BOS-1126 Q8: the bare menu on a wide screen shows each hint under its name in two columns, one column on a phone", async () => {
+    const browser = await launch();
+    if (!browser) return;
+    try {
+      for (const vp of [sizes[0]!, sizes[1]!]) {
+        const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: 1, hasTouch: vp.touch });
+        await page.goto(`${base}/#/settings`);
+        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
+        await new Promise((r) => setTimeout(r, 300));
+        const hint = page.locator("nav[aria-label='Settings'] .set-item-hint").first();
+        expect(await hint.isVisible(), `${vp.name}: hint shows`).toBe(true);
+        const links = page.locator("nav[aria-label='Settings'] ul").first().locator("a");
+        const a = await links.nth(0).boundingBox();
+        const b = await links.nth(1).boundingBox();
+        expect(b!.x, `${vp.name}: second page sits in a second column`).toBeGreaterThan(a!.x + a!.width - 1);
+        expect(Math.abs(b!.y - a!.y), `${vp.name}: same row`).toBeLessThan(2);
+        const rowGap = await page.locator("nav[aria-label='Settings'] ul").first().evaluate((el: Element) => getComputedStyle(el).rowGap);
+        expect(rowGap, `${vp.name}: the rows sit on the 8 px spacing scale`).toBe("8px");
+        await saveShot(`settings-index-${vp.name}.png`, page);
+        await page.close();
+      }
+      const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
+      await phone.goto(`${base}/#/settings`);
+      await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
+      await new Promise((r) => setTimeout(r, 300));
+      const l = phone.locator("nav[aria-label='Settings'] ul").first().locator("a");
+      const p0 = await l.nth(0).boundingBox();
+      const p1 = await l.nth(1).boundingBox();
+      expect(p1!.y, "phone: one column, the second page is below the first").toBeGreaterThan(p0!.y + p0!.height - 1);
       await phone.close();
     } finally {
       await browser.close();

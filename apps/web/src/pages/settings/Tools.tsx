@@ -4,7 +4,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
 
-type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
+type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean; secretRefused?: boolean };
 
 /** Extra MCP tool servers on the owner's network. Tokens stay in the secret store: only the name of a granted secret is entered here. */
 export function ToolServers({ company }: { company: Company }) {
@@ -57,7 +57,8 @@ export function ToolServers({ company }: { company: Company }) {
                   <td>{m.transport}</td>
                   <td>
                     <span className="mono">{m.secretEnv ?? "none"}</span>
-                    {!m.secretGranted && <span className="tag amber" style={{ marginLeft: 6 }}>Not granted to {company.name}: no agent gets this server</span>}
+                    {m.secretRefused && <span className="tag red" style={{ marginLeft: 6 }}>Left out of every run: {m.secretEnv} is the git login, which agents may never hold. Give this server its own token.</span>}
+                    {!m.secretRefused && !m.secretGranted && <span className="tag amber" style={{ marginLeft: 6 }}>Not granted to {company.name}: no agent gets this server</span>}
                   </td>
                   <td>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(m)} aria-label={`Remove tool server ${m.name}`}>

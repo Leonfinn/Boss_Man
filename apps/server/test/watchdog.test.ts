@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { activity, agents, companies, decisions, notifications, reviewHolds, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, notifications, quotaSamples, reviewHolds, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { readWatchdogSettings } from "@boss-man/shared";
@@ -755,6 +755,93 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect(await loops()).toBe(1);
   });
 
+  it("BOS-1199: the backtest replays review holds like the live rule", async () => {
+    await ctx.switchOn();
+    const mk = async (title: string) => {
+      const t = await ctx.ticket({ title, stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      for (const mins of [500, 400, 300, 200]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+      return t;
+    };
+    const held = await mk("Held all along");
+    await ctx.db.insert(reviewHolds).values({ ticketId: held.id, reason: "hold", createdAt: ctx.ago(550) });
+    const released = await mk("Released later");
+    await ctx.db.insert(reviewHolds).values({ ticketId: released.id, reason: "hold", status: "released", createdAt: ctx.ago(550), closedAt: ctx.ago(60) });
+    const bouncing = await mk("Never held");
+    for (const mins of [50, 40, 30]) await ctx.db.insert(ticketReviews).values({ ticketId: released.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const loops = (id: string) => bt.flags.filter((f) => f.ticketId === id && f.rule === "review_loop");
+    expect(loops(held.id)).toHaveLength(0);
+    // Flags only on the send-backs after the release, not the four before it.
+    expect(loops(released.id)).toHaveLength(1);
+    expect(new Date(loops(released.id)[0]!.firstAt).getTime()).toBeGreaterThanOrEqual(ctx.ago(50).getTime());
+    expect(loops(bouncing.id)).toHaveLength(1);
+  });
+
+  // QA gap tests for BOS-1167 (BOS-1200). Every time is ctx.ago(): the test clock, never a separate "now".
+  describe("review_loop and review holds (BOS-1167, QA)", () => {
+    const sendBacks = async (ticketId: string, minsAgo: number[]) => {
+      for (const m of minsAgo) await ctx.db.insert(ticketReviews).values({ ticketId, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(m) });
+    };
+    const loops = async (ticketId: string) => (await ctx.db.select().from(watchdogFlags).where(and(eq(watchdogFlags.ticketId, ticketId), eq(watchdogFlags.rule, "review_loop"), eq(watchdogFlags.status, "open")))).length;
+
+    it("a bouncing ticket that never had a hold is still flagged", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Bouncy, never held", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await sendBacks(t.id, [500, 400, 300, 200]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("a hold that was cancelled (pass withdrawn) ends like a released one: earlier send-backs stop counting", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Hold cancelled", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await sendBacks(t.id, [500, 400, 300, 200]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Hold", status: "cancelled", closedAt: ctx.ago(100) });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [50, 40, 30]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("a send-back at the very moment the hold ended does not count; one a minute later does", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Edge of the hold", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(600) });
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Hold", status: "released", closedAt: ctx.ago(100) });
+      await sendBacks(t.id, [100, 100, 100, 100]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [99, 98, 97, 96]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("two holds in a row: only send-backs after the LAST one count", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Held twice", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(900) });
+      await sendBacks(t.id, [800, 790]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "First", status: "released", closedAt: ctx.ago(700) });
+      // Four send-backs between the two holds: they would flag if the first hold's end were used.
+      await sendBacks(t.id, [600, 590, 580, 570]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Second", status: "released", closedAt: ctx.ago(300) });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+      await sendBacks(t.id, [50, 40, 30]);
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(1);
+    });
+
+    it("an open second hold silences the flag even when send-backs follow the first hold", async () => {
+      await ctx.switchOn();
+      const t = await ctx.ticket({ title: "Re-held", stateChangedAt: ctx.ago(30), createdAt: ctx.ago(900) });
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "First", status: "released", closedAt: ctx.ago(700) });
+      await sendBacks(t.id, [600, 590, 580, 570]);
+      await ctx.db.insert(reviewHolds).values({ ticketId: t.id, reason: "Second", status: "open" });
+      await ctx.watchdog.run();
+      expect(await loops(t.id)).toBe(0);
+    });
+  });
+
   it("the backtest hands a review loop off again in the sweep where it is sent back once more", async () => {
     await ctx.switchOn({ reviewHours: 6 });
     const t = await ctx.ticket({ title: "Bouncy", stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
@@ -840,7 +927,8 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     const QUOTA = "subscription seven_day window nearly used up";
     const held = async (ticketId: string, minutes: number, extra: Partial<typeof wakes.$inferInsert> = {}) =>
       (await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId, reason: "message", status: "deferred", statusReason: QUOTA, priority: 2, causationDepth: 0, createdAt: ctx.ago(minutes), ...extra }).returning())[0]!;
-    const alerts = () => ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "quota-held:%"));
+    const alerts = () => ctx.db.select().from(decisions).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
+    const account = async (name: string) => (await ctx.req("POST", "/api/funding-sources", { name, kind: "subscription", provider: "anthropic" })).json() as { id: string };
 
     it("a quota-held wake is not a plan: the stall rule still flags the ticket", async () => {
       await ctx.switchOn();
@@ -852,6 +940,8 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
 
     it("one alert to the CEO once a wake has been held an hour, naming agent, ticket, window and held time; none before", async () => {
       await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
       const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
       const w = await held(t.id, 59);
       await ctx.watchdog.run();
@@ -860,7 +950,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       await ctx.watchdog.run();
       const list = await alerts();
       expect(list).toHaveLength(1);
-      expect(list[0]!.dedupeKey).toBe(`quota-held:${w.id}`);
+      expect((list[0]!.context as { ladder: { groupBy: string } }).ladder.groupBy).toBe(`quota-held:${ctx.companyId}:${fs.id}:seven_day`);
       expect(list[0]!.question).toContain("Developer");
       expect(list[0]!.question).toContain("Add rate limiting");
       expect(list[0]!.question).toContain("seven_day");
@@ -904,11 +994,60 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
       ctx.advance(10);
       await ctx.watchdog.run();
       expect(await alerts()).toHaveLength(1);
-      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(like(decisions.dedupeKey, "quota-held:%"));
+      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
       ctx.advance(10);
       await ctx.watchdog.run();
       expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "quota_held_alert"))).toHaveLength(1);
       expect(await ctx.db.select().from(decisions).where(like(decisions.question, "%usage limit%"))).toHaveLength(1);
+    });
+
+    it("with 10 wakes held by one account limit, exactly one card lists all 10 (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "seven_day", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 20 * H), observedAt: ctx.now() });
+      for (let i = 0; i < 10; i++) await held((await ctx.ticket({ title: `Held ${i}` })).id, 90);
+      await ctx.watchdog.run();
+      const list = await alerts();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.question).toMatch(/10 wake/);
+      for (let i = 0; i < 10; i++) expect(list[0]!.question).toContain(`Held ${i}`);
+      expect(list[0]!.question).toContain("resets");
+      expect((list[0]!.context as { ladder: { kind: string } }).ladder.kind).toBe("quota_held");
+    });
+
+    it("answering it doesn't bring back a card for the same wakes in the same limit window (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.insert(quotaSamples).values({ fundingSourceId: fs.id, window: "seven_day", utilization: 1, resetsAt: new Date(ctx.now().getTime() + 20 * H), observedAt: ctx.now() });
+      await held((await ctx.ticket({ title: "Held A" })).id, 90);
+      await held((await ctx.ticket({ title: "Held B" })).id, 90);
+      await ctx.watchdog.run();
+      expect(await alerts()).toHaveLength(1);
+      await ctx.db.update(decisions).set({ status: "answered", dedupeKey: null }).where(sql`${decisions.context}->'ladder'->>'kind' = 'quota_held'`);
+      for (let i = 0; i < 3; i++) {
+        ctx.advance(30);
+        await ctx.watchdog.run();
+      }
+      expect((await alerts()).filter((d) => d.status === "open")).toHaveLength(0);
+      expect(await alerts()).toHaveLength(1);
+    });
+
+    it("a different account or limit window gets its own card (BOS-1425)", async () => {
+      await ctx.switchOn();
+      const fs = await account("Claude Max");
+      const other = await account("Claude Team");
+      await ctx.db.update(agents).set({ fundingSourceId: fs.id }).where(eq(agents.id, ctx.dev.id));
+      await ctx.db.update(agents).set({ fundingSourceId: other.id }).where(eq(agents.id, ctx.sm.id));
+      await held((await ctx.ticket({ title: "On Max" })).id, 90);
+      await held((await ctx.ticket({ title: "On Team" })).id, 90, { agentId: ctx.sm.id });
+      await held((await ctx.ticket({ title: "Max five hour" })).id, 90, { statusReason: "subscription five_hour window nearly used up" });
+      await ctx.watchdog.run();
+      const list = await alerts();
+      expect(list).toHaveLength(3);
+      const keys = list.map((d) => (d.context as { ladder: { groupBy: string } }).ladder.groupBy).sort();
+      expect(keys).toEqual([`quota-held:${ctx.companyId}:${fs.id}:five_hour`, `quota-held:${ctx.companyId}:${fs.id}:seven_day`, `quota-held:${ctx.companyId}:${other.id}:seven_day`].sort());
     });
   });
 

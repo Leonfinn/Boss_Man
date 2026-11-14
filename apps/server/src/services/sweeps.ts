@@ -6,15 +6,18 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
+import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
+import { agents, checkJobs, companies, decisions, engagementMessages, engagements, keyResults, milestones, notifications, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
+import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
+import { agentWipHold, canStartNow, cantMoveFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
@@ -38,6 +41,8 @@ export type SweepLimits = {
    * that stopped.
    */
   mergeMissedAfterMs: number;
+  /** After a server takes charge, at most this many merges are started from scratch at once; the rest follow as these finish (BOS-1371). Merges whose check is still live are not counted. */
+  resumeRestartsAtOnce: number;
   /** An urgent ticket in progress whose assignee has no live or queued run is woken after this long idle (BOS-346). */
   urgentIdleAfterMs: number;
   /** An agent is nudged about the same ticket at most once per this long (R82). */
@@ -86,6 +91,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   stallAfterMs: 5 * 60_000,
   missedAfterMs: 30 * 60_000,
   mergeMissedAfterMs: MERGE_MISSED_AFTER_MS,
+  resumeRestartsAtOnce: 4,
   urgentIdleAfterMs: 2 * 60_000,
   missedEveryMs: 4 * 3_600_000,
   keepWaitingMs: 30 * 60_000,
@@ -110,6 +116,10 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
 };
 /** How many unassigned tickets the CEO's idle-agents wake lists (BOS-615). */
 const IDLE_ASK_TICKETS = 8;
+/** The wake reason for starting a ticket the WIP limit held, once there is room (BOS-1180); it is the ordinary "assigned" wake, so it is outside the idle-slot allowance. */
+const HELD_START_REASON = "assigned";
+/** The CEO's idle-agents wake lists work held behind an agent's WIP cap for longer than this (BOS-1180). */
+const HELD_LISTED_AFTER_MS = 30 * 60_000;
 /**
  * The line a re-queued wake carries at the end of its note: it is how the retries of one original
  * wake are counted without a column (BOS-480), and it tells the agent why it was started again.
@@ -134,9 +144,12 @@ const endedByItself = (outcome: string | null) => !!outcome && endedNormally(out
 const ago = (ms: number) => ageWords(ms);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; /** Raises the CEO card for each roadmap feature with no open ticket (BOS-595); without it that sweep does nothing. */ featuresWithoutTickets?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; /** When the runner's current process was seen to start after a restart, if it was (BOS-579). */ runnerRestartedAt?: (runnerId: string) => Date | null; endRun: (runId: string, outcome: string, at: Date, how?: { interrupted?: boolean }) => Promise<unknown>; /** How many more work runs the company could start now (BOS-574); without it the idle-slot sweep does nothing. */ freeSlots?: (companyId: string) => Promise<number>; /** Queues a wake as given, never merged into another or steered into a live run (BOS-480). */ requeue?: (input: WakeInput) => Promise<unknown>; /** Tells the runner to drop a run it may still be setting up. */ cancelOnRunner?: (runnerId: string, runId: string) => unknown; endUnconfirmedCancels: (t: Date) => Promise<unknown>; /** Stops a run through the Stop button's cancel, with the reason it ends under (the run time limit, BOS-846); without it that sweep does nothing. */ cancelRun?: (runId: string, reason: string) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** Starts an approved merge again when a server takes charge (DR-026). */ resumeLand?: (ticketId: string) => Promise<unknown>; /** Releases a backlog or blocked ticket whose blockers are all done (BOS-603); true if it did something. */ releaseUnblocked?: (ticketId: string) => Promise<boolean>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; /** The files the ticket's branch would clash with on the default branch; null when that can't be told (BOS-426). */ branchClash?: (ticketId: string) => Promise<string[] | null>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null>; /** The owner's unanswered ticket messages (BOS-425): the 5-minute re-wake and the 10-minute stand-in. */ ownerReplies?: (t: Date) => Promise<{ rewoken: number; standIns: number }>; /** The head commit of a ticket's branch on its runner, for telling a run that committed from one that did not (BOS-612). Throws or returns null when it can't be read. */ branchHead?: (ticketId: string) => Promise<string | null>; /** Whether the owner's sign-off on an earlier commit still covers the branch head (BOS-734); null when the runner can't say. */ signoffCovers?: (ticketId: string, signed: string, head?: string) => Promise<SignoffCover | null>; /** Withdraws a card for older code and sends the ticket back for a new review (BOS-734). */ signoffWithdraw?: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown>; /** The merge line jam alerts (BOS-766); without it that sweep does nothing. */ mergeJam?: () => Promise<{ alerted: number; reminded: number; cleared: number }> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; /** Closes every card whose conditions have cleared (DR-016, BOS-470). */ clearAlerts?: () => Promise<number>; /** Raises the CEO card for each roadmap feature with no open ticket (BOS-595); without it that sweep does nothing. */ featuresWithoutTickets?: () => Promise<number>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; /** When the runner's current process was seen to start after a restart, if it was (BOS-579). */ runnerRestartedAt?: (runnerId: string) => Date | null; endRun: (runId: string, outcome: string, at: Date, how?: { interrupted?: boolean }) => Promise<unknown>; /** How many more work runs the company could start now (BOS-574); without it the idle-slot sweep does nothing. */ freeSlots?: (companyId: string) => Promise<number>; /** Queues a wake as given, never merged into another or steered into a live run (BOS-480). */ requeue?: (input: WakeInput) => Promise<unknown>; /** Tells the runner to drop a run it may still be setting up. */ cancelOnRunner?: (runnerId: string, runId: string) => unknown; endUnconfirmedCancels: (t: Date) => Promise<unknown>; /** Stops a run through the Stop button's cancel, with the reason it ends under (the run time limit, BOS-846); without it that sweep does nothing. */ cancelRun?: (runId: string, reason: string) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** Ends Boss Man's own merge holds whose waits are merged and live, and starts those merges (BOS-1173). */ releaseHolds?: () => Promise<unknown>; /** Withdraws a review round with no verdicts opened on code an earlier round passed (BOS-1173). */ withdrawRepeatRounds?: (judged: Set<string>) => Promise<unknown>; /** Starts an approved merge again when a server takes charge (DR-026). */ resumeLand?: (ticketId: string, adopt?: { commit: string; tree: string }) => Promise<unknown>; /** Releases a backlog or blocked ticket whose blockers are all done (BOS-603); true if it did something. */ releaseUnblocked?: (ticketId: string) => Promise<boolean>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; /** True only while a merge for the ticket is actually running in this process (BOS-1371: the cap counts these, not the alive-beat that outlives a finished merge). */ landingRunning?: (ticketId: string) => boolean; /** The files the ticket's branch would clash with on the default branch; null when that can't be told (BOS-426). */ branchClash?: (ticketId: string) => Promise<string[] | null>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null>; /** The owner's unanswered ticket messages (BOS-425): the 5-minute re-wake and the 10-minute stand-in. */ ownerReplies?: (t: Date) => Promise<{ rewoken: number; standIns: number }>; /** The head commit of a ticket's branch on its runner, for telling a run that committed from one that did not (BOS-612). Throws or returns null when it can't be read. */ branchHead?: (ticketId: string) => Promise<string | null>; /** Whether the owner's sign-off on an earlier commit still covers the branch head (BOS-734); null when the runner can't say. */ signoffCovers?: (ticketId: string, signed: string, head?: string) => Promise<SignoffCover | null>; /** Withdraws a card for older code and sends the ticket back for a new review (BOS-734). */ signoffWithdraw?: (ticketId: string, cardHead: string, head: string, why: string) => Promise<unknown>; /** The merge line jam alerts (BOS-766); without it that sweep does nothing. */ mergeJam?: () => Promise<{ alerted: number; reminded: number; cleared: number }> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
+  // Repeat review rounds already judged this server run (BOS-1173), so the runner isn't asked about each one every minute.
+  // shortcut: in memory; a restart judges each open round once more, which is harmless.
+  const judgedRounds = new Set<string>();
 
   async function withdraw(ids: string[]) {
     if (!ids.length) return;
@@ -702,32 +715,70 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * started and how many must wait (update hold on, or the company's runner not connected yet): the caller
    * asks again until none wait.
    */
+  // BOS-1371: tickets already picked up in the current promotion pass-series, so a merge that ended without landing is not started again by the next 10 s pass.
+  let resumedFor = 0;
+  // shortcut: lost on restart, harmless because a restarted server runs the resume pass afresh and a merge already done is found and closes the ticket.
+  const resumed = new Set<string>();
   async function resumeMergesOnPromotion(promotedAt: Date) {
     if (!opts.resumeLand) return { started: 0, waiting: 0 };
     if (await getHold(db)) return { started: 0, waiting: 1 };
-    const list = (await approvedUnmerged()).filter((x) => x.approvedAt < promotedAt.getTime());
+    if (resumedFor !== promotedAt.getTime()) {
+      resumedFor = promotedAt.getTime();
+      resumed.clear();
+    }
+    const list = (await approvedUnmerged()).filter((x) => x.approvedAt < promotedAt.getTime() && !resumed.has(x.id));
     list.sort((a, b) => checkPriority(a) - checkPriority(b) || a.approvedAt - b.approvedAt);
+    // Held-back tickets are re-listed by this pass, so a ticket that left the list (failed by another route, landed) is not kept from the stuck sweep.
+    heldByCap.clear();
     let started = 0;
     let waiting = 0;
+    let capped = 0;
+    // Full restarts still running from earlier passes count against the cap.
+    let restarting = [...resumed].filter((id) => restartedFull.has(id) && opts.landingRunning?.(id)).length;
     for (const ticket of list) {
       const companyRunners = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, ticket.companyId));
       if (!companyRunners.some((r) => opts.isConnected(r.id))) {
         waiting++;
         continue;
       }
-      const ok = await opts.resumeLand(ticket.id).then(() => true, () => false);
+      // A merge whose check job is still queued or running on the runner is picked up, not started over (BOS-1371).
+      const [live] = await db
+        .select({ commit: checkJobs.commit, tree: checkJobs.tree })
+        .from(checkJobs)
+        .where(and(eq(checkJobs.ticketId, ticket.id), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"])))
+        .orderBy(desc(checkJobs.queuedAt))
+        .limit(1);
+      if (!live && restarting >= limits.resumeRestartsAtOnce) {
+        waiting++;
+        capped++;
+        heldByCap.add(ticket.id);
+        continue;
+      }
+      heldByCap.delete(ticket.id);
+      const ok = await opts.resumeLand(ticket.id, live ? { commit: live.commit, tree: live.tree } : undefined).then(() => true, () => false);
       if (!ok) continue;
       started++;
-      await record(db, { companyId: ticket.companyId, ticketId: ticket.id, kind: "merge_check_lock_wait", summary: "The server restarted during this merge, so it was started again. Nothing to do." });
+      resumed.add(ticket.id);
+      if (!live) {
+        restarting++;
+        restartedFull.add(ticket.id);
+      }
+      await record(db, { companyId: ticket.companyId, ticketId: ticket.id, kind: "merge_check_lock_wait", summary: live ? "The server restarted, but this merge's check is still running, so the merge carries on with it. Nothing to do." : "The server restarted during this merge, so it was started again. Nothing to do." });
     }
-    return { started, waiting };
+    return { started, waiting, ...(capped ? { capped } : {}) };
   }
+  // shortcut: lost on restart, harmless because a restarted server retrying a merge once more is safe: a merge already done is found and closes the ticket.
+  const restartedFull = new Set<string>();
+  // BOS-1371: merges held back by the restart cap. The 30-minute stuck sweep leaves them alone, or it would restart them all at once and undo the cap.
+  // shortcut: lost on restart, harmless because a restarted server runs the resume pass afresh and the stuck sweep then covers them as before.
+  const heldByCap = new Set<string>();
 
   async function unmergedApprovals(t: Date) {
     let raised = 0;
     for (const ticket of await approvedUnmerged()) {
       // Quiet is measured from the last approval (BOS-362).
       if (ticket.approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
+      if (heldByCap.has(ticket.id)) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
         await opts.retryLand(ticket.id).catch(() => undefined);
@@ -821,6 +872,32 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .onConflictDoNothing();
     }
     return result;
+  }
+
+  /**
+   * BOS-1209: a Blocked ticket that nothing holds any more goes to Ready with a plain note: no dependency row, no open
+   * card naming it, no "blocked until" time, and no merged-but-unreported after-merge check. It catches a hold row lost
+   * to older code (BOS-382 sat Blocked after the owner approved its plan). Skips a ticket that only just moved, so it
+   * never races the write that adds the hold row.
+   */
+  async function releaseStrandedBlocked(t: Date) {
+    const rows = await db
+      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(eq(tickets.systemState, "blocked"), isNull(tickets.blockedUntil), isNull(tickets.goLiveWait), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
+        sql`not exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`,
+        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`));
+    let released = 0;
+    for (const r of rows) {
+      if (r.mergeCommit && unreportedAfterMerge(r.criteria, r.note).length > 0) continue;
+      const [name] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.assigneeAgentId ?? ""));
+      const moved = await systemMoveTicket(db, { ticketId: r.id, from: ["blocked"], to: "ready", reason: "Boss Man: nothing holds it any more", now: t, stateNote: `Ready: nothing is holding it any more. Starts when ${name?.name ?? "its assignee"} has a free slot.` });
+      if (!moved) continue;
+      released++;
+      if (moved.assigneeAgentId) await opts.wake({ agentId: moved.assigneeAgentId, ticketId: moved.id, reason: "unblocked" });
+    }
+    return released;
   }
 
   async function missedWork(t: Date) {
@@ -1004,16 +1081,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
 
   /** Whether the ticket still waits on something unfinished, the way decisions.ts decides it. */
-  async function isBlocked(ticketId: string) {
-    const deps = await db
-      .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    return deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
-  }
+  const isBlocked = (ticketId: string) => ticketIsBlocked(db, ticketId);
 
   /** Whether the run started or waited on scripts/check-quick.sh or check-all.sh: its agent is in the shared check line (BOS-574). */
   async function ranCheckScript(runId: string) {
@@ -1123,13 +1191,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   /**
    * Tier 2 of the idle-slot sweep (BOS-615): an idle agent's assigned `ready` ticket is its next up (the CEO
    * or PM puts the plan's next ticket there), so a free slot starts it at once rather than after missed
-   * work's half hour. Agents with in-progress work that isn't waiting on a booked check are left to tier 1
-   * and missed work, so a ready ticket never pulls an agent off what it was doing. Same order, quiet time and
-   * per-ticket limits as tier 1; blocked tickets and plan-first ones awaiting approval are skipped, and so is a
-   * ticket missed work has already nudged today (its own ladder ends in the "looks stuck" card).
+   * work's half hour. Agents with in-progress work that can move and isn't waiting on a booked check are left to
+   * tier 1 and missed work, so a ready ticket never pulls an agent off what it was doing; work that can't move
+   * (BOS-1172's `cantMoveSql`: waiting on an unfinished ticket, a plan, a go-live check) doesn't make an agent busy.
+   * Same order, quiet time and per-ticket limits as tier 1.
+   *
+   * BOS-1180: this is the one start step for Ready tickets, and it asks the one `canStartNow` test (no live run or
+   * queued wake, WIP room, not blocked, plan not waiting). It also starts tickets the WIP limit held (`wip_held_at`)
+   * the moment there is room: those skip the quiet time, the busy test and the allowance, as the agent has already
+   * been told to wait for room. Wakes the WIP limit refused don't count towards `idleFillsPerDay`, and a
+   * missed-work wake no longer stops this step (missed work keeps its own ladder, which ends in the "looks stuck" card).
    */
   async function readySlots(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>, take: (companyId: string) => void) {
     const msObjective = alias(objectives, "ms_objective");
+    const doing = alias(tickets, "doing");
     const rows = await db
       .select({ ticket: tickets, krPriority: objectives.priority, msPriority: msObjective.priority })
       .from(tickets)
@@ -1147,11 +1222,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(companies.paused, false),
           // Plan-first tickets wait for their plan's approval, as in missed work.
           or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
-          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled.
-          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs)),
+          // Quiet as long as tier 1 asks, so a ticket just assigned (its "assigned" wake) or just handed back isn't doubled. A held start isn't: it was refused for room.
+          or(isNotNull(tickets.wipHeldAt), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs))),
           isNull(tickets.monitorAt),
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
-          sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null)`,
+          or(isNotNull(tickets.wipHeldAt), sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null and not ${cantMoveFor(doing)})`),
         ),
       );
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
@@ -1162,21 +1237,29 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     for (const { ticket } of candidates) {
       const agentId = ticket.assigneeAgentId!;
       if (busy.has(agentId)) continue;
-      if ((await roomIn(ticket.companyId)) <= 0) continue;
-      if (await isBlocked(ticket.id)) continue;
+      const held = !!ticket.wipHeldAt;
+      // A held start waits for WIP room, not a run slot: its wake queues like any other.
+      if (!held && (await roomIn(ticket.companyId)) <= 0) continue;
+      if (!(await canStartNow(db, ticket))) continue;
       const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
-      if (ticketRuns.some((r) => !r.endedAt)) continue;
       const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
-      if (t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
+      if (!held && t.getTime() - lastActive.getTime() < limits.idleFillAfterMs) continue;
       const recent = await db
-        .select({ createdAt: wakes.createdAt, reason: wakes.reason })
+        .select({ createdAt: wakes.createdAt, statusReason: wakes.statusReason, reason: wakes.reason })
         .from(wakes)
-        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, [IDLE_SLOT_REASON, MISSED_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+        .where(and(eq(wakes.ticketId, ticket.id), inArray(wakes.reason, held ? [IDLE_SLOT_REASON, HELD_START_REASON] : [IDLE_SLOT_REASON]), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
         .orderBy(desc(wakes.createdAt));
-      // Once missed work has nudged this ticket, its ladder (two wakes, then "looks stuck") owns it; more wakes here would only hold that card back.
-      if (recent.some((w) => w.reason === MISSED_REASON)) continue;
-      if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
-      if (recent.length >= limits.idleFillsPerDay) continue;
+      // Dropped and refused wakes keep the gap (so none is retried every minute) but not the allowance: a wake the WIP limit refused wasn't a try at the work.
+      // For a held start the wake that was refused for room is the very thing being retried now, so it doesn't hold the next one off.
+      const gapOf = held ? recent.filter((w) => w.statusReason !== WIP_REFUSED_REASON) : recent;
+      if (gapOf[0] && t.getTime() - gapOf[0].createdAt.getTime() < limits.idleFillEveryMs) continue;
+      if (held) {
+        await opts.wake({ agentId, ticketId: ticket.id, reason: HELD_START_REASON, priority: 1, note: "Your WIP limit has room again, so this held ticket can start now." });
+        busy.add(agentId);
+        woken++;
+        continue;
+      }
+      if (recent.filter((w) => w.reason === IDLE_SLOT_REASON && w.statusReason !== WIP_REFUSED_REASON).length >= limits.idleFillsPerDay) continue;
       await opts.wake({
         agentId,
         ticketId: ticket.id,
@@ -1200,6 +1283,12 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * `missedEveryMs`, so an agent the CEO leaves idle on purpose doesn't start a CEO run every half hour.
    */
   async function askCeoForWork(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>) {
+    const mine = alias(tickets, "mine");
+    // A Ready ticket the COMPANY limit refuses (held, and its agent has room under its own cap) is no work the agent can do: the agent counts as idle (BOS-1479).
+    const agentLimit = (await readWipLimits(db)).agent;
+    const heldByCompany = agentLimit == null
+      ? sql`(mine.system_state = 'ready' and mine.wip_held_at is not null)`
+      : sql`(mine.system_state = 'ready' and mine.wip_held_at is not null and (select count(*) from tickets own where own.assignee_agent_id = mine.assignee_agent_id and own.system_state = 'in_progress' and not ${cantMoveFor(alias(tickets, "own"))}) < ${agentLimit})`;
     const idle = await db
       .select({ id: agents.id, companyId: agents.companyId, name: agents.name, title: agents.title, role: agents.role })
       .from(agents)
@@ -1210,7 +1299,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(agents.paused, false),
           isNull(agents.retiredAt),
           eq(companies.paused, false),
-          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress'))`,
+          // Work that can't move (waiting on an unmerged fix, a plan, a go-live check) doesn't make an agent busy (BOS-1172's rule, BOS-1180).
+          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not ${cantMoveFor(mine)} and not ${heldByCompany})`,
           sql`not exists (select 1 from review_requests owed join tickets reviewed on reviewed.id = owed.ticket_id where owed.reviewer_agent_id = ${agents.id} and owed.status = 'pending' and reviewed.system_state = 'review')`,
         ),
       )
@@ -1240,7 +1330,16 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
         .leftJoin(msObjective, eq(msObjective.id, milestones.objectiveId))
         .where(and(eq(tickets.companyId, companyId), inArray(tickets.systemState, ["backlog", "ready"]), isNull(tickets.assigneeAgentId)));
-      if (!open.length) continue;
+      // Assigned work the agent's WIP cap has held for a while: not moved by Boss Man (fit is the CEO's call), only shown (BOS-1180).
+      const heldRows = await db
+        .select({ ticket: tickets, prefix: companies.ticketPrefix, owner: agents.name })
+        .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
+        .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNotNull(tickets.wipHeldAt), lte(tickets.wipHeldAt, new Date(t.getTime() - HELD_LISTED_AFTER_MS))))
+        .orderBy(asc(tickets.wipHeldAt))
+        .limit(IDLE_ASK_TICKETS);
+      if (!open.length && !heldRows.length) continue;
       // While the merge line is long, work that needs no check slot (no-code: research, wiki, docs) goes first.
       const [{ waiting } = { waiting: 0 }] = await db.select({ waiting: sql<number>`count(*)::int` }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")));
       const lineLong = waiting > limits.mergeLineLongAt;
@@ -1260,15 +1359,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const marks = [ticket.systemState, ticket.urgent ? "urgent" : null, ticket.noCode ? "no code, needs no check slot" : null, ticket.planFirst ? "plan first" : null, ticket.risk ? `${ticket.risk} risk` : null].filter(Boolean).join(", ");
         top.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (${marks})`);
       }
-      if (!top.length) continue;
+      if (!top.length && !heldRows.length) continue;
+      const heldLines: string[] = [];
+      for (const { ticket, prefix, owner } of heldRows) {
+        const scope = (await agentWipHold(db, ticket)).hold?.scope;
+        const why = scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
+      }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
       const body = [
-        `Idle agents (no live run, no ready or in-progress ticket, no review owed):`,
+        `Idle agents (no live run, no ready or in-progress ticket they can move, no review owed):`,
         ...people.map((p) => `- ${p.name} (${p.title ?? p.role})`),
         ``,
-        `Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`,
-        ...top,
-        ``,
+        ...(top.length ? [`Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`, ...top, ``] : []),
+        ...(heldLines.length ? [`Assigned, but held by a WIP limit for over 30 minutes (each line names the limit; Boss Man doesn't move these; move one to an idle agent with assign_ticket if it fits: check its plan, branch and risk first):`, ...heldLines, ``] : []),
         `Give an idle agent its next ticket with assign_ticket and move it to ready; Boss Man then starts it in a free slot. Match the role, keep plan-first and risky work for agents who can carry it, and leave an agent idle if nothing fits. You are asked again only when this list changes.`,
       ].join("\n");
       if (lastAsks[0]?.note?.endsWith(`\n${body}`)) continue;
@@ -1322,6 +1426,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .where(and(eq(wakes.agentId, run.agentId!), eq(wakes.ticketId, ticket.id), inArray(wakes.status, ["queued", "deferred"])))
         .limit(1);
       if (queued) continue;
+      // Waiting on a queued or running check: its result wakes the agent (BOS-1479), so a resume now only finds a check still in line.
+      const [liveCheck] = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticket.id), eq(checkJobs.kind, "pre_review"), inArray(checkJobs.state, ["queued", "running"]))).limit(1);
+      if (liveCheck) continue;
       if (ticket.monitorAt) await db.update(tickets).set({ monitorAt: null, monitorNote: null }).where(and(eq(tickets.id, ticket.id), eq(tickets.monitorNote, CARRY_ON_NOTE)));
       await opts.wake({
         agentId: run.agentId!,
@@ -1338,11 +1445,13 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
-  type Pass = { holdWakes: number; goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
+  type Pass = { holdWakes: number; goalChecks: { raised: number }; portalHolds: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
 
   return {
     limits,
     resumeMergesOnPromotion,
+    // The resume loop gave up: merges it still held back go back to the stuck-merge sweep, which retries or alerts.
+    releaseHeldMerges: () => heldByCap.clear(),
     resumeAfterUpdate,
     /** One pass of every sweep. Safe to call often. */
     run: async (_noProgressRun: (t: Date) => Promise<{ raised: number }> = (t) => noProgress.run(t)): Promise<Pass> => {
@@ -1352,8 +1461,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.endUnconfirmedCancels(t);
       // Runs past the company's time limit (BOS-846). Off by default; a failing read must not take the pass down.
       if (opts.cancelRun) await runTimeLimitSweep(db, { now, cancel: opts.cancelRun, alert: opts.alert }).run().catch(() => ({ stopped: 0 }));
-      // A fence mode nobody chose (BOS-940): Off where the runner can't fence, or one card asking about an old Off.
-      await fenceDefaultSweep(db, t).catch(() => ({ turnedOff: 0, raised: 0 }));
+      // The fence cards: one asking about an old unchosen Off (BOS-940), one per episode of agent work held because
+      // the runner can't fence (BOS-373), which goes by itself when the episode ends.
+      await fenceDefaultSweep(db, t).catch(() => ({ raised: 0, heldCards: 0, released: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);
@@ -1368,6 +1478,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const closedCards = await opts.clearAlerts?.();
       const urgentIdleResult = held ? { woken: 0 } : await urgentIdle(t);
       const releasedResult = held ? { released: 0, parked: 0 } : await releaseUnblocked();
+      if (!held) releasedResult.released += await releaseStrandedBlocked(t);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       // After missed work, so its wakes already count against the free slots (BOS-574).
       const idleSlotsResult = held ? { woken: 0 } : await idleSlots(t);
@@ -1384,6 +1495,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // the card's to alert and not this sweep's. A failing read must not take the pass down (as above).
       const jam = opts.mergeJam ? await opts.mergeJam().catch(() => ({ alerted: 0, reminded: 0, cleared: 0 })) : { alerted: 0, reminded: 0, cleared: 0 };
       const unmerged = held ? 0 : await unmergedApprovals(t);
+      // Approved work held on a fix to the merge check (BOS-1173): once the fix is merged and live, Boss Man ends the
+      // hold and starts the merge itself; no reviewer re-checks unchanged code. A repeat round on passed code goes too.
+      if (!held) await opts.releaseHolds?.().catch(() => undefined);
+      if (!held) await opts.withdrawRepeatRounds?.(judgedRounds).catch(() => undefined);
       // A review hold whose wait is over (BOS-808): the holding reviewer is asked once to re-check and release.
       const holdWakes = held ? 0 : await wakeReadyHolds(db, t, (input) => opts.wake(input));
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
@@ -1398,7 +1513,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A feature the roadmap commits to with nothing working on it (BOS-595): the CEO is asked to give
       // it a ticket. Raised after the closer, so a feature whose ticket was linked in the same pass gets none.
       const featuresWithoutTickets = (await opts.featuresWithoutTickets?.().catch(() => 0)) ?? 0;
-      return { holdWakes, noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
+      // A feature held off the portal (the security guess or a keep-off mark) is put to the owner once (BOS-1358).
+      // After the closer, so a feature already settled is not asked about.
+      const portalHolds = await raiseHeldPortalCards(db, t).catch(() => ({ raised: 0 }));
+      return { holdWakes, noProgress: noProgressResult, goalChecks, portalHolds, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
     },
   };
 }

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, runs as runsTable, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
+import { runners, runs as runsTable, ticketDependencies, ticketMessages, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -195,6 +195,66 @@ describe("ticket conversation (R65)", () => {
     await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } }))).toBe("Posted on the ticket's conversation.");
     expect(await posted()).toBe(3);
+    await client.close();
+  });
+
+  it("holds a CEO reply or nudge that calls a ticket urgent while its flag is off (BOS-1375)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Rule order", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId, c.ceo.id);
+    const [row] = await c.db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, t.id));
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    // Not a claim: "not urgent", and no word at all.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "This one is not urgent, it can wait." } }))).toContain("Posted");
+    // The word on the reply's own ticket, flag off: held, nothing posted.
+    const before = await posted();
+    const held = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "This is urgent, please pick it up first." } });
+    expect(held).toMatchObject({ isError: true });
+    expect(textOf(held)).toContain("urgent: true");
+    expect(textOf(held)).toContain("quotesUrgent");
+    expect(await posted()).toBe(before);
+    // A named ticket near the word is checked too.
+    const named = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: `BOS-${row!.number} is urgent.` } });
+    expect(named).toMatchObject({ isError: true });
+    expect(textOf(named)).toContain(`BOS-${row!.number}`);
+    // A nudge is held the same way.
+    const nudged = await client.callTool({ name: "nudge", arguments: { agent: "Engineer", ticketId: t.id, why: "This is urgent, take it now." } });
+    expect(nudged).toMatchObject({ isError: true });
+    // The override posts it.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "This is urgent, quoting the word.", quotesUrgent: true } }))).toContain("Posted");
+    // With the flag on, no hold.
+    await client.callTool({ name: "update_ticket", arguments: { ticketId: t.id, urgent: true, reason: "urgent" } });
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "This is urgent and now flagged." } }))).toContain("Posted");
+    await client.close();
+  });
+
+  it("create_ticket takes a list of waits-on tickets and warns on an unlinked 'after BOS-n' (BOS-1375)", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+    const a = await mk("First");
+    const b = await mk("Second");
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "CEO work", assigneeAgentId: c.ceo.id });
+    await c.scheduler.tick();
+    const [ra] = await c.db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, a.id));
+    const [rb] = await c.db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, b.id));
+    const client = await c.mcp(c.starts()[0]!.runId, c.ceo.id);
+    const out = textOf(await client.callTool({ name: "create_ticket", arguments: { size: 3, project: "Site", title: "Third", body: `Do this after BOS-${ra!.number} and once BOS-${rb!.number} lands.`, waitsOn: [a.id, b.id] } }));
+    expect(out).toContain("Created ticket");
+    expect(out).not.toContain("no waits-on link");
+    const id = /Created ticket ([0-9a-f-]{36})/.exec(out)![1]!;
+    const deps = await c.db.select({ blocker: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, id));
+    expect(deps.map((d) => d.blocker).sort()).toEqual([a.id, b.id].sort());
+    // Only one linked: the other is named in the warning.
+    const one = textOf(await client.callTool({ name: "create_ticket", arguments: { size: 3, project: "Site", title: "Fourth", body: `Do this after BOS-${ra!.number} and once BOS-${rb!.number} lands.`, waitsOn: a.id } }));
+    expect(one).toContain(`BOS-${rb!.number}`);
+    expect(one).toContain("no waits-on link");
+    expect(one).not.toContain(`after BOS-${ra!.number},`);
+    // update_ticket warns the same way.
+    const upd = textOf(await client.callTool({ name: "update_ticket", arguments: { ticketId: id, body: `Waits on BOS-${ra!.number}`, reason: "test" } }));
+    expect(upd).not.toContain("no waits-on link");
+    const upd2 = textOf(await client.callTool({ name: "update_ticket", arguments: { ticketId: id, body: "Waits on BOS-9999", reason: "test" } }));
+    expect(upd2).toContain("BOS-9999");
     await client.close();
   });
 

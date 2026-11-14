@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { featureHorizon, HORIZONS, portalTitle, type Horizon } from "@boss-man/shared";
 import {
   api,
@@ -16,7 +16,7 @@ import {
   type Risk,
   type ScoredFeatures,
 } from "../api";
-import { usePoll } from "../hooks";
+import { useMediaQuery, usePoll } from "../hooks";
 import { clearDraft, readDraftJson, useFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 import { away } from "../server-watch";
@@ -27,17 +27,65 @@ export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considerin
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
 const HORIZON_LABEL: Record<Horizon, string> = { now: "Now", next: "Next", later: "Later" };
 
+/** An editable value that reads as text (BOS-1257): the value shows as plain text and the real <select> lies over it at
+ * opacity 0, so it is still one tab stop, opens the browser's own list and keeps its aria-label. Hover or keyboard focus
+ * reveals the field edge and a ▾ (its space is always kept). */
+function Cell({ text, empty, children }: { text: ReactNode; empty?: boolean; children: ReactNode }) {
+  return (
+    <span className={`cell${empty ? " empty" : ""}`}>
+      <span className="cell-text" aria-hidden="true">
+        {text}
+      </span>
+      <span className="cell-caret" aria-hidden="true">▾</span>
+      {children}
+    </span>
+  );
+}
+
 /** A 0 to 5 score, or unscored. */
 function ScoreSelect({ value, onChange, label }: { value: number | null | undefined; onChange: (v: number | null) => void; label: string }) {
   return (
-    <select className="mini" aria-label={label} value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}>
-      <option value="">–</option>
-      {[0, 1, 2, 3, 4, 5].map((n) => (
-        <option key={n} value={n}>
-          {n}
-        </option>
-      ))}
-    </select>
+    <Cell text={value ?? "–"} empty={value == null}>
+      <select className="cell-select" aria-label={label} value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}>
+        <option value="">–</option>
+        {[0, 1, 2, 3, 4, 5].map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+    </Cell>
+  );
+}
+
+type Patch = (id: string, body: Record<string, unknown>) => void;
+
+function StatusSelect({ f, onPatch }: { f: Feature; onPatch: Patch }) {
+  return (
+    <Cell text={<span className={`tag ${STATUS_TONE[f.status]}`}>{FEATURE_STATUS_LABEL[f.status]}</span>}>
+      <select className="cell-select" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
+        {FEATURE_STATUSES.map((s) => (
+          <option key={s} value={s}>
+            {FEATURE_STATUS_LABEL[s]}
+          </option>
+        ))}
+      </select>
+    </Cell>
+  );
+}
+
+function EffortSelect({ f, onPatch }: { f: Feature; onPatch: Patch }) {
+  return (
+    <Cell text={f.effort ? `${f.effort} ${EFFORT[f.effort]}` : "–"} empty={!f.effort}>
+      <select className="cell-select" aria-label={`Effort of ${f.title}`} value={f.effort ?? ""} onChange={(e) => onPatch(f.id, { effort: e.target.value === "" ? null : Number(e.target.value) })}>
+        <option value="">–</option>
+        {[1, 2, 3, 4, 5].map((n) => (
+          <option key={n} value={n}>
+            {n} {EFFORT[n]}
+          </option>
+        ))}
+      </select>
+    </Cell>
   );
 }
 
@@ -254,16 +302,16 @@ function AddFeature({ companyId, areas, onAdded }: { companyId: string; areas: A
     );
   };
   return (
-    <form onSubmit={submit} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }} aria-label="Add a feature">
-      <div className="field" style={{ flex: "2 1 240px" }}>
-        <label htmlFor="new-feature">New feature</label>
-        <input id="new-feature" required maxLength={200} placeholder="e.g. Export reports as CSV" value={title} onChange={(e) => setTitle(e.target.value)} />
+    <form onSubmit={submit} className="features-add" aria-label="Add a feature">
+      <div className="field" style={{ flex: "2 1 220px" }}>
+        <label htmlFor="new-feature" className="sr-only">New feature</label>
+        <input id="new-feature" required maxLength={200} placeholder="New feature, e.g. Export reports as CSV" value={title} onChange={(e) => setTitle(e.target.value)} />
       </div>
       {areas.length > 0 && (
         <div className="field">
-          <label htmlFor="new-feature-area">Area</label>
+          <label htmlFor="new-feature-area" className="sr-only">Area</label>
           <select id="new-feature-area" value={areaId} onChange={(e) => setAreaId(e.target.value)}>
-            <option value="">None</option>
+            <option value="">No area</option>
             {areas.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -301,13 +349,22 @@ function saveFeatureOpen(state: { ids: string[] }) {
   } catch {}
 }
 
+/** Done, all and blocked tasks of a feature (cancelled ones count for none). */
+function taskCounts(f: Feature) {
+  const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
+  return { total: live.length, done: live.filter((t) => t.state === "done").length, blocked: live.filter((t) => t.state === "blocked").length };
+}
+
 /** The WORK column in plain words: done of all tasks (cancelled ones count for neither), and any blocked. */
 export function taskSummary(f: Feature): string {
-  const live = f.tickets.items.filter((t) => t.outcome !== "cancelled");
-  if (!live.length) return "–";
-  const done = live.filter((t) => t.state === "done").length;
-  const blocked = live.filter((t) => t.state === "blocked").length;
-  return `${done} of ${live.length} complete${blocked ? ` · ${blocked} blocked` : ""}`;
+  const { total, done, blocked } = taskCounts(f);
+  if (!total) return "–";
+  return `${done} of ${total} complete${blocked ? ` · ${blocked} blocked` : ""}`;
+}
+
+/** A blocked task is said on its own line, with a mark so it isn't colour alone (BOS-1257). */
+function BlockedLine({ n }: { n: number }) {
+  return n ? <span className="feature-blocked">⚠ {n} blocked</span> : null;
 }
 
 /** What a visitor reads as the feature's title on the portal, shown under the feature's name on the list row (BOS-997):
@@ -317,24 +374,24 @@ function VisitorsWillSee({ f }: { f: Feature }) {
   if (!f.portal?.onPortal) return null;
   const seen = portalTitle(f.publicTitle, f.publicSummary);
   if (!seen) return null;
-  const fromSummary = !f.publicTitle?.trim();
+  // One line on the row (BOS-1257); the full text and where it comes from are in the tooltip.
+  const source = f.publicTitle?.trim() ? "" : " (from the summary, no public title set)";
   return (
     <span className="feature-visitors">
-      <small>Visitors will see: {seen}</small>
-      {fromSummary && <small className="muted">from the summary, no public title set</small>}
+      <small title={`Visitors will see: ${seen}${source}`}>Visitors will see: {seen}</small>
     </span>
   );
 }
 
 /** The "On portal" tick on a list row (BOS-957): saves at once, and says why a feature is held off when it is. */
-function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Record<string, unknown>) => void }) {
+function PortalTick({ f, onPatch, word }: { f: Feature; onPatch: Patch; word?: boolean }) {
   const reason = f.portal?.reason ?? null;
   const hint = !f.portalVisible && (reason === "security" || reason === "sensitive") ? `kept off: ${reason}` : reason === "needs public summary" ? "needs public summary" : null;
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
-      <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
+      <label className={word ? "portal-tick-word" : undefined} style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
         <input type="checkbox" aria-label={`On portal: ${f.title}`} checked={f.portalVisible} onChange={(e) => onPatch(f.id, { portalVisible: e.target.checked })} />
-        <span className="muted" style={{ fontSize: 12 }}>On portal</span>
+        {word && <span className="muted" style={{ fontSize: 13 }}>On portal</span>}
       </label>
       {hint && <small className="muted" style={{ fontSize: 11 }}>{hint}</small>}
     </span>
@@ -342,12 +399,12 @@ function PortalTick({ f, onPatch }: { f: Feature; onPatch: (id: string, body: Re
 }
 
 function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: (id: string, body: Record<string, unknown>) => void }) {
-  const summary = taskSummary(f);
+  const counts = taskCounts(f);
   const foldable = f.tickets.items.length > 0;
   return (
     <>
     <tr>
-      <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220, maxWidth: 340 }}>
+      <td className="feature-name" style={{ paddingLeft: sub ? 28 : undefined }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {foldable && (
             <button type="button" className="feature-fold" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} aria-label={`${open ? "Hide" : "Show"} tasks of ${f.title}`} onClick={onToggle}>
@@ -362,45 +419,31 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
         <PortalTick f={f} onPatch={onPatch} />
       </td>
       <td>
-        <select className="mini" aria-label={`Status of ${f.title}`} value={f.status} onChange={(e) => onPatch(f.id, { status: e.target.value })}>
-          {FEATURE_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {FEATURE_STATUS_LABEL[s]}
-            </option>
-          ))}
-        </select>
+        <StatusSelect f={f} onPatch={onPatch} />
       </td>
       <td className="mono" style={{ whiteSpace: "nowrap" }}>
         <Bar value={f.demand} max={maxDemand} label={`Demand ${f.demand}`} /> {f.demand}
         <small className="muted"> ({f.customerCount})</small>
       </td>
       {drivers.map((d) => (
-        <td key={d.id}>
+        <td key={d.id} className="num">
           <ScoreSelect label={`${d.name} for ${f.title}`} value={f.driverScores[d.id]} onChange={(v) => onPatch(f.id, { driverScores: { [d.id]: v } })} />
         </td>
       ))}
       <td>
-        <select className="mini" aria-label={`Effort of ${f.title}`} value={f.effort ?? ""} onChange={(e) => onPatch(f.id, { effort: e.target.value === "" ? null : Number(e.target.value) })}>
-          <option value="">–</option>
-          {[1, 2, 3, 4, 5].map((n) => (
-            <option key={n} value={n}>
-              {n} {EFFORT[n]}
-            </option>
-          ))}
-        </select>
+        <EffortSelect f={f} onPatch={onPatch} />
       </td>
-      <td className="mono">{f.value.toFixed(1)}</td>
-      <td className="mono">
-        <b>{f.priority.toFixed(1)}</b>
-      </td>
+      <td className="mono num">{f.value.toFixed(1)}</td>
+      <td className="mono num feature-priority">{f.priority.toFixed(1)}</td>
       <td className="mono muted" style={{ whiteSpace: "nowrap" }}>
         {foldable ? (
           <button type="button" className="feature-fold feature-work" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} onClick={onToggle}>
-            {summary}
+            {counts.total ? `${counts.done} of ${counts.total} done` : "–"}
           </button>
         ) : (
-          summary
+          "–"
         )}
+        <BlockedLine n={counts.blocked} />
       </td>
     </tr>
     {foldable && (
@@ -427,6 +470,79 @@ function FeatureRow({ f, drivers, maxDemand, sub, hasSubfeatures, open, onToggle
   );
 }
 
+/** One feature as a card, for a phone (BOS-1257). It shows the same values as the table row and shares its onPatch. */
+function FeatureCard({ f, drivers, sub, hasSubfeatures, open, onToggle, onPatch }: { f: Feature; drivers: Driver[]; sub?: boolean; hasSubfeatures: boolean; open: boolean; onToggle: () => void; onPatch: Patch }) {
+  const counts = taskCounts(f);
+  const foldable = f.tickets.items.length > 0;
+  return (
+    <li className={`fcard${sub ? " sub" : ""}`}>
+      <div className="fcard-top">
+        <div className="fcard-title">
+          <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          <VisitorsWillSee f={f} />
+          <StatusSelect f={f} onPatch={onPatch} />
+        </div>
+        <div className="fcard-priority" title="Value × 3 ÷ effort">
+          <b className="mono">{f.priority.toFixed(1)}</b>
+          <small className="muted">Priority</small>
+        </div>
+      </div>
+      <div className="fcard-grid">
+        <div>
+          <small className="muted">Demand</small>
+          <span className="mono">
+            {f.demand}
+            <small className="muted"> ({f.customerCount})</small>
+          </span>
+        </div>
+        <div>
+          <small className="muted">Effort</small>
+          <EffortSelect f={f} onPatch={onPatch} />
+        </div>
+        <div>
+          <small className="muted">Value</small>
+          <span className="mono">{f.value.toFixed(1)}</span>
+        </div>
+        {drivers.map((d) => (
+          <div key={d.id}>
+            <small className="muted">{d.name}</small>
+            <ScoreSelect label={`${d.name} for ${f.title}`} value={f.driverScores[d.id]} onChange={(v) => onPatch(f.id, { driverScores: { [d.id]: v } })} />
+          </div>
+        ))}
+      </div>
+      <div className="fcard-foot">
+        <PortalTick f={f} onPatch={onPatch} word />
+        {foldable ? (
+          <button type="button" className="feature-fold feature-work" aria-expanded={open} aria-controls={`feature-tasks-${f.id}`} onClick={onToggle}>
+            <span aria-hidden="true">{open ? "▾" : "▸"}</span> Tasks: {counts.total ? `${counts.done} of ${counts.total} complete` : "none"}
+          </button>
+        ) : (
+          <span className="muted">Tasks: none</span>
+        )}
+        <BlockedLine n={counts.blocked} />
+      </div>
+      {foldable && (
+        <div id={`feature-tasks-${f.id}`} hidden={!open}>
+          <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
+            {f.tickets.items.map((t) => (
+              <li key={t.id}>
+                <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                <span className={`tag ${t.state === "done" ? "green" : t.state === "blocked" ? "amber" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <span className="muted">{t.assignee ?? "unassigned"}</span>
+              </li>
+            ))}
+          </ul>
+          {hasSubfeatures && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              {f.title} has its own tasks too: open it to see them.
+            </p>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 export function Features({ companies, companyId, featureId, go }: { companies: Company[]; companyId: string | undefined; featureId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   if (company && featureId) return <FeaturePage key={featureId} id={featureId} companyId={company.id} go={go} />;
@@ -436,9 +552,11 @@ export function Features({ companies, companyId, featureId, go }: { companies: C
 function FeatureList({ companies, company, go }: { companies: Company[]; company: Company | undefined; go: (to: string) => void }) {
   const data = usePoll((signal) => (company ? api<ScoredFeatures>(`/api/companies/${company.id}/features`, { signal }) : Promise.resolve(null)), 30_000, `features-${company?.id}`);
   const settings = usePoll((signal) => (company ? api<FeedbackSettingsView>(`/api/companies/${company.id}/feedback-settings`, { signal }) : Promise.resolve(null)), 60_000, `fs-list-${company?.id}`);
+  const phone = useMediaQuery("(max-width: 640px)");
   const [sort, setSort] = useState<Sort>("priority");
   const [all, setAll] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [fold, setFold] = useState(readFeatureOpen);
   const [error, setError] = useState<string | null>(null);
   const patch = (id: string, body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(data.reload, (err: Error) => setError(err.message));
@@ -469,19 +587,29 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
       <header className="page-head">
         <div>
           <h1>Features</h1>
-          <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
-          <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-            New features go on the feedback portal by default, unless they look like security work. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
+          <p className="sub">
+            New features show on your feedback portal unless they look like security work.{" "}
+            <button type="button" className="link" style={{ padding: 0 }} aria-expanded={showHelp} aria-controls="features-portal-help" onClick={() => setShowHelp(!showHelp)}>
+              {showHelp ? "Less" : "How the portal works"}
+            </button>
           </p>
+          {showHelp && (
+            <ul id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+              <li>Tick "On portal" on a row to put a feature on the portal or take it off.</li>
+              <li>Visitors only see a feature once it has a public summary.</li>
+              <li>Visitors see the public title if you write one. If not, the first line of the public summary is the title. They never see the internal title or description.</li>
+              <li>To keep a feature off on purpose, open it and tick "Keep off the portal (sensitive)".</li>
+            </ul>
+          )}
         </div>
       </header>
       {!company ? (
         <p>Create a company on the Kanban first.</p>
       ) : (
         <>
-          <section className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <section className="card features-toolbar">
             <AddFeature companyId={company.id} areas={areas} onAdded={(id) => go(`features/${company.id}/${id}`)} />
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", fontSize: 14 }}>
+            <div className="features-toolbar-tools">
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 Sort by
                 <select className="mini" value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
@@ -494,6 +622,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                 <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
                 Show released and declined
               </label>
+              {/* sort + toggles share the bar with New feature at desktop width (BOS-1257) */}
               {foldableIds.length > 0 && (
                 <button type="button" className="link" style={{ padding: 0 }} onClick={() => setAllOpen(!allOpen)}>
                   {allOpen ? "Collapse all" : "Expand all"}
@@ -511,23 +640,40 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           {error && <p className="error">{error}</p>}
           {d && !shown.length ? (
             <p className="muted">No features yet. Add one above, or create one while linking feedback in the inbox.</p>
+          ) : d && phone ? (
+            <div className="fcards">
+              {groups.map((g) => (
+                <section key={g.id || "none"} aria-label={g.name || "Features"}>
+                  {g.name && <h2 className="fcards-area">{g.name}</h2>}
+                  <ul className="fcard-list">
+                    {g.features.flatMap((f) => [
+                      <FeatureCard key={f.id} f={f} drivers={d.drivers} hasSubfeatures={shown.some((s) => s.parentId === f.id)} open={isOpen(f.id)} onToggle={() => setFeatureOpen(f.id, !isOpen(f.id))} onPatch={patch} />,
+                      ...shown
+                        .filter((s) => s.parentId === f.id)
+                        .sort(order)
+                        .map((s) => <FeatureCard key={s.id} f={s} sub drivers={d.drivers} hasSubfeatures={false} open={isOpen(s.id)} onToggle={() => setFeatureOpen(s.id, !isOpen(s.id))} onPatch={patch} />),
+                    ])}
+                  </ul>
+                </section>
+              ))}
+            </div>
           ) : d ? (
             <div className="table-wrap">
               <table className="features">
                 <thead>
                   <tr>
-                    <th>Feature</th>
+                    <th className="feature-name">Feature</th>
                     <th title="Show on the feedback portal, where visitors can vote on it">Portal</th>
                     <th>Status</th>
                     <th title="Importance from linked feedback; each customer counts once. In brackets: how many people.">Demand</th>
                     {d.drivers.map((x) => (
-                      <th key={x.id} title={`Weight ${x.weight}`}>
-                        {x.name}
+                      <th key={x.id} className="num" title={`${x.name} (weight ${x.weight})`}>
+                        <span className="th-clamp">{x.name}</span>
                       </th>
                     ))}
                     <th>Effort</th>
-                    <th title="Weighted average of demand and criteria, 0 to 5">Value</th>
-                    <th title="Value × 3 ÷ effort">Priority</th>
+                    <th className="num" title="Weighted average of demand and criteria, 0 to 5">Value</th>
+                    <th className="num" title="Value × 3 ÷ effort">Priority</th>
                     <th title="Tasks done">Work</th>
                   </tr>
                 </thead>
@@ -665,8 +811,16 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // title to visitors (BOS-991).
   const publicTitleDraftKey = `feature-public-title/${id}`;
   const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
+  // Why the feature is kept off the portal is saved with the mark (BOS-1358), so the owner's card says why.
+  const keepOffReasonDraftKey = `feature-keep-off-reason/${id}`;
+  const [keepOffReasonDraft, setKeepOffReasonDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
+  const saveKeepOffReason = (reason: string) =>
+    void api(`/api/features/${id}`, { method: "PATCH", body: { keepOffPortal: true, keepOffReason: reason.trim() || null } }).then(
+      () => (setError(null), setKeepOffReasonDraft(null), clearDraft(keepOffReasonDraftKey), data.reload()),
+      (err: Error) => setError(err.message),
+    );
   const saveSummary = (summary: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
@@ -873,6 +1027,29 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
           Keep off the portal (sensitive)
         </label>
+        {f.keepOffPortal && (
+          <div className="field">
+            <label htmlFor="f-keep-off-reason">Why it's kept off (optional)</label>
+            <DraftTextarea
+              draftKey={keepOffReasonDraftKey}
+              id="f-keep-off-reason"
+              rows={2}
+              maxLength={500}
+              placeholder="A short reason; the owner sees it if they are asked about this feature"
+              value={keepOffReasonDraft ?? f.keepOffReason ?? ""}
+              onChange={setKeepOffReasonDraft}
+            />
+            <button
+              type="button"
+              className="btn small"
+              style={{ alignSelf: "flex-start" }}
+              disabled={keepOffReasonDraft === null || keepOffReasonDraft.trim() === (f.keepOffReason ?? "")}
+              onClick={() => saveKeepOffReason(keepOffReasonDraft!)}
+            >
+              Save reason
+            </button>
+          </div>
+        )}
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.

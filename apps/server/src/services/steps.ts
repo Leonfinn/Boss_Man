@@ -9,6 +9,7 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
 // The one reading of a step's fences, shared with the web app's renderer so the two can't disagree (BOS-550).
@@ -59,7 +60,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -76,7 +77,7 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
  * up and that Boss Man has no record for yet (`newHost`, DR-046), the card's options, and the machine's own update
  * card for R15 (DR-036) with the drain in progress (`selfDeploy.hold`, for R16, DR-046 part 2). Each may be absent,
  * and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts };
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
 
 /**
  * The drain state R16 needs (DR-046 part 2): a runner image update or setting change that is waiting for runs to
@@ -429,6 +430,118 @@ function pieces(text: string) {
   return { blocks, blockPieces, inline, prose, stray: strayFence(parts) };
 }
 
+// ---------------------------------------------------------------------------------------------------
+// R17 (DR-052): a vague host step. "Delete X from .env" or "restart the notifications add-on" passes every other
+// rule but leaves the owner asking where the file is and how to restart anything. A small phrase table, not a
+// prose judge: each row is tested on its own, and a false refusal costs the author one rewrite (or a CEO override).
+// ---------------------------------------------------------------------------------------------------
+
+/** The host files a step may name, each of which needs a location. Not after a `/` (then it is a path) or a word
+ * character (`.envrc`, `my.env`). */
+const HOST_FILE = /(?<![\w/.}-])(\.env|(?:docker-)?compose[\w.-]*\.ya?ml|host\.json)(?![\w.-])/gi;
+/** The verbs that make a step ask the owner to work on a file. */
+const FILE_VERB = /\b(?:add|set|edit|open|change|remove|delete|put|copy|append|replace|update|write|uncomment|comment|look|check|find|create|paste|type)\b/i;
+/** A host action aimed at something on the host: the verb, up to three words, then what it acts on. */
+const HOST_ACTION = /\b(?:re-?start|stop|start|re-?create|pull|edit)\s+(?:[\w.-]+\s+){0,3}?(?:containers?|add-?ons?|services?|stacks?|files?)\b/i;
+/** "delete/remove … from" a host file or thing. */
+const HOST_REMOVE = /\b(?:delete|remove)\b[^.;\n]{1,80}?\bfrom\s+(?:[\w-]+\s+){0,3}?(?:\.env(?![\w.-])|(?:docker-)?compose[\w.-]*\.ya?ml|host\.json|containers?|add-?ons?|services?|stacks?|files?)\b/i;
+/** A Boss Man button path: the owner does it in the app, so no command is needed. */
+const SETTINGS_PATH = /\bSettings\s*(?:→|->)\s*\S/;
+/** The pointer the go-live card writes in place of a host fact Boss Man hasn't been told yet (DR-052 point 5). */
+export const THIS_HOST_POINTER = "Settings → Server and runner → This host";
+
+/**
+ * R17: refuse a step that names a host file with no location, or asks for a host action with neither a command
+ * nor a button path. A command here is code with a space in it (`docker compose restart ntfy`), so a bare
+ * `` `.env` `` in backticks is still a name, not a command. A `{{host.…}}` token is a location (filled in at go-live).
+ */
+function vagueHostFindings(step: number, prose: string, blocks: string[], refuse: LintFinding[]) {
+  const commands = [...blocks, ...[...prose.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!)].filter((c) => /\S\s+\S/.test(c));
+  // The words the owner reads, with every command taken out: a file named inside a command is the command's business.
+  const words = prose.replace(/`([^`\n]+)`/g, (all, c: string) => (/\S\s+\S/.test(c) ? " " : c));
+  const pointer = words.includes(THIS_HOST_POINTER);
+  const before = refuse.length;
+  // Only a step that asks the owner to do something with the file: "Your .env needs nothing new" names it harmlessly.
+  for (const m of FILE_VERB.test(words) ? words.matchAll(HOST_FILE) : []) {
+    const file = m[1]!;
+    // A command that names the file, or a host token (filled with its real path at go-live), says where it is.
+    if (pointer || commands.some((c) => c.toLowerCase().includes(file.toLowerCase()) || /\{\{\s*host\./.test(c))) continue;
+    const token = /^\.env$/i.test(file) ? "{{host.env.file}}" : /compose/i.test(file) ? "{{host.compose.cmd}} (the docker compose command for this host)" : "its folder as a token ({{host.paths.deployer}}, {{host.paths.install}} or {{host.paths.src}}) followed by /" + file;
+    refuse.push({ step, rule: "R17", problem: `names ${file} without saying where it is, so the owner can't find it. Write ${token} instead (Boss Man fills in this server's real path when the card goes out), or give a command that does it` });
+    break;
+  }
+  const action = HOST_ACTION.exec(words) ?? HOST_REMOVE.exec(words);
+  // One finding a step is enough: "delete X from .env" is already refused for the file.
+  if (action && refuse.length === before && !commands.length && !SETTINGS_PATH.test(words)) {
+    refuse.push({ step, rule: "R17", problem: `says "${action[0]}" with no command and no Settings → path, so the owner can't tell how. Give the command (for a service in the stack: \`{{host.compose.cmd}} restart <service>\`, with the service's name from the compose file) or the button path in the app` });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// R19: a step on someone else's website says where its clicks came from. Vendor docs go out of date and an agent
+// can't see the owner's screen, so a step is either `seen: <ticket image id>` (a screenshot of that screen) or
+// `not seen: <doc URL>, <YYYY-MM-DD>` (read from a doc on that date). A card with a not-seen step must also offer
+// the owner a way to say the screen differs.
+// ---------------------------------------------------------------------------------------------------
+
+/** A screenshot older than this many days no longer proves the screen looks that way. */
+export const SEEN_MAX_DAYS = 30;
+/** The option a card with a not-seen step must offer (matched by the words, so the writer can phrase the rest). */
+export const SCREEN_DIFFERENT_OPTION = "My screen looks different (I'll attach a screenshot)";
+const SCREEN_DIFFERENT = /\bmy screen looks different\b/i;
+/** Generic web consoles a step may send the owner to. Short on purpose: a URL in the step catches the rest. */
+const OUTSIDE_VENDORS = /\b(?:cloudflare|aws console|aws management console|google cloud console|azure portal|github|gitlab|stripe dashboard|namecheap|godaddy|vercel|netlify|digitalocean|hetzner)\b/i;
+const SEEN_MARK = /(?<!not )\bseen:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const NOT_SEEN_MARK = /\bnot seen:\s*(https?:\/\/[^\s,]+)\s*,\s*(\d{4}-\d{2}-\d{2})/i;
+const ANY_SEEN_WORD = /\b(?:not )?seen:/i;
+
+/** True for a host that is the Boss Man server or the owner's own network, so a link to it is not "outside". */
+function ownHost(host: string, serverHost: string | null | undefined): boolean {
+  const h = host.toLowerCase().replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  if (serverHost && h === serverHost.toLowerCase()) return true;
+  return h === "localhost" || h === "::1" || /\.(?:local|lan|internal|home\.arpa|ts\.net)$/.test(h) || /^(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(h) || !h.includes(".");
+}
+
+/** The outside host a step sends the owner to: the first URL not on this server, else a vendor named in words. */
+function outsideSite(prose: string, serverHost: string | null | undefined): string | null {
+  // The doc URL inside a `not seen:` mark is where the writer read it, not where the owner is sent.
+  const text = prose.replace(new RegExp(NOT_SEEN_MARK.source, "gi"), " ");
+  for (const m of text.matchAll(/https?:\/\/([^\s/?#)>\]`'"]+)/gi)) if (!ownHost(m[1]!, serverHost)) return m[1]!.toLowerCase();
+  return OUTSIDE_VENDORS.exec(text)?.[0] ?? null;
+}
+
+/**
+ * R19: per step. Returns whether the step is "not seen" (explicitly, or because its image is older than SEEN_MAX_DAYS),
+ * which the card-level option check needs. `images` maps ticket image ids to their created-at; with none given an
+ * image id is accepted as it is (the caller could not look it up) and only its form is checked.
+ */
+function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refuse: LintFinding[]): boolean {
+  const site = outsideSite(prose, facts.serverHost);
+  if (!site) return false;
+  const now = facts.now ?? new Date();
+  const seen = SEEN_MARK.exec(prose);
+  const notSeen = NOT_SEEN_MARK.exec(prose);
+  if (seen) {
+    const created = facts.images?.[seen[1]!.toLowerCase()];
+    if (facts.images && created === undefined) {
+      refuse.push({ step, rule: "R19", problem: `says "seen: ${seen[1]}", but that is not an image attached to this ticket. Attach the screenshot of the ${site} screen (attach_image) and use its id, or write "not seen: <doc URL>, <YYYY-MM-DD>"` });
+      return false;
+    }
+    const ageDays = created === undefined ? 0 : (now.getTime() - Date.parse(created)) / 86_400_000;
+    if (ageDays <= SEEN_MAX_DAYS) return false;
+    refuse.push({ step, rule: "R19", problem: `says "seen: ${seen[1]}", but that screenshot is ${Math.floor(ageDays)} days old (more than ${SEEN_MAX_DAYS}), so it counts as not seen. Attach a newer screenshot, or write "not seen: <doc URL>, <YYYY-MM-DD>" and offer the option "${SCREEN_DIFFERENT_OPTION}"` });
+    return true;
+  }
+  if (notSeen) {
+    if (Number.isNaN(Date.parse(notSeen[2]!)) || Date.parse(notSeen[2]!) > now.getTime() + 86_400_000) {
+      refuse.push({ step, rule: "R19", problem: `has "not seen: …, ${notSeen[2]}", which is not a real past date. Write the date you read the doc as YYYY-MM-DD` });
+    }
+    return true;
+  }
+  refuse.push({ step, rule: "R19", problem: `sends the owner to ${site}, a site Boss Man can't see, and doesn't say where its clicks came from. Add "seen: <ticket image id>" if you have a screenshot of that screen (attach_image first, and it must be under ${SEEN_MAX_DAYS} days old), or "not seen: <doc URL>, <YYYY-MM-DD>" if you only read a doc${ANY_SEEN_WORD.test(prose) ? " (the mark you wrote isn't in that form)" : ""}. A card with a not-seen step must also offer the option "${SCREEN_DIFFERENT_OPTION}"` });
+  return false;
+}
+
 /** Names a piece of shell sets: `X=…` (also inline, `X=1 cmd`, and after export/local), `read X Y`, `for X in`. */
 function setsIn(code: string, into: Set<string>) {
   for (const m of code.matchAll(/(?:^|[\s;&|(`])([A-Za-z_]\w*)=/g)) into.add(m[1]!);
@@ -629,6 +742,12 @@ export function fillServerHost(steps: readonly string[], serverHost: string | nu
  * database or container-shell prompt, or never returns by itself (`waitsIn`). R11 (DR-024): steps with a host command
  * (HOST_COMMAND) need `proof`; a "not rehearsed" proof also needs the last step to be a look-only check.
  * R12 (BOS-543): a command block that prints nothing when it works must say so or show its result (`silentBlock`).
+ * R17 (DR-052): a vague host step, a host file named with no location or a host action with neither a command nor a
+ * Settings → path (`vagueHostFindings`). It can be overridden by the CEO.
+ * R18 (DR-057): a step that adds, edits or offers "if it isn't there" on one of Boss Man's own forms (OWNER_FORMS)
+ * without a value for every field it needs, or that names a "Settings → … form" the registry doesn't know
+ * (`formStepFindings`). It can be overridden by the CEO. A `[if company.….deployTarget …]` branch still here wasn't
+ * settled from the record (company-facts.ts), so it is R4.
  */
 export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[], proof?: Proof): { refuse: LintFinding[]; warn: LintFinding[] } {
   const given: LintFacts = Array.isArray(facts) ? { hosts: facts } : facts ?? {};
@@ -641,6 +760,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   // not state: scratch for one call over one card; nothing is kept between calls.
   const staged = new Map<string, Set<string>>();
   let hostStep = 0;
+  let notSeenStep = 0;
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -692,6 +812,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (given.selfDeploy) updateCardFindings(step, code, given.selfDeploy, refuse);
     runnerUpdateFindings(step, text, code, given, refuse, warn);
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
+    vagueHostFindings(step, prose, blocks, refuse);
+    if (outsideSiteFindings(step, prose, given, refuse) && !notSeenStep) notSeenStep = step;
     for (const c of code) {
       const hit = INTERACTIVE.find(([re]) => re.test(c));
       if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
@@ -709,6 +831,18 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
+  });
+  // R19: a card built on a doc nobody saw on a screen must let the owner say the screen differs. Only checked when
+  // the caller gave the card's options (a setup-steps check has none).
+  if (notSeenStep && given.options && !given.options.some((o) => SCREEN_DIFFERENT.test(o))) {
+    refuse.push({ step: notSeenStep, rule: "R19", problem: `is a "not seen" step on someone else's website, so the card must offer the option "${SCREEN_DIFFERENT_OPTION}" for when the owner's screen doesn't match` });
+  }
+  // R18 (DR-057): a step on one of Boss Man's own forms gives every value. Read over the whole card, as one visit to
+  // a form can take two steps; only the sentences, as a command block is never a form.
+  refuse.push(...formStepFindings(steps.map((s) => pieces(s).prose)));
+  steps.forEach((text, i) => {
+    const m = BRANCH_MARKER.exec(text);
+    if (m) refuse.push({ step: i + 1, rule: "R4", problem: `starts "${m[0].trim()}", a branch only Boss Man's own record can settle, and it couldn't (no such company, or no single deploy target to read). Write the step without the branch, with every value` });
   });
   if (hostStep && !proof) {
     refuse.push({ step: hostStep, rule: "R11", problem: `has a host command, so the card needs proof: "rehearsed <script> @ <commit>" once a CI rehearsal passed, or "not rehearsed: <what and why>" with a look-only check as the last step` });

@@ -7,8 +7,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, reviewRequests, runners, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkJobs, decisions, reviewRequests, runners, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { setInfraRetryBase } from "../src/services/review.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -37,10 +38,16 @@ async function setup(o: { covers?: { covers: boolean; reason: string; newCommits
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json();
   await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
+  /** Errors the runner answers the next diff requests with, one each (BOS-1396); then it answers normally. */
+  const diffErrors: string[] = [];
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") ok(DIFF);
+    if (c.type === "workspace.diff") {
+      const error = diffErrors.shift();
+      if (error) queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: false, error }));
+      else ok(DIFF);
+    }
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
     if (c.type === "workspace.carried") ok({ carried: [] });
@@ -84,8 +91,45 @@ async function setup(o: { covers?: { covers: boolean; reason: string; newCommits
   /** An owner sign-off on the card, recorded for a commit (DR-013), as the Decisions answer writes it. */
   const signedOffCard = (ticketId: string, head: string) =>
     db.insert(decisions).values({ companyId: company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "answered", answer: "Approve and merge", answeredAt: new Date(Date.now() - 3_600_000), context: { type: "risk_review", ticketId, reviewer: "Sam", head, risk: "high", signedOff: { head, risk: "high", at: new Date(Date.now() - 3_600_000).toISOString(), by: "owner" } } });
-  return { ...built, db, req, company, ceo, senior: senior!, worker, row, mcp, approvedHighRisk, cards, merges, boardCard, signedOffCard };
+  return { ...built, db, req, company, ceo, senior: senior!, worker, row, mcp, approvedHighRisk, cards, merges, boardCard, signedOffCard, diffErrors };
 }
+
+describe("what a sign-off card lists (BOS-1236)", () => {
+  it("lists each reviewer's verdict (one still open), the last quick check and who built it", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const ticket = await c.row(t.id);
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "adversarial", reviewerAgentId: c.ceo.id, round: 1, seq: 1, status: "pending" });
+    const endedAt = new Date(Date.now() - 600_000);
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: ticket.projectId, ticketId: t.id, kind: "pre_review", scope: "quick", commit: "f".repeat(40), tree: "1".repeat(40), state: "failed", exitCode: 1, endedAt: new Date(endedAt.getTime() - 60_000) });
+    await c.db.insert(checkJobs).values({ companyId: c.company.id, projectId: ticket.projectId, ticketId: t.id, kind: "pre_review", scope: "quick", commit: "e".repeat(40), tree: "2".repeat(40), state: "passed", exitCode: 0, endedAt });
+    const [card] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Merge?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", status: "open", context: { type: "risk_review", ticketId: t.id, reviewer: "Sam", risk: "high", files: 3 } }).returning();
+    const listed = ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: Record<string, unknown> }>).find((d) => d.id === card!.id)!;
+    expect(listed.context).toMatchObject({
+      type: "risk_review",
+      risk: "high",
+      builder: "Engineer",
+      reviews: [{ name: "Sam", kind: "code", verdict: "passed" }, { name: "CEO", kind: "adversarial", verdict: "waiting" }],
+      quickCheck: { result: "passed", sha: "e".repeat(40), at: endedAt.toISOString() },
+      files: 3,
+    });
+  });
+});
+
+describe("the files count on a sign-off card (BOS-1236)", () => {
+  it("is saved when the card is raised and listed back; a card raised without it lists null", async () => {
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    const ticket = await c.row(t.id);
+    const { raiseSignoffCard } = await import("../src/services/signoff.js");
+    const id = await raiseSignoffCard(c.db, ticket, { reviewer: "Sam", reviewerAgentId: c.senior.id, head: "b".repeat(40), files: 7 });
+    const filesOf = async () => ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: { files?: number | null } }>).find((d) => d.id === id)!.context.files;
+    expect(await filesOf()).toBe(7);
+    const id2 = await raiseSignoffCard(c.db, ticket, { reviewer: "Sam", reviewerAgentId: c.senior.id, head: "b".repeat(40) });
+    const listed = ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string; context: { files?: number | null } }>).find((d) => d.id === id2)!;
+    expect(listed.context.files).toBeNull();
+  });
+});
 
 describe("owner sign-off cards (BOS-503)", () => {
   it("puts a lost card back once, tells the CEO once, and never merges the ticket meanwhile", async () => {
@@ -203,6 +247,32 @@ describe("owner sign-off cards (BOS-503)", () => {
     const stuck = await c.db.select().from(decisions).where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`));
     expect(stuck).toHaveLength(1);
     expect(await c.cards(t.id, "open")).toHaveLength(0);
+  });
+
+  it("a diff the runner couldn't read is asked again, never compared with the sign-off or called a new commit (BOS-1396)", async () => {
+    setInfraRetryBase(1);
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "b".repeat(40));
+    c.diffErrors.push("The runner couldn't read the branch.");
+    // land() resolves with what it did: assert on that rather than polling the row, which raced under a loaded suite.
+    const land = await c.review.land(t.id, "Boss Man");
+    expect(land.outcome).toBe("merged");
+    expect(c.merges()).toBe(1);
+    const stuck = await c.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'check_stuck'`);
+    expect(stuck).toHaveLength(0);
+  });
+
+  it("a lock-wait timeout from the runner is asked again by itself, with no card (BOS-1396)", async () => {
+    setInfraRetryBase(1);
+    const c = await setup();
+    const t = await c.approvedHighRisk();
+    await c.signedOffCard(t.id, "b".repeat(40));
+    c.diffErrors.push("Timed out waiting for the lock on project-1.");
+    const land = await c.review.land(t.id, "Boss Man");
+    expect(land.outcome).toBe("merged");
+    expect(c.merges()).toBe(1);
+    expect(await c.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'check_stuck'`)).toHaveLength(0);
   });
 
   it("merges when the recorded sign-off covers the commit being merged, with no card raised", async () => {

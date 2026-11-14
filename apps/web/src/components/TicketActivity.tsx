@@ -13,6 +13,7 @@ import { OwnerMessageBox, tooLongToSend } from "./OwnerMessageBox";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
+import { Loader } from "./Loader";
 
 type Message = {
   id: string;
@@ -72,7 +73,7 @@ function Steps({ runId, live }: { runId: string; live: boolean }) {
     if (live && box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [live, shown.length]);
   if (error && !items.length) return <p className="error">{error.message}</p>;
-  if (!items.length) return <p className="muted">{live ? "Starting…" : "Loading…"}</p>;
+  if (!items.length) return <Loader label={live ? "Starting the run" : "Loading activity"} />;
   return (
     <>
       {steps.length > STEPS && (
@@ -303,7 +304,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
         </OwnerMessageBox>
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy || tooLongToSend(text, img.attached)} title={!text.trim() && !img.attached.length ? "Type a message first" : undefined}>
             Send
           </button>
           {live && (

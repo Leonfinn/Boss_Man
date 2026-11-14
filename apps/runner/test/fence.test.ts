@@ -232,6 +232,23 @@ describe.skipIf(!live)("fence, live", () => {
     expect(r.stdout).toContain("LIST_REFUSED");
   });
 
+  it("DR-050: the Claude pack is readable but read-only: an agent can't change the binary it runs", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-"));
+    const inside = path.join(root, "in");
+    const pack = path.join(root, "pack");
+    mkdirSync(inside);
+    mkdirSync(path.join(pack, "node_modules", ".bin"), { recursive: true });
+    const bin = path.join(pack, "node_modules", ".bin", "claude");
+    writeFileSync(bin, "#!/bin/sh\necho 2.1.316\n");
+    // The pack is granted read-only, as fenceRun does with base.BOSSMAN_CLAUDE_PACK.
+    const r = fenced(inside, `cat "${bin}" >/dev/null && echo READ; echo evil > "${bin}" 2>/dev/null && echo WROTE || echo REFUSED`, {}, { readOnly: [pack] });
+    expect(r.stdout).toContain("READ");
+    expect(r.stdout).not.toContain("WROTE");
+    expect(r.stdout).toContain("REFUSED");
+    // The binary is untouched.
+    expect(readFileSync(bin, "utf8")).toContain("2.1.316");
+  });
+
   it("can't read another session's environment", async () => {
     const sibling = spawn("sleep", ["30"], { env: { PATH: process.env.PATH, SIBLING_TOKEN: "sibling-secret" }, stdio: "ignore" });
     try {

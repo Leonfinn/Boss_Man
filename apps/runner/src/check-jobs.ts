@@ -2,7 +2,7 @@
 // session: it keeps going when a run ends and an agent has no command that can stop it (only the server's check.cancel).
 // The server's slots order the jobs; each job also takes a slot in the runner's own check line (BOS-805), so jobs, agents'
 // hand-run checks and the vitest guard share the machine's real limit. The runner's count caps the server's check_slots.
-import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_TIMEOUT_MS, type RunnerMessage } from "@boss-man/shared";
+import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type RunnerMessage } from "@boss-man/shared";
 import type { Workspaces } from "./workspace.js";
 
 type Done = Extract<RunnerMessage, { type: "check.done" }>;
@@ -35,7 +35,7 @@ export class CheckJobs {
     this.unsent.delete(jobId);
   }
 
-  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number }) {
+  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string }) {
     if (this.cancels.has(cmd.jobId)) return; // the server asked twice
     let lastSent = 0;
     let cancelled = false;
@@ -44,6 +44,7 @@ export class CheckJobs {
     });
     void this.workspaces
       .runCommitCheck({ projectId: cmd.projectId, jobId: cmd.jobId, commit: cmd.commit }, cmd.command, cmd.timeoutMs ?? VERIFY_TIMEOUT_MS, {
+        scanList: cmd.scanList,
         onStart: (kill) => {
           this.cancels.set(cmd.jobId, () => {
             cancelled = true;
@@ -60,12 +61,12 @@ export class CheckJobs {
         },
       })
       .then(
-        (r) => ({ exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output }),
-        (err: Error) => ({ exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}` }),
+        (r) => ({ exitCode: cancelled ? null : r.exitCode, timedOut: r.timedOut && !cancelled, tail: cancelled ? `${r.output}\nStopped by the server.` : r.output, fullLog: r.fullLog === undefined ? undefined : cancelled ? `${r.fullLog}\nStopped by the server.` : r.fullLog }),
+        (err: Error) => ({ exitCode: null as number | null, timedOut: false, tail: `The runner could not start the check: ${String(err.message).slice(0, 1000)}`, fullLog: undefined as string | undefined }),
       )
       .then((r) => {
         this.cancels.delete(cmd.jobId);
-        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: r.tail.slice(-8192) };
+        const done: Done = { type: "check.done", jobId: cmd.jobId, commit: cmd.commit, exitCode: r.exitCode, timedOut: r.timedOut, tail: redactForModel(withCheckFacts(r.tail)), ...(r.fullLog !== undefined ? { fullLog: r.fullLog } : {}) };
         this.unsent.set(cmd.jobId, done);
         this.send(done);
         this.log(`check job ${cmd.jobId} ended (exit ${r.exitCode}${r.timedOut ? ", timed out" : ""})`);

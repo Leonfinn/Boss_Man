@@ -23,7 +23,7 @@ async function setup() {
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   const sent: RunnerCommand[] = [];
   built.runners.connect(reg.runnerId, (c) => (sent.push(c), true));
-  return { ...built, close, req, company, worker, project, sent };
+  return { ...built, db, close, req, company, worker, project, sent };
 }
 
 const good = { name: "scrapling", url: "http://192.168.1.50:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN" };
@@ -44,6 +44,32 @@ describe("tool servers (MCP)", () => {
       { ...good, transport: "ws" },
     ]) expect((await c.req("POST", url, bad)).statusCode, JSON.stringify(bad)).toBe(400);
     expect((await c.req("GET", url)).json()).toEqual([]);
+  });
+
+  it("refuses the git login as a tool server's secret, in any of its names (BOS-373)", async () => {
+    const c = (ctx = await setup());
+    const url = `/api/companies/${c.company.id}/mcp-servers`;
+    for (const secretEnv of ["GIT_TOKEN", "GITHUB_TOKEN", "GITHUB_TOKEN_WORK", "GH_TOKEN", "GITEA_TOKEN", "GIT_PASSWORD"]) {
+      const r = await c.req("POST", url, { ...good, secretEnv });
+      expect(r.statusCode, secretEnv).toBe(400);
+      expect(r.json().message, secretEnv).toBe("secretEnv: That is the git login, which agents may never hold. Give the tool server its own token.");
+    }
+    expect((await c.req("GET", url)).json()).toEqual([]);
+    // A name that only contains a token name is an ordinary secret.
+    expect((await c.req("POST", url, { ...good, secretEnv: "MY_GIT_TOKEN_NOTE" })).statusCode).toBe(201);
+  });
+
+  it("leaves out a tool server saved with the git login before the refusal, and flags it in Settings (BOS-373)", async () => {
+    const c = (ctx = await setup());
+    const { mcpServers } = await import("../src/db/schema.js");
+    await c.db.insert(mcpServers).values({ companyId: c.company.id, name: "leaky", url: "http://192.168.1.50:1/mcp", transport: "http", secretEnv: "GIT_TOKEN" });
+    await c.req("POST", `/api/companies/${c.company.id}/mcp-servers`, good);
+    const listed = (await c.req("GET", `/api/companies/${c.company.id}/mcp-servers`)).json() as Array<{ name: string; secretRefused: boolean }>;
+    expect(listed.map((m) => [m.name, m.secretRefused])).toEqual([["leaky", true], ["scrapling", false]]);
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Look it up", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const start = c.sent.find((s): s is Extract<RunnerCommand, { type: "run.start" }> => s.type === "run.start")!;
+    expect(start.mcpServers?.map((m) => m.name)).toEqual(["scrapling"]);
   });
 
   it("lower-cases the name, and says what's wrong with bad input", async () => {

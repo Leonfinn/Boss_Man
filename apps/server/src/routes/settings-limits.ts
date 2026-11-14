@@ -10,7 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
-import { limitReason } from "../services/check-limit.js";
+import { CHECK_MEMORY_CEILING_BYTES, limitReason } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
@@ -92,6 +92,7 @@ export function settingsLimitsRoutes(
       ? {
           slots: lc.slots,
           memoryBytes: lc.memoryBytes,
+          perCheckBytes: CHECK_MEMORY_CEILING_BYTES,
           // A lower limit always carries a reason (BOS-1152), also while the launcher has not yet been sent the setting.
           reason: limitReason(slots, lc),
           // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
@@ -100,23 +101,34 @@ export function settingsLimitsRoutes(
           applying: hold?.kind === "settings",
         }
       : null;
+    // BOS-1471: what the runners said they run at once (hello). The server hands out at most the smaller of that and the setting,
+    // so the number that really applies is the least over the connected runners that reported one.
+    const reported = live.map((r) => checks.runnerSlots(r.id)).filter((n): n is number => typeof n === "number");
+    const effectiveSlots = reported.length ? Math.min(slots, ...reported) : slots;
     return {
       mode: await checkQueueSvc.mode(),
       slots,
+      effectiveSlots,
+      runnerSlotsReported: reported.length ? Math.min(...reported) : null,
       runner,
       maxSlots: MAX_CHECK_SLOTS,
       defaultSlots: DEFAULT_CHECK_SLOTS,
       // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
       runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
+      // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
+      train: await checkQueueSvc.train(),
+      runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
     };
   };
   owner.get("/api/settings/check-queue", async () => checkQueueView());
   owner.put("/api/settings/check-queue", async (req) => {
-    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
+    // `train` is optional, so an older page that doesn't send it leaves the switch as it was.
+    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional() }).parse(req.body);
     const was = await checkQueueSvc.mode();
     const slotsWere = await checkQueueSvc.slots();
     await checkQueueSvc.setSlots(b.slots);
     await checkQueueSvc.setMode(b.mode);
+    if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
     // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
     let applying = false;

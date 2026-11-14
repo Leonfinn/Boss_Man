@@ -12,9 +12,13 @@ import { SessionManager } from "../src/session-manager.js";
 import { gateStoreDir } from "../src/store.js";
 import { Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 const level = levelFor(probeLandlock().abi).level;
 const live = level !== "unavailable";
+/** The real Claude ACP adapter now lives in the Claude pack (DR-050, BOS-972), not the runner's node_modules:
+ * the stub-model suite drives it, so it runs only where a pack is pointed at, and skips otherwise. */
+const claude = claudeAdapterBin();
 const FAKE_REACH = path.join(import.meta.dirname, "fake-reach.mjs");
 
 type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; wroteSharedStore: boolean; wroteGateStore: boolean; wroteScratch: boolean; env: Record<string, string | null> };
@@ -23,7 +27,7 @@ type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; r
  * One run of the reach-probing adapter; `fence` is what the run asks for, `runnerLevel` what the runner can do. With
  * `workspace` the run is on a ticket (a scratch folder needs one), but no repo is fetched: the probe writes nothing there.
  */
-async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel; workspace?: boolean }) {
+async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel; workspace?: boolean; boardToolsOnly?: boolean }) {
   const root = mkdtempSync(path.join(tmpdir(), "bm-fence-run-"));
   const sharedHome = path.join(root, "node");
   const sharedClaude = path.join(sharedHome, ".claude");
@@ -86,6 +90,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel; works
     mcpToken: "t",
     ...(opts.workspace ? { workspace: { projectId: randomUUID(), ticketId, repoUrl, baseRef: "main" } } : {}),
     ...(opts.fence === undefined ? {} : { fence: opts.fence }),
+    ...(opts.boardToolsOnly ? { boardToolsOnly: true } : {}),
   });
   await ended;
   // A run on a ticket works in its worktree, which the runner set up from the repo: that is where the probe wrote.
@@ -195,9 +200,45 @@ describe("a run that isn't asked to be fenced", () => {
     expect(r.events.find((e) => e.type === "run.started")).not.toHaveProperty("fenced");
   });
 
-  it("runs unfenced and says so when the runner can't fence", async () => {
-    const r = await reachRun({ fence: true, runnerLevel: "unavailable" });
-    expect(r.reach.wroteOutside).toBe(true);
+});
+
+describe("a run asked to be fenced on a runner that can't fence (BOS-373)", () => {
+  /** Starts one such run on a ticket and says what happened: the run's events, and whether the adapter or the ticket copy ever appeared. */
+  async function refusedRun(opts: { runnerLevel?: FenceLevel }) {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-refuse-"));
+    const workspaces = new Workspaces(path.join(root, "workspaces"));
+    const events: RunnerEvent[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:1/mcp",
+      baseEnv: { PATH: process.env.PATH, HOME: root },
+      resolveEnv: async () => ({}),
+      adapterBins: { claude: FAKE_REACH },
+      workspaces,
+      ...(opts.runnerLevel ? { fence: runnerFence(opts.runnerLevel, path.join(root, "runner-data"), path.join(root, "workspaces")) } : {}),
+      emit: (e) => (events.push(e), e.type === "run.ended" && done()),
+    });
+    const ticketId = randomUUID();
+    const cwd = path.join(root, "cwd");
+    manager.handle({ type: "run.start", runId: randomUUID(), agentId: randomUUID(), agentKind: "claude", model: null, fundingSourceId: null, cwd, prompt: "probe", mcpToken: "t", fence: true, workspace: { projectId: randomUUID(), ticketId, repoUrl: path.join(root, "no-repo"), baseRef: "main" } });
+    await ended;
+    manager.shutdown();
+    return { events, adapterRan: existsSync(path.join(cwd, "reach.json")), ticketCopy: existsSync(path.join(root, "workspaces", "tickets", ticketId)) };
+  }
+
+  for (const [what, runnerLevel] of [["reports unavailable", "unavailable"], ["has no fence set up at all", undefined]] as const) {
+    it(`never starts unfenced when the runner ${what}: the run ends with the reason before the workspace is prepared`, async () => {
+      const r = await refusedRun({ runnerLevel });
+      expect(r.events.some((e) => e.type === "run.started")).toBe(false);
+      expect(r.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: null, error: expect.stringContaining("can't fence") });
+      expect(r.adapterRan).toBe(false);
+      expect(r.ticketCopy).toBe(false);
+    });
+  }
+
+  it("still runs owner chat (board tools only) unfenced, and says so", async () => {
+    const r = await reachRun({ fence: true, runnerLevel: "unavailable", boardToolsOnly: true });
     expect(r.events.find((e) => e.type === "run.started")).toMatchObject({ fenced: false });
     expect(r.events).toContainEqual(expect.objectContaining({ type: "runner.log", level: "warn", message: expect.stringContaining("can't fence agents") }));
   });
@@ -293,7 +334,7 @@ describe.skipIf(!live)("the shared memory link", () => {
   });
 });
 
-describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
+describe.skipIf(!live || !claude)("Claude Code inside the fence (stub model)", () => {
   let stub: Awaited<ReturnType<typeof startStubAnthropic>>;
   const stubLog: StubLogEntry[] = [];
   beforeEach(async () => {
@@ -328,6 +369,7 @@ describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
       baseEnv: { PATH: process.env.PATH, HOME: root, CLAUDE_CONFIG_DIR: sharedClaude, NO_PROXY: "127.0.0.1,localhost" },
       resolveEnv: async () => ({ ANTHROPIC_BASE_URL: stub.url, ANTHROPIC_API_KEY: "sk-ant-stub-not-a-real-key", NO_PROXY: "127.0.0.1,localhost" }),
       fence: { level, agentsRoot },
+      ...(claude ? { adapterBins: { claude } } : {}),
       emit: (e) => {
         events.push(e);
         if (e.type === "run.permission_request") manager.handle({ type: "permission.decide", runId: e.runId, requestId: e.requestId, verdict: /rm -rf/.test(String((e.rawInput as { command?: string } | null)?.command)) ? "deny" : "allow" });

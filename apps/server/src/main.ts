@@ -5,6 +5,7 @@ import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
+import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler } from "./services/check-limit.js";
@@ -31,7 +32,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -48,6 +49,7 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
   launcher: env.BOSSMAN_LAUNCHER === "1" ? { url: env.BOSSMAN_LAUNCHER_URL ?? "http://launcher:3105", keyFile: env.BOSSMAN_LAUNCHER_KEY_FILE ?? "/run/launcher/key" } : undefined,
   sweepLimits: {
     ...(env.BOSSMAN_STALE_BLOCKER_HOURS ? { staleAfterMs: Number(env.BOSSMAN_STALE_BLOCKER_HOURS) * 3_600_000 } : {}),
+    ...(env.BOSSMAN_RESUME_MERGES_MAX && Number(env.BOSSMAN_RESUME_MERGES_MAX) > 0 ? { resumeRestartsAtOnce: Number(env.BOSSMAN_RESUME_MERGES_MAX) } : {}),
     ...(env.BOSSMAN_STALL_MINUTES ? { stallAfterMs: Number(env.BOSSMAN_STALL_MINUTES) * 60_000 } : {}),
   },
 });
@@ -72,7 +74,13 @@ const bg = createBackground(
     { name: "resume merges", everyMs: Number(env.BOSSMAN_RESUME_MERGES_MS ?? 10_000), run: async () => {
       if (!resumeMergesSince) return;
       const r = await sweeps.resumeMergesOnPromotion(resumeMergesSince);
-      if (!r.waiting || Date.now() - resumeMergesSince.getTime() > 30 * 60_000) resumeMergesSince = null;
+      // Merges held back by the restart cap (BOS-1371) keep being asked for, up to 6 hours; other waits give up after 30 minutes.
+      const capped = "capped" in r && !!r.capped;
+      const age = Date.now() - resumeMergesSince.getTime();
+      if (!r.waiting || age > (capped ? 6 * 3_600_000 : 30 * 60_000)) {
+        resumeMergesSince = null;
+        sweeps.releaseHeldMerges();
+      }
     } },
     // Stale-blocker, stalled-run and missed-work sweeps.
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
@@ -101,6 +109,8 @@ const bg = createBackground(
     // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
     { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
+    // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
+    { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },
     // Every company's runner stays connected: tells that company's CEO and the owner when one does not, and checks a deploy brought them all back (BOS-467). // leader-only
     { name: "runner watch", everyMs: Number(env.BOSSMAN_RUNNER_WATCH_MS ?? 30_000), run: () => runnerWatch.step() },
     // The server-owned check queue (DR-003): starts due jobs and marks silent ones stuck, each with a recorded reason. Does nothing while check_queue_mode is legacy.
@@ -150,6 +160,12 @@ await app.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.PORT ?? 3100) }
 // The feedback portal on its own port, serving nothing else, so it can be shared without the owner's side.
 if (env.BOSSMAN_PORTAL_PORT) {
   // The portal is never fronted by Serve (plain http), so its voter cookie is not Secure once the sidecar is in use.
-  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true });
+  // BOSSMAN_PORTAL_TRUSTED_PROXY (BOS-1386): the reverse proxy's own address(es), so each visitor gets their own limit.
+  const portalProxy = parseTrustedProxies(env.BOSSMAN_PORTAL_TRUSTED_PROXY);
+  if (portalProxy.ignored.length) console.warn(`BOSSMAN_PORTAL_TRUSTED_PROXY: ignoring ${portalProxy.ignored.length} entr${portalProxy.ignored.length === 1 ? "y" : "ies"} that are not an address or CIDR (or are a /0): ${portalProxy.ignored.join(", ")}`);
+  // BOSSMAN_PORTAL_CLIENT_HEADER: which header names the visitor; default X-Forwarded-For, cf-connecting-ip only for Cloudflare.
+  const portalHeader = parseClientHeader(env.BOSSMAN_PORTAL_CLIENT_HEADER);
+  if (portalHeader.bad) console.warn(`BOSSMAN_PORTAL_CLIENT_HEADER: "${portalHeader.bad}" is not x-forwarded-for or cf-connecting-ip, using x-forwarded-for`);
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header });
   await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
 }

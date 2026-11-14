@@ -10,7 +10,9 @@ import type { Db } from "../db/client.js";
 import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
+import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
+import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -18,6 +20,15 @@ export type ClearWhen =
   | { kind: "agentRanOk"; agentId: string }
   | { kind: "ticketDone"; ticketId: string }
   | { kind: "ticketLeft"; ticketId: string; state: string }
+  /** An agent's question names the ticket whose merge settles it (BOS-1161): merged (a merge commit is recorded) or done. */
+  | { kind: "ticketMerged"; ticketId: string }
+  /**
+   * An agent's question waits on a runner rebuild (BOS-1161): the company's runner image is no longer the one it
+   * was when the card was raised (`from`, null when no commit was recorded then), and a commit is now recorded.
+   */
+  | { kind: "runnerRebuilt"; companyId: string; from: string | null }
+  /** An agent's question waits on a deploy containing a commit (BOS-1161): the running server was built from it or from a later merge. `commit` is the full sha. */
+  | { kind: "serverHasCommit"; commit: string }
   /**
    * A roadmap feature that had no open ticket now has one (BOS-595): the work for it is underway, so
    * the CEO's card has done its job. A sub-task alone doesn't count: it belongs to a parent already
@@ -49,7 +60,14 @@ export type ClearWhen =
   /** No-progress cards (BOS-593): a work run in that company has finished cleanly since the card was raised. */
   | { kind: "companyRanOk"; companyId: string }
   /** A server-health card (BOS-640): its rule (memory or freezes) has stayed under its level for 30 minutes. */
-  | { kind: "serverCalm"; rule: "memory" | "freezes" };
+  | { kind: "serverCalm"; rule: "memory" | "freezes" }
+  /**
+   * The owner's held-off-portal card (BOS-1358): the feature's portal place is settled some other way —
+   * someone ticked it on, or marked it keep-off by hand — so asking is no longer needed.
+   */
+  | { kind: "featurePortalSettled"; featureId: string }
+  /** A repeated-merge-failure card (BOS-1461): no failed attempt of that reason for 30 minutes. */
+  | { kind: "mergeFailuresCalm"; companyId: string; reason: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -73,6 +91,15 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "ticketLeft":
         if (typeof c.ticketId === "string" && typeof c.state === "string") out.push({ kind: "ticketLeft", ticketId: c.ticketId, state: c.state });
+        break;
+      case "ticketMerged":
+        if (typeof c.ticketId === "string") out.push({ kind: "ticketMerged", ticketId: c.ticketId });
+        break;
+      case "runnerRebuilt":
+        if (typeof c.companyId === "string" && (c.from === null || typeof c.from === "string")) out.push({ kind: "runnerRebuilt", companyId: c.companyId, from: c.from });
+        break;
+      case "serverHasCommit":
+        if (typeof c.commit === "string" && /^[0-9a-f]{40}$/i.test(c.commit)) out.push({ kind: "serverHasCommit", commit: c.commit.toLowerCase() });
         break;
       case "featureHasTicket":
         if (typeof c.featureId === "string") out.push({ kind: "featureHasTicket", featureId: c.featureId });
@@ -98,11 +125,44 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "serverCalm":
         if (c.rule === "memory" || c.rule === "freezes") out.push({ kind: "serverCalm", rule: c.rule });
         break;
+      case "featurePortalSettled":
+        if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
+        break;
+      case "mergeFailuresCalm":
+        if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
+        break;
       default:
         break;
     }
   }
   return out;
+}
+
+/** What an agent may name in raise_decision's `clearsWhen` (BOS-1161): only conditions Boss Man can check. Each is an alternative. */
+export type ClearsWhenInput = { ticketMerged?: string; ticketDone?: string; runnerRebuilt?: boolean; serverHasCommit?: string };
+
+/**
+ * Turns an agent's `clearsWhen` into stored conditions, or says why it can't. A ticket must be in the company, and a
+ * commit must be one Boss Man can place in merge order (the server has no git), so a condition that could never be
+ * checked is refused now rather than leaving a card that never closes.
+ */
+export async function clearsWhenToConditions(db: Db, companyId: string, input: ClearsWhenInput): Promise<{ error: string } | { clearWhen: ClearWhen[] }> {
+  const out: ClearWhen[] = [];
+  for (const [key, ticketId] of [["ticketMerged", input.ticketMerged], ["ticketDone", input.ticketDone]] as const) {
+    if (!ticketId) continue;
+    const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+    if (!t) return { error: `clearsWhen.${key}: no ticket with that ID in your company.` };
+    out.push(key === "ticketMerged" ? { kind: "ticketMerged", ticketId } : { kind: "ticketDone", ticketId });
+  }
+  if (input.runnerRebuilt) out.push({ kind: "runnerRebuilt", companyId, from: await runnerImageCommit(db, companyId) });
+  if (input.serverHasCommit) {
+    const want = input.serverHasCommit.toLowerCase();
+    const hits = (await mergeCommitOrder(db, companyId)).filter((c) => c.startsWith(want));
+    if (hits.length !== 1) return { error: `clearsWhen.serverHasCommit: ${hits.length ? "that prefix matches more than one merge" : "Boss Man can't place that commit"}; give the full or a longer sha of a commit that a ticket merged as.` };
+    out.push({ kind: "serverHasCommit", commit: hits[0]! });
+  }
+  if (!out.length) return { error: "clearsWhen names no condition. Give ticketMerged, ticketDone, runnerRebuilt or serverHasCommit, or leave clearsWhen out." };
+  return { clearWhen: out };
 }
 
 export type AlertClearingDeps = {
@@ -116,6 +176,8 @@ export type AlertClearingDeps = {
   release?: (ticketId: string) => Promise<unknown>;
   /** Why a server-health rule's card can go (server-health.ts), or null while it can't; without it those cards stay open. */
   serverCalm?: (rule: "memory" | "freezes") => string | null;
+  /** The commit this server was built from (BOSSMAN_COMMIT); without it a "server has commit" condition never clears. */
+  liveCommit?: () => string | null;
   now?: () => Date;
 };
 
@@ -155,6 +217,20 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         const [t] = await db.select({ state: tickets.systemState, title: tickets.title }).from(tickets).where(eq(tickets.id, c.ticketId));
         if (!t) return "the ticket is no longer on record";
         return t.state !== c.state ? `the ticket "${t.title}" is ${t.state === "done" ? "finished" : `now ${t.state.replace("_", " ")}`}` : null;
+      }
+      case "ticketMerged": {
+        const [t] = await db.select({ state: tickets.systemState, title: tickets.title, mergeCommit: tickets.mergeCommit }).from(tickets).where(eq(tickets.id, c.ticketId));
+        if (!t) return "the ticket is no longer on record";
+        return t.state === "done" || t.mergeCommit ? `the ticket "${t.title}" is merged` : null;
+      }
+      case "runnerRebuilt": {
+        const image = await runnerImageCommit(db, c.companyId);
+        return image && image !== c.from ? "the runners were rebuilt" : null;
+      }
+      case "serverHasCommit": {
+        const live = deps.liveCommit?.()?.toLowerCase() ?? null;
+        if (!live || !/^[0-9a-f]{40}$/.test(live)) return null;
+        return imageContains(live, c.commit, await mergeCommitOrder(db, card.companyId)) ? "the server running now contains that change" : null;
       }
       case "featureHasTicket": {
         const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
@@ -212,6 +288,21 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "mergeFailuresCalm": {
+        // Calm for the whole window, and the card itself is at least that old.
+        const since = new Date(now().getTime() - FAILURE_WINDOW_MS);
+        if (card.createdAt > since) return null;
+        return (await failedSince(db, c.companyId, c.reason, since)) ? null : "no merge has failed for that reason in the last 30 minutes";
+      }
+      case "featurePortalSettled": {
+        // The card asks whether a held-off feature should go on the portal. It is settled once someone
+        // ticks it on (a publish by hand or by the CEO/PM), or the feature goes from record. The keep-off
+        // state the card was raised for is not itself "settled": that is the question.
+        const [f] = await db.select({ title: features.title, portalVisible: features.portalVisible, keepOffPortal: features.keepOffPortal }).from(features).where(eq(features.id, c.featureId));
+        if (!f) return "the feature is no longer on record";
+        if (f.portalVisible && !f.keepOffPortal) return `"${f.title}" was put on the portal`;
+        return null;
+      }
       default:
         return null;
     }

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { FilterPanel, useIsPhone } from "../components/FilterPanel";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -6,6 +7,7 @@ import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
+import { Loader } from "../components/Loader";
 import { usePoll } from "../hooks";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -508,6 +510,159 @@ function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask:
   );
 }
 
+/** True while the element's text is cut by its line clamp or its ellipsis. Frozen while the card is open (the clamp is off then), so the arrow stays. */
+function useCut(ref: { current: HTMLElement | null }, text: string, open: boolean) {
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => {
+      if (!open) setCut(el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, text, open]);
+  return cut;
+}
+
+/** A Done-column row: the title is cut to 2 lines, and the full title shows on hover only when it was cut. */
+function DoneTitle({ id, title }: { id: string; title: string }) {
+  const ref = useRef<HTMLAnchorElement>(null);
+  const cut = useCut(ref, title, false);
+  return <a ref={ref} className="clamp2" href={`#/tickets/${id}`} title={cut ? title : undefined}>{title}</a>;
+}
+
+type BoardTicket = BoardData["columns"][number]["tickets"][number];
+
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow }: { t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  const titleRef = useRef<HTMLAnchorElement>(null);
+  const noteRef = useRef<HTMLSpanElement>(null);
+  const waitsRef = useRef<HTMLSpanElement>(null);
+  const noteText = t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`;
+  const blockers = t.blockedBy.filter((b) => b.ticketId);
+  const refOf = (b: (typeof blockers)[number]) => {
+    const n = b.ticketNumber ?? numberOf(b.ticketId!);
+    return n ? ticketRef(prefix, n) : null;
+  };
+  const waitsFull = blockers.map((b) => `${refOf(b) ? `${refOf(b)} · ` : ""}${b.ticketTitle ?? "a task"}${b.until ? ` (until ${b.until})` : ""}`).join("; ");
+  const titleCut = useCut(titleRef, t.title, open);
+  const noteCut = useCut(noteRef, noteText, open);
+  const waitsCut = useCut(waitsRef, waitsFull, open);
+  const ticketRefText = t.number ? ticketRef(prefix, t.number) : t.title;
+  const hover = (cut: boolean, text: string) => (cut && !open ? text : undefined);
+  const first = who ? name.split(" ")[0]! : name;
+  return (
+    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}${open ? " open" : ""}`} id={bodyId}>
+      <div className="top">
+        <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
+        {(t.risk === "high" || t.risk === "critical") && (
+          <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
+            {t.risk === "critical" ? "Critical" : "High"} risk
+          </span>
+        )}
+        {t.size && (
+          <span className="tag" title="Size, relative to other tasks">
+            Size {t.size}
+          </span>
+        )}
+        {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
+        {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : t.blockedBy.length}</span>}
+        {t.hold && (
+          <span className="tag amber" title={t.hold.reason}>
+            Held: {t.hold.label}
+            {t.hold.reviewer ? ` · ${t.hold.reviewer}` : ""}
+          </span>
+        )}
+        {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
+        {t.number && <span className="mono muted ref">{ticketRef(prefix, t.number)}</span>}
+      </div>
+      <h3>
+        <a ref={titleRef} className={open ? undefined : "clamp2"} href={`#/tickets/${t.id}`} title={hover(titleCut, t.title)}>{t.title}</a>
+      </h3>
+      {mine && <span ref={noteRef} className={`note${open ? "" : " clamp2"}`} title={hover(noteCut, noteText)}>{noteText}</span>}
+      {t.recheckingBy && !mine && <span className="note" data-testid="board-rechecking">Card being re-checked by {t.recheckingBy}</span>}
+      {mine && (
+        <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+          {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
+        </a>
+      )}
+      {t.wipExempt && (
+        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
+          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${blockers.map((b) => refOf(b) ?? b.ticketTitle ?? "a task").join(", ")}`}
+        </span>
+      )}
+      {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
+      {t.featureTitle && (
+        <span className="fchip" title={t.featureTitle}>
+          <b>Feature</b>
+          <span>{t.featureTitle}</span>
+        </span>
+      )}
+      {blockers.length > 0 &&
+        (open ? (
+          <span className="note waits-open">
+            Waits on
+            {blockers.map((b) => (
+              <span key={b.ticketId} className="waits-line">
+                <a href={`#/tickets/${b.ticketId}`}>{refOf(b) ? `${refOf(b)} · ` : ""}{b.ticketTitle ?? "a task"}</a>
+                {b.until ? ` (until ${b.until})` : ""}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span ref={waitsRef} className="note clamp1" title={hover(waitsCut, waitsFull)}>
+            Waits on{" "}
+            {blockers.length === 1 ? (
+              <a href={`#/tickets/${blockers[0]!.ticketId}`}>{refOf(blockers[0]!) ? `${refOf(blockers[0]!)} · ` : ""}{blockers[0]!.ticketTitle ?? "a task"}</a>
+            ) : (
+              blockers.map((b, i) => (
+                <span key={b.ticketId}>
+                  {i > 0 && ", "}
+                  <a href={`#/tickets/${b.ticketId}`}>{refOf(b) ?? b.ticketTitle ?? "a task"}</a>
+                </span>
+              ))
+            )}
+          </span>
+        ))}
+      {t.quotaHeldUntil && !t.working?.length && (
+        <span className="note" role="status">
+          Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
+          <button type="button" className="linkish" onClick={() => onRunNow(t.id)}>
+            Run now
+          </button>
+        </span>
+      )}
+      {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
+      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
+      {!!t.working?.length && (
+        <span className="working" role="status">
+          <span className="pulse-dot" aria-hidden="true" />
+          {t.working.join(" and ")}
+        </span>
+      )}
+      <div className="row">
+        <span className="who" title={who ? `${who.name} (${who.agentKind})` : undefined}>
+          {who && <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />}
+          <span className="who-name">{first}</span>
+        </span>
+        <span className="end">
+          <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
+          {(titleCut || noteCut || waitsCut || open) && (
+            <button type="button" className="icon-btn expand" aria-expanded={open} aria-controls={bodyId} aria-label={`${open ? "Show less of" : "Show all of"} ${ticketRefText}`} onClick={() => setOpen(!open)}>
+              <svg width="16" height="16" {...iconProps} style={{ transform: open ? "rotate(180deg)" : undefined }}><path d="M6 9l6 6 6-6" /></svg>
+            </button>
+          )}
+        </span>
+      </div>
+    </article>
+  );
+}
+
 export function Board({ companies, projectId, subpage, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void }) {
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
@@ -552,6 +707,37 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // A saved feature that is not in this company's list (other company, deleted) counts as any.
   const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
+  // The Filter button and its panel (BOS-1194).
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterBtn = useRef<HTMLButtonElement>(null);
+  const phone = useIsPhone();
+  const closeFilter = useCallback(() => setFilterOpen(false), []);
+  // A popover that crosses into phone width closes, keeping its filters.
+  useEffect(() => {
+    if (phone) setFilterOpen(false);
+  }, [phone]);
+  const filterCompany = companies.find((c) => c.id === current?.companyId);
+  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
+  const clearFilters = () => {
+    setView("all");
+    setAssignee("anyone");
+    setFilter({ feature: "any", working: false });
+  };
+  const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
+  const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
+  const chips: Array<{ key: string; label: string; remove: string; clear: () => void }> = [
+    ...(view !== "all" ? [{ key: "view", label: `Showing: ${view === "tasks" ? "Tasks" : "Features"}`, remove: `showing ${view}`, clear: () => setView("all") }] : []),
+    ...(assignee !== "anyone" ? [{ key: "assignee", label: `Assigned: ${assigneeName}`, remove: `assigned to ${assigneeName}`, clear: () => setAssignee("anyone") }] : []),
+    ...(featureFilter !== "any" ? [{ key: "feature", label: `Feature: ${featureName}`, remove: `feature ${featureName}`, clear: () => setFilter({ feature: "any" }) }] : []),
+    ...(filters.working ? [{ key: "working", label: "Working now", remove: "working now", clear: () => setFilter({ working: false }) }] : []),
+  ];
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  // Every word must appear in the ticket's reference, title, feature or description.
+  const passes = (t: BoardData["columns"][number]["tickets"][number]) =>
+    (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) &&
+    (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) &&
+    (!filters.working || !!t.working?.length) &&
+    (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
@@ -569,6 +755,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       { col, tickets: waiting, mine: true },
     ];
   });
+  const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
@@ -624,8 +811,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <p className="label">{company ? `${company.name} · project` : "Project"}</p>
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
+          {/* (BOS-1126 Q10) The watchdog status is a small pill on the line under the project name, not floating mid-heading. */}
+          {current && <p style={{ margin: "6px 0 0" }}><WatchdogHealth companyId={current.companyId} /></p>}
         </div>
-        {current && <WatchdogHealth companyId={current.companyId} />}
         {current && (
           <StarButton
             agent={current}
@@ -748,56 +936,61 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               Add task
             </button>
           )}
-          <div className="segmented" role="group" aria-label="Show">
-            {(["all", "features", "tasks"] as const).map((v) => (
-              <button key={v} type="button" className="chip" aria-pressed={view === v} onClick={() => setView(v)}>
-                {v === "all" ? "All" : v === "features" ? "Features" : "Tasks"}
+          <span className="search-field">
+            <svg width="16" height="16" {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+            <input type="search" className="board-search" aria-label="Search tasks" placeholder={`Search: ${company?.ticketPrefix || "HOL"}-12, title, words…`} value={query} onChange={(e) => setQuery(e.target.value)} />
+          </span>
+          <span className="filter-wrap">
+          <button
+            type="button"
+            ref={filterBtn}
+            className="btn filter-btn"
+            aria-haspopup="dialog"
+            aria-expanded={filterOpen}
+            aria-controls="filter-panel"
+            aria-label={filterCount ? `Filter, ${filterCount} on` : "Filter"}
+            onClick={() => setFilterOpen((o) => !o)}
+          >
+            <svg width="16" height="16" {...iconProps}><path d="M4 7h16M7 12h10M10 17h4" /></svg>
+            Filter
+            {filterCount > 0 && <span className="filter-count" aria-hidden="true">{filterCount}</span>}
+          </button>
+          {filterOpen && (
+            <FilterPanel
+              view={view}
+              onView={setView}
+              assignee={assignee}
+              onAssignee={setAssignee}
+              feature={featureFilter}
+              onFeature={(v) => setFilter({ feature: v })}
+              working={filters.working}
+              onWorking={(v) => setFilter({ working: v })}
+              agents={company?.agents ?? []}
+              features={featureList}
+              workingCount={board.data?.workingAgents}
+              shownCount={board.data ? shownTotal : undefined}
+              anyOn={filterCount > 0}
+              onClear={clearFilters}
+              onClose={closeFilter}
+              phone={phone}
+              triggerRef={filterBtn}
+            />
+          )}
+          </span>
+          {!phone && chips.map((c) => (
+            <span key={c.key} className="filter-chip" title={c.label}>
+              <span>{c.label}</span>
+              <button type="button" aria-label={`Remove filter: ${c.remove}`} onClick={c.clear}>
+                <span aria-hidden="true">×</span>
               </button>
-            ))}
-          </div>
-          {view !== "features" && (
-            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} />
-          )}
-          {view !== "features" && (
-            <label>
-              Assigned to
-              <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-                <option value="anyone">Anyone</option>
-                <option value="owner">You</option>
-                {company?.agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {view !== "features" && (
-            <label>
-              Feature
-              <select value={featureFilter} onChange={(e) => setFilter({ feature: e.target.value })}>
-                <option value="any">Any feature</option>
-                <option value="none">No feature</option>
-                {featureList.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {view !== "features" && (
-            <button type="button" className="chip" aria-pressed={filters.working} onClick={() => setFilter({ working: !filters.working })}>
-              Working now{board.data ? ` (${board.data.workingAgents})` : ""}
+            </span>
+          ))}
+          {!phone && filterCount > 0 && (
+            <button type="button" className="linkish" onClick={clearFilters}>
+              Clear all
             </button>
           )}
         </div>
-        {view !== "features" && (
-          <p>
-            <svg width="14" height="14" {...iconProps}>{PENCIL}</svg>
-            Rename a column with its pencil. Agents always see the fixed state.
-          </p>
-        )}
       </div>
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
       {view === "features" && (
@@ -814,14 +1007,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
+          {!board.data && current && !board.error && (
+            <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>
+          )}
           {lanes.map(({ col, tickets, mine, merging, held }) => {
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
             const full = col.wipLimit != null && counted >= col.wipLimit;
-            const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-            // Every word must appear in the ticket's reference, title, feature or description.
-            const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
-            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) && (!filters.working || !!t.working?.length) && hit(t));
+            const shown = tickets.filter(passes);
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
@@ -865,7 +1058,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${counted} / ${col.wipLimit}` : shown.length}
                       </span>
-                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
+                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} title="Rename this column. Agents always see the fixed state." onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>
@@ -876,7 +1069,16 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>}
+                {shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
+                  <p className="lane-empty">
+                    No tasks match your filters.{" "}
+                    <button type="button" className="linkish" onClick={clearFilters}>
+                      Clear filters
+                    </button>
+                  </p>
+                ) : (
+                  shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                )}
                 {done ? (
                   <>
                     <ul className="done-list">
@@ -884,8 +1086,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         <li key={t.id}>
                           <svg width="16" height="16" {...iconProps} strokeWidth={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
                           <span>
-                            <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                            <small>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{named(t)} · {when(t.lastActivityAt)}</small>
+                            <DoneTitle id={t.id} title={t.title} />
+                            <small title={named(t)}>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{t.assigneeAgentId ? named(t).split(" ")[0] : named(t)} · {when(t.lastActivityAt)}</small>
                           </span>
                         </li>
                       ))}
@@ -897,96 +1099,20 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </>
                 ) : (
-                  shown.map((t) => {
-                  const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
-                  return (
-                    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}`} key={t.id}>
-                      <div className="top">
-                        <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
-                        {t.number && <span className="mono muted">{ticketRef(company?.ticketPrefix, t.number)}</span>}
-                        {(t.risk === "high" || t.risk === "critical") && (
-                          <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
-                            {t.risk} risk
-                          </span>
-                        )}
-                        {t.size && (
-                          <span className="tag" title="Size, relative to other tasks">
-                            Size {t.size}
-                          </span>
-                        )}
-                      </div>
-                      <h3>
-                        <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                      </h3>
-                      {mine && <span className="note">{t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
-                      {mine && (
-                        <a className="btn primary small" href={t.ownerQuestion ? (t.ownerQuestionId ? `#/decisions/${t.ownerQuestionId}` : "#/decisions") : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
-                          {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
-                        </a>
-                      )}
-                      {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
-                      {t.wipExempt && (
-                        <span className="note" title="This ticket can't move right now, so it doesn't count towards the work-in-progress limit.">
-                          Not counted: {t.wipExempt === "plan" ? "plan with owner" : t.wipExempt === "live" ? "merged, waiting to go live" : `waits on ${t.blockedBy.filter((b) => b.ticketId).map((b) => { const n = (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === b.ticketId)?.number; return n ? ticketRef(company?.ticketPrefix, n) : (b.ticketTitle ?? "a task"); }).join(", ")}`}
-                        </span>
-                      )}
-                      {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
-                      {t.featureTitle && (
-                        <span className="fchip" title={t.featureTitle}>
-                          <b>Feature</b>
-                          <span>{t.featureTitle}</span>
-                        </span>
-                      )}
-                      {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
-                      {t.blockedBy.some((b) => b.ticketId) && (
-                        <span className="note">
-                          Waits on{" "}
-                          {t.blockedBy
-                            .filter((b) => b.ticketId)
-                            .map((b, i) => (
-                              <span key={b.ticketId}>
-                                {i > 0 && ", "}
-                                <a href={`#/tickets/${b.ticketId}`}>{b.ticketTitle ?? "a task"}</a>
-                                {b.until ? ` (until ${b.until})` : ""}
-                              </span>
-                            ))}
-                        </span>
-                      )}
-                      {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
-                      {t.quotaHeldUntil && !t.working?.length && (
-                        <span className="note" role="status">
-                          Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
-                          <button type="button" className="linkish" onClick={() => void runNow(t.id)}>
-                            Run now
-                          </button>
-                        </span>
-                      )}
-                      {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
-                      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
-                      {t.hold && (
-                        <span className="tag amber" style={{ alignSelf: "flex-start" }} title={t.hold.reason}>
-                          Held: {t.hold.label}
-                          {t.hold.reviewer ? ` · ${t.hold.reviewer}` : ""}
-                        </span>
-                      )}
-                      {!!t.working?.length && (
-                        <span className="working" role="status">
-                          <span className="pulse-dot" aria-hidden="true" />
-                          {t.working.join(" and ")}
-                        </span>
-                      )}
-                      <div className="row">
-                        <span className="who">
-                          {who && (
-                            <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />
-                          )}
-                          {named(t)}
-                        </span>
-                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
-                      </div>
-                    </article>
-                  );
-                  })
+                  shown.map((t) => (
+                    <TicketCard
+                      key={t.id}
+                      t={t}
+                      mine={!!mine}
+                      merging={!!merging}
+                      who={t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined}
+                      name={named(t)}
+                      prefix={company?.ticketPrefix}
+                      tiers={tiers}
+                      numberOf={(id) => (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === id)?.number}
+                      onRunNow={(id) => void runNow(id)}
+                    />
+                  ))
                 )}
               </section>
             );

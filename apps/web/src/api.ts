@@ -126,12 +126,12 @@ export type AdvisedDecision = {
   about?: Array<{ ticketId: string; ref: string | null; title: string }>;
   advice?: Advice;
   settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
-  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string };
+  withdrawn?: { by: string; note: string; /** The closed-card notice a card Boss Man closed by itself left (BOS-740). */ notice?: string; /** A plan card a newer plan replaced (BOS-1219): the newer card, its author (null if unknown) and when. */ newer?: { id: string; author: string | null; at: string } };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
 export type ClosedNotice = {
-  why: "live" | "newer";
+  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn";
   text: string;
   at: string;
   until: string;
@@ -179,6 +179,10 @@ export type Decision = {
   /** An owner action made this card possibly out of date; the raising agent is checking it (BOS-123). */
   staleAt?: string | null;
   staleReason?: string | null;
+  /** BOS-1193: set while the card is being re-checked but still shown (urgent, a live run, a merge card): who is checking it. */
+  rechecking?: { by: string; stage: "author" | "ceo" } | null;
+  /** BOS-1193: set when nobody re-checked the card in an hour; says plainly who failed to. */
+  notRechecked?: string | null;
   companyName: string;
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
@@ -202,7 +206,7 @@ export type Decision = {
   doAfter?: string[];
   /** (BOS-551) A short label for the card this one must be done before, for each one. */
   doBefore?: string[];
-  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A hire: the proposal the owner is being asked to approve. */ proposal?: { skills?: string[] }; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string; what?: string }>; /** The agent an "always" rule is limited to unless the owner widens it (BOS-294). */ alwaysAgent?: { id: string; name: string }; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; handoverRanOut?: { at: string }; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the owner-step lint flagged (BOS-417), and a CEO override with its reason. */ lint?: { warn: Array<{ step: number; problem: string }>; override?: { reason: string; findings: Array<{ step: number; problem: string }> }; /** How the host commands were proven (R11, DR-024): shown as a banner. */ proof?: { rehearsed: true; script: string; commit: string } | { rehearsed: false; part: string } }; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A hire: the proposal the owner is being asked to approve. */ proposal?: { skills?: string[] }; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A Boss Man update carrying the fix for a live problem (BOS-639): its heading leads the card. */ urgent?: { heading: string; fixes: Array<{ ticketId: string; ref: string; symptom: string }>; repeat?: boolean }; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string; what?: string }>; /** The agent an "always" rule is limited to unless the owner widens it (BOS-294). */ alwaysAgent?: { id: string; name: string }; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } }; /** A hand-applied server update's to-do (BOS-420): how quiet the machine is. */ quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[]; at: string }; /** A sign-off card (BOS-1236): who reviewed and what they said, the last quick check, the risk, the size of the change and who built it. */ reviews?: Array<{ name: string; kind: string; verdict: "passed" | "changes" | "waiting" | "overruled" }>; quickCheck?: { result: "passed" | "failed"; sha: string; at: string } | null; files?: number | null; builder?: string | null; risk?: string };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
@@ -235,7 +239,7 @@ export type Ticket = {
   dueDate: string | null;
   /** Why this in-progress ticket doesn't count towards the WIP limit; null when it counts (BOS-1172). */
   wipExempt?: "waits" | "plan" | "live" | null;
-  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  blockedBy: Array<{ ticketId: string | null; until?: "merged" | "done" | null;ticketTitle?: string | null; ticketNumber?: number | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
@@ -278,11 +282,13 @@ export type Ticket = {
   ownerQuestion?: string | null;
   /** The open card behind `ownerQuestion`, so the Board's button opens that exact card. */
   ownerQuestionId?: string | null;
+  /** The agent re-checking a card this ticket waits on (BOS-1193); the board says so instead of asking the owner to answer. */
+  recheckingBy?: string | null;
   approvedBy?: string | null;
 };
 /** A reviewer's "Passed, hold merge" (BOS-808): why, what it waits on, and the line the badge shows. */
 export type ReviewHold = { id: string; reason: string; reviewer: string | null; releaseAt: string | null; ready: boolean; label: string; waits: Array<{ kind: "ticket" | "decision"; id: string; label: string; closed: boolean }> };
-export type TicketDetail = Ticket & { /** What the merged ticket's after-merge checks still wait for (BOS-1021). */ goLiveWait?: "server" | "runner" | "both" | null; hold?: ReviewHold | null; ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
+export type TicketDetail = Ticket & { /** What the merged ticket's after-merge checks still wait for (BOS-1021). */ goLiveWait?: "server" | "runner" | "both" | "own" | null; hold?: ReviewHold | null; ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: Criterion[]; ownerSetup: string | null; /** "Fixes live" (BOS-639): the live symptom this ticket fixes, set by the CEO, its author or a reviewer. */ fixesLive?: string | null; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; /** The account the ticket's agent is paid from, by name (BOS-471). */ quotaHeldSource?: string | null; /** When another ticket really holds the agent, which one (BOS-471). */ quotaHeldOther?: { ref: string; title: string } | null; /** The owner's sign-off card for this ticket is open (BOS-471). */ signoffWaiting?: boolean; /** Where it stands on the owner's sign-off (BOS-503): waiting (card open), missing (owed, card being raised again), signed_off, or null when not needed. */ signoff?: "waiting" | "missing" | "signed_off" | null; stateNote: string | null; /** When an agent last posted on it, a reply or a state note (BOS-314). */ lastPostAt?: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
 /** A run going now that no card on the board shows (BOS-155). */
 export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
@@ -293,7 +299,7 @@ export type FundingSource = { id: string; name: string; kind: string; provider: 
 export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
-  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
+  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean; observedAt: string }>;
   /** Every window name the adapter has reported for this source, for the hold switches. */
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
@@ -395,7 +401,9 @@ export type Notice = {
   readAt: string | null;
   createdAt: string;
 };
-export type NoticeFeed = { items: Notice[]; unread: number };
+/** Unread notices by level and by company id ("none" = no company), ignoring any filter (BOS-1277). */
+export type NoticeCounts = { level: Partial<Record<NotifyLevel, number>>; company: Record<string, number> };
+export type NoticeFeed = { items: Notice[]; unread: number; counts?: NoticeCounts };
 export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;
@@ -505,6 +513,8 @@ export type Feature = {
   portalVisible: boolean;
   /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
   keepOffPortal: boolean;
+  /** Why someone kept it off the portal, in their own words; null when nobody said why. */
+  keepOffReason: string | null;
   publicSummary: string | null;
   /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
   publicTitle: string | null;

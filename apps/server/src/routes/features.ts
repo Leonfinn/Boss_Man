@@ -47,6 +47,7 @@ export function featureRoutes(
     objectiveId: Uuid.nullable(),
     portalVisible: z.boolean(),
     keepOffPortal: z.boolean(),
+    keepOffReason: z.string().trim().max(500).nullable(),
     publicSummary: z.string().trim().max(2000).nullable(),
     publicTitle: z.string().trim().max(200).nullable(),
     showPublicly: z.boolean(),

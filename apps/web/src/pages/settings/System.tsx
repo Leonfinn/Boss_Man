@@ -2,7 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
+import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
+import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
 
@@ -55,7 +57,36 @@ type SelfDeployView = {
   trial?: { endsAt: string; seconds: number } | null;
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
   deployWait?: { until: string } | null;
+  /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
+  runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
+  /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
+  heldDeploy?: { id: string; commit: string; since: string } | null;
+  /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
+  queueCancelled?: { at: string; why: string } | null;
 };
+
+/** A server update waiting for a quiet machine (BOS-420). */
+type DeployWaitView =
+  | { on: false }
+  | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
+
+const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+
+/** The plain-words line for a waiting update: what it waits for, and what is held back meanwhile. */
+function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
+  const q = w.quiet;
+  const mem = q?.freeMb != null && q.needMb != null ? ` ${gbOf(q.freeMb)} free of the ${gbOf(q.needMb)} it needs.` : "";
+  const held = " Meanwhile new merge checks wait and fewer runs start.";
+  if (w.phase === "waiting")
+    return w.origin === "hand"
+      ? q?.ready
+        ? `Ready: the machine is quiet. Apply the update to ${w.commit.slice(0, 8)} by hand now.${mem}${held}`
+        : `Making room before you apply the update to ${w.commit.slice(0, 8)} by hand: ${q?.why.join("; ") || "checking"}.${mem}${held}`
+      : `The update to ${w.commit.slice(0, 8)} is waiting for a quiet machine: ${q?.why.join("; ") || "checking"}.${mem} You'll be asked at ${when(w.deadline)} if it is still waiting.${held}`;
+  if (w.phase === "sent") return `The update to ${w.commit.slice(0, 8)} has gone to the machine.${held}`;
+  if (w.phase === "window") return `The update is live; its standby window runs until ${when(w.windowUntil ?? w.deadline)}.${held}`;
+  return `The update is live; waiting for the runner update to start.${held}`;
+}
 
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
 function atTime(iso: string): string {
@@ -128,15 +159,31 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
   const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
     <>
       {trial && !trialOver && (
-        <p className="error" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
-          The server update is still in its trial, so the runners can't be updated yet. Runners can be updated from {atTime(trial.endsAt)}, {inAbout(trial.endsAt, now)}.
-          Boss Man offers the runner update by itself then, so you don't need to press again.
+        <p className="muted" role="status" data-testid="runner-trial" style={{ fontSize: 14 }}>
+          {queue
+            ? `Runners will update at ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}), when this server update's trial ends. You don't need to press again.`
+            : `The server update is in its trial until ${atTime(trial.endsAt)} (${inAbout(trial.endsAt, now)}). Press Build and update runners to queue the runner update; it then starts by itself when the trial ends.`}
+        </p>
+      )}
+      {queue && !(trial && !trialOver) && (
+        <p className="muted" role="status" data-testid="runner-queue" style={{ fontSize: 14 }}>
+          The runner update is queued. It is waiting for {queue.why.replace(/\.$/, "")}, and starts by itself as soon as that is over.
+        </p>
+      )}
+      {held && (
+        <p className="muted" role="status" data-testid="deploy-held" style={{ fontSize: 14 }}>
+          The server update you approved ({held.commit.slice(0, 8)}) waits for the runner update to finish, then goes by itself.
+        </p>
+      )}
+      {cancelled && (
+        <p className="error" role="status" data-testid="queue-cancelled" style={{ fontSize: 14 }}>
+          {cancelled.why}
         </p>
       )}
       {wait && (
@@ -151,11 +198,13 @@ export function TrialLines({ trial, wait, now }: { trial?: { endsAt: string } | 
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
+  const w = wait.data?.on ? wait.data : null;
   if (!v?.enabled) return null;
   const s = v.status;
   // Right after a deploy the host's offer still names the old commit for a few minutes.
@@ -170,8 +219,30 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>
-      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} />
+      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
+      {w && (
+        <p style={{ fontSize: 14 }}>
+          {waitLine(w)}{" "}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+              })
+            }
+          >
+            {w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now"}
+          </button>
+        </p>
+      )}
       <div>
         <button
           type="button"
@@ -200,13 +271,37 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
           onClick={() =>
             act.run(async () => {
-              await api("/api/self-deploy/update-runners", { method: "POST", body: {} });
+              const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+              // BOS-1086: a press that cannot run yet is queued, not refused; the line above says when it starts.
+              if (r?.queued) {
+                view.reload();
+                return r.message ?? "The runner update is queued.";
+              }
               go("decisions");
             })
           }
         >
           Build and update runners
         </button>{" "}
+        {v.runnerQueue && (
+          <>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy}
+              title="Takes back the queued runner update. Nothing else changes."
+              onClick={() =>
+                act.run(async () => {
+                  await api("/api/self-deploy/cancel-runner-queue", { method: "POST", body: {} });
+                  view.reload();
+                  return "The queued runner update is cancelled.";
+                })
+              }
+            >
+              Cancel queued runner update
+            </button>{" "}
+          </>
+        )}
         <button
           type="button"
           className="btn"
@@ -349,7 +444,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -361,9 +456,11 @@ export function StopAllWork() {
   const paused = hold.data?.paused;
   return (
     <Section id="stop-all-h" title="Stop all work">
-      <p className="muted" style={{ fontSize: 14 }}>
-        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
-      </p>
+      <MoreAbout lead="Stops every company from starting new agent runs until you press Resume.">
+        <li>Runs already going are not cut off. They finish by themselves. To end one now, use the Runs page.</li>
+        <li>Wake-ups and messages wait in line, and start when you resume.</li>
+        <li>While work is stopped, every page shows a banner at the top. Press Resume on it to start work again.</li>
+      </MoreAbout>
       {paused === true ? (
         <p style={{ fontSize: 14 }} data-testid="stop-all-on">
           <span className="tag red">On</span> All work is stopped.
@@ -390,17 +487,62 @@ export function StopAllWork() {
   );
 }
 
+/**
+ * Settings → Server and runner → Private details to block (BOS-979): the owner's real IPs, host names, NAS paths and personal
+ * email that the merge-line check must keep out of the repo. Write-only: the saved list is never shown again, only how many
+ * entries of each kind it holds.
+ */
+export function PrivateDetails() {
+  const view = usePoll((signal) => api<{ total: number; counts: Record<string, number> }>("/api/private-details", { signal }), 30_000, "private-details");
+  const act = useAction();
+  const [text, setText] = useState("");
+  const d = view.data;
+  // Drawn at once, before the count arrives: a box that appears late pushes "This host" down mid-jump (the On this page link then stops short).
+  const total = d?.total ?? 0;
+  const kinds = Object.entries(d?.counts ?? {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  return (
+    <Section id="private-details-h" title="Private details to block">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The merge check stops any change that adds one of these to the code, so they can't be published when the repository goes public. Paste your real home IP addresses, host names, NAS or host folder paths and personal email addresses, one per line. Start a line with ip:, host:, path: or email: to say what it is, or just paste it and Boss Man guesses. An address ending in a dot (192.168.7.) blocks the whole range. Made-up examples such as 192.168.1.50, example.com and myserver are never blocked unless you list them. An entry is matched as plain text, so write each value the way it appears in the code; use at least 3 characters, and avoid short words such as "nas" that would match inside other words. It is stored encrypted, never shown again and never put in the repository or in a check log, and it is only given to the runner's own scan, never to the branch's code. The check for keys, tokens and passwords runs whether or not you add anything here.
+      </p>
+      <p style={{ fontSize: 14 }} data-testid="private-details-state">
+        {!d ? "Loading…" : total === 0 ? "Nothing listed yet." : `${total} entr${total === 1 ? "y" : "ies"} saved (${kinds}). Saving a new list replaces it.`}
+      </p>
+      <label htmlFor="private-details-text">New list (replaces the saved one; leave empty and save to clear it)</label>
+      <DraftTextarea draftKey={null} noDraft="holds the owner's real home details, which must not be kept in the browser" id="private-details-text" rows={6} value={text} onChange={setText} autoComplete="off" spellCheck={false} style={{ width: "100%", maxWidth: 520, fontFamily: "monospace" }} />
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !d || (text.trim() === "" && total === 0)}
+          onClick={() =>
+            void act.run(async () => {
+              const r = await api<{ total: number }>("/api/private-details", { method: "PUT", body: { text } });
+              setText("");
+              view.reload();
+              return r.total === 0 ? "List cleared." : `Saved ${r.total} entr${r.total === 1 ? "y" : "ies"}.`;
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** Settings → Server and runner → Checks (BOS-798): the owner's switch for the server-owned check queue (DR-003). */
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train };
   const n = Number(v.slots);
   const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
-  const changed = v.mode !== d.mode || n !== d.slots;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train;
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -424,9 +566,16 @@ export function CheckQueueSetting() {
         <p className="muted" style={{ fontSize: 14 }}>
           How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {d.effectiveSlots !== undefined && d.mode === "server" && (
+          <p style={{ fontSize: 14 }} data-testid="check-effective-slots">
+            Checks running at once right now: <strong>{d.effectiveSlots}</strong>.
+            {d.runnerSlotsReported !== null && d.runnerSlotsReported !== undefined && d.runnerSlotsReported < d.slots ? <> The runner says it runs {d.runnerSlotsReported} at once, so Boss Man starts no more than that until the runner is restarted with the new setting.</> : null}
+          </p>
+        )}
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
-            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory ceiling per runner). The ceiling is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
+            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check). That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
+            {d.runner.perCheckBytes ? <> Separately, each single check is stopped with a clear message if it uses more than {Math.round((d.runner.perCheckBytes / 1024 ** 3) * 10) / 10} GB, so one runaway check cannot starve the others.</> : null}
             {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
             {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}
           </p>
@@ -442,6 +591,18 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
+        <span>
+          <strong>Land approved merges in order (merge train).</strong>{" "}
+          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
+        </span>
+      </label>
+      {v.train && (d.runnersTooOldForTrain ?? []).length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="merge-train-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
@@ -452,7 +613,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
@@ -464,6 +625,128 @@ export function CheckQueueSetting() {
         </button>
       </div>
       {act.view}
+    </Section>
+  );
+}
+
+type EmailView = { settings: { host: string; port: number; security: "starttls" | "tls" | "none"; username: string | null; fromAddress: string; fromName: string | null; hasPassword: boolean } | null; configured: boolean };
+
+/** Outgoing email (BOS-1387): plain authenticated SMTP. The password goes to the secret store and is never shown again. */
+export function EmailSetting() {
+  const view = usePoll((signal) => api<EmailView>("/api/settings/email", { signal }), 60_000, "email-settings");
+  const act = useAction();
+  const testAct = useAction();
+  const [edit, setEdit] = useState<{ host: string; port: string; security: "starttls" | "tls" | "none"; username: string; fromAddress: string; fromName: string; password: string } | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const d = view.data;
+  if (!d) return null;
+  const s = d.settings;
+  const v = edit ?? { host: s?.host ?? "", port: String(s?.port ?? 587), security: s?.security ?? "starttls", username: s?.username ?? "", fromAddress: s?.fromAddress ?? "", fromName: s?.fromName ?? "", password: "" };
+  const set = (patch: Partial<typeof v>) => setEdit({ ...v, ...patch });
+  const port = Number(v.port);
+  const valid = v.host.trim() !== "" && Number.isInteger(port) && port >= 1 && port <= 65535 && v.fromAddress.includes("@");
+  const field = { display: "flex", flexDirection: "column", gap: 4 } as const;
+  return (
+    <Section id="email-h" title="Outgoing email">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {d.configured ? "Outgoing email is on." : "Outgoing email is off: nothing that needs email (like the portal's confirmation emails) can send until you set it up."} Use the SMTP details your mail provider gives you (for Proton Mail: smtp.protonmail.ch, port 587, STARTTLS, your address and its SMTP token). The password is kept in Boss Man's secret store and is never shown again.
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+        <div style={field}>
+          <label htmlFor="email-host">Server</label>
+          <input id="email-host" value={v.host} placeholder="smtp.example.com" onChange={(e) => set({ host: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-port">Port</label>
+          <input id="email-port" type="number" min={1} max={65535} value={v.port} onChange={(e) => set({ port: e.target.value })} style={{ width: 100 }} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-security">Security</label>
+          <select id="email-security" value={v.security} onChange={(e) => set({ security: e.target.value as typeof v.security })}>
+            <option value="starttls">STARTTLS (usually port 587)</option>
+            <option value="tls">TLS from the start (usually port 465)</option>
+            <option value="none">None (not encrypted)</option>
+          </select>
+        </div>
+        <div style={field}>
+          <label htmlFor="email-user">Username</label>
+          <input id="email-user" value={v.username} autoComplete="off" onChange={(e) => set({ username: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-password">Password or token</label>
+          <input id="email-password" type="password" value={v.password} autoComplete="new-password" placeholder={s?.hasPassword ? "Saved (type to replace)" : ""} onChange={(e) => set({ password: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-from">From address</label>
+          <input id="email-from" type="email" value={v.fromAddress} placeholder="boss@example.com" onChange={(e) => set({ fromAddress: e.target.value })} />
+        </div>
+        <div style={field}>
+          <label htmlFor="email-from-name">From name (optional)</label>
+          <input id="email-from-name" value={v.fromName} onChange={(e) => set({ fromName: e.target.value })} />
+        </div>
+      </div>
+      {v.security === "none" && <p role="note" className="error" style={{ fontSize: 14 }}>With no security the password and the mail cross the network in the clear. Use it only on a network you trust.</p>}
+      <p className="muted" style={{ fontSize: 14 }}>
+        The sending domain needs SPF, DKIM and DMARC records, or mail will land in spam. The Writer's guide has the details.
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/settings/email", { method: "PUT", body: { host: v.host, port, security: v.security, username: v.username.trim() || null, fromAddress: v.fromAddress, fromName: v.fromName.trim() || null, ...(v.password ? { password: v.password } : {}) } });
+              setEdit(null);
+              view.reload();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+        {d.configured && (
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              void act.run(async () => {
+                await api("/api/settings/email", { method: "DELETE" });
+                setEdit(null);
+                view.reload();
+                return "Outgoing email is off and the password is removed.";
+              })
+            }
+          >
+            Turn off
+          </button>
+        )}
+      </div>
+      {act.view}
+      {d.configured && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label htmlFor="email-test-to">Send a test email to</label>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input id="email-test-to" type="email" value={testTo} placeholder="you@example.com" onChange={(e) => setTestTo(e.target.value)} />
+            <button
+              type="button"
+              className="btn"
+              disabled={testAct.busy || !testTo.includes("@")}
+              onClick={() =>
+                void testAct.run(async () => {
+                  await api("/api/settings/email/test", { method: "POST", body: { to: testTo } });
+                  return `Sent. Check ${testTo} (and its spam folder).`;
+                })
+              }
+            >
+              Send test email
+            </button>
+          </div>
+          <p className="muted" style={{ fontSize: 14 }}>The test uses the saved settings, so save first.</p>
+          {testAct.view}
+        </div>
+      )}
     </Section>
   );
 }
@@ -496,7 +779,7 @@ export function RunnerUpdate() {
         {m.on
           ? m.kind === "wrapup"
             ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
-            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
+            : `${m.kind === "settings" ? "Applying a runner setting change (for example Check slots). This is not a runner update: the image stays the same" : "Update pending"}: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. ${m.blocking === false ? "It is past its deadline, so new runs are no longer held for it." : "Nothing new starts until it is done."} To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>
@@ -575,28 +858,38 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
               {s.runsList.map((run) => {
                 const onCard = !!run.waitingOn;
                 const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+                // BOS-1016: a run inside one long step (a check, a build) is busy, not stuck. Agents that can be
+                // steered get the message inside the step; others read it when the step ends.
+                const step = run.step ?? null;
                 return (
                   <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
                     <strong>{run.agent ?? "An agent"}</strong>
                     <span className="muted">
                       {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                      {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
                     </span>
                     {onCard ? (
                       <span className="tag amber" title={run.waitingOn!.question}>
                         Waiting for an answer
                       </span>
                     ) : late ? (
-                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes after being asked to wrap up.`}>
-                        Not responding
+                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes or more after being asked to wrap up.`}>
+                        Still going after {run.sinceWrapUpMinutes} min
+                      </span>
+                    ) : run.gotMessage ? (
+                      <span className="tag grey" title="It has the message and is saving its work.">
+                        Finishing up
+                      </span>
+                    ) : step ? (
+                      <span className="tag grey" title={`It is running ${step.title}. Some agents can only read the wrap-up message when this step ends, so if you want it to stop now use Stop this run.`}>
+                        In a long step: it will stop when this step ends
                       </span>
                     ) : (
                       <span className="tag grey">Working</span>
                     )}
-                    {(late || onCard) && (
-                      <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
-                        Stop this run
-                      </button>
-                    )}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
+                      Stop this run
+                    </button>
                   </li>
                 );
               })}
@@ -604,7 +897,7 @@ export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | nul
           )}
           {s.runsList.length > 0 && (
             <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
-              Agents have been asked to save their work and finish; most finish within a few minutes. One still going {s.notRespondingAfter} minutes after being asked shows Not responding next to its name. Boss Man won't stop an agent for you: if you want one to end now, press Stop this run next to it, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
+              Agents have been asked to save their work and finish; most finish within a few minutes. One in a long step, like a full check, may take longer, and some agents can only read the message when their step ends. One still going {s.notRespondingAfter} minutes after being asked shows Still going next to its name. Boss Man won't stop an agent for you, but Stop this run is there next to every one of them: press it to end one now, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
               {s.kind === "wrapup"
                 ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
                 : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}

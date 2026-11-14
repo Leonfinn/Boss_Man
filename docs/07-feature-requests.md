@@ -23,7 +23,7 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 ## Boss Man's own additions
 
 - **Agents.**
-  - The CEO can triage feedback through MCP: list unprocessed notes, link them to features, create features and log feedback it hears.
+  - The CEO and product managers (agents from the product-manager template, BOS-1359) can triage feedback through MCP: list unprocessed notes, link them to features, create features and log feedback they hear. A product manager also runs the roadmap tool, places and sizes features, writes their public summary and portal flags, and attaches any ticket to a feature (`update_ticket` with `featureId` alone). It gives a reason for each change, kept in the activity log. Nothing else on others' tickets (assignee, state, risk, body) changes, and the BOS-991 guard still keeps security-reading features off the portal: only the owner publishes those.
   - It can do this on its own when new feedback arrives (off by default, because it costs a run).
   - The owner chat can file feedback.
 - **Delivery.**
@@ -35,7 +35,7 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 
 1. Server: notes, insights, features, areas, criteria, customers and scoring. **Built.**
 2. Web: the feedback inbox (select a passage, pick or create a feature, set importance), the features list with inline prioritisation, and the feature page. **Built.**
-3. Agents and tickets: the `feedback` MCP tool (anyone logs and reads; the CEO links, creates features and marks notes), optional CEO triage wakes, the chat's `log_feedback` and `features`, tickets made from a feature (described from its feedback, with outside words marked untrusted), and features following their tickets to in progress and released. **Built.**
+3. Agents and tickets: the `feedback` MCP tool (anyone logs and reads; the CEO and product managers link, create features and mark notes), optional CEO triage wakes, the chat's `log_feedback` and `features`, tickets made from a feature (described from its feedback, with outside words marked untrusted), and features following their tickets to in progress and released. **Built.**
 4. The portal: an opt-in page behind a secret link, with an optional listener of its own. **Built.**
 
 ## What goes on the portal
@@ -60,6 +60,7 @@ The portal is the only part of Boss Man meant for people other than you.
 
   Your login, API, MCP and runner endpoints don't exist on that port. Expose the portal's port if you need to, **never the owner's** (`BOSSMAN_HOST_PORT`, 3100 by default).
 - **What visitors can do.** They vote on features you've shown, with an importance, and can add a comment or suggest an idea, optionally with a name and email. A visitor is remembered by an HttpOnly cookie, so they can change or remove their vote. They can't see anyone else's votes.
+- **Behind a reverse proxy.** The limits below count per visitor address. Behind a proxy that is the proxy's address, so list it in `BOSSMAN_PORTAL_TRUSTED_PROXY` (addresses or CIDRs, empty = off) and each visitor gets their own limit, taken from `X-Forwarded-For` (or, only when Cloudflare is the proxy, `CF-Connecting-IP`, chosen with `BOSSMAN_PORTAL_CLIENT_HEADER=cf-connecting-ip`), and only when the connection comes from a listed address. Only the chosen header is read: Nginx Proxy Manager, Caddy and Traefik pass a visitor-sent `CF-Connecting-IP` through, so it is never trusted unless chosen. See `docs/06-install-truenas.md`.
 - **Limits.**
   - 40 writes an hour per address and 600 per portal;
   - 120 reads a minute per address;

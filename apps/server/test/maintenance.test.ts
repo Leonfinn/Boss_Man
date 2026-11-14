@@ -7,7 +7,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, notifications, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
@@ -20,6 +20,13 @@ afterEach(async () => {
 });
 
 const MIN = 60_000;
+/** Steps the drain past every retry of a failing swap (3 tries, 30 s then 60 s apart). */
+async function retryOut(c: { maintenance: { step: () => Promise<unknown> }; advance: (ms: number) => unknown }) {
+  for (let i = 0; i < 4; i++) {
+    await c.maintenance.step();
+    c.advance(2 * MIN);
+  }
+}
 const KEY = "k".repeat(43);
 
 /** A stand-in launcher with one runner per slug; `recreate` puts a runner on the new image. */
@@ -33,8 +40,20 @@ function fakeLauncher() {
     const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if (method === "GET" && url.pathname === "/runners") return json(200, [...runnersBySlug].map(([slug, r]) => ({ slug, state: "running", status: "Up", image: "boss-man-runner:current", ...(old ? {} : { current: r.current }) })));
     if (method === "PUT") return json(200, { slug: url.pathname.split("/")[2], id: "x" }); // a new company's runner starts by itself
+    const back = /^\/runners\/([^/]+)\/previous$/.exec(url.pathname);
+    if (method === "POST" && back) {
+      if (noPrevious) return json(409, { error: "There is no previous runner image (boss-man-runner:previous) to go back to." });
+      rolledBack.push(back[1]!);
+      return json(200, { slug: back[1], image: "boss-man-runner:previous" });
+    }
     const m = /^\/runners\/([^/]+)\/recreate$/.exec(url.pathname);
     if (method === "POST" && m) {
+      const left = failTimes.get(m[1]!);
+      if (left) {
+        failTimes.set(m[1]!, left - 1);
+        return json(502, { error: "Creating the runner failed: the container exited at once" });
+      }
+      if (guardBroken.has(m[1]!)) return json(502, { error: `The network guard for ${m[1]} stopped (exit code 1); see docker logs.` });
       if (broken.has(m[1]!)) return json(502, { error: "Creating the runner failed: no such image" });
       runnersBySlug.get(m[1]!)!.current = true;
       return json(200, { slug: m[1] });
@@ -43,7 +62,11 @@ function fakeLauncher() {
   }) as typeof globalThis.fetch;
   let old = false;
   const broken = new Set<string>();
-  return { fetch, calls, runnersBySlug, broken, setOldLauncher: (v: boolean) => (old = v) };
+  const guardBroken = new Set<string>();
+  const failTimes = new Map<string, number>();
+  const rolledBack: string[] = [];
+  let noPrevious = false;
+  return { fetch, calls, runnersBySlug, broken, guardBroken, failTimes, rolledBack, setNoPrevious: (v: boolean) => (noPrevious = v), setOldLauncher: (v: boolean) => (old = v) };
 }
 
 async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
@@ -91,7 +114,8 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
     await db.insert(settings).values({ key: `runner-slug:${c.id}`, value: slug }).onConflictDoUpdate({ target: settings.key, set: { value: slug } });
     fake.runnersBySlug.set(slug, { current: false });
     const endRun = (runId: string) => built.runners.ingest(row!, { seq: ++seq, at: new Date().toISOString(), event: { type: "run.ended", runId, stopReason: "end_turn", error: null } });
-    const out = { id: c.id, ceo: ceo.id, name, endRun };
+    const event = (e: Parameters<typeof built.runners.ingest>[1]["event"]) => built.runners.ingest(row!, { seq: ++seq, at: new Date().toISOString(), event: e });
+    const out = { id: c.id, ceo: ceo.id, name, endRun, event };
     byName.set(name, out);
     return out;
   };
@@ -167,6 +191,46 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.maint()).toMatchObject({ on: true, runs: 1, companies: 1, chatOpen: true });
   });
 
+  it("waits for a running check job like a run, never swaps mid-check, and holds new checks meanwhile (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" }).onConflictDoNothing();
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [job] = await c.db
+      .insert(checkJobs)
+      .values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() })
+      .returning();
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step();
+    // No agent run is going, but a check is: the runner stays as it is.
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect(c.fake.calls.some((x) => x.endsWith("/recreate"))).toBe(false);
+    // A check queued now is not handed out while the drain is pending.
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c2", tree: "t2", state: "queued" });
+    await c.checks.pump();
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.state, "running"))).map((j) => j.id)).toEqual([job!.id]);
+    // The check ends: the swap goes ahead.
+    await c.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.id, job!.id));
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("at the deadline the owner's ask names the checks still running (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const asks = await c.open();
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.question).toMatch(/1 check is still going/);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+  });
+
   it("a live chat run doesn't stop a busy company's runner swapping", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -191,7 +255,29 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.scheduler.tick();
     await c.req("POST", "/api/maintenance/start", {});
     await c.req("POST", "/api/maintenance/start", {}); // already on: nobody is told twice
-    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false }]);
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false, steer: true }]);
+  });
+
+  it("stops holding new runs once the deadline question waits unanswered, and shows why (BOS-1414)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 30 });
+    await c.wake(b);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, waiting: 1 }); // before the deadline: a drain under way, held
+    expect(await c.maint()).toMatchObject({ on: true, blocking: true });
+    expect((await c.db.select().from(wakes).where(eq(wakes.status, "queued"))).map((w) => w.statusReason)).toEqual([HOLD_REASON]);
+
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    expect(await c.open()).toHaveLength(1); // the question is open and unanswered
+    expect(await c.maint()).toMatchObject({ on: true, blocking: false });
+    // The wake held for hours is released and starts; it never keeps "update pending" as its reason.
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    expect(c.commands.map((x) => x.company)).toEqual(["App Co", "Home Lab"]);
+    expect((await c.db.select().from(wakes).where(eq(wakes.statusReason, HOLD_REASON))).length).toBe(0);
   });
 
   it("asks the owner once at the deadline; each answer does what it says", async () => {
@@ -252,7 +338,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
     expect(waiting).toHaveLength(1);
     expect(waiting[0]).toMatchObject({ level: "page" });
-    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("app-co still has work runs or checks going");
     expect(waiting[0]!.body).toContain("on purpose");
     expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
   });
@@ -302,20 +388,63 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.company("Silent Co", "silent-co", false);
     await c.company("Broken Co", "broken-co");
     c.fake.broken.add("broken-co");
+    c.fake.setNoPrevious(true);
     await c.maintenance.start();
     await c.maintenance.step();
-    expect(await getHold(c.db)).not.toBeNull(); // Silent Co has been given time to dial in; Broken Co is tried again, not given up on
-    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
-    c.advance(31_000);
-    await c.maintenance.step();
-    expect((await getHold(c.db))!.failed ?? {}).toEqual({});
-    c.advance(31_000);
-    await c.maintenance.step(); // third failed try: now it counts as failed
+    expect(await getHold(c.db)).not.toBeNull(); // Broken Co is tried again, and Silent Co is given time to dial in
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     const page = (await c.db.select().from(notifications)).find((n) => n.title === "Runner update finished with problems");
     expect(page).toMatchObject({ level: "page" });
-    expect(page!.body).toContain("broken-co: Creating the runner failed");
+    expect(page!.body).toContain("broken-co: the new runner would not start (3 tries: Creating the runner failed");
+    expect(page!.body).toContain("going back to the previous runner image failed too");
+    expect(page!.body).toContain("Press Start runner");
     expect(page!.body).toContain("silent-co: has not reconnected");
+  });
+
+  // BOS-382: a swap that fails is tried again on its own, then goes back to the previous image, then says so once.
+  it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.failTimes.set("app-co", 2);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toMatchObject({ tries: { "app-co": { n: 1 } } });
+    await c.maintenance.step(); // still waiting for the next try: no second call yet
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    await retryOut(c);
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(3);
+    expect(c.fake.rolledBack).toEqual([]);
+    expect(await getHold(c.db)).toBeNull();
+    expect(await c.titles()).toContain("note: Runners updated");
+    expect((await c.titles()).some((t) => t.startsWith("page:"))).toBe(false);
+  });
+
+  it("after the last try, puts the runner back on the previous image and pages once, in plain words", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.broken.add("app-co");
+    await c.maintenance.start();
+    await retryOut(c);
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(3);
+    expect(c.fake.rolledBack).toEqual(["app-co"]);
+    expect(await getHold(c.db)).toBeNull();
+    const pages = (await c.db.select().from(notifications)).filter((n) => n.level === "page");
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toContain("app-co: the new runner would not start (3 tries: Creating the runner failed: no such image), so it was put back on the previous runner image and is running that");
+  });
+
+  it("a network guard failure is reported at once: trying again or going back can't fix it", async () => {
+    const c = (ctx = await setup({ reconnectMs: 1000 }));
+    await c.company("App Co", "app-co");
+    c.fake.guardBroken.add("app-co");
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(c.fake.calls.filter((x) => x.includes("recreate"))).toHaveLength(1);
+    expect(c.fake.rolledBack).toEqual([]);
+    expect(await getHold(c.db)).toBeNull();
+    const page = (await c.db.select().from(notifications)).find((n) => n.level === "page");
+    expect(page!.body).toContain("app-co: The network guard for app-co stopped");
   });
 
   it("a failed swap lifts the hold; once the runner is back on the new image the panel shows the current state, not the failure", async () => {
@@ -323,11 +452,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.company("App Co", "app-co");
     c.fake.broken.add("app-co");
     await c.maintenance.start();
-    await c.maintenance.step();
-    c.advance(31_000);
-    await c.maintenance.step();
-    c.advance(31_000);
-    await c.maintenance.step(); // third failed try: now it counts as failed
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: false }, healthy: false });
     c.fake.runnersBySlug.get("app-co")!.current = true; // it came back by itself (compose recreated it)
@@ -345,7 +470,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const orig = c.fake.runnersBySlug.get("app-co")!;
     Object.defineProperty(orig, "current", { get: (() => { let n = 0; return () => ++n > 1; })(), set: () => undefined });
     void recreate;
-    await c.maintenance.step();
+    await retryOut(c);
     expect(await getHold(c.db)).toBeNull();
     expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("Runners updated");
   });
@@ -480,12 +605,14 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     expect(c.commands).toHaveLength(1);
 
     // The button: every live work run gets exactly one wrap-up message, the same way the update tells them.
+    // steer (BOS-1016): an agent that can take it inside its running step gets it there.
     expect((await c.req("POST", "/api/maintenance/wrapup", {})).statusCode).toBe(200);
-    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP_ASKED}`, interrupt: false }]);
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP_ASKED}`, interrupt: false, steer: true }]);
     // Pressing it again does not tell them twice.
     await c.req("POST", "/api/maintenance/wrapup", {});
     expect(c.messages).toHaveLength(1);
-    expect(await c.maint()).toMatchObject({ on: true, kind: "wrapup", runs: 1, notRespondingAfter: 10 });
+    // A full check takes 30 to 50 minutes, so a run is only flagged after 30 (BOS-1016).
+    expect(await c.maint()).toMatchObject({ on: true, kind: "wrapup", runs: 1, notRespondingAfter: 30 });
 
     // Nothing new starts anywhere while wrap-up is on; the wake waits, and is not dropped.
     await c.wake(b);
@@ -534,6 +661,41 @@ describe("Ask agents to wrap up (BOS-929): a mode of the same hold", () => {
     const waiting = (await c.maint()) as { runsList: Array<{ sinceWrapUpMinutes: number; waitingOn: { question: string } | null }> };
     expect(waiting.runsList[0]!.sinceWrapUpMinutes).toBeGreaterThanOrEqual(10);
     expect(waiting.runsList[0]!.waitingOn).toMatchObject({ question: "May I run the full test suite?" });
+  });
+
+  it("says when a run is inside a long step, and when the message has reached it (BOS-1016)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const runId = c.commands[0]!.runId;
+    type Row = { gotMessage: boolean; step: { title: string; sinceMinutes: number } | null };
+    const row = async () => ((await c.maint()) as { runsList: Row[] }).runsList[0]!;
+    const update = (u: Record<string, unknown>) => a.event({ type: "run.update", runId, update: u });
+
+    // A finished step, an owner chat message delivered before the ask: neither counts.
+    await update({ kind: "tool_call", title: "Read file", toolKind: "read", status: "pending" });
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "completed" });
+    await update({ kind: "message_delivered", text: "Message from Boss Man: an earlier note", fullLength: 37 });
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    expect(await row()).toMatchObject({ gotMessage: false, step: null });
+
+    // A long command starts: the panel names it. Its updates carry no title, so the title comes from its start.
+    await update({ kind: "tool_call", title: "scripts/check-all.sh", toolKind: "execute", status: "pending" });
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "in_progress" });
+    expect(await row()).toMatchObject({ gotMessage: false, step: { title: "scripts/check-all.sh", sinceMinutes: 0 } });
+    c.advance(12 * MIN);
+    expect((await row()).step?.sinceMinutes).toBe(12);
+
+    // An owner chat message isn't the wrap-up; a Boss Man message steered in is.
+    await update({ kind: "message_delivered", text: "Message from the owner: hello", fullLength: 29 });
+    expect((await row()).gotMessage).toBe(false);
+    await update({ kind: "message_delivered", text: `Message from Boss Man: ${WRAP_UP_ASKED}`.slice(0, 4000), fullLength: 400, steered: true });
+    expect(await row()).toMatchObject({ gotMessage: true, step: { title: "scripts/check-all.sh" } });
+
+    // The step ends (the command was moved to the background): no step any more.
+    await update({ kind: "tool_call_update", title: null, toolKind: null, status: "completed" });
+    expect((await row()).step).toBeNull();
   });
 
   it("never stops a run by itself, even well past the not-responding time", async () => {

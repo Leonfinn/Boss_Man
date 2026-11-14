@@ -43,10 +43,19 @@ x-runner: &runner
   restart: unless-stopped
   profiles: ["runners"]
   depends_on:
-    - server
+    server:
+      condition: service_started
+    # Start after the installer has FINISHED its one attempt, not merely begun (BOS-972, Rod/Freddy): the runner
+    # reads the ready pack once at start, so starting before the install ends would leave Claude absent until a
+    # hand restart. The installer's own command always exits 0 (below), so a host with no internet still gets a
+    # runner with OpenCode and Codex working, just with Claude reported absent.
+    claude-pack:
+      condition: service_completed_successfully
   environment: &runner-env
     BOSSMAN_URL: ws://server:3100/api/runner/connect
     BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+    # The Claude pack volume (DR-050): mounted read-only below; the runner points Claude Code at a ready folder.
+    BOSSMAN_CLAUDE_PACK: /opt/bossman-claude
     # Full checks at once (BOS-542): the compose runner never received this, only the launcher passed it on.
     BOSSMAN_CHECK_SLOTS: ${BOSSMAN_CHECK_SLOTS:-}
     # Days the runner keeps OpenCode sessions before deleting them (BOS-616): empty = 14, 0 = never.
@@ -69,6 +78,35 @@ x-runner: &runner
   init: true
 
 services:
+  # The Claude pack (DR-050, BOS-972): the runner image holds no Anthropic code, so Claude Code and
+  # its ACP adapter are installed on first start into a named volume the runner then mounts read-only.
+  # It is a top-level service, NOT part of the x-runner anchor above: runner-app-co depends on it, and a
+  # service can only depend on another real service (BOS-972, Dougal).
+  claude-pack:
+    image: boss-man-runner:current
+    build:
+      context: .
+      dockerfile: apps/runner/Dockerfile
+    profiles: ["runners"]
+    # One-shot: installs the pack (npm ci + version check + canary + READY marker) and exits. Re-running
+    # it on an update is cheap: a ready folder is left alone and a new lockfile installs beside the old.
+    # The command exits 0 even when it can't install (no internet, npm down): readiness is proven by the READY
+    # marker, not the exit code, and the runner waiting on it must still start with Claude absent (BOS-972).
+    restart: "no"
+    command: ["sh", "-c", "node_modules/.bin/tsx src/claude-pack-main.ts || echo '[claude-pack] install did not finish; Claude will be absent until it can'"]
+    environment:
+      BOSSMAN_CLAUDE_PACK: /opt/bossman-claude
+      BOSSMAN_CLAUDE_PACK_SOURCE: /opt/bossman-claude-pack
+    depends_on:
+      - server
+    # It reaches npm (honouring the host's proxy/extra CA), so it needs a network; it mounts no company data.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - claude-pack:/opt/bossman-claude
+    mem_limit: ${BOSSMAN_CLAUDE_PACK_MEMORY:-2g}
+    pids_limit: 512
+
   db:
     image: pgvector/pgvector:0.8.7-pg17-bookworm
     restart: unless-stopped
@@ -108,7 +146,7 @@ services:
       BOSSMAN_LAUNCHER_URL: http://launcher:3105
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
       # Session cookies are Secure per request: over HTTPS through the trusted proxy below, not on plain
-      # LAN http. Setting this to 1 turns Secure off everywhere (older setups); you no longer need it.
+      # LAN http. With no trusted proxy set, cookies are always Secure, so a plain-http install (staging too) needs 1 here.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
       # Exact address(es) of the proxy whose X-Forwarded-* headers are believed (deploy/tailscale.yml). Empty = none.
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
@@ -116,6 +154,11 @@ services:
       BOSSMAN_PORTAL_PORT: "3101"
       # The portal's address as people reach it, for the share link, e.g. http://<host-ip>:3111.
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+      # The portal's reverse proxy: its own address(es) or CIDRs, e.g. 203.0.113.10, 10.0.0.0/8. Only a connection from one
+      # of them may name the visitor (CF-Connecting-IP, X-Forwarded-For). Empty = the connecting address is the visitor.
+      BOSSMAN_PORTAL_TRUSTED_PROXY: ${BOSSMAN_PORTAL_TRUSTED_PROXY:-}
+      # Which header names the visitor: x-forwarded-for (default) or cf-connecting-ip (only when Cloudflare is the proxy).
+      BOSSMAN_PORTAL_CLIENT_HEADER: ${BOSSMAN_PORTAL_CLIENT_HEADER:-}
       # JS heap cap in MiB (BOS-410). The live heap measured 89-100 MiB; 1536 leaves ~15x headroom. Raise it in .env if
       # the memory log ("memory" lines, heapUsed) ever nears it. Keep it below BOSSMAN_SERVER_MEMORY when that is set.
       NODE_OPTIONS: --max-old-space-size=${BOSSMAN_SERVER_HEAP_MB:-1536}
@@ -210,6 +253,8 @@ services:
       - app-co-workspaces:/home/node/workspaces
       - app-co-runner-data:/home/node/runner-data
       - app-co-claude:/home/node/.claude
+      # The installed Claude pack, read-only (DR-050): the installer above writes it, the runner only reads.
+      - claude-pack:/opt/bossman-claude:ro
 
 secrets:
   master_key:
@@ -227,3 +272,5 @@ volumes:
   app-co-workspaces:
   app-co-runner-data:
   app-co-claude:
+  # The Claude pack (DR-050): one install per stack, written by the claude-pack installer and read by runners.
+  claude-pack:

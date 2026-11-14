@@ -55,6 +55,9 @@ guard_isolated() { # this folder
   # Every docker compose call in this folder (deploy.sh and update-runner.sh refuse here, but a hand-typed one would
   # not) must get the staging overlay, or it builds production's image tags and starts a launcher with no stack.
   [[ $(env_get "$here/.env" COMPOSE_FILE) == *deploy/staging.yml* ]] || die "Set COMPOSE_FILE=docker-compose.yml:deploy/staging.yml in $here/.env so every docker compose command here uses the staging overlay."
+  # Staging is plain http unless a trusted HTTPS proxy is set. Without one of these two the server marks the session
+  # cookie Secure, the browser drops it on http://, and sign-in silently bounces back to the login page (BOS-1169).
+  [[ -n $(env_get "$here/.env" BOSSMAN_TRUSTED_PROXIES) || $(env_get "$here/.env" BOSSMAN_INSECURE_COOKIES) == 1 ]] || die "Set BOSSMAN_INSECURE_COOKIES=1 in $here/.env: staging is plain http, and without it sign-in loops back to the login page."
   pw="$(env_get "$here/.env" POSTGRES_PASSWORD)"
   local others=() d
   for d in "$here"/../*/ ${BOSSMAN_PRODUCTION_DIRS:-}; do
@@ -98,13 +101,16 @@ rebuild_and_start() { # old-commit new-commit
   local svcs=(server) built=(server) profiles
   profiles="${COMPOSE_PROFILES:-$(env_get .env COMPOSE_PROFILES)}" # the same precedence docker compose uses
   if [[ ,$profiles, == *,launcher,* ]]; then svcs+=(launcher); built+=(launcher netguard); fi
+  # A failed build must die, not fall through: callers run this inside "if !", where bash switches set -e off for
+  # the whole function, so without the "|| die" a failed build went on to start a partial stack (BOS-1169).
+  local built_fail="An image build failed (see above), so nothing was started; the running staging, if any, is unchanged. Fix the cause and run this again."
   step "Building (${built[*]})"
-  run dc build "${built[@]}"
+  run dc build "${built[@]}" || die "$built_fail"
   # The runner image the launcher starts: built when it is missing or the runner's code changed.
   if [[ ,$profiles, == *,launcher,* ]]; then
     if ((DRY)) || ! docker image inspect boss-man-staging-runner:current >/dev/null 2>&1 || { [[ -n ${1:-} ]] && git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'; }; then
       step "Building the staging runner image"
-      run dc --profile runners build runner-app-co
+      run dc --profile runners build runner-app-co || die "$built_fail"
       RUNNER_NEW=1
     fi
   fi

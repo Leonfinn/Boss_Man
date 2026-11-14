@@ -3,7 +3,8 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
-import { probeGuard } from "./guard-probe.js";
+import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
+import { probeGuardWhenReady } from "./guard-probe.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
@@ -77,6 +78,40 @@ log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox
 
 let connection: RunnerConnection;
 const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
+// The Claude pack (DR-050, BOS-972): the image ships no Anthropic code, so Claude Code and its ACP adapter
+// come from a ready folder on the bossman-claude volume, mounted read-only. The launcher's installer container
+// (or the compose claude-pack service) fills it before this process starts; here we only read it. Without a
+// ready pack, Claude is absent: CLAUDE_CODE_EXECUTABLE is left unset, no Claude adapter bin is given, and a
+// Claude run ends with a clear "not installed" message. Codex and OpenCode are unaffected.
+const claudePackRoot = env.BOSSMAN_CLAUDE_PACK?.trim();
+const claudePack = (() => {
+  if (!claudePackRoot) return { ready: false as const, reason: "BOSSMAN_CLAUDE_PACK isn't set" };
+  let hash: string;
+  try {
+    // The pack folder is named by the same lockfile hash the image ships and the installer used.
+    hash = lockHash(readFileSync(path.join(env.BOSSMAN_CLAUDE_PACK_SOURCE ?? PACK_SOURCE, "package-lock.json")));
+  } catch {
+    return { ready: false as const, reason: "the image has no Claude pack lockfile to name the folder by" };
+  }
+  return readPack(claudePackRoot, hash);
+})();
+if (claudePack.ready && claudePack.dir) {
+  env.CLAUDE_CODE_EXECUTABLE = claudeBin(claudePack.dir);
+  log(`Claude Code: ready pack at ${claudePack.dir} (${claudePack.version ?? "version unread"})`);
+} else {
+  delete env.CLAUDE_CODE_EXECUTABLE;
+  log(`Claude Code: absent on this runner (${"reason" in claudePack ? claudePack.reason : "no ready pack"}). Claude agents will say so; Codex and OpenCode keep working.`);
+}
+/** The Claude ACP adapter's version from the ready pack, for the harness report; undefined with no pack. */
+function claudePackAdapterVersion(): string | undefined {
+  if (!claudePack.ready || !claudePack.dir) return undefined;
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(claudePack.dir, "node_modules", "@agentclientprotocol", "claude-agent-acp", "package.json"), "utf8")) as { version?: string };
+    return manifest.version;
+  } catch {
+    return undefined;
+  }
+}
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
   mcpPreflightMs: Number(env.BOSSMAN_MCP_PREFLIGHT_MS ?? 20_000),
@@ -92,6 +127,8 @@ const sessions = new SessionManager({
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,
   checkJobs,
+  // The Claude adapter comes from the ready pack, not the runner's node_modules (DR-050).
+  ...(claudePack.ready && claudePack.dir ? { adapterBins: { claude: adapterBin(claudePack.dir) } } : {}),
   fence: { ...runnerFence(sandbox.level, dataDir, workspacesRoot), pnpmStore: storeDir },
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
@@ -108,12 +145,13 @@ connection = new RunnerConnection({
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
   imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
-  harnessVersions: await harnessVersions(),
+  harnessVersions: await harnessVersions({ claudeAdapterVersion: claudePackAdapterVersion() }),
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),
   restart,
   runningChecks: () => checkJobs.running(),
+  checkSlots: Math.max(1, checkSlots), // applyCheckSlots says 0 when unset: one check at a time
   onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
 });
@@ -124,16 +162,24 @@ if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) f
 connection.start();
 // The network guard proves itself: a connect to our own gateway must be refused at once (DR-049 point 2).
 // Reported with the sandbox report at start and every 5 minutes.
+// BOS-1362: the launcher connects the runner's network only after the guard loads, so the first probe waits
+// for the default route (up to 60 s) instead of reporting "absent" for a guard that comes up seconds later.
+// An absent result is looked at again after 15 s, so a late guard doesn't wait for the 5-minute probe.
+let guardProbing = false; // one probe (and one 15 s retry chain) at a time
 const reportGuard = async () => {
+  if (guardProbing) return;
+  guardProbing = true;
   try {
-    sandbox.guard = await probeGuard();
+    sandbox.guard = await probeGuardWhenReady();
     log(`network guard: ${sandbox.guard.state} (${sandbox.guard.reason}, ${sandbox.guard.ms} ms)`);
   } catch (err) {
     sandbox.guard = { state: "absent", reason: `probe failed: ${(err as Error).message}`.slice(0, 200), errno: null, ms: 0 };
   }
+  guardProbing = false;
   connection.emit({ type: "runner.sandbox", report: sandbox });
+  if (sandbox.guard.state !== "on") setTimeout(() => void reportGuard(), 15_000).unref();
 };
-await reportGuard();
+void reportGuard();
 setInterval(() => void reportGuard(), 5 * 60_000).unref();
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled

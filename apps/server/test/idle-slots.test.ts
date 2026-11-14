@@ -8,7 +8,8 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, deploys, deployTargets, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import type { Limits } from "../src/services/scheduler.js";
-import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import { WIP_REFUSED_REASON } from "../src/services/agent-wip.js";
 import type { SweepLimits } from "../src/services/sweeps.js";
 
 const MIN = 60_000;
@@ -354,5 +355,73 @@ describe("free run slots offer idle agents their next ticket (BOS-615)", () => {
     expect((await c.sweeps.run()).idleSlots).toMatchObject({ woken: 0, ready: 0, asked: 0 });
     expect(await c.wakesOf(IDLE_SLOT_REASON)).toEqual([]);
     expect(await c.wakesOf(IDLE_AGENTS_REASON)).toEqual([]);
+  });
+});
+
+describe("idle agents with startable Ready work (BOS-1180)", () => {
+  it("an agent whose only in-progress ticket waits on an unmerged fix is woken on its Ready ticket", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const fix = await c.working("The fix", ann.id, 0, { systemState: "in_progress", assigneeAgentId: null });
+    const waiting = await c.working("Waits on the fix", ann.id, 40 * MIN);
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: waiting, blockerTicketId: fix });
+    await c.run(ann.id, waiting, { endedAgoMs: 40 * MIN, lastEventAgoMs: 40 * MIN, outcome: "end_turn" });
+    const next = await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
+    const result = await c.sweeps.run();
+    expect(result.idleSlots).toMatchObject({ ready: 1 });
+    expect(await c.wakesOf(IDLE_SLOT_REASON)).toMatchObject([{ agentId: ann.id, ticketId: next }]);
+  });
+
+  it("wakes the WIP limit refused don't use up the day's allowance; ordinary ones do", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const next = await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
+    const old = (i: number) => new Date(Date.now() - (60 + i) * MIN);
+    const four = (statusReason: string | null) => [0, 1, 2, 3].map((i) => ({ companyId: c.company.id, agentId: ann.id, ticketId: next, reason: IDLE_SLOT_REASON, status: "launched" as const, statusReason, createdAt: old(i) }));
+    await c.db.insert(wakes).values(four(null));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ ready: 0 });
+    await c.db.delete(wakes).where(eq(wakes.ticketId, next));
+    await c.db.insert(wakes).values(four(WIP_REFUSED_REASON));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ ready: 1 });
+  });
+
+  it("a missed-work wake no longer holds the Ready ticket back for a day", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const next = await c.working("Ann's next up", ann.id, 15 * MIN, { systemState: "ready" });
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: ann.id, ticketId: next, reason: MISSED_REASON, status: "launched", createdAt: new Date(Date.now() - 60 * MIN) });
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ ready: 1 });
+  });
+
+  it("the CEO's idle-agents wake lists work held behind a cap for over 30 minutes, and Boss Man moves nothing", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const zippy = await c.hire("Zippy");
+    await c.working("Zippy's first", zippy.id, 0);
+    await c.working("Zippy's second", zippy.id, 0);
+    const held = await c.working("Held behind Zippy", zippy.id, 0, { systemState: "ready", wipHeldAt: new Date(Date.now() - 31 * MIN) });
+    await c.working("Only just held", zippy.id, 0, { systemState: "ready", wipHeldAt: new Date(Date.now() - 5 * MIN) });
+    await c.run(zippy.id, held, { lastEventAgoMs: MIN });
+    await c.sweeps.run();
+    const [ask] = await c.wakesOf(IDLE_AGENTS_REASON);
+    expect(ask!.note).toContain("- Ann (worker)");
+    expect(ask!.note).toContain("held by a WIP limit for over 30 minutes");
+    expect(ask!.note).toContain("held behind Zippy's own limit");
+    expect(ask!.note).toContain("Held behind Zippy");
+    expect(ask!.note).not.toContain("Only just held");
+    const [h] = await c.db.select().from(tickets).where(eq(tickets.id, held));
+    expect(h).toMatchObject({ assigneeAgentId: zippy.id, systemState: "ready" });
+  });
+
+  it("an idle agent whose only ticket waits on an unmerged fix is listed for the CEO", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const fix = await c.working("The fix", ann.id, 0, { assigneeAgentId: null });
+    const waiting = await c.working("Waits on the fix", ann.id, 40 * MIN);
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: waiting, blockerTicketId: fix });
+    await c.working("Unassigned", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+    await c.sweeps.run();
+    const [ask] = await c.wakesOf(IDLE_AGENTS_REASON);
+    expect(ask?.note).toContain("- Ann (worker)");
   });
 });

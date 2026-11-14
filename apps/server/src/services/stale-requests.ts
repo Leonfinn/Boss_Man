@@ -4,7 +4,8 @@
 // has already answered is refused, quoting the earlier answer.
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
+import { agents, decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
+import { closeInvalidCards, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
 
 type DecisionRow = typeof decisions.$inferSelect;
 
@@ -13,6 +14,15 @@ export const STALE_REASON = "checking an old card";
 
 /** Wakes an agent; the scheduler's notify matches this shape. */
 export type WakeFn = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => Promise<unknown>;
+
+/** What an author does when woken about a card that is being re-checked (BOS-1193): each way takes one tool call. */
+const RECHECK_STEPS = [
+  "The card is hidden from the owner's main list while you re-check it. You have 30 minutes, then it goes to the CEO.",
+  "Check the live state first: their latest answers, what's deployed, and whether the tickets involved are done. Then do exactly one:",
+  "- It still holds: withdraw_decision with action confirm and checked (one line on what you checked). Nothing is written on the card.",
+  "- It needs changing: raise one corrected card with raise_decision replaces <this card's id>; the old one closes as superseded.",
+  "- It is no longer needed: withdraw_decision (action withdraw, with a reason and replacedBy: card:<id>, ticket:<ref> with when, or none).",
+];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -59,7 +69,80 @@ export async function dependentsOf(db: Db, ticketId: string): Promise<string[]> 
   return [...seen];
 }
 
-type ActedResult = { flaggedDecisions: string[]; flaggedTickets: string[]; woken: string[] };
+/** A card confirmed this many times and flagged again within a day goes straight to the CEO (DR-054 point 5). */
+export const RECHECK_NOISY_COUNT = 2;
+const DAY_MS = 86_400_000;
+
+type FlaggedCard = { id: string; raisedByAgentId: string | null; recheckedAt?: Date | null; recheckCount?: number };
+
+/**
+ * BOS-1193 (DR-054): puts these cards into "being re-checked". Boss Man checks first: a card the validity table can
+ * close is closed here and never flagged, so its author isn't woken for nothing. The rest go to their author with 30
+ * minutes to settle them. A card with no author, a paused or deleted author, the CEO as author, or one confirmed twice
+ * in the last day goes straight to the CEO's stage. Returns the cards now in re-check, and which of them are at the CEO.
+ */
+async function enterRecheck(db: Db, input: { cards: FlaggedCard[]; reason: string; now: Date }): Promise<{ rechecking: FlaggedCard[]; atCeo: Set<string> }> {
+  if (!input.cards.length) return { rechecking: [], atCeo: new Set() };
+  await closeInvalidCards(db, { now: () => input.now }, { ids: input.cards.map((c) => c.id) });
+  const still = await db
+    .select({ id: decisions.id })
+    .from(decisions)
+    .where(and(inArray(decisions.id, input.cards.map((c) => c.id)), eq(decisions.status, "open"), isNull(decisions.staleAt)));
+  const live = new Set(still.map((s) => s.id));
+  const rechecking = input.cards.filter((c) => live.has(c.id));
+  if (!rechecking.length) return { rechecking: [], atCeo: new Set() };
+  const authorIds = [...new Set(rechecking.map((c) => c.raisedByAgentId).filter((a): a is string => !!a))];
+  const authors = authorIds.length ? await db.select({ id: agents.id, role: agents.role, paused: agents.paused }).from(agents).where(inArray(agents.id, authorIds)) : [];
+  const reachable = new Set(authors.filter((a) => !a.paused && a.role !== "ceo").map((a) => a.id));
+  const atCeo = new Set(
+    rechecking
+      .filter((c) => !c.raisedByAgentId || !reachable.has(c.raisedByAgentId) || ((c.recheckCount ?? 0) >= RECHECK_NOISY_COUNT && !!c.recheckedAt && input.now.getTime() - c.recheckedAt.getTime() < DAY_MS))
+      .map((c) => c.id),
+  );
+  const toCeo = [...atCeo];
+  const toAuthor = rechecking.filter((c) => !atCeo.has(c.id)).map((c) => c.id);
+  const base = { staleAt: input.now, staleReason: input.reason, recheckStageAt: input.now };
+  if (toAuthor.length) await db.update(decisions).set({ ...base, recheckStage: "author" }).where(and(inArray(decisions.id, toAuthor), eq(decisions.status, "open"), isNull(decisions.staleAt)));
+  if (toCeo.length) await db.update(decisions).set({ ...base, recheckStage: "ceo" }).where(and(inArray(decisions.id, toCeo), eq(decisions.status, "open"), isNull(decisions.staleAt)));
+  return { rechecking, atCeo };
+}
+
+/** The author could not be woken (the wake was dropped): their cards go to the CEO now rather than after 30 minutes. */
+async function moveToCeo(db: Db, ids: string[], now: Date) {
+  if (ids.length) await db.update(decisions).set({ recheckStage: "ceo", recheckStageAt: now }).where(and(inArray(decisions.id, ids), eq(decisions.status, "open"), eq(decisions.recheckStage, "author")));
+}
+
+/**
+ * Wakes the CEO once with every card now at their stage in a company (one list, not one wake per card), and
+ * says what to do with each. Returns true when the CEO was woken.
+ */
+export async function wakeCeoForRecheck(db: Db, input: { companyId: string; wake?: WakeFn | null; ids: string[] }): Promise<boolean> {
+  if (!input.wake || !input.ids.length) return false;
+  const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, input.companyId), eq(agents.role, "ceo")));
+  if (!ceo) return false;
+  const cards = await db.select({ id: decisions.id, question: decisions.question, reason: decisions.staleReason, by: agents.name }).from(decisions).leftJoin(agents, eq(agents.id, decisions.raisedByAgentId)).where(and(inArray(decisions.id, input.ids), eq(decisions.status, "open"), eq(decisions.recheckStage, "ceo")));
+  if (!cards.length) return false;
+  const w = await input.wake({
+    agentId: ceo.id,
+    ticketId: null,
+    reason: STALE_REASON,
+    note: [
+      `${cards.length === 1 ? "A card is" : `${cards.length} cards are`} being re-checked and its author did not settle ${cards.length === 1 ? "it" : "them"} in time. You have 30 minutes; after that ${cards.length === 1 ? "it goes" : "they go"} back to the owner marked as not re-checked by you.`,
+      ...cards.map((c) => `- ${c.id}: "${c.question.slice(0, 160)}" (raised by ${c.by ?? "Boss Man"}; flagged because ${c.reason ?? "something it depends on changed"})`),
+      "Check each against the live state. Use the decisions tool: action recheck with the card's id and note (one line on what you checked) to confirm it still holds, or action withdraw with a reason, or raise one corrected card with raise_decision replaces <id>.",
+    ].join("\n"),
+  });
+  return !(!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped"));
+}
+
+/**
+ * A card on the alert ladder is Boss Man's own and is never marked stale, except a question an agent asked by hand
+ * that waits with the CEO first (context type "question", BOS-1318): it is still the agent's card and keeps its flag-and-wake.
+ */
+const notOnSystemLadder = sql`(${decisions.context}->'ladder' is null or ${decisions.context}->>'type' = 'question')`;
+const onSystemLadder = sql`not ${notOnSystemLadder}`;
+
+type ActedResult ={ flaggedDecisions: string[]; flaggedTickets: string[]; woken: string[] };
 
 /**
  * The owner did something on these tickets: mark open cards about them (and everything that
@@ -79,7 +162,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
     .from(tickets)
     .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
   const flaggedTickets = noted.map((n) => n.id);
-  if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now }).where(inArray(tickets.id, flaggedTickets));
+  if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now, stateNoteStaleReason: input.reason }).where(inArray(tickets.id, flaggedTickets));
 
   // A card's tickets are the ones its context names (ticketId, blockedTicketId) or blocks, plus for
   // a permission or stall card the ticket of the run it names and for a deploy the ticket it
@@ -98,16 +181,15 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   // either current or closed by its own condition, not marked stale. A question an agent asked by
   // hand keeps today's flag-and-wake, and is matched only by the ticket it names or blocks, never by
   // an answer on a different card about the same ticket.
-  const system = or(isNull(decisions.raisedByAgentId), sql`${decisions.context}->'ladder' is not null`);
+  const system = or(isNull(decisions.raisedByAgentId), onSystemLadder);
   const open = await db
-    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context })
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
     .from(decisions)
     .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`not (${system})`, or(named, blocking, deployTicket, engagementCard)));
-  // The query above already picked out the cards about these tickets, so these are the flagged
-  // cards; no second lookup is needed (BOS-175).
-  const flagged = open;
+  // The query above already picked out the cards about these tickets (BOS-175). Boss Man checks them before any
+  // author is asked (BOS-1193): a card it can see is dead closes, the rest go into "being re-checked".
+  const { rechecking: flagged, atCeo } = await enterRecheck(db, { cards: open, reason: input.reason, now });
   const flaggedDecisions = flagged.map((d) => d.id);
-  if (flaggedDecisions.length) await db.update(decisions).set({ staleAt: now, staleReason: input.reason }).where(inArray(decisions.id, flaggedDecisions));
 
   // One wake per agent, naming what changed and what to do about it. Only an agent that actually
   // holds a card or a state note the answer could have made out of date is woken (BOS-254): a
@@ -116,7 +198,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   const skip = new Set(input.skipAgents?.filter((id): id is string => !!id) ?? []);
   // not state: built per call and thrown away.
   const targets = new Map<string, { ticketId: string | null }>();
-  for (const d of flagged) if (d.raisedByAgentId && !skip.has(d.raisedByAgentId) && !targets.has(d.raisedByAgentId)) targets.set(d.raisedByAgentId, { ticketId: null });
+  for (const d of flagged) if (d.raisedByAgentId && !atCeo.has(d.id) && !skip.has(d.raisedByAgentId) && !targets.has(d.raisedByAgentId)) targets.set(d.raisedByAgentId, { ticketId: null });
   // Woken only for a note or card of their own: `noted` is every flagged note (a dependent's own
   // "waiting on it" note counts, it is really out of date), and `flagged` is every open card about
   // anything in scope. Nobody is woken just for a ticket being listed downstream.
@@ -130,19 +212,117 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
         reason: STALE_REASON,
         note: [
           `The owner acted (${input.reason}), so a decision card or the state note you left may now be out of date.`,
-          "Check the live state before you repeat anything to them: their latest answers, what's deployed, and whether the tickets involved are done.",
-          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run.",
-          "If nothing of yours is affected, end the run.",
+          ...RECHECK_STEPS,
+          "Also update the ticket's state note in this run if it is affected. If nothing of yours is affected, end the run.",
         ].join("\n"),
       });
-      if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) continue;
+      if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) {
+        // Nobody to ask: the CEO has it now, not in 30 minutes.
+        const theirs = flagged.filter((d) => d.raisedByAgentId === agentId && !atCeo.has(d.id)).map((d) => d.id);
+        await moveToCeo(db, theirs, now);
+        for (const id of theirs) atCeo.add(id);
+        continue;
+      }
       woken.push(agentId);
     }
   }
+  if (input.wake && atCeo.size) await wakeCeoForRecheck(db, { companyId: input.companyId, wake: input.wake, ids: [...atCeo] });
   return { flaggedDecisions, flaggedTickets, woken };
 }
 
-export type OwnerAnswer = { kind: "decision" | "message"; question: string | null; answer: string; at: Date };
+/**
+ * Flags these open cards "may be out of date" and wakes each author once (BOS-1161). Never closes a card: only a
+ * checkable `clearWhen` condition does that (alert-clearing.ts). A card already flagged is left alone, so one event is one wake.
+ */
+async function flagCards(db: Db, input: { cards: FlaggedCard[]; reason: string; wake?: WakeFn | null; now: Date; companyId?: string }): Promise<{ flaggedDecisions: string[]; woken: string[] }> {
+  const { rechecking, atCeo } = await enterRecheck(db, { cards: input.cards, reason: input.reason, now: input.now });
+  const woken: string[] = [];
+  if (input.wake) {
+    for (const agentId of new Set(rechecking.filter((c) => !atCeo.has(c.id)).map((c) => c.raisedByAgentId).filter((a): a is string => !!a))) {
+      const w = await input.wake({
+        agentId,
+        ticketId: null,
+        reason: STALE_REASON,
+        note: [`${input.reason}, so a decision card you raised may now be out of date.`, ...RECHECK_STEPS, "Also update the ticket's state note in this run if it is affected."].join("\n"),
+      });
+      if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) {
+        const theirs = rechecking.filter((c) => c.raisedByAgentId === agentId).map((c) => c.id);
+        await moveToCeo(db, theirs, input.now);
+        for (const id of theirs) atCeo.add(id);
+        continue;
+      }
+      woken.push(agentId);
+    }
+    if (atCeo.size && input.companyId) await wakeCeoForRecheck(db, { companyId: input.companyId, wake: input.wake, ids: [...atCeo] });
+  }
+  return { flaggedDecisions: rechecking.map((c) => c.id), woken };
+}
+
+/** The open cards a person (an agent) wrote and nobody has flagged yet: Boss Man's own cards close by their own condition instead (BOS-470). */
+const agentCardFilter = (companyId: string) =>
+  and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, notOnSystemLadder);
+
+/**
+ * The runners were rebuilt (BOS-1161): open question cards that talk about the runners or a rebuild may be moot now.
+ * Matched on the card's own words, because a card about the runner names no ticket; it is flagged and its author
+ * woken to confirm or withdraw, never closed (a card that named a rebuild in `clearsWhen` was closed already).
+ */
+export async function runnerRebuilt(db: Db, input: { companyId: string; wake?: WakeFn | null; now?: Date }) {
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
+    .from(decisions)
+    .where(and(agentCardFilter(input.companyId), sql`(${decisions.question} ~* 'runner|rebuild')`));
+  return flagCards(db, { cards: open, reason: "the runners were rebuilt", wake: input.wake, now: input.now ?? new Date(), companyId: input.companyId });
+}
+
+/**
+ * A card's own ticket changed state well after the card was raised (BOS-1161): the work went on without the answer, or
+ * someone moved it. Compared to the card's age plus a grace period, because raising a card that blocks its ticket moves
+ * the ticket too. Run from the sweep, since ticket state moves from many places (a database trigger stamps each one).
+ */
+export const STATE_CHANGE_GRACE_MS = 2 * 60_000;
+export async function ticketStateChanged(db: Db, input: { companyId?: string; wake?: WakeFn | null; now?: Date }) {
+  const now = input.now ?? new Date();
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, companyId: decisions.companyId, recheckedAt: decisions.recheckedAt, recheckCount: decisions.recheckCount })
+    .from(decisions)
+    .innerJoin(tickets, sql`${tickets.id}::text = (${decisions.context} ->> 'ticketId')`)
+    // A card a re-check confirmed is only flagged by a change after that confirmation (BOS-1193): else the same old
+    // state change would flag it again on every sweep. `greatest` ignores a null recheckedAt.
+    .where(and(eq(decisions.status, "open"), isNull(decisions.staleAt), sql`${decisions.raisedByAgentId} is not null`, notOnSystemLadder, sql`(${decisions.kind} <> 'permission' or ${decisions.context}->>'plan' = 'true')`, sql`${tickets.stateChangedAt} > greatest(${decisions.createdAt} + (${STATE_CHANGE_GRACE_MS} * interval '1 millisecond'), ${decisions.recheckedAt})`, ...(input.companyId ? [eq(decisions.companyId, input.companyId)] : [])));
+  const out = { flaggedDecisions: [] as string[], woken: [] as string[] };
+  for (const companyId of new Set(open.map((d) => d.companyId))) {
+    const r = await flagCards(db, { cards: open.filter((d) => d.companyId === companyId), reason: "the ticket it is about changed state", wake: input.wake, now, companyId });
+    out.flaggedDecisions.push(...r.flaggedDecisions);
+    out.woken.push(...r.woken);
+  }
+  return out;
+}
+
+/**
+ * The re-check clock (BOS-1193, DR-054), run from the sweep: a card its author did not settle in 30 minutes goes to the
+ * CEO (one wake per company listing every such card), and a card the CEO did not settle in a further 30 goes back to the
+ * owner as "lapsed", which says plainly who failed to re-check it. A lapsed card is not re-checked again.
+ */
+export async function recheckDeadlines(db: Db, input: { wake?: WakeFn | null; now?: Date }) {
+  const now = input.now ?? new Date();
+  const lapsed = await db
+    .update(decisions)
+    .set({ recheckStage: "lapsed", recheckStageAt: now })
+    .where(and(eq(decisions.status, "open"), eq(decisions.recheckStage, "ceo"), sql`${decisions.recheckStageAt} <= ${new Date(now.getTime() - RECHECK_CEO_MS)}`))
+    .returning({ id: decisions.id });
+  const toCeo = await db
+    .update(decisions)
+    .set({ recheckStage: "ceo", recheckStageAt: now })
+    .where(and(eq(decisions.status, "open"), eq(decisions.recheckStage, "author"), sql`${decisions.recheckStageAt} <= ${new Date(now.getTime() - RECHECK_AUTHOR_MS)}`))
+    .returning({ id: decisions.id, companyId: decisions.companyId });
+  for (const companyId of new Set(toCeo.map((c) => c.companyId))) {
+    await wakeCeoForRecheck(db, { companyId, wake: input.wake, ids: toCeo.filter((c) => c.companyId === companyId).map((c) => c.id) });
+  }
+  return { lapsed: lapsed.map((l) => l.id), movedToCeo: toCeo.map((c) => c.id) };
+}
+
+export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date };
 
 const askWords = (s: string) =>
   new Set(

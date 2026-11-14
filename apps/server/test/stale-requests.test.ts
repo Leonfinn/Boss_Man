@@ -10,6 +10,7 @@ import { decisions, deploys, deployTargets, engagements, ticketDependencies, tic
 import { issueRunToken } from "../src/mcp.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { ownerActed, STALE_REASON } from "../src/services/stale-requests.js";
+import { workService } from "../src/services/work.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -91,7 +92,8 @@ describe("stale requests (BOS-123)", () => {
 
     const allowed = await ask("Which payment provider should I use, Stripe or Mollie?", { stillNeeded: "The owner chose Mollie, but the Mollie key has expired and they must pick again." });
     expect(isError(allowed)).toBe(false);
-    expect(textOf(allowed)).toMatch(/in the owner's queue/i);
+    // BOS-1318: a plain question goes to the CEO first.
+    expect(textOf(allowed)).toMatch(/went to the CEO first/i);
   });
 
   it("lets the same agent ask an unrelated question after the owner answered a different one (BOS-175)", async () => {
@@ -106,7 +108,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the checkout button?", options: ["Green", "Brand blue"], recommended: "Green", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("flags notes and cards that wait on a ticket when that ticket is done", async () => {
@@ -162,7 +164,11 @@ describe("stale requests (BOS-123)", () => {
     const note = { stateNote: "Waiting on the owner.", stateNoteAt: new Date("2026-10-27T10:00:00Z"), lastActivityAt: new Date("2026-10-27T09:00:00Z") };
     expect(stateNoteLine(note, now)).not.toContain("(may be out of date)");
     expect(stateNoteLine({ ...note, lastActivityAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
-    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
+    // An owner action says what it was and when, never a bare "check before repeating" (BOS-1192).
+    const byOwner = stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z"), stateNoteStaleReason: 'the owner answered "Approve BOS-1095?"' }, now);
+    expect(byOwner).toContain('after this was written, the owner answered "Approve BOS-1095?", 1h ago');
+    expect(byOwner).not.toContain("check before repeating");
+    expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("the owner acted on this ticket 1h ago");
     // A flag from before the note was rewritten doesn't make the fresh note stale.
     expect(stateNoteLine({ ...note, stateNoteAt: new Date("2026-10-27T11:30:00Z"), stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).not.toContain("(may be out of date)");
   });
@@ -176,6 +182,7 @@ describe("stale requests (BOS-123)", () => {
 
     let [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+    expect(row!.stateNoteStaleReason).toContain('the owner answered "Which colour?"');
 
     await c.work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
     [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
@@ -186,6 +193,18 @@ describe("stale requests (BOS-123)", () => {
     await c.decisions.answer(second.id, "No");
     [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+  });
+
+  it("stamps a fresh note and the activity time from one instant, so a clock that ticks mid-write leaves it fresh (BOS-1343)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    // A clock that advances on every read: if the write reads it twice, the activity time lands after the note's.
+    let clock = new Date("2026-11-13T10:00:00Z");
+    const work = workService(c.db, { now: () => (clock = new Date(clock.getTime() + 3)) });
+    await work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
+    const [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteAt!.getTime()).toBe(row!.lastActivityAt.getTime());
+    expect(stateNoteLine({ stateNote: row!.stateNote, stateNoteAt: row!.stateNoteAt, stateNoteStaleAt: row!.stateNoteStaleAt, lastActivityAt: row!.lastActivityAt }, new Date("2026-11-13T10:05:00Z"))).not.toContain("(may be out of date)");
   });
 
   it("does not refuse a fresh question because of an unrelated permission answer on the ticket", async () => {
@@ -210,7 +229,7 @@ describe("stale requests (BOS-123)", () => {
       arguments: { question: "Which colour for the footer?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
     });
     expect(isError(asked)).toBe(false);
-    expect(textOf(asked)).toMatch(/in the owner's queue/i);
+    expect(textOf(asked)).toMatch(/went to the CEO first/i);
   });
 
   it("marks cards and notes across every kind of card in one action, and wakes each author once (BOS-175 item 3)", async () => {
@@ -316,7 +335,7 @@ describe("stale requests (BOS-123)", () => {
     await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
 
     const mcp = await c.mcp(c.other.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved", replacedBy: "none" } });
     expect(isError(r)).toBe(true);
     expect(textOf(r)).toMatch(/another flow/i);
 
@@ -331,7 +350,7 @@ describe("stale requests (BOS-123)", () => {
     const t = await c.ticket("Pick a colour", c.worker.id);
     const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Blue or navy?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Read the brand guide" });
     const mcp = await c.mcp(c.worker.id);
-    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue" } });
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue, so this question is no longer needed.", replacedBy: "none" } });
     expect(isError(r)).toBe(false);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
     expect(after!.status).toBe("withdrawn");

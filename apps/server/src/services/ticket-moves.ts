@@ -7,7 +7,7 @@ import type { SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, tickets, workflowColumns } from "../db/schema.js";
 import { record } from "./activity.js";
-import { agentWipHold, cantMoveSql, countWip, isWipHeldNote } from "./agent-wip.js";
+import { agentWipHold, cantMoveSql, countWip } from "./agent-wip.js";
 import { lineEvent } from "./merge-line.js";
 import { WorkError } from "./ticket-links.js";
 
@@ -130,7 +130,10 @@ export async function moveTicket(db: Db, ticketId: string, to: SystemState | nul
   const changed = target !== t.systemState;
   const fields: Partial<typeof tickets.$inferInsert> = { ...opts.fields };
   if (held) Object.assign(fields, { stateNote: held, stateNoteAt: at, stateNoteStaleAt: null });
-  else if (target === "in_progress" && fields.stateNote === undefined && isWipHeldNote(t.stateNote)) fields.stateNote = null;
+  else if (target === "in_progress" && fields.stateNote === undefined && t.wipHeldAt) fields.stateNote = null;
+  // The hold is a field, so a later state note can't erase it (BOS-1180): set when held, kept while the ticket stays in Ready, cleared on leaving it.
+  if (held) fields.wipHeldAt = t.systemState === "ready" && t.wipHeldAt ? t.wipHeldAt : at; // the first hold's time, so "held for 30 minutes" isn't reset by each refusal
+  else if (target !== "ready") fields.wipHeldAt = null;
   if (t.noCode && t.mergeCommit && !opts.internal && fields.noCode === undefined && changed && REOPEN_STATES.has(target)) fields.noCode = false;
   const set: Partial<typeof tickets.$inferInsert> = {
     ...fields,

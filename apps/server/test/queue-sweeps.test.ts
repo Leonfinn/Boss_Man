@@ -190,12 +190,12 @@ describe("ranked decision queue (R20)", () => {
       ctx = await setup();
       const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
       const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
 
       const rows = await ordered();
       // The waiting card is last, is marked, and the hands-on card is numbered.
       expect(rows[rows.length - 1]!.id).toBe(stale.id);
-      expect(rows[rows.length - 1]!.waiting).toMatch(/checking whether this is still needed/i);
+      expect(rows[rows.length - 1]!.waiting).toMatch(/being re-checked/i);
       expect(rows[0]!.id).toBe(hands.id);
       expect(rows[0]!.step).toBe(1);
     });
@@ -328,8 +328,8 @@ describe("ranked decision queue (R20)", () => {
       const hands = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Read the memory figure", options: ["Done", "Skip"], recommended: "Done", steps: ["Read the memory figure in Settings."] });
       const plain = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the budget?", options: ["Approve", "No"], recommended: "Approve" });
       // One the owner already acted on: the agent is checking it (superseded → waiting group).
-      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Approve the other budget?", options: ["Approve", "No"], recommended: "Approve" });
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, stale.id));
+      const stale = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Hire the new designer?", options: ["Approve", "No"], recommended: "Approve" });
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, stale.id));
       // One whose ticket went back to an agent (a merge card in the waiting group).
       const sentBackTicket = await ctx.ticket({ title: "Ship the invoicing page", state: "in_progress", assigneeAgentId: ctx.worker.id });
       const [sentBack] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", tier: "owner", question: "Merge and ship?", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", context: { type: "check_stuck", ticketId: sentBackTicket.id, command: "scripts/check-all.sh", output: "failed" } as never }).returning();
@@ -362,7 +362,7 @@ describe("ranked decision queue (R20)", () => {
       await ctx.db.update(decisions).set({ staleAt: null, staleReason: null }).where(eq(decisions.id, stale.id));
       expect(await tally()).toEqual({ open: 3, waiting: 1 });
       ctx.advance(6_000);
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(eq(decisions.id, plain.id));
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(eq(decisions.id, plain.id));
       expect(await tally()).toEqual({ open: 2, waiting: 2 });
       // Answering the hands-on card drops it out of both figures at once: an answer clears the kept tally.
       await ctx.req("POST", `/api/decisions/${hands.id}/answer`, { answer: "Done" });
@@ -395,7 +395,7 @@ describe("ranked decision queue (R20)", () => {
       expect(dash.queueRows).toBe(0);
       // Past the few seconds the queue is walked again, so a card moving between groups shows at once.
       ctx.advance(6_000);
-      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
+      await ctx.db.update(decisions).set({ staleAt: ctx.clock(), staleReason: "you changed it", recheckStage: "author" }).where(sql`${decisions.companyId} = ${ctx.company.id}`);
       const later = await measure(`/api/decisions/tally?companyId=${ctx.company.id}`);
       expect(later.body).toEqual({ open: 0, waiting: 1 });
       expect(later.queueRows).toBeGreaterThan(0);
@@ -736,8 +736,9 @@ describe("stalled runs (R32)", () => {
     await ctx.scheduler.tick();
     ctx.advance(6 * 60_000);
     expect(await ctx.sweep()).toMatchObject({ stalledRuns: { raised: 0 }, neverStartedRuns: 0 });
-    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean } | null };
-    expect(status.runner?.swapping).toBe(true);
+    const status = (await ctx.serverStatus.status(ctx.company.id)) as { runner: { swapping: boolean; settling: boolean } | null };
+    // Connected again: it is settling (starting queued runs), not mid-swap, so the swapping flag is clear (BOS-382).
+    expect(status.runner).toMatchObject({ swapping: false, settling: true });
   });
 
   describe("runs that never start (BOS-480)", () => {
@@ -1337,7 +1338,7 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     expect(row.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished" })]);
     // Same chain as the old whole-table walk.
     const legacyRaw = await legacyQueue(ctx.db, () => new Date());
-    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, createdAt: r.createdAt.toISOString() }));
+    const old = legacyRaw.map((r) => ({ ...r, about: row.about, refs: {}, rechecking: null, notRechecked: null, createdAt: r.createdAt.toISOString() }));
     expect(mine).toEqual(old);
   });
 
@@ -1369,6 +1370,8 @@ describe("queue reads only what the open cards reach (BOS-413)", () => {
     const about = (id: string) => [{ ticketId: id, title: id === root[0]!.id ? "Root 0" : "Branch 0", ref: id === root[0]!.id ? "APP-1" : "APP-5" }];
     const old = legacyRaw.map((r) => ({
       ...r,
+      rechecking: null,
+      notRechecked: null,
       about: r.id === heldCards[0]!.id ? about(root[0]!.id) : r.id === heldCards[1]!.id ? about(branch[0]!.id) : [],
       // A Date in the old body, an ISO string over HTTP.
       createdAt: r.createdAt.toISOString(),

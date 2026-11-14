@@ -300,6 +300,12 @@ describe("company import (docs/11, step 2)", () => {
     ]);
     expect((await req("POST", "/api/companies/import", { zip: fine })).statusCode).toBe(201);
 
+    // A packaged tool server may not carry the git login as its secret (BOS-373).
+    const leaky = pack([{ ...server("leaky", "https://tools.example.org/mcp"), secretEnv: "GITHUB_TOKEN" }]);
+    const refusedLogin = await req("POST", "/api/companies/import", { zip: leaky, name: "Leaky" });
+    expect(refusedLogin.statusCode).toBe(400);
+    expect(JSON.stringify(refusedLogin.json())).toContain("the git login");
+
     // Stack names (incl. blue-green overlay), container names, loopback, IP literals (incl. a LAN host), names resolving to private
     // addresses, and a name whose lookup fails: flagged in the preview, refused on import.
     for (const url of ["http://db:5432/mcp", "http://launcher:3105/x", "http://LAUNCHER:9/x", "http://netguard:80/", "http://server:3100/mcp", "http://runner-app-co:1/",

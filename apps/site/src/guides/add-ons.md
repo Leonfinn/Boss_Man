@@ -6,6 +6,8 @@ order: 9
 lead: Boss Man works without any add-ons. Each one below is optional and off until you turn it on.
 ---
 
+![Three kinds of extra for agents: skills come from a link, a draft or an upload, are checked by the Security Reviewer and approved by you, and run in the agent's session; tool servers are servers you add yourself and run elsewhere; runner add-ons come from Boss Man's short list, you turn them on in .env, and they are built into the runner. A skill that needs an add-on waits until it shows Working.](/img/three-kinds-of-add-on.svg =1160x460 narrow=/img/three-kinds-of-add-on-narrow.svg:360x1160 "Skills, tool servers and runner add-ons: where each comes from, who approves it and where it runs.")
+
 ## Tailscale: HTTPS from anywhere on your tailnet
 
 Tailscale gives Boss Man an address such as `https://boss-man.<tailnet>.ts.net` with a real certificate. Only devices on your tailnet can reach it. Your home network address keeps working. You need it for phone notifications and to install Boss Man as an app on your phone.
