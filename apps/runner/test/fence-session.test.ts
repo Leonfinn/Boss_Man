@@ -12,9 +12,13 @@ import { SessionManager } from "../src/session-manager.js";
 import { gateStoreDir } from "../src/store.js";
 import { Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
 
 const level = levelFor(probeLandlock().abi).level;
 const live = level !== "unavailable";
+/** The real Claude ACP adapter now lives in the Claude pack (DR-050, BOS-972), not the runner's node_modules:
+ * the stub-model suite drives it, so it runs only where a pack is pointed at, and skips otherwise. */
+const claude = claudeAdapterBin();
 const FAKE_REACH = path.join(import.meta.dirname, "fake-reach.mjs");
 
 type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; wroteSharedStore: boolean; wroteGateStore: boolean; wroteScratch: boolean; env: Record<string, string | null> };
@@ -330,7 +334,7 @@ describe.skipIf(!live)("the shared memory link", () => {
   });
 });
 
-describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
+describe.skipIf(!live || !claude)("Claude Code inside the fence (stub model)", () => {
   let stub: Awaited<ReturnType<typeof startStubAnthropic>>;
   const stubLog: StubLogEntry[] = [];
   beforeEach(async () => {
@@ -365,6 +369,7 @@ describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
       baseEnv: { PATH: process.env.PATH, HOME: root, CLAUDE_CONFIG_DIR: sharedClaude, NO_PROXY: "127.0.0.1,localhost" },
       resolveEnv: async () => ({ ANTHROPIC_BASE_URL: stub.url, ANTHROPIC_API_KEY: "sk-ant-stub-not-a-real-key", NO_PROXY: "127.0.0.1,localhost" }),
       fence: { level, agentsRoot },
+      ...(claude ? { adapterBins: { claude } } : {}),
       emit: (e) => {
         events.push(e);
         if (e.type === "run.permission_request") manager.handle({ type: "permission.decide", runId: e.runId, requestId: e.requestId, verdict: /rm -rf/.test(String((e.rawInput as { command?: string } | null)?.command)) ? "deny" : "allow" });
