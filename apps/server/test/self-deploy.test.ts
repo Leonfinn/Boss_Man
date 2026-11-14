@@ -1368,6 +1368,18 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     await c.notes.syncDecisions();
     const sent = await c.db.select().from(notifications);
     expect(sent.find((n) => n.decisionId === runner!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+
+    // A second runner card for the same fix (the owner said "Not now", then pressed the button) is a repeat: it
+    // keeps the heading text but is routine again, so the owner is not paged twice for one fix.
+    await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Not now" });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const [again] = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
+    expect(again!.id).not.toBe(runner!.id);
+    expect(urgentOf(again!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    const all = await c.db.select().from(notifications);
+    expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
   });
 });
 
