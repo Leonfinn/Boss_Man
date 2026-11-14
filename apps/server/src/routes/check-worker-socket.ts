@@ -11,7 +11,8 @@ import type { CheckWorker, CheckWorkersService } from "../services/check-workers
 /** Close code for a worker the owner turned off (or removed): it keeps redialling, and is refused until turned on. */
 export const WORKER_OFF_CLOSE = 4003;
 
-type Checks = Pick<ReturnType<typeof checkDispatcher>, "onWorkerHello" | "onWorkerDone" | "onWorkerProgress" | "onWorkerGone">;
+type Checks = Pick<ReturnType<typeof checkDispatcher>, "onWorkerHello" | "onWorkerDone" | "onWorkerProgress" | "onWorkerGone"> &
+  Partial<Pick<ReturnType<typeof checkDispatcher>, "onWorkerNeedCode" | "onWorkerNoCode" | "onWorkerRepos">>;
 
 export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: CheckWorkersService, opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Checks } = {}) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
@@ -86,7 +87,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
                 );
                 // lastSeq 0: a worker keeps no journal, so there is nothing to replay; the welcome only says "live".
                 send({ type: "welcome", lastSeq: 0 });
-                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs);
+                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs, msg.repos);
               })
               .catch((err) => app.log.error({ err, workerId: worker.id }, "check worker hello failed"));
             return;
@@ -95,6 +96,16 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             return;
           case "check.done":
             queue = queue.then(() => opts.checks?.onWorkerDone(worker.id, msg)).catch((err) => app.log.error({ err, workerId: worker.id }, "check worker result failed"));
+            return;
+          // BOS-1436: getting the code. Only for the worker's own jobs (the dispatcher checks the job runs on it).
+          case "check.needCode":
+            queue = queue.then(() => opts.checks?.onWorkerNeedCode?.(worker.id, msg.jobId)).catch((err) => app.log.warn({ err, workerId: worker.id }, "check worker code request failed"));
+            return;
+          case "check.noCode":
+            queue = queue.then(() => opts.checks?.onWorkerNoCode?.(worker.id, msg.jobId, msg.reason)).catch((err) => app.log.warn({ err, workerId: worker.id }, "check worker no-code failed"));
+            return;
+          case "check.haves":
+            opts.checks?.onWorkerRepos?.(worker.id, msg.repos);
             return;
           case "ping":
             send({ type: "pong" });

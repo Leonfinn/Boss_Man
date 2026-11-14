@@ -35,13 +35,25 @@ async function setup(opts: { runnerSlots?: number; graceMs?: number } = {}) {
   const toWorker: Array<{ workerId: string; command: any }> = [];
   const closed: Array<{ workerId: string; code: number }> = [];
   let runnerUp = true;
-  const d = checkDispatcher(db, {
-    send: (runnerId, command) => (runnerUp ? (toRunner.push({ runnerId, command }), true) : false),
-    isConnected: () => runnerUp,
-    can: () => true,
+  const removed: string[] = [];
+  // setRunnerUp(false): the runner takes no checks itself (as if its slots were full), but stays connected, because since
+  // BOS-1436 a worker gets its code only through the company runner.
+  const dispatcher = checkDispatcher(db, {
+    send: (runnerId, command) => (runnerUp || command.type !== "check.run" ? (toRunner.push({ runnerId, command }), true) : false),
+    isConnected: () => true,
+    can: () => runnerUp,
     workers,
     workerGraceMs: opts.graceMs ?? 30,
+    // BOS-1436: the runner "packs" at once; the code itself is covered in check-bundles.test.ts.
+    bundles: { store: { remove: (id) => void removed.push(id), sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
   });
+  // A worker's job starts once its code is packed, after pump returns: every call here waits for that too.
+  const d = new Proxy(dispatcher, {
+    get: (t, k) => {
+      const v = (t as Record<string | symbol, unknown>)[k];
+      return typeof v === "function" && k !== "settled" ? async (...a: unknown[]) => { const r = await (v as (...x: unknown[]) => unknown)(...a); await t.settled(); return r; } : v;
+    },
+  }) as typeof dispatcher;
   const q = checkQueue(db);
   let n = 0;
   const req = async (c: typeof co, extra: Record<string, unknown> = {}) => {
