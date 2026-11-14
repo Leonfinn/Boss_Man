@@ -967,6 +967,8 @@ export function schedulerService(
    */
   async function staleAgentWake(w: typeof wakes.$inferSelect): Promise<string | null> {
     if (w.ticketId || wakeClassOf(w) !== "agent") return null;
+    // Work put back after an account limit refused its run (BOS-1438, limit-requeue.ts) waits for the reset, which can be days: it is not stale.
+    if (w.statusReason?.startsWith("subscription limit hit:")) return null;
     const waited = now().getTime() - w.createdAt.getTime();
     if (waited > limits.staleWakeMs) return `it waited ${Math.round(waited / 3_600_000)} hours, so it is out of date`;
     if (!w.note) return null;

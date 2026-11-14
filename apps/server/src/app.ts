@@ -61,6 +61,7 @@ import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
+import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
 import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
@@ -682,7 +683,21 @@ export async function buildApp(opts: AppOptions) {
           if (!event.error || event.interrupted) return;
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
+          // A run the account refused for a usage limit goes back in the queue, held to the real reset, once per window (BOS-1438).
+          // A second refusal in the same window is the account card instead.
+          const requeued = await limitRequeues.afterRun(event.runId);
+          if (run && requeued.outcome === "second_refusal") {
+            await alerts.raise({
+              companyId: run.companyId,
+              kind: "account_limit",
+              question: `${requeued.account}: a run was refused again on ${requeued.window} after its work was already put back to wait for the reset.`,
+              ticketId: run.ticketId,
+              about: [run.agentId],
+              cause: { account: { fundingSourceId: requeued.fundingSourceId, name: requeued.account, window: requeued.window }, agents: [run.agentId] },
+            });
+          }
         })
+        .then(() => limitRequeues.releaseReady())
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -827,6 +842,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
+  const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
