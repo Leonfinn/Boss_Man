@@ -1563,11 +1563,48 @@ export const feedbackNotes = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
     portalVoter: text("portal_voter"),
+    /** Who the note is, out in the world (BOS-1393): the GitHub watcher's id for an issue, discussion or comment, so a repeat fetch never files it twice. */
+    externalId: text("external_id"),
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
-  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt)],
+  (t) => [
+    index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt),
+    uniqueIndex("feedback_notes_external_id").on(t.companyId, t.externalId).where(sql`${t.externalId} is not null`),
+  ],
 );
+
+/**
+ * The GitHub watcher's setting and cursor, one row per project (BOS-1393). Off by default. The token is a
+ * secret granted to the company as GITHUB_WATCH_TOKEN, never stored here. The cursors live here, in the
+ * database, so a restart or a server takeover carries on where the last pass stopped.
+ */
+export const githubWatches = pgTable("github_watches", {
+  projectId: uuid("project_id").primaryKey().references(() => projects.id, { onDelete: "cascade" }),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  /** "owner/name" on github.com. */
+  repo: text("repo"),
+  /** Minutes between passes: 60 unless the owner says otherwise (BOS-1393); never below 15 (the service and the route both clamp it). */
+  intervalMinutes: integer("interval_minutes").notNull().default(60),
+  watchIssues: boolean("watch_issues").notNull().default(true),
+  watchDiscussions: boolean("watch_discussions").notNull().default(true),
+  /** Logins whose posts are skipped (the owner's own, Boss Man's account), compared without case. */
+  skipLogins: jsonb("skip_logins").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  /** Everything updated up to here has been filed (issues and their comments; discussions and theirs). Null: not yet synced. */
+  issuesCursor: timestamp("issues_cursor", { withTimezone: true }),
+  /** Issue comments are a separate stream on GitHub (repo-wide, by update time), so they have their own cursor. */
+  commentsCursor: timestamp("comments_cursor", { withTimezone: true }),
+  discussionsCursor: timestamp("discussions_cursor", { withTimezone: true }),
+  /** "ok", "error" or "backoff"; the plain reason is in lastError. */
+  status: text("status").notNull().default("idle"),
+  lastError: text("last_error"),
+  failures: integer("failures").notNull().default(0),
+  backoffUntil: timestamp("backoff_until", { withTimezone: true }),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  lastNewNotes: integer("last_new_notes").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
 export const insights = pgTable(

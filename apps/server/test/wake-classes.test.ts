@@ -338,6 +338,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
     "services/retro.ts": NEVER_DROPPED,
+    "services/github-watch.ts": NEVER_DROPPED + " (github feedback and github security are scheduled)",
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
     "services/release-log.ts": CHECKS_OUTCOME + " (a dropped release wake is logged and retried next pass)",
     "services/review-kinds.ts": NEVER_DROPPED,

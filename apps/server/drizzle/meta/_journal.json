@@ -911,6 +911,13 @@
       "when": 1794478875856,
       "tag": "0148_gate_fault_hold",
       "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1794575056383,
+      "tag": "0149_perpetual_lucky_pierre",
+      "breakpoints": true
     }
   ]
 }

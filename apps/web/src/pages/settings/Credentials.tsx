@@ -13,6 +13,7 @@ const CREDENTIALS = [
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
   { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
+  { kind: "generic", label: "GitHub watcher token (read-only)", env: "GITHUB_WATCH_TOKEN", help: "A fine-grained GitHub token with Issues, Discussions and Metadata read access only, for the project's GitHub feedback watcher. Give it no write access." },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
 ] as const;
 

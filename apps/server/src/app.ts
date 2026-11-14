@@ -26,7 +26,8 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
-import { AnswerError, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { runnerWatchService } from "./services/runner-watch.js";
@@ -855,6 +856,17 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // The GitHub watcher (BOS-1393): main.ts runs runDue() on the leader's timer; the owner's routes save the setting and check now.
+  const githubWatch = githubWatchService(db, {
+    fetch: opts.fetch,
+    now: opts.now,
+    token: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "github_watch"))[WATCH_TOKEN_ENV],
+    feedback,
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    alert: (input) => alerts.raise(input),
+    clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    log: (m) => app.log.warn(m),
+  });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
   const runnerWatch = runnerWatchService(db, { isConnected: (id) => runners.isConnected(id), holdOn: async () => !!(await getHold(db)), wantedCompanies: () => launch.wantedCompanies(), guardFault: async (companyId) => ((await launch.status(companyId))?.container?.guardReason ?? null), notify: (n) => notes.notify(n), alert: (input) => alerts.raise(input), now: opts.now, log: (m) => app.log.warn(m) });
   // Server-health alerts (BOS-640): memory to the CEO, freezes to the owner. main.ts runs check() on the leader.
@@ -1537,7 +1549,7 @@ export async function buildApp(opts: AppOptions) {
     };
 
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
-    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, now: opts.now });
+    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
 
@@ -2181,5 +2193,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

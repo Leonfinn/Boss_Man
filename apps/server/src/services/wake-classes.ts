@@ -45,6 +45,10 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "review hold ready": "scheduled",
   // The merge queue tells the CEO a card holding a merge looks stale (BOS-1078).
   "merge held by a stale card": "scheduled",
+  // The GitHub watcher filed new notes (BOS-1393): one wake per pass, never dropped, merged while it waits.
+  "github feedback": "scheduled",
+  // A GitHub post that looks like a security report goes to the CEO at once (BOS-1393).
+  "github security": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

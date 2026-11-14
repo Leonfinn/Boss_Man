@@ -15,6 +15,8 @@ const REDACTIONS: Array<[RegExp, string]> = [
   [/\b(Bearer)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 [redacted]"],
   [/\b(sk-[A-Za-z0-9_-]{8,})/g, "sk-[redacted]"],
   [/\b(gh[pousr]_[A-Za-z0-9]{16,})/g, "gh[redacted]"],
+  // A fine-grained GitHub token (BOS-1393): the GitHub watcher's read-only token has this shape.
+  [/\b(github_pat_[A-Za-z0-9_]{16,})/g, "github_pat_[redacted]"],
   [/([?&](?:token|key|secret|password|api[_-]?key)=)[^&\s]+/gi, "$1[redacted]"],
   [/\b([A-Za-z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Za-z0-9_]*=)[^\s&"']+/gi, "$1[redacted]"],
   [/("(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|cookie)"\s*:\s*")[^"]*(")/gi, "$1[redacted]$2"],
