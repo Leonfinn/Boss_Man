@@ -1351,6 +1351,150 @@ export class Workspaces {
     }
   }
 
+  /**
+   * DR-060 part 2 (BOS-1436): the company runner packs a check job's commit for a check worker, which has no GitHub login.
+   * The bundle carries the job's commit (under refs/bossman/bundle/<jobId>) and the runner's own origin/<main>, which
+   * check-quick diffs against and the secrets scan reads. `haves` are commits the worker says it holds: those it really
+   * has here become the `--not` base, so after the first (full) bundle the next ones are thin. When the worker already
+   * has both tips git refuses an empty bundle, and the answer is `empty` with nothing uploaded. The temporary ref and
+   * the file go in every case; `upload` streams the file to the server before this returns.
+   */
+  async makeCheckBundle(
+    spec: { projectId: string; jobId: string; commit: string; haves: string[]; full: boolean },
+    upload: (file: string, meta: { bytes: number; sha256: string }) => Promise<void>,
+  ): Promise<CheckBundleMade> {
+    if (!UUID_RE.test(spec.jobId)) throw new Error("the job id isn't a UUID");
+    if (!SHA_RE.test(spec.commit)) throw new Error("the job's commit isn't a commit id");
+    const repo = this.repoDir(spec.projectId);
+    if (!existsSync(path.join(repo, "HEAD"))) throw new Error("this runner has no copy of the project's repo");
+    await this.git(["rev-parse", "--verify", "--quiet", `${spec.commit}^{commit}`], { cwd: repo }).catch(() => {
+      throw new Error(`commit ${spec.commit.slice(0, 12)} isn't in the runner's repo`);
+    });
+    const { mainRef, mainCommit } = await this.originMain(repo);
+    const haves: string[] = [];
+    if (!spec.full) {
+      for (const h of [...new Set(spec.haves)].slice(0, CHECK_BUNDLE_MAX_HAVES)) {
+        if (!SHA_RE.test(h)) continue;
+        if ((await this.gitCode(["cat-file", "-e", `${h}^{commit}`], { cwd: repo })).code === 0) haves.push(h);
+      }
+    }
+    const ref = `refs/bossman/bundle/${spec.jobId}`;
+    const dir = this.scratch("bundle");
+    const file = path.join(dir, `${spec.jobId}.bundle`);
+    try {
+      await this.git(["update-ref", ref, spec.commit], { cwd: repo });
+      const r = await this.gitCode(["bundle", "create", "--quiet", file, ref, mainRef, ...(haves.length ? ["--not", ...haves] : [])], { cwd: repo });
+      if (r.code !== 0) {
+        // The worker already has every object: nothing to send. It checks for both tips itself before it runs.
+        if (haves.length && /empty bundle/i.test(r.stderr)) return { bytes: 0, sha256: "", mainRef, mainCommit, empty: true };
+        throw new Error(`git bundle create failed (exit ${r.code}): ${r.stderr.split("\n").filter(Boolean).pop() ?? ""}`);
+      }
+      const meta = await fileDigest(file);
+      await upload(file, meta);
+      return { ...meta, mainRef, mainCommit, empty: false };
+    } finally {
+      await this.gitCode(["update-ref", "-d", ref], { cwd: repo }).catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The shared repo's origin/<default branch>: where origin/HEAD points, else main, else master. */
+  private async originMain(repo: string): Promise<{ mainRef: string; mainCommit: string }> {
+    const head = (await this.gitCode(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: repo })).stdout;
+    for (const ref of [head, "refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+      if (!ref || !/^refs\/remotes\/origin\/[A-Za-z0-9._/-]+$/.test(ref) || ref === "refs/remotes/origin/HEAD") continue;
+      const c = await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo });
+      if (c.code === 0 && c.stdout) return { mainRef: ref, mainCommit: c.stdout };
+    }
+    throw new Error("the runner's repo has no origin/main (or origin/master) to send with the job");
+  }
+
+  /** A fresh folder for a downloaded bundle (BOS-1436); the caller removes it. */
+  checkBundleScratch = () => this.scratch("bundle-in");
+
+  /**
+   * DR-060 part 2 (BOS-1436), on a check worker: takes a job's bundle into the project's bare repo (one per project,
+   * made on the first job), so runCommitCheck then finds the commit as on the company runner. The bundle must hold
+   * exactly the job's commit and the main the runner named; objects are fsck'd on the way in. `file` null means the
+   * runner sent nothing because this repo already has both tips. `missing` says a thin bundle's base isn't here, so
+   * the caller can ask for a full one.
+   */
+  async takeCheckBundle(
+    spec: { projectId: string; jobId: string; commit: string; mainRef: string; mainCommit: string },
+    file: string | null,
+  ): Promise<{ ok: true } | { ok: false; missing: boolean; reason: string }> {
+    if (!UUID_RE.test(spec.jobId) || !UUID_RE.test(spec.projectId)) return { ok: false, missing: false, reason: "the job or project id isn't a UUID" };
+    if (!SHA_RE.test(spec.commit) || !SHA_RE.test(spec.mainCommit)) return { ok: false, missing: false, reason: "the job's commit isn't a commit id" };
+    if (!/^refs\/remotes\/origin\/[A-Za-z0-9._/-]+$/.test(spec.mainRef) || spec.mainRef.includes("..")) return { ok: false, missing: false, reason: "the main ref isn't an origin branch" };
+    const repo = this.repoDir(spec.projectId);
+    const jobRef = `refs/bossman/jobs/${spec.jobId}`;
+    return this.withRepoLock(spec.projectId, async () => {
+      if (!existsSync(path.join(repo, "HEAD"))) {
+        mkdirSync(path.dirname(repo), { recursive: true });
+        await this.git(["init", "--bare", "--quiet", repo]);
+      }
+      if (file) {
+        const verify = await this.gitCode(["bundle", "verify", "--quiet", file], { cwd: repo });
+        if (verify.code !== 0) {
+          const missing = /lacks these prerequisite/i.test(verify.stderr);
+          return { ok: false, missing, reason: missing ? "the bundle needs commits this worker doesn't have" : `the bundle didn't verify: ${lastLine(verify.stderr)}` };
+        }
+        const heads = new Map(
+          (await this.git(["bundle", "list-heads", file], { cwd: repo }))
+            .split("\n")
+            .map((l) => l.trim().split(/\s+/))
+            .filter((p) => p.length === 2)
+            .map(([sha, name]) => [name, sha] as const),
+        );
+        if (heads.get(`refs/bossman/bundle/${spec.jobId}`) !== spec.commit || heads.get(spec.mainRef) !== spec.mainCommit) {
+          return { ok: false, missing: false, reason: "the bundle doesn't hold the job's commit and main" };
+        }
+        const fetched = await this.gitCode(
+          ["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, `+refs/bossman/bundle/${spec.jobId}:${jobRef}`, `+${spec.mainRef}:${spec.mainRef}`],
+          { cwd: repo },
+        );
+        if (fetched.code !== 0) return { ok: false, missing: /prerequisite|missing/i.test(fetched.stderr), reason: `fetching the bundle failed: ${lastLine(fetched.stderr)}` };
+      } else {
+        for (const c of [spec.commit, spec.mainCommit]) {
+          if ((await this.gitCode(["cat-file", "-e", `${c}^{commit}`], { cwd: repo })).code !== 0) return { ok: false, missing: true, reason: "the runner sent no bundle, but this worker lacks the commit" };
+        }
+        await this.git(["update-ref", jobRef, spec.commit], { cwd: repo });
+        await this.git(["update-ref", spec.mainRef, spec.mainCommit], { cwd: repo });
+      }
+      if ((await this.git(["rev-parse", "--verify", "--quiet", `${jobRef}^{commit}`], { cwd: repo })) !== spec.commit) return { ok: false, missing: false, reason: "the job's commit didn't arrive" };
+      // check-quick and the secrets scan look for origin/main or origin/HEAD.
+      await this.git(["symbolic-ref", "refs/remotes/origin/HEAD", spec.mainRef], { cwd: repo });
+      await this.pruneJobRefs(repo, spec.jobId);
+      return { ok: true };
+    });
+  }
+
+  /** Keeps the newest CHECK_BUNDLE_KEEP_JOBS job refs (and the current job's), so the repo's haves stay recent and it doesn't grow forever. */
+  private async pruneJobRefs(repo: string, keep: string) {
+    const refs = (await this.git(["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/bossman/jobs/"], { cwd: repo })).split("\n").filter(Boolean);
+    const old = refs.filter((r) => !r.endsWith(`/${keep}`)).slice(CHECK_BUNDLE_KEEP_JOBS - 1);
+    for (const r of old) await this.gitCode(["update-ref", "-d", r], { cwd: repo });
+    if (old.length) await this.gitCode(["gc", "--auto", "--quiet"], { cwd: repo });
+  }
+
+  /**
+   * What a check worker tells the server it holds, per project (BOS-1436): the tips of its recent job refs and its
+   * origin branches, newest first, at most CHECK_BUNDLE_MAX_HAVES. The runner uses them as the next bundle's base.
+   */
+  async checkBundleHaves(): Promise<Array<{ projectId: string; haves: string[] }>> {
+    const root = this.reposRoot();
+    if (!existsSync(root)) return [];
+    const out: Array<{ projectId: string; haves: string[] }> = [];
+    for (const name of readdirSync(root)) {
+      const projectId = name.replace(/\.git$/, "");
+      if (!name.endsWith(".git") || !UUID_RE.test(projectId) || !existsSync(path.join(root, name, "HEAD"))) continue;
+      const list = await this.gitCode(["for-each-ref", "--sort=-committerdate", "--format=%(objectname)", "refs/remotes/origin/", "refs/bossman/jobs/"], { cwd: this.repoDir(projectId) });
+      const haves = [...new Set(list.stdout.split("\n").filter((s) => SHA_RE.test(s)))].slice(0, CHECK_BUNDLE_MAX_HAVES);
+      if (haves.length) out.push({ projectId, haves });
+    }
+    return out;
+  }
+
   /** Job ids whose folders belong to a check running in this process: the start-up sweep leaves them alone. */
   private readonly activeJobs = new Set<string>();
 
