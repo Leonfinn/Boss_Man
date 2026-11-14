@@ -164,7 +164,7 @@ describe("approve and merge", () => {
 });
 
 describe("unrated task", () => {
-  it("says the CEO rates it when it reviews the task", async () => {
+  it("says it counts as medium under the field, and why in the Risk help", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -172,12 +172,18 @@ describe("unrated task", () => {
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });
         if (url.includes("/messages")) return json({ live: null, items: [] });
-        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("objectives")) return json([]);
+        if (url.includes("risk")) return json([{ tier: "medium", summary: "Rod reviews it; the project's check runs before it merges; a short plan first." }]);
         return json({});
       }),
     );
+    vi.stubGlobal("innerWidth", 1440);
     render(<Ticket id="t1" companies={[{ id: "c1", name: "App Co", mission: null, paused: false, agents: [] }]} />);
-    expect(await screen.findByText("Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).")).toBeTruthy();
+    expect(await screen.findByText("Not rated yet (counts as medium).")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "About Risk" }));
+    expect(screen.getByText("Rod reviews it; a short plan first.")).toBeTruthy();
+    // Unrated, so no level is marked "(this task)"; the field says it counts as medium.
+    expect(screen.queryByText(/\(this task\)/)).toBeNull();
   });
 });
 

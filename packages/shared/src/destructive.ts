@@ -702,6 +702,18 @@ export function commandRisks(command: string | string[]): Risk[] {
             judge({ ...cmd, words: words.slice(i), nested: true, elsewhere: true }, depth + 1, bulk);
           });
         };
+        // docker/podman compose and the standalone docker-compose/podman-compose, given the words after `compose`
+        // (BOS-856): `down -v` deletes the project's named volumes (its databases), `down --rmi` its images and `rm`
+        // its containers, like docker rm/rmi. exec/run are judged with `inside`, as for docker exec.
+        const compose = (words: Word[], name: string) => {
+          const cw = afterOptions(words, ["-f", "--file", "-p", "--project-name", "--project-directory", "--env-file", "--profile", "--ansi", "--progress", "--parallel"]);
+          const verb = cw[0];
+          if (verb?.dynamic) return destroys(`runs a ${name} command only known when it runs`);
+          if (verb?.text === "rm") destroys(`removes containers (${name} rm)`);
+          if (verb?.text === "down" && cw.slice(1).some((o) => shortHas(o.text, "v") || longOf(o.text, ["volumes", "rmi"]) || mayBeOption(o))) destroys(`deletes the project's volumes or images (${name} down)`);
+          const runAt = words.findIndex((x) => x.text === "exec" || x.text === "run");
+          if (runAt >= 0) inside(words.slice(runAt + 1));
+        };
 
         if (prog === "entr" && args.some((a) => /^-[a-zA-Z]*s/.test(a.text))) {
           // entr -s 'cmd' hands its one argument to a shell.
@@ -1074,11 +1086,13 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (rest[0]?.dynamic || (group && afterOptions(rest.slice(1))[0]?.dynamic)) return destroys(`runs a ${prog} command only known when it runs`);
           if (a === "rm" || a === "rmi" || (/^(system|volume|container|image|network|builder)$/.test(a ?? "") && (b === "prune" || b === "rm"))) destroys(`removes containers, images or volumes (${prog} ${a})`);
           if (a === "push" || (a === "image" && b === "push")) add("pushes", `publishes an image (${prog} push)`, all, plain);
-          // docker exec/run, docker container exec/run and docker compose exec/run: see `inside` above.
-          const runAt = a === "exec" || a === "run" ? 0 : a === "container" || a === "compose" ? rest.findIndex((x, i) => i > 0 && (x.text === "exec" || x.text === "run")) : -1;
+          if (a === "compose") return compose(rest.slice(1), `${prog} compose`);
+          // docker exec/run and docker container exec/run: see `inside` above.
+          const runAt = a === "exec" || a === "run" ? 0 : a === "container" ? rest.findIndex((x, i) => i > 0 && (x.text === "exec" || x.text === "run")) : -1;
           if (runAt >= 0) inside(rest.slice(runAt + 1));
           return;
         }
+        if (prog === "docker-compose" || prog === "podman-compose") return compose(args, prog);
         if (prog === "kubectl") {
           const cmdWords = afterOptions(args, KUBE_VALUED);
           if (cmdWords[0]?.dynamic) return destroys("runs a kubectl command only known when it runs");
@@ -1118,19 +1132,35 @@ export function commandRisks(command: string | string[]): Risk[] {
           const cmdWords = afterOptions(args, ["-chdir", "-var", "-var-file", "--var", "--var-file"]);
           const verb = cmdWords[0];
           if (verb?.dynamic) return destroys("runs a terraform command only known when it runs");
-          // state push overwrites the remote state with a local file, with -force even when the lineage or serial is older (BOS-1061).
-          if (verb?.text === "state") {
-            const op = afterOptions(cmdWords.slice(1))[0];
-            if (op?.dynamic || op?.text === "push") return destroys("overwrites the stored infrastructure state (terraform state push)");
-          }
           if (verb?.text === "destroy") return destroys("destroys the infrastructure it manages (terraform destroy)");
           if (verb?.text === "apply" && args.some((a) => /^-{1,2}destroy(=true)?$/.test(a.text))) return destroys("destroys the infrastructure it manages (terraform apply -destroy)");
+          // BOS-856: -replace destroys and recreates a resource. An unquoted $FLAGS (or a -… word holding one) may
+          // become -destroy or -replace; a quoted "$PLAN" stays one plan-file operand, so it is left alone.
+          if (verb?.text === "apply" && args.some((a) => /^-{1,2}replace(=|$)/.test(a.text))) return destroys("destroys and recreates resources (terraform apply -replace)");
+          if (verb?.text === "apply" && cmdWords.slice(1).some((a) => a.dynamic && (a.split || a.text.startsWith("-")))) return destroys("terraform apply with an option only known when it runs");
+          // BOS-856: state rm makes terraform forget resources (a later apply recreates them beside the old ones), and
+          // workspace delete drops a workspace's state. state push overwrites the remote state with a local file, with
+          // -force even when the lineage or serial is older (BOS-1061).
+          const sub = verb?.text === "state" || verb?.text === "workspace" ? afterOptions(cmdWords.slice(1))[0] : undefined;
+          if (sub?.dynamic) return destroys(`runs a terraform ${verb!.text} command only known when it runs`);
+          if (verb?.text === "state" && sub?.text === "rm") return destroys("makes terraform forget resources (terraform state rm)");
+          if (verb?.text === "state" && sub?.text === "push") return destroys("overwrites the stored infrastructure state (terraform state push)");
+          if (verb?.text === "workspace" && sub?.text === "delete") return destroys("deletes a workspace's state (terraform workspace delete)");
           return;
         }
         if (prog === "pulumi") {
-          const verb = afterOptions(args, ["-C", "--cwd", "--stack", "-s"]).find((a) => !a.text.startsWith("-"));
+          // --color and --verbose take a value too, so the word after them isn't taken for the verb (BOS-856).
+          const rest = afterOptions(args, ["-C", "--cwd", "--stack", "-s", "--color", "-v", "--verbose"]);
+          const at = rest.findIndex((a) => !a.text.startsWith("-"));
+          const verb = rest[at];
           if (verb?.dynamic) return destroys("runs a pulumi command only known when it runs");
           if (verb?.text === "destroy" || verb?.text === "down" || verb?.text === "dn") return destroys("destroys the infrastructure it manages (pulumi destroy)");
+          // BOS-856: stack rm (alias of stack remove) deletes a stack's state and history; state delete (now state
+          // remove) drops resources from the state, so pulumi no longer manages them.
+          const sub = verb?.text === "stack" || verb?.text === "state" ? afterOptions(rest.slice(at + 1), ["-s", "--stack"])[0] : undefined;
+          if (sub?.dynamic) return destroys(`runs a pulumi ${verb!.text} command only known when it runs`);
+          if (verb?.text === "stack" && (sub?.text === "rm" || sub?.text === "remove")) return destroys("deletes a stack and its state (pulumi stack rm)");
+          if (verb?.text === "state" && (sub?.text === "delete" || sub?.text === "remove")) return destroys("drops resources from the stack's state (pulumi state delete)");
           return;
         }
         if (prog === "helm") {
@@ -1146,27 +1176,45 @@ export function commandRisks(command: string | string[]): Risk[] {
           if (words.some((a) => a.dynamic)) return destroys("runs a gcloud command only known when it runs");
           // A bare `delete` anywhere (even where an option was thought to take it as a value) is never a value in
           // gcloud, so flag it: a wrong entry in the value list can then only over-flag, never miss a delete.
-          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (gcloud … delete)");
+          // `rm` is gcloud storage's delete (BOS-856).
+          const del = (a: Word) => a.text === "delete" || a.text === "rm";
+          if (words.some(del) || args.some((a) => !a.dynamic && del(a))) return destroys("deletes cloud resources (gcloud … delete)");
           // gcloud storage mv copies, then removes the source objects (BOS-1061).
           if (words.some((a) => a.text === "mv")) return destroys("removes the source after copying (gcloud storage mv)");
-          // gcloud storage rsync --delete-unmatched-destination-objects deletes what the source lacks (BOS-1064).
+          // gcloud storage rsync --delete-unmatched-destination-objects deletes what the source lacks (BOS-856, BOS-1064).
           if (words.some((a) => a.text === "rsync") && args.some((a) => longOf(a.text, ["delete-unmatched-destination-objects"]) || mayBeOption(a))) return destroys("deletes destination objects the source lacks (gcloud storage rsync)");
           return;
         }
         if (prog === "gsutil") {
-          // gsutil [-m] [-h header] [-o section:key=value] mv … removes the source after copying (BOS-1061).
-          const verb = afterOptions(args, ["-h", "-o", "-u", "-i"])[0];
+          // gsutil [-m] [-h header] [-o section:key=value] VERB (BOS-856, BOS-1061): rm and its aliases delete objects and
+          // buckets; rsync -d deletes what the source lacks; mv removes the source after copying.
+          // rb is left alone: gsutil only removes an empty bucket.
+          const cmdWords = afterOptions(args, ["-h", "-o", "-u", "-i"]);
+          const verb = cmdWords[0];
           if (verb?.dynamic) return destroys("runs a gsutil command only known when it runs");
+          if (verb && ["rm", "del", "delete", "remove"].includes(verb.text)) return destroys("deletes in the cloud (gsutil rm)");
           if (verb?.text === "mv") return destroys("removes the source after copying (gsutil mv)");
-          // gsutil rsync -d deletes destination objects the source doesn't have (BOS-1064); -d may sit in a cluster (-dr, -mdr).
+          // gsutil rsync -d deletes destination objects the source doesn't have (BOS-856, BOS-1064); -d may sit in a cluster (-dr, -mdr).
           if (verb?.text === "rsync" && args.some((a) => mayBeOption(a) || /^-[a-zA-Z]*d/.test(a.text))) return destroys("deletes destination objects the source lacks (gsutil rsync -d)");
           return;
         }
         if (prog === "az") {
-          // az GROUP … delete: same shape as gcloud (BOS-571).
+          // az GROUP … delete: same shape as gcloud (BOS-571). BOS-856 adds the other delete-* verbs (delete-batch),
+          // purge (a soft-deleted key vault or secret, gone for good) and az storage remove.
           const words = gcloudWords(args);
           if (words.some((a) => a.dynamic)) return destroys("runs an az command only known when it runs");
-          if (words.some((a) => a.text === "delete") || args.some((a) => !a.dynamic && a.text === "delete")) return destroys("deletes cloud resources (az … delete)");
+          // Any delete-* among the command's words, but only exact verbs anywhere else, so a value such as
+          // `-n delete-me` after an option this list doesn't know doesn't raise a card.
+          if (words.some((a) => /^(delete(-|$)|purge$)/.test(a.text)) || args.some((a) => !a.dynamic && /^(delete|delete-batch|purge)$/.test(a.text))) return destroys("deletes cloud resources (az … delete)");
+          if (words[0]?.text === "storage" && words[1]?.text === "remove") return destroys("deletes in the cloud (az storage remove)");
+          // az storage blob sync deletes destination blobs the source lacks unless --delete-destination is false
+          // (its default is true), so every value given must be a plain false.
+          if (words[0]?.text === "storage" && words[1]?.text === "blob" && words[2]?.text === "sync") {
+            const values = args.flatMap((a, i) =>
+              a.text === "--delete-destination" ? [args[i + 1]] : a.text.startsWith("--delete-destination=") ? [{ ...a, text: a.text.slice(21) }] : [],
+            );
+            if (!values.length || values.some((v) => !v || v.dynamic || !/^false$/i.test(v.text))) return destroys("deletes in the cloud (az storage blob sync)");
+          }
           // --mode Complete makes a deployment delete every resource in the group that the template doesn't list (BOS-1061).
           // az (Python argparse) takes any unambiguous start of the option, and the value from the next word or after =.
           for (let i = 0; i < args.length; i++) {

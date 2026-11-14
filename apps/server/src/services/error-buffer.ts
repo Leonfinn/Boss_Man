@@ -5,31 +5,17 @@
 // whose work it belongs to when the caller knows it, and a company only ever reads its own lines;
 // the rest are counted, never shown. Secrets are still redacted before a line is kept.
 
+import { redact } from "@boss-man/shared";
+
 const MAX = 200;
 const MAX_MESSAGE = 500;
 
-/** What must never leave the server in an error line. Order matters: specific tokens first. */
-const REDACTIONS: Array<[RegExp, string]> = [
-  [/bm_run_[A-Za-z0-9_-]+/g, "bm_run_[redacted]"],
-  [/bmr_[A-Za-z0-9_-]+/g, "bmr_[redacted]"],
-  [/\b(Bearer)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 [redacted]"],
-  [/\b(sk-[A-Za-z0-9_-]{8,})/g, "sk-[redacted]"],
-  [/\b(gh[pousr]_[A-Za-z0-9]{16,})/g, "gh[redacted]"],
-  [/([?&](?:token|key|secret|password|api[_-]?key)=)[^&\s]+/gi, "$1[redacted]"],
-  [/\b([A-Za-z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Za-z0-9_]*=)[^\s&"']+/gi, "$1[redacted]"],
-  [/("(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|cookie)"\s*:\s*")[^"]*(")/gi, "$1[redacted]$2"],
-  [/\b(bm_session=)[^;\s"'&]+/gi, "$1[redacted]"],
-  [/\b(cookie\s*[:=]\s*)[^\n]+/gi, "$1[redacted]"],
-  [/Failed query:[\s\S]*/gi, "Failed query [redacted]"],
-  [/(\/\/[^/:@\s]+:)[^@\s/]+@/g, "$1[redacted]@"],
-];
-
-/** Redact the secrets an error line may carry. Exported so tests can check it directly. */
-export function redact(s: string): string {
-  let out = s;
-  for (const [re, to] of REDACTIONS) out = out.replace(re, to);
-  return out;
-}
+/**
+ * Redact the secrets an error line may carry. The list lives in `@boss-man/shared` (BOS-1368 security
+ * review), so the runner cleans tool output with the same rules before it is stored. Exported here so
+ * existing callers and tests keep one import.
+ */
+export { redact } from "@boss-man/shared";
 
 /** One kept error: when it happened, the message the code logged with it, and whose it is. */
 export type ErrorEntry = { at: string; message: string; companyId: string | null };

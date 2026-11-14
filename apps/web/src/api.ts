@@ -299,7 +299,7 @@ export type FundingSource = { id: string; name: string; kind: string; provider: 
 export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
-  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
+  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean; observedAt: string }>;
   /** Every window name the adapter has reported for this source, for the hold switches. */
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
@@ -401,7 +401,9 @@ export type Notice = {
   readAt: string | null;
   createdAt: string;
 };
-export type NoticeFeed = { items: Notice[]; unread: number };
+/** Unread notices by level and by company id ("none" = no company), ignoring any filter (BOS-1277). */
+export type NoticeCounts = { level: Partial<Record<NotifyLevel, number>>; company: Record<string, number> };
+export type NoticeFeed = { items: Notice[]; unread: number; counts?: NoticeCounts };
 export type NotifySettings = {
   quietHours: { start: string; end: string; timeZone: string } | null;
   agentHourlyCap: number;
@@ -511,6 +513,8 @@ export type Feature = {
   portalVisible: boolean;
   /** Marked "keep off the portal (sensitive)"; the default never overrides it. */
   keepOffPortal: boolean;
+  /** Why someone kept it off the portal, in their own words; null when nobody said why. */
+  keepOffReason: string | null;
   publicSummary: string | null;
   /** The title visitors see on the portal; null falls back to the summary's first line (BOS-991). */
   publicTitle: string | null;

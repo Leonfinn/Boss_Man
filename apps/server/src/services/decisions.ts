@@ -67,6 +67,7 @@ import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { applyPortalAnswer } from "./feature-portal.js";
 import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
@@ -214,6 +215,8 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   /** The follow-up after a feature ships: did it move its key result? */
   | { type: "goal_check"; featureId: string }
+  /** A feature held off the portal (the security guess or a keep-off mark): the owner keeps it off or publishes it (BOS-1358). */
+  | { type: "feature_portal_hold"; featureId: string }
   /**
    * An approved decision whose next step is the owner's own (BOS-122): a deploy whose target has to be
    * applied by hand. It stays open as a to-do on the owner's queue until they mark it done or the live
@@ -388,6 +391,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "ticket_cap",
   "rule_proposal",
   "goal_check",
+  "feature_portal_hold",
 ]);
 
 /**
@@ -756,7 +760,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -801,7 +805,7 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     return { error: "These steps use {{host}} to name the server Boss Man runs on, but the host deployer hasn't reported a name yet (it may not be set up). Write the server's name yourself, or wait for the host's report, then raise the card again." };
   }
   steps = fillServerHost(steps, a.serverHost);
-  const lint0 = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}) }, proof);
+  const lint0 = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}) }, proof);
   const refuse = [...company.findings, ...lint0.refuse];
   const warn = lint0.warn;
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
@@ -957,6 +961,16 @@ function ceoCanHandle(d: { kind: string; context: unknown; raisedByAgentId: stri
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
+
+/**
+ * Whether an answer is a refusal button (BOS-1094): one of the card's own options that says "Send it back", "Deny"
+ * or "Reject" (so free text and a plain "No" never count: those are often just the answer to a yes/no question).
+ */
+export function isRefusalAnswer(answer: string, options: readonly string[] | null | undefined): boolean {
+  if (!options?.includes(answer)) return false;
+  const a = answer.trim().toLowerCase().replace(/[.!\s]+$/, "");
+  return /^(no, |not approved, )?(send it back|deny|reject)\b/.test(a) || a === "do not approve" || a === "don't approve";
+}
 
 /**
  * How long an Allow once covers a repeat of the same command in the same run (BOS-376). A harness can
@@ -3466,6 +3480,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (p && answer === HARD_STOP) await db.update(budgetPolicies).set({ onLimit: "pause" }).where(eq(budgetPolicies.id, p.id));
       } else if (ctx.type === "goal_check") {
         await recordGoalAnswer(db, ctx.featureId, answer, now());
+      } else if (ctx.type === "feature_portal_hold") {
+        await applyPortalAnswer(db, ctx.featureId, answer, now());
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {
@@ -3542,6 +3558,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
+      }
+      // The owner refused (BOS-1094): a "Send it back" / "Deny" / "Reject" button on an agent's card about a ticket in
+      // review stops its merge. The card no longer holds it, so without this the merge went on (BOS-1071).
+      const refused = ctx.type === "question" && !extra.settledBy && extra.by !== "ceo" && isRefusalAnswer(answer, d.options as string[] | null);
+      if (refused) {
+        for (const t of kept) {
+          await loopHooks?.sendBack(t.id, `The owner answered "${d.question}" with "${answer}", so this ticket is not to merge as it is.${extra.note ? ` Their note: ${extra.note}` : ""} Change it as they ask, then move it back to review.`, "the owner");
+          await record(db, { companyId: d.companyId, ticketId: t.id, kind: "merge_stopped_by_answer", summary: `The owner answered "${asked}" with "${answer}", so the ticket was sent back to in progress and its merge stopped.`, at: now() });
+        }
+        kept = [];
       }
       for (const t of kept) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });

@@ -1,5 +1,5 @@
 {
-  "id": "88ae946a-3889-4a68-a214-48c4d7ee1d1c",
+  "id": "3957ab38-cd85-465f-bd2e-4bbda3fa3ae3",
   "prevId": "01d56c7a-928b-4561-bb2e-b27572fb79d8",
   "version": "7",
   "dialect": "postgresql",
@@ -9360,18 +9360,6 @@
         "go_live_wait_since": {
           "name": "go_live_wait_since",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "live_marked_at": {
-          "name": "live_marked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "live_evidence": {
-          "name": "live_evidence",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

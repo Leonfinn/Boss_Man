@@ -4,7 +4,7 @@
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
 // called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
 import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+import { GO_LIVE_WAIT_MAX_MS, ageWords, formatDate, readWatchdogSettings, sinceHours, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NON_CAPPED_KINDS, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, windowHasReset, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { activity, agents, companies, decisions, engagements, fundingSources, quotaSamples, notifications, reviewHolds, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
@@ -499,7 +499,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const samples = await db.selectDistinctOn([quotaSamples.window]).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, source.id)).orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
     if (!samples.length) return false;
     const off = new Set(source.quotaDisabledWindows ?? []);
-    return !samples.some((x) => !off.has(x.window) && x.utilization >= source.quotaHoldAt && (!x.resetsAt || x.resetsAt > t));
+    return !samples.some((x) => !off.has(x.window) && !windowHasReset(x.resetsAt, t) && x.utilization >= source.quotaHoldAt);
   }
 
   /**

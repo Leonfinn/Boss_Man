@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
-import { branchFor, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, copiesAreClones, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -42,6 +42,20 @@ describe("git workspaces (R38)", () => {
     const again = await ws.ensure(spec);
     expect(again).toMatchObject({ created: false, baseCommit: base });
     expect(readFileSync(path.join(again.path, "work.txt"), "utf8")).toBe("in progress\n");
+  });
+
+  it("makes new copies clones by default, with a worktree escape hatch (BOS-343)", () => {
+    // Unset or an unknown value: clones, so a rolling image back can't lose one.
+    expect(copiesAreClones({})).toBe(true);
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "" })).toBe(true);
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "yes" })).toBe(true);
+    // Said outright.
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "clone" })).toBe(true);
+    // The old kind, only for rolling an image back to one that predates clones.
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "worktree" })).toBe(false);
+    // Trimmed and case-insensitive, so a stray space or capital letter still rolls back as intended.
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: " Worktree " })).toBe(false);
+    expect(copiesAreClones({ BOSSMAN_TICKET_COPIES: "WORKTREE" })).toBe(false);
   });
 
   it("saves uncommitted work as a patch on release and puts it back next time", async () => {

@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { goLiveWaitWords, touchesRunnerCode } from "@boss-man/shared";
+import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -12,13 +12,14 @@ import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
-import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import { GitHostError, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMergeCards, fixesLiveHeading, raiseMergeStuck, REASSIGN_REVIEW, SEND_BACK_FOR_MERGE, supersedeSignoffs, TAKE_REVIEW, WAIT_ANOTHER_HOUR, type DecisionContext } from "./decisions.js";
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, ticketCheckPriority } from "./check-gate.js";
 import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
+import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
@@ -258,8 +259,10 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
-    /** The owner's private-details list for the merge-line scan (BOS-979). */
+    /** The owner's private-details list for the merge-line scan (BOS-979). A read failure is said once (BOS-1093); pass it through scanListWarning. */
     scanList?: () => Promise<string | null>;
+    /** Where a set list that can't be read says so: one warning and one owner notification per failure streak (BOS-1093). */
+    scanListWarning?: ScanListWarning;
     /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
     onMerged?: (ticketId: string) => Promise<unknown>;
     /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
@@ -272,6 +275,8 @@ export function reviewService(
   // At most N merge checks at once, quick or full (BOS-446); the rest wait in order, urgent and arch fixes first.
   const gate = checkGate(db);
   const queue = checkQueue(db);
+  // A set list that can't be read says so; an unset one reads as null, silently.
+  const scanListWarning = scanListReader({ read: deps.scanList ?? (async () => null), ...deps.scanListWarning });
   // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
   // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
@@ -1126,6 +1131,26 @@ export function reviewService(
       return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
+    /** The host's checks on the ticket's branch head as data, for the ticket page (BOS-1418). Null whenever there's nothing to show, including any host error. */
+    async branchChecks(ticketId: string, companyId?: string): Promise<(CommitChecks & { sha: string }) | null> {
+      try {
+        return await this.branchChecksOrThrow(ticketId, companyId);
+      } catch {
+        return null;
+      }
+    },
+
+    async branchChecksOrThrow(ticketId: string, companyId?: string): Promise<(CommitChecks & { sha: string }) | null> {
+      const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
+      if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts) return null;
+      const a = repoUrl ? parseRepoUrl(repoUrl) : null;
+      const token = await deps.gitToken?.(t.companyId);
+      if (!a || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase || !token) return null;
+      const cfg = { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
+      const sha = await deps.gitHosts.branchHead(cfg, token, t.branch);
+      return { ...(await deps.gitHosts.checks(cfg, token, sha)), sha };
+    },
+
     /**
      * One line for `tickets read` (DR-024 #2): the host's checks on the head of the ticket's branch.
      * Null when there's nothing to say (no branch, already merged, no known host or token). A host
@@ -1133,14 +1158,10 @@ export function reviewService(
      */
     async branchChecksLine(ticketId: string, companyId?: string): Promise<string | null> {
       try {
-        const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId, companyId);
-        if (!t.branch || t.mergeCommit || t.systemState === "done" || !deps.gitHosts) return null;
-        const a = repoUrl ? parseRepoUrl(repoUrl) : null;
-        const token = await deps.gitToken?.(t.companyId);
-        if (!a || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase || !token) return null;
-        const cfg = { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo };
-        const sha = await deps.gitHosts.branchHead(cfg, token, t.branch);
-        const c = await deps.gitHosts.checks(cfg, token, sha);
+        const r = await this.branchChecksOrThrow(ticketId, companyId);
+        if (!r) return null;
+        const c = r;
+        const sha = r.sha;
         const at = sha.slice(0, 8);
         const names = c.failing.join(", ");
         if (c.state === "none") return `CI on branch head ${at}: no checks reported (yet).`;
@@ -1600,7 +1621,7 @@ export function reviewService(
      * recorded sign-off for this round will do (the early check); a string: the sign-off must cover that commit,
      * and "" (the runner couldn't say) passes only an owner's own approval, which covers what is there now.
      */
-    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null) {
+    async requireSignoff(t: typeof tickets.$inferSelect, head: string | null, because?: string) {
       const d = await derivedSignoff(db, t, head || null);
       if (d.state === "not_needed") return;
       if (d.state === "signed_off" && (head === null || head === "" || d.head === null || d.head === head)) {
@@ -1625,7 +1646,7 @@ export function reviewService(
       }
       if (d.state === "waiting") {
         // Raise its card if it went missing; either way the owner's answer is what starts the merge.
-        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null);
+        await restoreSignoffCard(db, t, "a merge was about to start without it", head || null, because);
         throw new SignoffPendingError();
       }
       if (d.state === "reviews_pending") throw new ReviewError(409, "This ticket needs the owner's sign-off and its reviews aren't all in, so it wasn't merged.");
@@ -1721,7 +1742,23 @@ export function reviewService(
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
-      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null);
+      // A diff that touches a file the owner approves (scripts/check-all.sh, CLAUDE.md) is held at high risk, so the
+      // owner's sign-off is needed even if nobody raised a card (BOS-1094). The sign-off machinery does the holding.
+      // A diff that could not be read has an unknown file list, so it must not merge: it might change one of those
+      // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
+      // the retries fail too (BOS-1396).
+      if (!changed && t.branch) throw new RunnerGone("The runner couldn't say which files the ticket changes.");
+      const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
+      let because: string | undefined;
+      if (ownerFiles.length) {
+        because = `This ticket changes ${ownerFiles.join(", ")}, which the owner has to approve before it merges.`;
+        if (RISK_TIERS.indexOf(riskOf(t.risk)) < RISK_TIERS.indexOf("high")) {
+          await db.update(tickets).set({ risk: "high" }).where(eq(tickets.id, ticketId));
+          t.risk = "high";
+          await record(db, { companyId: t.companyId, ticketId, kind: "risk_raised", summary: `${because} Its risk was raised to high so it waits for the owner's sign-off.` });
+        }
+      }
+      await this.requireSignoff(t, changed ? changed.head : t.branch ? "" : null, because);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!noCode) {
@@ -1849,7 +1886,7 @@ export function reviewService(
             return timedCheck(named(command), "gate", (w) => gate.run(checkPrio, alone, w), checkVerdict, () => {
               phases.set(ticketId, "checking");
               return (async () => {
-                const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
+                const scanList = await scanListWarning.forScan();
                 return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command, ...(scanList ? { scanList } : {}) }), VERIFY_ASK_TIMEOUT_MS);
               })().catch((err: Error): VerifyResult & { noAnswer: true } => {
                 // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
