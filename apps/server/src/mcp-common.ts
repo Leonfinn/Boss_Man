@@ -2,9 +2,9 @@
 // mcp.ts import them without importing mcp.ts back.
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { afterMergeLint, criterionText, isAfterMerge, readVerdicts, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
+import { afterMergeLint, criterionText, isAfterMerge, namesStaging, readVerdicts, stagingLint, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, companies, projects, tickets, wakes } from "./db/schema.js";
+import { agents, companies, deployTargets, projects, tickets, wakes } from "./db/schema.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -28,6 +28,26 @@ export const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
   const w = criteria?.length ? afterMergeLint(criteria) : "";
   return w ? `\n\nHeads-up: ${w}` : "";
 };
+
+/**
+ * Whether anything in the company can reach staging: a non-production deploy target (BOS-1473). Boss Man's own
+ * self-deploy has none today; BOS-1472 will record a staging deploy there. Computed, so no flag can go stale.
+ */
+export async function stagingReachable(db: Db, companyId: string): Promise<boolean> {
+  const [t] = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.companyId, companyId), eq(deployTargets.isProduction, false))).limit(1);
+  return !!t;
+}
+
+/** The heads-up when a criterion or the ticket text names staging and nothing can reach it; empty otherwise. */
+export async function stagingWarning(db: Db, companyId: string, texts: ReadonlyArray<string | null | undefined>): Promise<string> {
+  const named = texts.filter((t): t is string => !!t && namesStaging(t));
+  if (!named.length || (await stagingReachable(db, companyId))) return "";
+  const w = stagingLint(named);
+  return w ? `\n\nHeads-up: ${w}` : "";
+}
+
+/** The texts of a criteria list plus the ticket's own text, for the staging check. */
+export const stagingTexts = (criteria: readonly Criterion[] | undefined, ...more: Array<string | null | undefined>) => [...(criteria ?? []).map(criterionText), ...more];
 
 /**
  * The heads-up a code ticket gets when it will be hard to pick up (BOS-595): no description, so the

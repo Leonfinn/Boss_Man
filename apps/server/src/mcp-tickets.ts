@@ -22,7 +22,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { addTicketDependency } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
-import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
+import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
 /** The state note after update_ticket replaces the criteria: the old note's verdicts belong to the old list, so none carries over. */
@@ -228,7 +228,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
       const thin = noCode ? "" : thinTicketWarning(body, assignee);
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${thin}`);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}`);
     },
   );
 }
@@ -428,7 +428,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${!planGiven ? "" : ceoPlan ? ` (plan set, due ${ceoPlanDeadline})` : " (plan cleared)"}${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${fixesLive === undefined ? "" : fixesLive?.trim() ? ` (fixes live: ${fixesLive.trim()})` : " (no longer marked fixes live)"}${fixesMergeCheck === undefined ? "" : fixesMergeCheck ? " (marked as fixing the merge check: approved work in the project waits on it in Passed, held)" : " (no longer marked as fixing the merge check)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}${ownerSetup === undefined ? "" : ownerSetup?.trim() ? " (owner setup steps changed)" : " (owner setup steps cleared)"}${acceptanceCriteria === undefined ? "" : ` (acceptance criteria replaced: ${acceptanceCriteria.length ? acceptanceCriteria.map((c, i) => `${i + 1}. ${criteriaText([c])}`).join(" ") : "none now"})`}${waitsLines.length ? ` (${waitsLines.join("; ")})` : ""}: ${reason}` });
         await noteRunTicket(ticketId);
-        return text(`Ticket ${ticketId} updated (version ${u.version}).${waitsLines.length ? ` ${waitsLines.join("; ")}.` : waitsOn ? " No waitsOn link changed." : ""}${acceptanceCriteria !== undefined ? ` Its acceptance criteria are replaced and none is reported yet.${t.state === "review" ? " It is in review: reviews were NOT re-requested, so tell the assignee and reviewers the criteria changed." : ""}${criteriaWarning(acceptanceCriteria)}` : ""}`);
+        return text(`Ticket ${ticketId} updated (version ${u.version}).${waitsLines.length ? ` ${waitsLines.join("; ")}.` : waitsOn ? " No waitsOn link changed." : ""}${acceptanceCriteria !== undefined ? ` Its acceptance criteria are replaced and none is reported yet.${t.state === "review" ? " It is in review: reviews were NOT re-requested, so tell the assignee and reviewers the criteria changed." : ""}${criteriaWarning(acceptanceCriteria)}` : ""}${acceptanceCriteria !== undefined || body !== undefined ? await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body)) : ""}`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
