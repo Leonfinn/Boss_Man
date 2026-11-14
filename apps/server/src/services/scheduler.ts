@@ -113,7 +113,10 @@ export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
 export const PLAIN_SUMMARY_RULE =
   "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. A ticket in review waits on its reviewer: when that is the owner, say what they need to do (review and approve, or send it back); never tell them there is nothing to do. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
-const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
+/** Reviewer guidance for every company (BOS-1465): the owner often found a sibling of a fault already fixed. */
+export const TWIN_PATHS_GUIDANCE =
+  "For a fix to a fault the owner reported, list its twin paths and states, and for each say \"covered by test X\" or \"follow-up BOS-n\": server and runner, chat and ticket run, every company, after a restart or rebuild, every form of that kind, the state the owner presses it in.";
+const WATCH_LINE =/^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
@@ -826,7 +829,7 @@ export function schedulerService(
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
     if (w.reason === RETRO_REASON) lines.push("", ...RETRO_DUTY);
     if (w.reason === REVIEW_REASON) {
-      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
+      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):", TWIN_PATHS_GUIDANCE);
       const copy = await reviewCopy(w);
       if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }
