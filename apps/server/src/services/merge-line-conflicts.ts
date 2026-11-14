@@ -84,12 +84,10 @@ export async function planOverlaps(db: Db, t: Ticket, plan: string): Promise<Pla
     .where(and(eq(tickets.projectId, t.projectId), ne(tickets.id, t.id), inArray(tickets.systemState, [...OPEN_STATES])));
   if (!others.length) return [];
   const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
-  const files = new Map<string, string[]>();
-  for (const o of others) files.set(o.id, await changedFilesOf(db, o.id));
   const out: PlanOverlap[] = [];
   for (const o of others) {
-    const have = new Set(files.get(o.id) ?? []);
-    const shared = mine.filter((f) => have.has(f));
+    const have = await changedFilesOf(db, o.id);
+    const shared = mine.filter((f) => have.includes(f));
     if (shared.length) out.push({ ticketId: o.id, ref: ticketRef(c?.prefix, o.number), title: o.title, state: o.systemState, urgent: !!o.urgent, files: shared });
   }
   // Urgent first, then in the line ahead of the plan (review before in progress), then by ticket number.
