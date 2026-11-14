@@ -12,6 +12,7 @@ import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, set
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -257,6 +258,9 @@ export function checkQueue(db: Db) {
    * jobs left out), exactly as before; a check worker's are counted across every company, since its slots are shared.
    */
   async function claimOn(machine: Machine, limit: number, now = new Date(), companyId?: string, skip?: (jobId: string) => boolean): Promise<CheckJob[]> {
+    // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
+    // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
+    if ((await softHold(db, now)).on) return [];
     const worker = isWorker(machine) ? machine.workerId : null;
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
     const candidates = (await servable(now)).filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id));

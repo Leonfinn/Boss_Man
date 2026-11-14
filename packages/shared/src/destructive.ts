@@ -544,8 +544,11 @@ function gcloudWords(args: Word[]): Word[] {
  * `valued` lists letters whose value may be joined OR given as the next word (-r lib / -rlib), so the word after them
  * is not read as a switch cluster (BOS-571: a value like -rdate must not hide a later -i).
  */
-function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE", longValued: string[] = []): { inPlace: boolean; code: boolean; end: number; unknownLong: boolean } {
+function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters = "eE", longValued: string[] = [], chdirLetters = ""): { inPlace: boolean; code: boolean; end: number; unknownLong: boolean; chdir: boolean } {
   let inPlace = false;
+  // A letter in chdirLetters inside a switch bundle changes directory (ruby -pC/, -px/; BOS-858): C always, x only
+  // with text after it (-x/dir; a bare -x stays routine).
+  let chdir = false;
   let code = false;
   let unknownLong = false;
   let i = 0;
@@ -581,6 +584,7 @@ function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters 
         inPlace = true;
         break;
       }
+      if (chdirLetters.includes(c) && (c !== "x" || j + 1 < t.length)) chdir = true;
       if (codeLetters.includes(c)) {
         code = true;
         if (j + 1 === t.length) i++;
@@ -599,7 +603,7 @@ function inPlaceSwitches(args: Word[], joined: string, valued = "", codeLetters 
       if (joined.includes(c)) break;
     }
   }
-  return { inPlace, code, end: i, unknownLong };
+  return { inPlace, code, end: i, unknownLong, chdir };
 }
 
 /**
@@ -1391,10 +1395,11 @@ export function commandRisks(command: string | string[]): Risk[] {
           // is the -i (BOS-571 security review round 2).
           // ruby also has long options (--encoding, --external-encoding, --internal-encoding) whose value is the next
           // word, and --inplace is its long form of -i; an unknown long option could hide a following -i too.
-          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e", ["--encoding", "--external-encoding", "--internal-encoding"]);
+          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e", ["--encoding", "--external-encoding", "--internal-encoding"], "Cx");
           // -C/--chdir changes the directory before the files resolve, so a relative path no longer names a file in
           // the checkout; its base is unknown, so a -i edit goes to the owner (BOS-571 review).
-          const chdirs = args.slice(0, edit.end).some((a) => a.text === "-C" || a.text === "--chdir" || /^-C./.test(a.text) || /^--chdir=/.test(a.text));
+          // -C or -x[dir] inside a bundle (-pC/, -px/) changes directory too (BOS-858).
+          const chdirs = edit.chdir || args.slice(0, edit.end).some((a) => a.text === "-C" || a.text === "--chdir" || /^-C./.test(a.text) || /^--chdir=/.test(a.text));
           // An unknown long option stops the read, so a -i after it can't be shown absent: send it to the owner.
           if (edit.unknownLong) destroys("edits files outside the working copy and /tmp (ruby -i after an unknown long option)");
           // Without -e the first word left is the script file; the rest are the files edited.

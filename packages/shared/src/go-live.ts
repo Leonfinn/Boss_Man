@@ -19,12 +19,21 @@ export const OWNER_APPROVED_PATHS: readonly string[] = ["scripts/check-all.sh"];
 /** The owner-approved files among the changed ones. */
 export const ownerApprovedFiles = (paths: readonly string[]): string[] => paths.filter((p) => OWNER_APPROVED_PATHS.includes(p));
 
-/** What a merged ticket's after-merge checks still wait for: the server deploy, the runner rebuild, or both. */
-export type GoLiveWait = "server" | "runner" | "both";
+/**
+ * What a merged ticket's after-merge checks still wait for: the server deploy, the runner rebuild, or both; or,
+ * for a company Boss Man's server doesn't put live (BOS-1345), its CEO marking the ticket live ("own").
+ */
+export type GoLiveWait = "server" | "runner" | "both" | "own";
 
 /** Plain words for the board: what "waiting for go-live" is waiting for. */
 export const goLiveWaitWords = (w: GoLiveWait): string =>
-  w === "both" ? "waiting for go-live: the server update and the runner rebuild" : w === "runner" ? "waiting for go-live: the runner rebuild" : "waiting for go-live: the server update";
+  w === "own"
+    ? "waiting for go-live: the CEO to mark it live (this company puts its own work live)"
+    : w === "both"
+      ? "waiting for go-live: the server update and the runner rebuild"
+      : w === "runner"
+        ? "waiting for go-live: the runner rebuild"
+        : "waiting for go-live: the server update";
 
 /** How long a ticket may wait before the watchdog looks at it again (nobody may have deployed). */
 export const GO_LIVE_WAIT_MAX_MS = 3 * 24 * 60 * 60 * 1000;

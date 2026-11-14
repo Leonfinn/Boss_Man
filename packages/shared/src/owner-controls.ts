@@ -132,6 +132,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The update wait (BOS-420): the same button reads by phase.
+    "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
     // Ask every running agent to stop cleanly before an update (BOS-929).
@@ -146,6 +148,8 @@ export const OWNER_CONTROLS = {
     "Measuring", "Record this device", "Rename", "Forget",
     // Outgoing email (BOS-1387).
     "Turn off", "Send test email",
+    // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
+    "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -256,6 +260,8 @@ export const OWNER_FIELDS = {
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Land approved merges in order (merge train)",
+    // Settings → Checks → Check workers (BOS-1435): one machine's form.
+    "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Workspace disk.
     "Disk cap (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).

@@ -9,7 +9,10 @@ import { RunnerConnection } from "@boss-man/runner";
 import { PROTOCOL_VERSION, WORKER_FEATURES } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkWorkers } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, projects, runners, settings, tickets } from "../src/db/schema.js";
+import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE } from "../src/services/check-workers.js";
+import { WORKER_NO_HELLO_CLOSE } from "../src/routes/check-worker-socket.js";
 
 const HEARTBEAT = 100;
 const COMMIT = "c".repeat(40);
@@ -141,5 +144,86 @@ describe("check worker socket (BOS-1435)", () => {
     expect(await status(workerUrl(), token)).toBe(403);
     expect((await ctx.app.inject({ method: "DELETE", url: `/api/settings/check-workers/${id}`, headers: { cookie: ctx.cookie } })).statusCode).toBe(200);
     expect(await status(workerUrl(), token)).toBe(401);
+  });
+
+  /** A raw worker socket that says hello as a ready worker (bundle support, the runner's commit) and records what it gets. */
+  async function readyWorker(token: string) {
+    const ws = new WebSocket(workerUrl(), { headers: { authorization: `Bearer ${token}` } });
+    const got: Array<{ type: string; command?: { type: string; jobId: string } }> = [];
+    const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
+    ws.on("message", (raw) => got.push(JSON.parse(String(raw))));
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, imageCommit: COMMIT, checkSlots: 2, features: ["check-jobs", BUNDLE_FEATURE] }));
+    await waitFor(() => got.some((m) => m.type === "welcome"), Boolean);
+    return { ws, got, closed, runs: () => got.filter((m) => m.command?.type === "check.run").map((m) => m.command!.jobId) };
+  }
+
+  /**
+   * BOS-1436: a worker only gets a job once the company runner has packed its code. This raw runner socket packs (answers
+   * every check.bundle as "the worker already has it") but doesn't run checks itself, so the worker is still the only
+   * machine that can take the job.
+   */
+  async function packingRunner() {
+    const ws = new WebSocket(`ws://${ctx.base}/api/runner/connect`, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    let welcomed!: () => void;
+    const welcome = new Promise<void>((r) => (welcomed = r));
+    ws.on("message", (raw) => {
+      const m = JSON.parse(String(raw));
+      if (m.type === "welcome") welcomed();
+      if (m.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
+      const c = m.command ?? m;
+      if (c?.type === "check.bundle")
+        ws.send(JSON.stringify({ type: "reply", requestId: c.requestId, ok: true, data: { sha256: "f".repeat(64), bytes: 0, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: true } }));
+    });
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, imageCommit: COMMIT, features: [BUNDLE_FEATURE] }));
+    await welcome;
+    return ws;
+  }
+
+  it("removing a busy worker puts its checks back in line, not back on the worker it is removing (Freddy's BOS-1435 find)", async () => {
+    // The company runner doesn't run checks (it only packs code, BOS-1436), so the worker is the only machine; before the fix,
+    // the pump inside the re-queue handed the job straight back to the worker, and deleting the row then left it running with
+    // no machine at all.
+    const { db } = ctx;
+    const packer = await packingRunner();
+    await db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, ctx.reg.runnerId));
+    for (const [key, value] of [[CHECK_QUEUE_MODE_KEY, "server"], [CHECK_SLOTS_KEY, 1]] as const)
+      await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    const [p] = await db.insert(projects).values({ companyId: ctx.companyId, name: "Dev" }).returning();
+    const [t] = await db.insert(tickets).values({ companyId: ctx.companyId, projectId: p!.id, title: "T", number: 1 }).returning();
+    const { job } = await checkQueue(db).enqueue({ companyId: ctx.companyId, projectId: p!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c1000000", tree: "tree-1" } as never);
+    const { id, token } = await ctx.addWorker();
+    const w = await readyWorker(token);
+    await waitFor(w.runs, (r) => r.includes(job.id));
+    expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "running", workerId: id });
+    expect((await ctx.app.inject({ method: "DELETE", url: `/api/settings/check-workers/${id}`, headers: { cookie: ctx.cookie } })).statusCode).toBe(200);
+    expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "queued", workerId: null, runnerId: null, reason: expect.stringMatching(/removed the check worker/) });
+    // The cancel and the close travel over the socket, so wait for them rather than read straight after the DELETE.
+    expect(await w.closed).toBe(4003);
+    expect(w.got.some((m) => m.command?.type === "check.cancel" && m.command.jobId === job.id)).toBe(true);
+    expect(w.runs()).toEqual([job.id]); // sent once, never again
+    packer.close();
+  });
+
+  it("a second machine with the same token replaces the first, whose socket is closed", async () => {
+    const { token } = await ctx.addWorker();
+    const first = await readyWorker(token);
+    const second = await readyWorker(token);
+    expect(await first.closed).toBe(WORKER_REPLACED_CLOSE);
+    expect(second.ws.readyState).toBe(WebSocket.OPEN);
+    // The first one going doesn't take the second's place in the connected list.
+    const view = (await ctx.app.inject({ method: "GET", url: "/api/settings/check-queue", headers: { cookie: ctx.cookie } })).json();
+    expect(view.workers[0].connected).toBe(true);
+    second.ws.close();
+  });
+
+  it("closes a socket that never says hello within three heartbeats", async () => {
+    const { token } = await ctx.addWorker();
+    const ws = new WebSocket(workerUrl(), { headers: { authorization: `Bearer ${token}` } });
+    const closed = new Promise<number>((r) => ws.on("close", (code) => r(code)));
+    // Answers pings, so only the missing hello can close it.
+    ws.on("message", (raw) => JSON.parse(String(raw)).type === "ping" && ws.send(JSON.stringify({ type: "pong" })));
+    expect(await closed).toBe(WORKER_NO_HELLO_CLOSE);
   });
 });
