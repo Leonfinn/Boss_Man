@@ -6,7 +6,7 @@ These are mock-ups, not the site: the build goes into `apps/site` using its own 
 
 ## Files
 
-- `home.html`, `guide.html`, `about.html`: the three pages. On About, dashed amber boxes are placeholders for the owner's photo and words.
+- `home.html`, `guide.html`, `about.html`: the three pages. About carries the owner's own words (typed in Penpot, 12 Nov, lightly tidied) and photo (img/owner.jpg, not in the repo).
 - `mock.css`: tokens, the header menu and the home page; `guide.css`: the guide template on top of it; `about.css`: the About page.
 - `menu.js`: the phone menu (Menu opens a panel and becomes Close; Escape closes it). Add `#menu` to a page's address to see it open.
 - The Roadmap menu item and the "Open the Boss Man roadmap" buttons go to Boss Man's own feedback portal. The build reads its public address from config and hides them while it's unset. Never put the portal's secret link in the repo.

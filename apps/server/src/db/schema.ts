@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures, type TraceBody } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -182,7 +182,7 @@ export const runners = pgTable("runners", {
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
   bootId: text("boot_id"),
-  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  /** Kept for older databases: when a restart last pulled parked checks forward. No longer written (BOS-1075). */
   bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
@@ -345,9 +345,12 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
-    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
+    /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
+    liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -388,7 +391,7 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
-    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    /** When a runner restart happened while this check was waiting (BOS-352, BOS-1075); the wake at its booked time says so, then this is cleared. */
     monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
@@ -410,6 +413,12 @@ export const tickets = pgTable(
      * A deploy card whose range carries a marked merge leads with it and pages the owner once.
      */
     fixesLive: text("fixes_live"),
+    /**
+     * "Fixes the merge check" (BOS-1173): while this ticket is open and its fix isn't in force, the merge check is
+     * known to be broken for reasons no branch caused. Other approved work in the project waits on it in "Passed,
+     * held" instead of running the check and being sent back. Set by the CEO or a manager (update_ticket).
+     */
+    fixesMergeCheck: boolean("fixes_merge_check").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -940,6 +949,8 @@ export const reviewRequests = pgTable(
     comments: jsonb("comments").notNull().default([]),
     overruledByAgentId: uuid("overruled_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     overruleReason: text("overrule_reason"),
+    /** The branch head the verdict was given on (BOS-1173), so a return to review on that same head keeps the pass. Null when the runner couldn't say, and on rows from before. */
+    head: text("head"),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
@@ -1043,6 +1054,10 @@ export const checkJobs = pgTable(
     priority: integer("priority").notNull().default(1),
     /** True for a ticket that fixes a red main: it goes before every other job while main is red. */
     fixesMain: boolean("fixes_main").notNull().default(false),
+    /** BOS-1384: when the owner (or the CEO) moved this merge to the front; the latest move is served first, below a fix for main. */
+    frontAt: timestamp("front_at", { withTimezone: true }),
+    /** Who moved it, by name, for the reason shown beside the place. */
+    frontBy: text("front_by"),
     /** The agent to wake with the result. */
     requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
     runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
@@ -1061,6 +1076,21 @@ export const checkJobs = pgTable(
     index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
     index("check_jobs_project_tree").on(t.projectId, t.tree),
   ],
+);
+
+/**
+ * The whole log of a failed check job (BOS-1228), cut to FULL_LOG_MAX and redacted before it is stored. Kept apart from
+ * check_jobs so the queue rows stay small; deleted after FULL_LOG_RETENTION_DAYS (the check sweep) or with the job.
+ */
+export const checkJobLogs = pgTable(
+  "check_job_logs",
+  {
+    jobId: uuid("job_id").primaryKey().references(() => checkJobs.id, { onDelete: "cascade" }),
+    log: text("log").notNull(),
+    chars: integer("chars").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("check_job_logs_created").on(t.createdAt)],
 );
 
 /** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
@@ -1292,6 +1322,27 @@ export const ownerChatMessages = pgTable(
 );
 
 /**
+ * The Thinking trace shown above one agent reply (BOS-1368): the steps it took, in order, and the
+ * header numbers. Set once when the reply is saved, so a stored trace never grows; a reply with no
+ * steps has no row. Only the owner's chat reads it, and text was redacted and clipped before it was
+ * kept here.
+ */
+export const ownerChatTraces = pgTable(
+  "owner_chat_traces",
+  {
+    messageId: uuid("message_id")
+      .primaryKey()
+      .references(() => ownerChatMessages.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    trace: jsonb("trace").$type<TraceBody>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("owner_chat_traces_created").on(t.createdAt)],
+);
+
+/**
  * An agent's lasting notes (BOS-85): corrections and preferences the owner gave in chat, shown
  * in every later chat and run. Kept apart from the owner's standing instructions. Only the CEO
  * writes them for now; keyed by agent so others can later.
@@ -1489,6 +1540,8 @@ export const features = pgTable(
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),
+    /** Why someone chose to keep the feature off the portal, in their own words; null when nobody said why. */
+    keepOffReason: text("keep_off_reason"),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
     /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */

@@ -5,20 +5,30 @@
 // The hold is one `settings` row, so there is no migration and a restart keeps it.
 import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, runs, settings, tickets } from "../db/schema.js";
+import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
 import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 
 export const MAINTENANCE_KEY = "maintenance";
+
+/**
+ * The words a failed swap's note carries (BOS-382), shared with runner-report.ts, which reads them back to pick the
+ * panel's wording. Reword them here and both sides move together.
+ */
+export const SWAP_PUT_BACK = "put back on the previous runner image";
+export const SWAP_PUT_BACK_RUNNING = `${SWAP_PUT_BACK} and is running that`;
+export const SWAP_PUT_BACK_FAILED = "going back to the previous runner image failed";
+/** How long a recreated runner has to dial in (the drain's reconnect wait), and how long it still counts as mid-swap. */
+export const SWAP_WINDOW_MS = 5 * 60_000;
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
 /** The same, for a runner restart that applies new runner settings (BOS-594). */
 export const WRAP_UP_SETTINGS = "A runner restart for a setting change is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the runner is back.";
 /** The owner pressed "Ask agents to wrap up" (BOS-929): the same clean stop, before an update or a runner rebuild. */
-export const WRAP_UP_ASKED = "The owner asked every agent to wrap up before an update. Finish the step you are on, commit your work on the ticket branch, write the ticket's state note with the next step, reply to anything pending, then end your turn now. Don't start anything new: no new checks either. You'll be woken again once it is done.";
+export const WRAP_UP_ASKED = "The owner asked every agent to wrap up before an update. Finish the step you are on, commit your work on the ticket branch, write the ticket's state note with the next step, reply to anything pending, then end your turn now. Don't start anything new: no new checks either. If a command you were running was moved to the background, don't wait for a long check: say in the state note that it needs running again. You'll be woken again once it is done.";
 /**
  * The owner pressed "Ask agents to wrap up" while an update already waits (BOS-988). The update's own message only
  * reaches the runs going when the hold started; this one reaches every run still going now, and keeps the update's
@@ -30,8 +40,12 @@ export const WRAP_UP_DURING_UPDATE = `${WRAP_UP_ASKED} A runner update is alread
  * "wrapup": the owner asked every agent to stop cleanly (BOS-929); nothing is swapped, so there is no runner to wait
  * for: the hold only keeps new runs from starting until the owner cancels it or the update it was for finishes. */
 export type HoldKind = "update" | "settings" | "wrapup";
-/** How long the "Ask agents to wrap up" panel lets a run go before calling it "not responding" (BOS-929). Never stopped automatically. */
-export const WRAPUP_NOT_RESPONDING_MINUTES = 10;
+/**
+ * How long the "Ask agents to wrap up" panel lets a run go before flagging it "still going" (BOS-929). Never stopped
+ * automatically. 30, not 10 (BOS-1016): a merge check takes 15 minutes or more and a full check 30 to 50, and an agent
+ * that can't be steered (OpenCode) only reads the message when such a step ends.
+ */
+export const WRAPUP_NOT_RESPONDING_MINUTES = 30;
 /** The reason drain.json carries for a setting change (scripts/update-runner.sh --settings). */
 export const SETTINGS_REASON = "setting change";
 /** How the last runner update ended, for Settings (BOS-465). `swapped` says which companies it swapped, so a later Settings visit knows which history belongs to which runner. */
@@ -54,8 +68,8 @@ export type Hold = {
   swapped?: Record<string, string>;
   /** slug -> why its runner could not be recreated. */
   failed?: Record<string, string>;
-  /** slug -> failed recreate tries so far and when the last was; a recreate is tried up to RECREATE_TRIES times before it counts as failed. */
-  tries?: Record<string, { n: number; at: string }>;
+  /** slug -> a swap that failed and is tried again after `next` (BOS-382): the hold stays on while it is retried. */
+  tries?: Record<string, { n: number; next: string; last: string }>;
   /** The "update is stuck" page has been sent for this hold (once). */
   stalledPaged?: boolean;
   /**
@@ -72,9 +86,6 @@ export type Hold = {
   startTold?: Record<string, string>;
 };
 
-export const RECREATE_TRIES = 3;
-const RECREATE_RETRY_MS = 30_000;
-
 export async function getHold(db: Db): Promise<Hold | null> {
   const [row] = await db.select().from(settings).where(eq(settings.key, MAINTENANCE_KEY));
   return (row?.value as Hold | null | undefined) ?? null;
@@ -87,12 +98,31 @@ export async function getHold(db: Db): Promise<Hold | null> {
  */
 export const runnerCardHold = (hold: Hold | null): Hold | null => (hold && hold.kind !== "wrapup" ? hold : null);
 
+/**
+ * Whether the hold keeps new runs from starting right now (BOS-1414). Only while a drain is really under way: before
+ * its deadline, or once the owner chose "Stop the remaining runs and update now". Past the deadline the owner has been
+ * asked what to do; until they answer (Keep waiting gives a new deadline), the drain is stalled, not under way, and
+ * background agents must keep working overnight. A wrap-up the owner asked for holds until they cancel it.
+ */
+export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
+  if (!hold) return false;
+  if (hold.kind === "wrapup" || hold.wrapSince || hold.force) return true;
+  return at < new Date(hold.deadline);
+};
+/** What a wake released from a stalled drain shows in place of "update pending". */
+export const HOLD_RELEASED_REASON = "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it";
+
 export type FleetRunner = { slug: string; companyId: string | null; current: boolean | undefined };
 
 export type MaintenanceDeps = {
   /** The launcher's runners, each with its company and whether it runs the current image. */
   fleet: () => Promise<FleetRunner[]>;
   recreate: (slug: string) => Promise<unknown>;
+  /** Puts a company's runner back on the image it ran before, when the new one would not start (BOS-382). */
+  rollback?: (slug: string) => Promise<unknown>;
+  /** How many times a swap is tried before going back to the previous image (default 3), and the first wait between tries (doubles each time). */
+  swapTries?: number;
+  swapRetryMs?: number;
   connected: (companyId: string) => Promise<boolean>;
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
@@ -115,7 +145,22 @@ export type MaintenanceDeps = {
 
 export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   const now = deps.now ?? (() => new Date());
-  const reconnectMs = deps.reconnectMs ?? 5 * 60_000;
+  const reconnectMs = deps.reconnectMs ?? SWAP_WINDOW_MS;
+  const swapTries = Math.max(1, deps.swapTries ?? 3);
+  const swapRetryMs = deps.swapRetryMs ?? 30_000;
+
+  /** BOS-382: the new runner would not start after every try. Go back to the previous image; say plainly what happened either way. */
+  async function goBack(slug: string, why: string, n: number): Promise<string> {
+    const tried = `the new runner would not start (${n} tr${n === 1 ? "y" : "ies"}: ${why})`;
+    if (!deps.rollback) return tried;
+    try {
+      await deps.rollback(slug); // leader-only
+      deps.log?.(`drain: ${slug} is back on the previous runner image`);
+      return `${tried}, so it was ${SWAP_PUT_BACK_RUNNING}`;
+    } catch (err) {
+      return `${tried}, and ${SWAP_PUT_BACK_FAILED} too (${(err as Error).message}). Press Start runner in Settings > Runner`;
+    }
+  }
   const trigger = deps.dir && path.join(deps.dir, "inbox", "drain.json");
 
   const save = (h: Hold) => db.insert(settings).values({ key: MAINTENANCE_KEY, value: h }).onConflictDoUpdate({ target: settings.key, set: { value: h } });
@@ -166,11 +211,40 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`${decisions.context}->>'runId' is not null`));
       for (const c of cards) if (c.runId && !waiters.has(c.runId)) waiters.set(c.runId, { question: c.question, tier: c.tier });
     }
-    const sent = new Date(since).getTime();
+    // BOS-1016: what each run is doing, from its own events (the runner_events_run index serves both queries),
+    // so a run inside one long step is shown as that, not as stuck. `gotMessage`: a Boss Man message reached the
+    // agent after it was told (steered mid-step, or at the end of its turn). `step`: the tool call it is in, if any.
+    const activity = new Map<string, { gotMessage: boolean; step: { title: string; sinceMinutes: number } | null }>();
+    for (const r of live) {
+      const toldAt = new Date(told[r.runId] ?? since);
+      const [got] = await db
+        .select({ one: sql<number>`1` })
+        .from(runnerEvents)
+        .where(and(sql`(${runnerEvents.payload}->>'runId') = ${r.runId}`, eq(runnerEvents.type, "run.update"), sql`${runnerEvents.payload}->'update'->>'kind' = 'message_delivered'`, sql`${runnerEvents.payload}->'update'->>'text' like 'Message from Boss Man:%'`, gte(runnerEvents.receivedAt, toldAt)))
+        .limit(1);
+      // The newest tool events, newest first. Updates carry no call id, so the newest one says whether a step is
+      // running; the step's title and start come from the run of pending/in-progress events it ends.
+      const tools = await db
+        .select({ payload: runnerEvents.payload, at: runnerEvents.occurredAt })
+        .from(runnerEvents)
+        .where(and(sql`(${runnerEvents.payload}->>'runId') = ${r.runId}`, eq(runnerEvents.type, "run.update"), sql`${runnerEvents.payload}->'update'->>'kind' in ('tool_call', 'tool_call_update')`))
+        .orderBy(desc(runnerEvents.seq))
+        .limit(20);
+      const open = (p: unknown) => ["pending", "in_progress"].includes(String((p as { update?: { status?: unknown } }).update?.status));
+      let step: { title: string; sinceMinutes: number } | null = null;
+      if (tools[0] && open(tools[0].payload)) {
+        let i = 0;
+        while (i + 1 < tools.length && open(tools[i + 1]!.payload)) i++;
+        const title = tools.slice(0, i + 1).map((t) => (t.payload as { update?: { title?: unknown } }).update?.title).find((t): t is string => typeof t === "string" && t.length > 0);
+        step = { title: (title ?? "a tool").slice(0, 120), sinceMinutes: Math.max(0, Math.round((now().getTime() - new Date(tools[i]!.at).getTime()) / 60_000)) };
+      }
+      activity.set(r.runId, { gotMessage: !!got, step });
+    }
     return live.map((r) => {
       const w = r.runId ? waiters.get(r.runId) : undefined;
       const own = r.runId ? told[r.runId] : undefined;
       return {
+        ...(activity.get(r.runId) ?? { gotMessage: false, step: null }),
         runId: r.runId,
         agentId: r.agentId,
         agent: r.agentName,
@@ -237,7 +311,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Nothing new starts anywhere until you answer.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Until you answer, new runs are not held for this update, so the runs going keep working; it goes ahead by itself once a company has no run left.`,
         options,
         recommendedOption: options[1]!,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
@@ -305,7 +379,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         return have;
       }
       // A wrap-up has no deadline: nothing is waiting on a swap, so it never asks "stop them now?". The panel's
-      // "not responding" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
+      // "still going" timeout is only a flag for the owner (WRAPUP_NOT_RESPONDING_MINUTES).
       const minutes = opts.minutes ?? (kind === "wrapup" ? WRAPUP_NOT_RESPONDING_MINUTES : (deps.drainMinutes ?? 30));
       const t = now();
       const h: Hold = { reason: opts.reason ?? (kind === "settings" ? SETTINGS_REASON : kind === "wrapup" ? "asking agents to wrap up" : "runner update"), kind, since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
@@ -344,7 +418,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const active = await activeByCompany(true);
       const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -456,7 +530,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       for (const r of fleet) {
         if (!needsSwap(h, r, swapped) || failed[r.slug]) continue;
         if (swapped[r.slug] && t.getTime() - new Date(swapped[r.slug]!).getTime() < 60_000) continue;
-        if (tries[r.slug] && t.getTime() - new Date(tries[r.slug]!.at).getTime() < RECREATE_RETRY_MS) continue;
+        if (tries[r.slug] && t < new Date(tries[r.slug]!.next)) continue; // a failed swap, waiting for its next try
         if (!h.force && r.companyId && (active.get(r.companyId) ?? 0) > 0) continue;
         // A pass that began before the hold may still be launching; wait for it, then look again.
         await deps.settled();
@@ -469,15 +543,24 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
           swapped[r.slug] = now().toISOString();
           delete tries[r.slug];
         } catch (err) {
+          const why = (err as Error).message;
           const n = (tries[r.slug]?.n ?? 0) + 1;
-          tries[r.slug] = { n, at: now().toISOString() };
-          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${RECREATE_TRIES}): ${(err as Error).message}`);
-          if (n >= RECREATE_TRIES) failed[r.slug] = (err as Error).message;
+          deps.log?.(`drain: could not recreate ${r.slug} (try ${n} of ${swapTries}): ${why}`);
+          // A network guard failure is not the new image's fault: the previous image starts behind the same guard,
+          // so trying again or going back can't help. It is reported at once.
+          const guardFault = /network guard/i.test(why);
+          if (!guardFault && n < swapTries) {
+            tries[r.slug] = { n, next: new Date(now().getTime() + swapRetryMs * 2 ** (n - 1)).toISOString(), last: why };
+            continue;
+          }
+          delete tries[r.slug];
+          failed[r.slug] = guardFault ? why : await goBack(r.slug, why, n);
         }
       }
       h = { ...h, swapped, failed, tries };
       // No swap for twice the reconnect time while runners still wait: say so once, so a hold is never silently stuck.
-      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug]);
+      // A runner whose swap failed and is being tried again is not stuck: it is on its retry schedule (BOS-382), and the end of it pages.
+      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug] && !tries[r.slug]);
       if (waiting.length && !h.stalledPaged) {
         const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
         if (t.getTime() - lastProgress >= 2 * reconnectMs) {

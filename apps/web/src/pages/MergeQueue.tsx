@@ -9,6 +9,7 @@ import type { Company } from "../api";
 import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
+import { Loader } from "../components/Loader";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
@@ -17,7 +18,7 @@ type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" |
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
 /** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
-type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null };
+type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
 
@@ -60,6 +61,13 @@ export function rowState(r: WaitingRow): { word: string; tone: "amber" | "red" |
   if (r.state === "checking") return { word: "Checking", tone: "blue" };
   if (r.state === "held" || r.state === "waiting_host" || r.state === "waiting_for_other_ticket" || r.state === "waiting_for_decision") return { word: "Held", tone: "grey" };
   return { word: "Waiting", tone: "grey" };
+}
+
+/** The free-slot sentence: never "the slot" when there are several slots. */
+export function freeSlotsText(free: number, slots: number): string {
+  if (free >= slots) return slots === 1 ? "The slot is free." : slots === 2 ? "Both slots are free." : `All ${slots} slots are free.`;
+  if (free === 0) return slots === 1 ? "The slot is busy." : "No slot is free.";
+  return `${free} of ${slots} slots are free.`;
 }
 
 /** The Needs you button for a row, by the kind of card behind it. Null when there is no card to open. */
@@ -156,7 +164,7 @@ function NeedsYou({ rows }: { rows: WaitingRow[] }) {
       <h2 id="mq-needs-h">Needs you</h2>
       <ul>
         {rows.map((r) => {
-          const b = needsButton(r);
+          const b = needsButton(r) ?? { text: "Open ticket", href: `#/tickets/${r.ticketId}` };
           return (
             <li key={r.ticketId} data-needs-row={r.ticketId}>
               <div className="mq-needs-text">
@@ -165,11 +173,9 @@ function NeedsYou({ rows }: { rows: WaitingRow[] }) {
                   {upFirst(r.label)}. <span className="mq-wait">waiting {waited(r.minutes)}</span>
                 </span>
               </div>
-              {b && (
-                <a className="btn" href={b.href} data-needs-button="true">
-                  {b.text}
-                </a>
-              )}
+              <a className="btn" href={b.href} data-needs-button="true">
+                {b.text}
+              </a>
             </li>
           );
         })}
@@ -178,7 +184,37 @@ function NeedsYou({ rows }: { rows: WaitingRow[] }) {
   );
 }
 
-export function Waiting({ rows }: { rows: WaitingRow[] }) {
+/** BOS-1384: "Move to front" for a merge that is queued for a check slot, is not already next, and is not held by something else. */
+function MoveToFront({ companyId, row, onMoved }: { companyId: string; row: WaitingRow; onMoved: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <span className="mq-front">
+      <button
+        type="button"
+        className="btn"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setErr(null);
+          try {
+            await api(`/api/companies/${companyId}/merge-queue/${row.ticketId}/front`, { method: "POST" });
+            onMoved();
+          } catch (e) {
+            setErr(e instanceof Error ? e.message : "Couldn't move it.");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Move to front
+      </button>
+      {err ? <span role="alert" className="muted"> {err}</span> : null}
+    </span>
+  );
+}
+
+export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; companyId?: string; onMoved?: () => void }) {
   const firstFailed = rows.findIndex((r) => r.actor !== "owner" && r.state === "check_failed_retrying");
   const firstStuck = rows.findIndex((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck);
   return (
@@ -205,6 +241,8 @@ export function Waiting({ rows }: { rows: WaitingRow[] }) {
                   {r.urgent && <span className="tag blue"> urgent</span>}{" "}
                   {upFirst(r.label)}.{r.next ? ` ${r.next}` : ""}
                   {r.actor && r.actor !== "system" ? ` (${actingText(r.actor)})` : ""}
+                  {r.why ? <span className="tag grey" data-why="true"> next because: {r.why}</span> : null}
+                  {companyId && onMoved && r.place && r.place > 1 && (r.state === "waiting_for_slot" || r.state === "waiting_for_check_capacity") ? <> <MoveToFront companyId={companyId} row={r} onMoved={onMoved} /></> : null}
                 </p>
                 {/* A carried-work hold (BOS-130, BOS-766, BOS-819): name the ticket it waits for, from the typed
                     list, so the row never depends on reading a title out of the hold's sentence. */}
@@ -271,7 +309,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; heldBy: string | null };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -296,7 +334,7 @@ function MainRedBanner({ held, rows }: { held: number; rows: CheckRow[] }) {
 
 /** The "Queued checks" tab (BOS-1174): every check running or waiting in the server's check queue. Read-only. */
 export function QueuedChecks({ data }: { data: CheckQueueData }) {
-  const held = data.rows.filter((r) => r.heldBy).length;
+  const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
   return (
     <section>
@@ -306,7 +344,7 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
       {!data.rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No checks queued.</strong> When an agent or the merge gate asks for a check, it shows here until it finishes.{" "}
-          {free === data.slots && data.slots === 2 ? "Both slots are free." : free === 1 ? "The slot is free." : `${free} ${free === 1 ? "slot is" : "slots are"} free.`}
+          {freeSlotsText(free, data.slots)}
         </div>
       ) : (
         <div className="mq-list" data-checks-list="true">
@@ -320,8 +358,9 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
                 <span className="mq-wait">for {waited(r.minutes)}</span>
               </div>
               <p className="mq-line">
-                <span className={`tag ${r.state === "running" ? "blue" : r.heldBy ? "amber" : "grey"}`}>{r.state === "running" ? "Running" : r.heldBy ? "Held" : "Waiting"}</span>
-                {r.fixesMain && <span className="tag green"> fixes main</span>}{" "}
+                <span className={`tag ${r.state === "running" ? "blue" : r.heldByMain ? "amber" : "grey"}`}>{r.state === "running" ? "Running" : r.heldByMain ? "Held" : "Waiting"}</span>
+                {r.fixesMain && <span className="tag green"> fixes main</span>}
+                {r.why && !r.fixesMain ? <span className="tag grey"> {r.why}</span> : null}{" "}
                 {upFirst(KIND[r.kind])}
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
               </p>
@@ -349,7 +388,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const needsYou = data ? data.waiting.filter((r) => r.actor === "owner") : [];
   const failed = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state === "check_failed_retrying").length : 0;
   const stuck = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck).length : 0;
-  const heldChecks = cq ? cq.rows.filter((r) => r.heldBy).length : 0;
+  const heldChecks = cq ? cq.rows.filter((r) => r.heldByMain).length : 0;
   const base = `#/merge-queue/${companyId}`;
 
   const pick = (t: Tab) => go(t === "checks" ? `merge-queue/${companyId}/checks` : `merge-queue/${companyId}`);
@@ -406,23 +445,23 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
           <p className="muted mq-calm">Nothing needs you. Everything here is moving by itself.</p>
         ))}
       <div className="tabs" role="tablist" aria-label="Merge queue views">
-        {tabButton("merges", "Merges", data ? data.waitingCount : null, needsYou.length > 0)}
+        {tabButton("merges", "Merges", data ? data.waitingCount + data.running.length : null, needsYou.length > 0)}
         {tabButton("checks", "Queued checks", cq ? cq.rows.length : null, heldChecks > 0)}
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
-          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <p className="muted">Loading…</p>}
+          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <Loader label="Loading the queued checks" />}
         </div>
       ) : (
         <div role="tabpanel" id="mq-panel-merges" aria-labelledby="mq-tab-merges">
           {mq.error ? <p className="banner" role="alert">Couldn't load the merge queue. It will try again shortly.</p> : null}
           {!data && !mq.error ? (
-            <p className="muted">Loading…</p>
+            <Loader label="Loading the merge queue" />
           ) : data ? (
             <>
               <NeedsYou rows={needsYou} />
               <Running rows={data.running} slots={data.slots} />
-              <Waiting rows={data.waiting} />
+              <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
               <Recent rows={data.recent} />
             </>
           ) : null}

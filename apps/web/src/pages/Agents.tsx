@@ -5,11 +5,13 @@ import { Star } from "lucide-react";
 import { describeRoles, HARNESSES, isInfiniteModel, reviewRolesOf, SENIOR_DEV_TEMPLATE, THINKING_LEVELS, type ReviewPolicy as SharedPolicy } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource, type ReviewPolicy } from "../api";
 import { Avatar } from "../components/Avatar";
+import { RowMenu } from "../components/RowMenu";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { MoreAbout } from "../components/MoreAbout";
 
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 type AgentRow = {
@@ -680,7 +682,11 @@ function CeoApprovals({ companyId }: { companyId: string }) {
           </option>
         ))}
       </select>
-      <small className="muted">Every hire and model change always waits for you, whatever this setting says: it shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. This setting only decides whether the CEO may change an agent's instructions without waiting. Anything else you're told about, and can undo from the agent's history.</small>
+      <MoreAbout lead="Choose whether the CEO's changes to an agent's instructions wait for you.">
+        <li>Hires and model changes always wait for you, whichever you choose. Each one is a card in Decisions showing four fields: harness, provider, model and paid from. You can approve, edit or reject it.</li>
+        <li>If instructions apply at once, you get a note each time the CEO changes them. You can see the change, or undo it, in Agents → the agent → History.</li>
+        <li>Any other change is not held for you either: you're told about it, and you can undo it from the agent's history.</li>
+      </MoreAbout>
       {error && (
         <p className="error" role="alert">
           {error}
@@ -729,12 +735,67 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
     const used = a.fundingKind === "subscription" || !a.month.costMicros ? `${compact(a.month.tokens)} tokens` : usd(a.month.costMicros);
     return (
       <li key={a.id} className="card agent-card">
-        <div className="agent-line">
+        <div
+          className="agent-line"
+          onClick={(e) => {
+            // A click on the card itself opens the row too, but never one meant for a link, button or the menu.
+            if ((e.target as HTMLElement).closest("a, button, input, select, textarea, [role=menu]")) return;
+            setOpen(open === a.id ? null : a.id);
+          }}
+        >
           <Avatar agent={a} className={`big ${a.role}`} />
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <strong>{a.name}</strong>
-            {jobOf(a) !== a.name && <span className="muted"> · {jobOf(a)}</span>}
-            <div className="muted" style={{ fontSize: 13 }}>
+          <div className="agent-head">
+            <button type="button" className="agent-name" aria-expanded={open === a.id} aria-controls={`agent-panel-${a.id}`} onClick={() => setOpen(open === a.id ? null : a.id)}>
+              {a.name}
+            </button>
+            {a.starred && !a.retiredAt && <Star size={14} className="agent-star" aria-label="Starred" fill="currentColor" />}
+            {jobOf(a) !== a.name && <span className="muted agent-job">{jobOf(a)}</span>}
+            <span className={`pill ${tone || "grey"} ${a.status}`}>
+              <span className="pill-mark" aria-hidden="true" />
+              {label}
+            </span>
+          </div>
+          <div className="agent-actions">
+            {!a.retiredAt && (
+              <button type="button" className="btn" onClick={() => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { paused: !a.paused } }), a.paused ? `${a.name} started.` : `${a.name} paused.`)}>
+                {a.paused ? "Start" : "Pause"}
+              </button>
+            )}
+            {a.retiredAt ? (
+              <button type="button" className="btn" aria-expanded={open === a.id} aria-controls={`agent-panel-${a.id}`} onClick={() => setOpen(open === a.id ? null : a.id)}>
+                {open === a.id ? "Close" : "History"}
+              </button>
+            ) : (
+              <RowMenu
+                label={`More for ${a.name}`}
+                heading={a.name}
+                subheading={jobOf(a) !== a.name ? jobOf(a) : undefined}
+                items={[
+                  { label: `Edit ${a.name}`, hint: "Name, model, instructions and history", onSelect: () => setOpen(a.id) },
+                  {
+                    label: a.starred ? `Unstar ${a.name}` : `Star ${a.name}`,
+                    hint: a.starred ? "Stop showing under Chat" : "Show under Chat in the menu",
+                    onSelect: () => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { starred: !a.starred } }), a.starred ? `${a.name} unstarred.` : `${a.name} starred.`),
+                  },
+                  ...(a.role !== "ceo"
+                    ? [
+                        {
+                          label: `Retire ${a.name}…`,
+                          hint: "Asks first. Their tasks go back to unassigned.",
+                          danger: true,
+                          dividerBefore: true,
+                          onSelect: () =>
+                            window.confirm(`Retire ${a.name}? They stop working, their open tasks go back to unassigned and they stop watching tasks. You can rehire them from their history.`) &&
+                            void act(() => api(`/api/agents/${a.id}/retire`, { method: "POST" }), `${a.name} retired.`),
+                        },
+                      ]
+                    : []),
+                ]}
+              />
+            )}
+          </div>
+          <div className="agent-body">
+            <div className="agent-doing">
               {a.current ? (
                 <>
                   Working on <a href={`#/tickets/${a.current.ticketId}`}>{a.current.title ?? "a task"}</a>
@@ -747,13 +808,11 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               {a.wipLimit != null && a.wipCount !== undefined && (
                 <>
                   {" · "}
-                  <span title="Tickets in progress, against the limit per agent set in Settings" style={a.wipCount > a.wipLimit ? { color: "var(--danger, #b3261e)" } : undefined}>
-                    {a.wipCount} / {a.wipLimit} in progress
+                  <span title="Tickets in progress, against the limit per agent set in Settings" className={a.wipCount > a.wipLimit ? "over-limit" : undefined}>
+                    {a.wipCount} / {a.wipLimit} in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
                   </span>
                 </>
               )}
-              {" · "}
-              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
               {isInfiniteModel(a.model) && (
                 <>
                   {" "}
@@ -763,40 +822,23 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                 </>
               )}
             </div>
+            <div className="muted agent-stats">
+              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+            </div>
             {a.pa && (
-              <div className="muted" style={{ fontSize: 13 }}>
+              <div className="muted agent-stats">
                 Answers: {a.pa.posted} posted, {a.pa.escalated} passed to the CEO
                 {a.pa.posted + a.pa.escalated > 0 && ` (${Math.round((a.pa.escalated / (a.pa.posted + a.pa.escalated)) * 100)}%)`}, {a.pa.wrong} marked wrong
               </div>
             )}
           </div>
-          <div className="agent-actions">
-            <span className={`tag ${tone}`}>{label}</span>
-            {!a.retiredAt && <StarButton agent={a} onToggle={() => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { starred: !a.starred } }), a.starred ? `${a.name} unstarred.` : `${a.name} starred.`)} />}
-            {!a.retiredAt && (
-              <button type="button" className="btn" onClick={() => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { paused: !a.paused } }), a.paused ? `${a.name} started.` : `${a.name} paused.`)}>
-                {a.paused ? "Start" : "Pause"}
-              </button>
-            )}
-            <button type="button" className="btn" aria-expanded={open === a.id} onClick={() => setOpen(open === a.id ? null : a.id)}>
-              {open === a.id ? "Close" : a.retiredAt ? "History" : "Edit"}
-            </button>
-            {!a.retiredAt && a.role !== "ceo" && (
-              <button
-                type="button"
-                className="btn"
-                onClick={() =>
-                  window.confirm(`Retire ${a.name}? They stop working, their open tasks go back to unassigned and they stop watching tasks. You can rehire them from their history.`) &&
-                  void act(() => api(`/api/agents/${a.id}/retire`, { method: "POST" }), `${a.name} retired.`)
-                }
-              >
-                Retire
-              </button>
-            )}
-          </div>
         </div>
         {a.role === "ceo" && !a.retiredAt && <CeoNotes agentId={a.id} />}
-        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} policy={reviewPolicy.data && company ? { rules: reviewPolicy.data, companyId: company.id } : null} />}
+        {open === a.id && (
+          <div id={`agent-panel-${a.id}`}>
+            <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} policy={reviewPolicy.data && company ? { rules: reviewPolicy.data, companyId: company.id } : null} />
+          </div>
+        )}
       </li>
     );
   };

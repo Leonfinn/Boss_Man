@@ -159,6 +159,25 @@ describe("the merge gate renumbers a clashing migration (BOS-690)", () => {
     expect(r.status).toBe("conflicts");
   });
 
+  it("(c2) both add the very same column, same definition: sent back, not rebuilt (BOS-736)", async () => {
+    const o = origin();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
+    const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addColumn("shared", "text")));
+    const two = await ticket(ws, o, 2, (d) => addMigration(d, 3, "beta", 3100, addColumn("shared", "text")));
+    await ws.merge(one, "main", "m1");
+    expect((await ws.merge(two, "main", "m2")).status).toBe("conflicts");
+  });
+
+  it("(c3) both add the very same table, same definition: sent back, not rebuilt (BOS-736)", async () => {
+    const o = origin();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
+    const addTable = (s: Snap) => void (s.tables["public.u"] = { columns: { id: { name: "id", type: "uuid" } } });
+    const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addTable));
+    const two = await ticket(ws, o, 2, (d) => addMigration(d, 3, "beta", 3100, addTable));
+    await ws.merge(one, "main", "m1");
+    expect((await ws.merge(two, "main", "m2")).status).toBe("conflicts");
+  });
+
   it("(d) a real code clash beside the journal clash: sent back", async () => {
     const o = origin();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-rb-ws-")));
@@ -270,6 +289,8 @@ describe("scripts/rebase-migrations.mjs", () => {
     const one = await ticket(ws, o, 1, (d) => addMigration(d, 3, "alpha", 3000, addColumn("alpha")));
     const two = await ticket(ws, o, 2, (d) => addMigration(d, 3, "beta", 3100, addColumn("beta")));
     await ws.merge(one, "main", "m1");
+    // A clone's branch reaches the shared repo only on a sync (BOS-343): the script is given the branch as the gate sees it.
+    await ws.checkpoint(two, "after a turn");
     const clone = mkdtempSync(path.join(tmpdir(), "bm-rb-script-"));
     git(clone, "clone", "-q", o.url, ".");
     git(clone, "fetch", "-q", ws.repoDir(PROJECT), `refs/heads/bossman/${two.ticketId}:refs/heads/work`);
@@ -297,6 +318,12 @@ describe("mergeSnapshots", () => {
     // and the same name added on main's side
     const merged = mergeSnapshots(base, { id: "o", tables: { t: { columns: { a: { type: "x" } } } } }, col("constructor")) as typeof base;
     expect(Object.keys(merged.tables.t.columns)).toContain("constructor");
+  });
+  it("throws when both sides add the same column or table, even with the same definition (BOS-736)", () => {
+    const withCol = { id: "o", tables: { t: { columns: { a: { type: "x" }, n: { type: "y" } } } } };
+    expect(() => mergeSnapshots(base, withCol, { ...withCol, id: "t" })).toThrow();
+    const withTable = { id: "o", tables: { ...base.tables, u: { columns: { id: { type: "uuid" } } } } };
+    expect(() => mergeSnapshots(base, withTable, { ...withTable, id: "t" })).toThrow();
   });
   it("throws when both sides change the same column differently", () => {
     const ours = { id: "o", tables: { t: { columns: { a: { type: "y" } } } } };

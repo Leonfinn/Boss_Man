@@ -46,9 +46,12 @@ describe("Stop all work", () => {
     const button = (await screen.findByRole("button", { name: "Stop all work" })) as HTMLButtonElement;
     await vi.waitFor(() => expect(button.disabled).toBe(false));
     const text = screen.getByRole("region", { name: "Stop all work" }).textContent!;
-    expect(text).toContain("starts no new agent runs");
-    expect(text).toContain("finish by themselves");
-    expect(text).toContain("Runs page");
+    expect(text).toContain("starting new agent runs");
+    expect(text).toContain("until you press Resume");
+    expect(text).not.toContain("finish by themselves");
+    fireEvent.click(screen.getByRole("button", { name: "More about this" }));
+    expect(screen.getByRole("region", { name: "Stop all work" }).textContent).toContain("finish by themselves");
+    expect(screen.getByRole("region", { name: "Stop all work" }).textContent).toContain("Runs page");
     expect(screen.queryByText("All work is stopped.")).toBeNull();
     fireEvent.click(button);
     await screen.findByRole("button", { name: "Resume" });

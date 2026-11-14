@@ -3,17 +3,43 @@
 // a setting, read on every grant, so changing it takes effect without a restart. The default is host-neutral.
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { settings } from "../db/schema.js";
+import { agents, settings } from "../db/schema.js";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const MERGE_CHECK_LIMIT_KEY = "merge_check_limit";
 export const DEFAULT_MERGE_CHECK_LIMIT = 2;
 export const MAX_MERGE_CHECK_LIMIT = 16;
+/** While a server update's soft hold parks new checks, how often the gate looks again (BOS-420). */
+export const PARKED_RETRY_MS = 30_000;
 
-/** Tickets that jump the queue: owner-marked urgent work, and arch fixes (the gate's own repairs). */
-export function checkPriority(t: { urgent?: boolean | null; title?: string | null }): number {
+/**
+ * Whether an agent's job title puts it in the background lane (BOS-1403). The assignee's title ("Background Developer")
+ * is used, not the ticket's "(Background lane)" suffix: the suffix is typed by hand and can be missing or copied.
+ */
+export function isBackgroundLaneTitle(agentTitle: string | null | undefined): boolean {
+  return /\bbackground\b/i.test(agentTitle ?? "");
+}
+
+/**
+ * Where a ticket's check starts in the line: 0 for owner-marked urgent work and arch fixes (the gate's own repairs), 1 for
+ * ordinary tickets, 2 for background-lane tickets, which go last (BOS-1403). It only orders the start; every merge still runs
+ * its full check, and a lane ticket with nothing ahead of it starts at once. The owner's Move to front sorts above all of this.
+ */
+export function checkPriority(t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null; background?: boolean | null }): number {
   if (t.urgent) return 0;
+  if (t.fixesMergeCheck) return 0;
   if (/^\s*arch fix\b/i.test(t.title ?? "")) return 0;
-  return 1;
+  return t.background ? 2 : 1;
+}
+
+/** checkPriority for a ticket row, looking up the assignee's job title for the lane. */
+export async function ticketCheckPriority(db: Db, t: { urgent?: boolean | null; fixesMergeCheck?: boolean | null; title?: string | null; assigneeAgentId?: string | null }): Promise<number> {
+  let background = false;
+  if (t.assigneeAgentId) {
+    const [a] = await db.select({ title: agents.title }).from(agents).where(eq(agents.id, t.assigneeAgentId));
+    background = isBackgroundLaneTitle(a?.title);
+  }
+  return checkPriority({ urgent: t.urgent, fixesMergeCheck: t.fixesMergeCheck, title: t.title, background });
 }
 
 type Waiter = { priority: number; seq: number; alone: boolean; grant: () => void; cancelled: boolean };
@@ -30,7 +56,18 @@ export function checkGate(db: Db) {
     return Number.isInteger(n) && n >= 1 ? Math.min(n, MAX_MERGE_CHECK_LIMIT) : DEFAULT_MERGE_CHECK_LIMIT;
   }
 
+  let parked: ReturnType<typeof setTimeout> | null = null;
   async function pump() {
+    // A server update waiting for a quiet machine (BOS-420): checks already running finish, no new one starts.
+    // One timer looks again every 30 s, so the parked checks start soon after the hold lifts.
+    if (queue.some((w) => !w.cancelled) && (await softHold(db).catch(() => ({ on: false as const }))).on) {
+      parked ??= setTimeout(() => {
+        parked = null;
+        void pump();
+      }, PARKED_RETRY_MS);
+      parked.unref?.();
+      return;
+    }
     const max = await limit().catch(() => DEFAULT_MERGE_CHECK_LIMIT);
     while (!aloneRunning && running < max && queue.length) {
       queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
@@ -55,6 +92,8 @@ export function checkGate(db: Db) {
     },
     /** What is running and what waits, for tests and status. */
     state: () => ({ running, waiting: queue.filter((w) => !w.cancelled).length }),
+    /** Looks at the queue again now, e.g. when a server update's soft hold lifts (BOS-420). */
+    pump: () => pump(),
     /** Runs `work` once a slot is free; lower priority numbers go first, ties in arrival order. `alone`: nothing else runs beside it. */
     async run<T>(priority: number, alone: boolean, work: () => Promise<T>): Promise<T> {
       await new Promise<void>((resolve) => {

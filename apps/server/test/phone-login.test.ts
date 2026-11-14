@@ -7,7 +7,7 @@ import { PHONE_LOGIN_TTL_MS, PHONE_USER, phoneLoginService } from "../src/servic
 
 // "Create phone login" (BOS-1004): the password comes back sealed to a key only this process holds, once.
 
-const PASSWORD = ["sample", "fake", "pw"].join("-").padEnd(24, "x"); // 24 characters, like the host makes
+const PASSWORD = ["Sample", "Fake", "Pw"].join("").padEnd(24, "x"); // 24 letters and digits, like the host makes
 let dirs: string[] = [];
 afterEach(async () => {
   for (const d of dirs) await rm(d, { recursive: true, force: true });

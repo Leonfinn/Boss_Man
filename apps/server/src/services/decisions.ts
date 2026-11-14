@@ -3,9 +3,9 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
+import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
-import { applyFenceAnswer, checkFenceAnswer } from "./fence-default.js";
+import { applyFenceAnswer, applyFenceUnavailableAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -60,12 +60,14 @@ import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
+import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
 import { addTicketDependency } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { applyPortalAnswer } from "./feature-portal.js";
 import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
@@ -78,6 +80,7 @@ import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
 import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
+import { runCapabilities } from "./run-capabilities.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -206,12 +209,14 @@ export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>)
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
+  | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
   /** The follow-up after a feature ships: did it move its key result? */
   | { type: "goal_check"; featureId: string }
+  /** A feature held off the portal (the security guess or a keep-off mark): the owner keeps it off or publishes it (BOS-1358). */
+  | { type: "feature_portal_hold"; featureId: string }
   /**
    * An approved decision whose next step is the owner's own (BOS-122): a deploy whose target has to be
    * applied by hand. It stays open as a to-do on the owner's queue until they mark it done or the live
@@ -220,7 +225,7 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice; /** A server update's quiet-machine check, while the owner waits to apply it by hand (BOS-420). */ quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[]; at: string } }
   /**
    * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
    * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
@@ -233,6 +238,8 @@ export type DecisionContext =
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
+  /** An approved server update still waiting for a quiet machine (services/deploy-wait.ts, BOS-420): keep waiting, update now, or cancel. */
+  | { type: "deploy_wait"; approvedAt: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
   /** A review woken this round again and again with no verdict (BOS-404, BOS-426): the CEO acts on it. */
   | { type: "review_stall"; ticketId: string; reviewId: string; reviewerAgentId: string; kind: string }
@@ -242,6 +249,8 @@ export type DecisionContext =
   | { type: "run_time_limit"; companyId: string; runId: string; minutes: number }
   /** A company still at the old unchosen fence Off, on a runner that can fence (BOS-940): switch to Watch or keep Off. */
   | { type: "fence_default" }
+  /** A company's agent work held because its runner can't fence (BOS-373): run agents without the fence, or keep them stopped. */
+  | { type: "fence_unavailable" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -304,9 +313,13 @@ export const TODO_DONE = "Done, it's applied";
 export const TODO_FAILED = "A step failed";
 /** The approval for a change that has to be applied by hand: approving it leaves a to-do rather than deploying. */
 export const APPROVE_HAND_APPLY = "Approve";
+/** A hand-applied server update's to-do (BOS-420): make room on the machine before the owner applies it. */
+export const QUIET_FIRST = "Quiet the machine first";
 
 /** Who ended a card without answering it, and why (BOS-149): the CEO clears a stale or duplicate card, or the product does. */
-export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
+/** The "replaced by" fields of a withdraw call, as the tool received them (DR-058 B). */
+export type Replacement = { replacedBy?: string; when?: string };
+export type Withdrawal ={ by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string; /** Set when a newer plan card replaced this one (BOS-1219). */ newer?: { id: string; author: string | null; at: string } };
 
 /**
  * Cards that answer an action rather than make an owner choice: a merge retry and Boss Man's own
@@ -342,6 +355,8 @@ export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unkno
   if (opts.ladder !== false && ctx.ladder?.rung === "owner") return "This alert is already with the owner, so it isn't yours to settle. Leave it for them.";
   if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
+  // BOS-1318: a card marked owner-only stays the owner's even if a row were ever left on the CEO's tier.
+  if (ctx.type === "question" && (ctx.ownerOnly || ctx.ownerMustDo)) return "This card is marked as the owner's alone (a secret, money, a host step, a sign-off or an owner choice), so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "review_stall" && answer !== undefined && !REVIEW_STALL_ACTIONS.includes(answer)) return `On a stalled review, choose one of: ${REVIEW_STALL_ACTIONS.join(", ")}.`;
   if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
   if (isSystemCard(d)) {
@@ -364,6 +379,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "owner_todo",
   "owner_setup",
   "maintenance",
+  "deploy_wait",
   "hire",
   "instructions",
   "rename",
@@ -376,9 +392,11 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "project_cap",
   "run_time_limit",
   "fence_default",
+  "fence_unavailable",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
+  "feature_portal_hold",
 ]);
 
 /**
@@ -538,7 +556,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[] },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -546,8 +564,8 @@ export async function raiseOwnerTodo(
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: [TODO_DONE, TODO_FAILED],
-      recommendedOption: TODO_DONE,
+      options: t.quietFirst ? [QUIET_FIRST, TODO_DONE, TODO_FAILED] : [TODO_DONE, TODO_FAILED],
+      recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
@@ -594,7 +612,9 @@ export async function raiseOwnerSetup(db: Db, t: { companyId: string; tickets: {
   // filled from the deployer's report (or, unreported, become a pointer to where Boss Man shows them), then the
   // whole lint runs. Steps that fail never reach the owner and are never dropped either: the CEO gets a card to fix
   // them, and the owner's card goes out on a later pass once they pass (release-log.ts retries while it is open).
-  const check = checkOwnerSetup(t.steps, t.facts ?? {}, "raise");
+  // DR-057: other companies' records are read here, per card, by the server (an agent can't see them).
+  const company = t.facts?.company ?? (await loadCompanyFacts(db, t.companyId, t.steps));
+  const check = checkOwnerSetup(t.steps, { ...(t.facts ?? {}), ...(company ? { company } : {}) }, "raise");
   const override = t.override?.trim() || null;
   if (check.hard.length || (check.soft.length && !override)) {
     await raiseOwnerSetupFix(db, { companyId: t.companyId, tickets: t.tickets, findings: [...check.hard, ...check.soft], commit: t.commit });
@@ -713,10 +733,14 @@ export async function clearOwnerTodo(db: Db, key: string, summary: string) {
 
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
+/** BOS-1086: on a server card whose change needs a runner rebuild: deploy now, and queue the runner update for when the trial ends. */
+export const DEPLOY_AND_RUNNERS = "Deploy, then update runners after the trial";
 export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
 export const CANCEL_UPDATE = "Cancel the update";
+/** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
+export const UPDATE_NOW_ANYWAY = "Update now anyway";
 
 export class AnswerError extends Error {}
 
@@ -743,7 +767,7 @@ const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec
  * `proof` says how host commands were proven (R11, DR-024); a malformed one is refused before the lint runs,
  * and a good one is kept on the card for its banner.
  */
-export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[]; options?: string[]; lintOverride?: string; byCeo?: boolean; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; hostValues?: Record<string, string>; addons?: AddonFacts; setsUp?: Addon; selfDeploy?: SelfDeployFacts; proof?: string; company?: CompanyFacts; images?: Record<string, string> }): { error: string; lint?: undefined; steps?: undefined } | { error: null; lint?: CardLint; steps?: string[] } {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
     return { error: "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself." };
@@ -759,9 +783,11 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   if (typeof proof === "string") return { error: `The ${proof}.` };
   // `{{host.…}}` tokens (DR-008): filled from the recorded host facts before the lint, so the lint reads what the owner
   // will. A fact that isn't recorded stops the card; a caller with no facts leaves the token, which R4 refuses.
-  let steps = a.steps;
+  // DR-057: another company's facts (tokens, "[if … exists]" branches, R18b) before the host facts, as on a setup card.
+  const company = fillCompanyFacts(a.steps, a.company, "raise");
+  let steps = company.steps;
   if (a.hostValues) {
-    const filled = fillHostTokens(a.steps, a.hostValues);
+    const filled = fillHostTokens(steps, a.hostValues);
     if (filled.missing.length) {
       return { error: `These steps use host facts Boss Man doesn't have: ${filled.missing.map((k) => `{{host.${k}}}`).join(", ")}. The host deployer hasn't reported them (it may not be applied yet, or the fact can't be detected). Ask the owner to confirm it in Settings → This host, or wait for the host's report, then raise the card again.` };
     }
@@ -786,7 +812,9 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
     return { error: "These steps use {{host}} to name the server Boss Man runs on, but the host deployer hasn't reported a name yet (it may not be set up). Write the server's name yourself, or wait for the host's report, then raise the card again." };
   }
   steps = fillServerHost(steps, a.serverHost);
-  const { refuse, warn } = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}) }, proof);
+  const lint0 = lintOwnerSteps(steps, { ...(a.options ? { options: a.options } : {}), ...(a.hosts ? { hosts: a.hosts } : {}), ...(a.serverHost ? { serverHost: a.serverHost } : {}), ...(newHost ? { newHost } : {}), ...(a.addons ? { addons: a.addons, setsUp: a.setsUp } : {}), ...(a.selfDeploy ? { selfDeploy: a.selfDeploy } : {}), ...(a.images ? { images: a.images } : {}) }, proof);
+  const refuse = [...company.findings, ...lint0.refuse];
+  const warn = lint0.warn;
   const hard = refuse.filter((f) => NOT_OVERRIDABLE.has(f.rule));
   const soft = refuse.filter((f) => !NOT_OVERRIDABLE.has(f.rule));
   const tail = "Fix the steps and raise it again. The owner pastes each command exactly as written and has no other document open.";
@@ -866,6 +894,31 @@ export type Settled = { agentId: string; name: string; note: string | null; at: 
 /** How long a permission or plan request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
 export const CEO_HANDOVER_MINUTES = 5;
 
+/** How long a team question waits with the CEO before it moves to the owner (BOS-1318). Housekeeping isn't urgent, and nobody's run waits on it. */
+export const CEO_QUESTION_HANDOVER_MINUTES = 60;
+
+/**
+ * The only reasons an agent's card stays on the owner's queue without steps (BOS-1318): a fixed list,
+ * never guessed from the card's wording, so a mistake errs toward the owner.
+ */
+export const OWNER_ONLY_KINDS = ["secret", "money", "host", "signoff", "owner_choice", "owner_setup"] as const;
+export type OwnerOnlyKind = (typeof OWNER_ONLY_KINDS)[number];
+
+/**
+ * Where an agent's raise_decision card goes (BOS-1318), by structure only. "owner" unless nothing about the
+ * card needs the owner: no ownerOnly kind, no steps, not ownerMustDo, not an add-on setup, not an after-merge
+ * check, raised by an agent that is not the CEO, and a CEO that can take it.
+ */
+export function routeAgentCard(c: { ownerOnly?: OwnerOnlyKind; ownerMustDo?: boolean; steps?: string[]; setsUp?: unknown; criterionIndexes?: number[]; raiserRole: string | null; ceoAvailable: boolean }): { tier: "owner" | "ceo"; why: string } {
+  if (c.ownerOnly) return { tier: "owner", why: `owner-only: ${c.ownerOnly}` };
+  if (c.ownerMustDo || c.steps?.length) return { tier: "owner", why: "the owner has steps to do" };
+  if (c.setsUp) return { tier: "owner", why: "an add-on setup card" };
+  if (c.criterionIndexes?.length) return { tier: "owner", why: "the owner's after-merge check" };
+  if (c.raiserRole === null || c.raiserRole === "ceo") return { tier: "owner", why: "the CEO can't answer its own card, or no agent raised it" };
+  if (!c.ceoAvailable) return { tier: "owner", why: "the CEO can't take it now" };
+  return { tier: "ceo", why: "a team question goes to the CEO first" };
+}
+
 export const SKILL_ADD = "Add the skill";
 export const SKILL_REJECT = "Don't add it";
 export const SKILL_CONDITIONS = "Add it, accepting the reviewer's conditions";
@@ -915,6 +968,16 @@ function ceoCanHandle(d: { kind: string; context: unknown; raisedByAgentId: stri
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
+
+/**
+ * Whether an answer is a refusal button (BOS-1094): one of the card's own options that says "Send it back", "Deny"
+ * or "Reject" (so free text and a plain "No" never count: those are often just the answer to a yes/no question).
+ */
+export function isRefusalAnswer(answer: string, options: readonly string[] | null | undefined): boolean {
+  if (!options?.includes(answer)) return false;
+  const a = answer.trim().toLowerCase().replace(/[.!\s]+$/, "");
+  return /^(no, |not approved, )?(send it back|deny|reject)\b/.test(a) || a === "do not approve" || a === "don't approve";
+}
 
 /**
  * How long an Allow once covers a repeat of the same command in the same run (BOS-376). A harness can
@@ -976,7 +1039,13 @@ export type LoopHooks = {
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
-export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, opts?: { override?: boolean; thenRunners?: boolean }): Promise<unknown> };
+/** The quiet-machine wait of a server update (BOS-420, deploy-wait.ts). */
+export type DeployWaitHook = {
+  get(): Promise<{ decisionId: string; origin: "approve" | "hand" } | null>;
+  begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand"; thenRunners?: boolean }): Promise<unknown>;
+  answered(answer: string): Promise<unknown>;
+};
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
@@ -1154,6 +1223,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
   let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
+  // DR-058: the feed note a withdrawn owner card sends; wired in app.ts. Without it the card still gets its notice.
+  let notifyFeed: ((n: NotifyInput) => Promise<unknown>) | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let secondOpinion: SecondOpinionHook | null = null;
@@ -1168,6 +1239,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onSkill: SkillHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
+  let deployWait: DeployWaitHook | null = null;
   let maintenance: MaintenanceHook | null = null;
 
   // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
@@ -1231,9 +1303,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Checks an answer's extra input before anything changes. */
   async function validate(d: typeof decisions.$inferSelect, answer: string, extra: AnswerExtra) {
     const ctx = d.context as DecisionContext;
-    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS)) {
+    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS)) {
       if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
       await selfDeploy.check(ctx);
+      // One server update at a time (BOS-420): one already waiting for a quiet machine, or in its window, holds the line.
+      const w = ctx.target === "server" ? await deployWait?.get() : null;
+      if (w && w.decisionId !== d.id) throw new AnswerError("Another server update is waiting for a quiet machine or is in its standby window. Cancel it in Settings → Server and runner → Updates first, or wait for it to finish.");
+    }
+    if (ctx.type === "owner_todo" && answer === QUIET_FIRST) {
+      if (!deployWait) throw new AnswerError("The quiet-machine wait is not set up on this install.");
+      if (ctx.target !== "server" || !ctx.commit || !ctx.fromCommit) throw new AnswerError("Only a server update can wait for a quiet machine.");
+      const w = await deployWait.get();
+      if (w && w.decisionId !== ctx.ofDecisionId) throw new AnswerError("Another server update is already waiting for a quiet machine. Cancel it in Settings → Server and runner → Updates first.");
     }
     if (ctx.type === "stale_blocker" && answer === REASSIGN) {
       if (!ctx.blockerTicketId) throw new AnswerError("Only a ticket can be reassigned.");
@@ -1645,6 +1726,37 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return rows.length === ids.size && rows.every((r) => r.systemState === "done");
   }
 
+  /**
+   * DR-058 A: what a withdrawal needs to tell the owner, read before the card closes (closing frees its ticket links).
+   * Null when the card never reached the owner: not an owner-tier card, or still with the CEO in its handover.
+   */
+  async function withdrawFacts(d: typeof decisions.$inferSelect) {
+    const ctx = d.context as DecisionContext & { ladder?: { rung?: string; ticketId?: string | null }; steps?: string[]; handSteps?: string[] };
+    if (d.tier !== "owner" || (ctx.ladder?.rung && ctx.ladder.rung !== "owner")) return null;
+    const ids = new Set<string>();
+    const own = (ctx as { ticketId?: unknown }).ticketId;
+    if (typeof own === "string") ids.add(own);
+    if (ctx.ladder?.ticketId) ids.add(ctx.ladder.ticketId);
+    for (const b of await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id))) ids.add(b.ticketId);
+    const rows = ids.size ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, systemState: tickets.systemState }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, [...ids])) : [];
+    return { ticket: rows[0] ? ticketRef(rows[0].prefix, rows[0].number) : null, stale: rows.length > 0 && rows.length === ids.size && rows.every((r) => r.systemState === "done"), steps: ctx.handSteps?.length ? ctx.handSteps : ctx.steps };
+  }
+
+  /** Leaves the withdrawn notice on a closed card and tells the feed (DR-058 C, D, E). Never fails the withdraw. */
+  async function noticeWithdrawn(d: typeof decisions.$inferSelect, facts: NonNullable<Awaited<ReturnType<typeof withdrawFacts>>>, w: { agentId: string; agent: string; reason: string; replacedBy: ReplacedBy }) {
+    try {
+      let newerLabel: string | undefined;
+      if (w.replacedBy.kind === "card") {
+        const [n] = await db.select({ question: decisions.question }).from(decisions).where(and(eq(decisions.id, w.replacedBy.id), eq(decisions.companyId, d.companyId)));
+        newerLabel = n?.question.split("\n")[0]?.slice(0, 120);
+      }
+      const notice = withdrawnNotice({ agent: w.agent, ticket: facts.ticket, reason: w.reason, replacedBy: w.replacedBy, ...(newerLabel ? { newerLabel } : {}), steps: facts.steps, now: now() });
+      await leaveWithdrawnNotice(db, d.id, { notice, agent: w.agent, agentId: w.agentId, stale: facts.stale }, { notify: notifyFeed ?? (async () => undefined), now });
+    } catch (err) {
+      log(`withdrawn notice for card ${d.id} failed: ${(err as Error).message}`);
+    }
+  }
+
   /** Another open card of the same kind asks the same thing (BOS-149). */
   async function openSibling(d: typeof decisions.$inferSelect, subject: string): Promise<typeof decisions.$inferSelect | null> {
     const c = d.context as DecisionContext;
@@ -1736,8 +1848,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput, agentId: run?.agentId ?? null };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
       const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      // BOS-1300: an ordinary agent's owner chat has its working tools, so it goes through the company's rules like its ticket runs.
+      // The CEO, Scrum Master and personal assistant chats stay board-only.
+      const [chatAgent] = asking?.purpose === "chat" && asking.agentId ? await db.select({ role: agents.role, duty: agents.duty }).from(agents).where(eq(agents.id, asking.agentId)) : [];
+      const boardOnlyChat = asking?.purpose === "chat" && (!chatAgent || runCapabilities(chatAgent, true).boardToolsOnly);
       const { outcome, rule, position } =
-        asking?.purpose === "chat"
+        boardOnlyChat
           ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
@@ -1928,7 +2044,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean }) {
+    async raise(input: { /** The open question card this one replaces (BOS-1193): it closes as superseded in the same call. Your own card, or any card for the CEO. */ replaces?: string; companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; /** Hold blocksTicketId's merge until this is answered (BOS-1078). */ holdsMerge?: boolean; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string; lint?: CardLint; setsUp?: Addon; /** Checkable conditions that close the card by itself (BOS-1161), already validated by the tool. */ clearWhen?: ClearWhen[]; /** The after-merge criteria this card settles, 0-based indexes into the ticket's list (BOS-963). */ criterionIndexes?: number[]; /** What each option means for those criteria (BOS-1155). */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** The ticket's plan (BOS-531): stored on the ticket; approving the card sets planApprovedAt. */ plan?: string; doAfter?: OrderLink[]; doBefore?: OrderLink[]; resetsOnRestart?: boolean; /** Why only the owner can take this card (BOS-1318); it stays on the owner's queue. */ ownerOnly?: OwnerOnlyKind; /** The one-line reason an owner_choice card is the owner's. */ ownerOnlyWhy?: string; /** An agent's card via raise_decision (BOS-1318): goes to the CEO first unless it needs the owner. Plans and system cards leave it out and keep their routing. */ ceoFirst?: boolean }) {
+      // BOS-1318: where this card goes. Decided by routeAgentCard from the card's structure, never its wording.
+      if (input.ownerOnly === "owner_choice" && !input.ownerOnlyWhy?.trim()) throw new AnswerError("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's.");
+      let route: { tier: "owner" | "ceo"; why: string } = { tier: "owner", why: "unchanged" };
+      let ceoRow: { id: string } | undefined;
+      if (input.ceoFirst && !input.plan) {
+        const [me] = input.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId))) : [];
+        const [ceo] = await db.select({ id: agents.id, paused: agents.paused, companyPaused: companies.paused }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.companyId, input.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+        route = routeAgentCard({ ownerOnly: input.ownerOnly, ownerMustDo: input.ownerMustDo, steps: input.steps, setsUp: input.setsUp, criterionIndexes: input.criterionIndexes, raiserRole: me?.role ?? null, ceoAvailable: !!ceo && !ceo.paused && !ceo.companyPaused && !!wake });
+        if (route.tier === "ceo") ceoRow = ceo;
+      }
       // A card this one replaces (BOS-1193): checked before anything is written, so a wrong id changes nothing.
       let replaced: { id: string; question: string; companyId: string } | null = null;
       if (input.replaces) {
@@ -1958,7 +2084,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
+            ...(route.tier === "ceo" ? { tier: "ceo" as const } : {}),
+            context: { type: "question", ...(input.ownerOnly ? { ownerOnly: input.ownerOnly, ...(input.ownerOnlyWhy?.trim() ? { ownerOnlyWhy: input.ownerOnlyWhy.trim().slice(0, 200) } : {}) } : {}), ...(route.tier === "ceo" ? { ladder: { rung: "ceo", since: now().toISOString(), minutes: CEO_QUESTION_HANDOVER_MINUTES, ticketId: input.blocksTicketId ?? null, about: input.agentId ? [input.agentId] : [], hops: [{ to: "ceo", at: now().toISOString(), why: route.why }] } } : {}), ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.blocksTicketId && input.holdsMerge ? { holdsMerge: true as const } : {}), ...(input.criterionIndexes?.length ? { criterionIndexes: input.criterionIndexes } : {}), ...(input.criterionIndexes?.length && input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}), ...(input.lint ? { lint: input.lint } : {}), ...(input.plan ? { plan: true } : {}),
               // Ordering against other owner cards (BOS-551): "do after" / "do before" links, checked in the queue.
               ...(doAfter?.length ? { doAfter } : {}), ...(doBefore?.length ? { doBefore } : {}),
               // A restart would reset what this card measures, so a server update card lists it to do first (BOS-551).
@@ -2003,11 +2130,25 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           for (const o of same) if (similarQuestion(o.question, input.question) && sameChoices(o)) await closeCardBySystem(db, o, note, closeDeps).catch((err) => log(`closing the repeated card ${o.id} failed: ${(err as Error).message}`));
         }
       }
-      await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
+      await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `${route.tier === "ceo" ? "Asked the CEO first" : "Asked the owner"}: ${input.question}`, at: now() });
       // (BOS-996) A new card is in the queue: the kept tally is stale from this moment.
       clearTallyCache();
+      // BOS-1318: a team question waits with the CEO. If the CEO's wake is dropped it goes straight to the owner (wakeLadderCeo).
+      if (route.tier === "ceo" && ceoRow) {
+        const ladder = (raised.context as { ladder: Ladder }).ladder;
+        await wakeLadderCeo(input.companyId, raised, { ladder }, ceoRow.id, [
+          `A team question is waiting for you (decision ${raised.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
+          "An agent asked it, and it needs none of the owner's hands, money, secrets or sign-off, so it came to you before the owner. Settle it yourself: answer with the decisions tool (action answer, one of its options) and a note saying why. The agent is woken with your answer and the owner can read the note.",
+          `If it really is the owner's call (product direction, a secret, money, a host step or a sign-off), escalate it at once (decisions tool, action escalate, with triedFirst). If you don't answer within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+        ].join("\n").slice(0, 4000));
+      }
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
-      return { ...raised, droppedLinks };
+      let withCeo = false;
+      if (route.tier === "ceo") {
+        const [now1] = await db.select({ tier: decisions.tier }).from(decisions).where(eq(decisions.id, raised.id));
+        withCeo = now1?.tier === "ceo";
+      }
+      return { ...raised, droppedLinks, withCeo };
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
@@ -2089,6 +2230,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setSelfDeployHook(hook: SelfDeployHook) {
       selfDeploy = hook;
+    },
+
+    setDeployWaitHook(hook: DeployWaitHook) {
+      deployWait = hook;
     },
 
     setPermissionLog(l: PermissionLog) {
@@ -2185,6 +2330,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setWakeHook(hook: WakeHook) {
       wake = hook;
+    },
+
+    setNotifyHook(hook: (n: NotifyInput) => Promise<unknown>) {
+      notifyFeed = hook;
     },
 
 
@@ -2832,7 +2981,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * info cards may be cleared directly, except merge cards, which must be stale or duplicate.
      * Returns null when it is already settled.
      */
-    async withdrawCard(input: { id: string; companyId: string; agentId: string; note: string }) {
+    async withdrawCard(input: { id: string; companyId: string; agentId: string; note: string; /** DR-058: what takes the card's place; the tool requires it, and with it a card that reached the owner leaves a notice. */ replacement?: Replacement }) {
       const note = input.note.replace(/\s+/g, " ").trim().slice(0, 500);
       if (note.length < 10) throw new AnswerError("Give a reason of at least 10 characters: the owner reads it in the audit list.");
       const [ceo] = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId), eq(agents.role, "ceo")));
@@ -2874,6 +3023,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
+      // DR-058 B, after the checks above so a card the CEO may not withdraw is refused for that reason first.
+      const rb = input.replacement ? parseReplacedBy({ reason: note, ...input.replacement }) : null;
+      if (rb && !rb.ok) throw new AnswerError(rb.error);
+      const facts = rb ? await withdrawFacts(d) : null;
       const closed = await db.transaction(async (tx) => {
         const [row] = await tx
           .update(decisions)
@@ -2886,6 +3039,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!closed) return null;
       await markDecisionNotificationRead(db, d.id, now());
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
+      if (facts && rb?.ok) await noticeWithdrawn(d, facts, { agentId: input.agentId, agent: ceo.name, reason: rb.reason, replacedBy: rb.replacedBy });
       // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
       // open card when there is one, so the owner's surviving question still holds it, and drop it
       // otherwise. A ticket is never blocked on a decision nobody can answer.
@@ -3217,10 +3371,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             fromCommit: ctx.fromCommit,
             update: ctx.update,
             doAfter: ctx.doAfter,
+            quietFirst: ctx.target === "server" && !!deployWait,
           });
-        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
-            await selfDeploy!.send(ctx, id);
+            // A server update waits for a quiet machine (BOS-420); it is sent at once when the machine is quiet already.
+            // Runner updates have their own drain (DR-006) and go as before.
+            const thenRunners = answer === DEPLOY_AND_RUNNERS;
+            if (ctx.target === "server" && deployWait) await deployWait.begin({ decisionId: id, commit: ctx.commit, fromCommit: ctx.fromCommit, thenRunners });
+            else await selfDeploy!.send(ctx, id, { thenRunners });
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
@@ -3232,7 +3391,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // the change isn't applied yet, so the card stays on the owner's queue. Keep what the owner said
         // so it shows on the card, and tell someone who can help: the agent that raised it is woken below;
         // a to-do raised by the system itself goes to the CEO.
-        if (answer === TODO_FAILED) {
+        if (answer === QUIET_FIRST) {
+          // Make room before the owner applies a server update by hand (BOS-420). The to-do stays open; the wait
+          // writes how quiet the machine is onto it, and nothing is sent to the host.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          await deployWait!.begin({ decisionId: ctx.ofDecisionId, commit: ctx.commit!, fromCommit: ctx.fromCommit!, origin: "hand" });
+        } else if (answer === TODO_FAILED) {
           const note = (extra.note ?? "").trim() || "No details given.";
           // Reopening restores the pre-answer context: only the keys answering wrote (settled, a handled advice) are put back.
           const hadAdvice = (ctx as { advice?: unknown }).advice !== undefined;
@@ -3254,6 +3418,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "maintenance") {
         await maintenance?.answered(answer);
+      } else if (ctx.type === "deploy_wait") {
+        await deployWait?.answered(answer);
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
@@ -3313,6 +3479,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === "Raise the limit") await db.update(companies).set({ maxRunMinutes: Math.min(10080, Math.ceil(ctx.minutes * 1.5)) }).where(and(eq(companies.id, d.companyId), eq(companies.maxRunMinutes, ctx.minutes)));
       } else if (ctx.type === "fence_default") {
         await applyFenceAnswer(db, d.companyId, answer, now());
+      } else if (ctx.type === "fence_unavailable") {
+        await applyFenceUnavailableAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
@@ -3351,6 +3519,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (p && answer === HARD_STOP) await db.update(budgetPolicies).set({ onLimit: "pause" }).where(eq(budgetPolicies.id, p.id));
       } else if (ctx.type === "goal_check") {
         await recordGoalAnswer(db, ctx.featureId, answer, now());
+      } else if (ctx.type === "feature_portal_hold") {
+        await applyPortalAnswer(db, ctx.featureId, answer, now());
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {
@@ -3428,6 +3598,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
       }
+      // The owner refused (BOS-1094): a "Send it back" / "Deny" / "Reject" button on an agent's card about a ticket in
+      // review stops its merge. The card no longer holds it, so without this the merge went on (BOS-1071).
+      const refused = ctx.type === "question" && !extra.settledBy && extra.by !== "ceo" && isRefusalAnswer(answer, d.options as string[] | null);
+      if (refused) {
+        for (const t of kept) {
+          await loopHooks?.sendBack(t.id, `The owner answered "${d.question}" with "${answer}", so this ticket is not to merge as it is.${extra.note ? ` Their note: ${extra.note}` : ""} Change it as they ask, then move it back to review.`, "the owner");
+          await record(db, { companyId: d.companyId, ticketId: t.id, kind: "merge_stopped_by_answer", summary: `The owner answered "${asked}" with "${answer}", so the ticket was sent back to in progress and its merge stopped.`, at: now() });
+        }
+        kept = [];
+      }
       for (const t of kept) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "decision answered", ticketId: t.id, note: `The card "${d.question}" on this ticket was answered: ${answer}. The ticket stays in review; its merge goes on now nothing holds it.` });
       }
@@ -3435,7 +3615,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
-    async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
+    async withdraw(id: string, actor: { agentId: string | null }, reason?: string, replacement?: Replacement) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       // (BOS-996) A withdrawal changes the queue; clear the kept tally before anything reads it again.
       clearTallyCache();
@@ -3451,6 +3631,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const isPlanCard = (d.context as { plan?: boolean } | null)?.plan === true && (type === "question" || type === "permission");
       if (isPlanCard && (await holdsLiveRun(db, d.context))) throw new AnswerError("This plan card holds a live run that is waiting for the answer, so it can't be withdrawn until the run ends.");
       if (!isPlanCard && (d.kind !== "question" || type !== "question")) throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
+      // DR-058 B, after the checks above so a card that can't be withdrawn is refused for that reason first.
+      const rb = replacement ? parseReplacedBy({ reason, ...replacement }) : null;
+      if (rb && !rb.ok) throw new AnswerError(rb.error);
+      const facts = rb ? await withdrawFacts(d) : null;
       const closed = await db.transaction(async (tx) => {
         const [row] = await tx.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, recheckStage: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
         if (row) await revokeApproveTokens(tx as unknown as Db, id, now());
@@ -3462,6 +3646,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       for (const f of freed) await releaseIfFree(f.ticketId, false);
       await record(db, { companyId: d.companyId, agentId: actor.agentId, ticketId: freed[0]?.ticketId, kind: "decision_withdrawn", summary: `Withdrew "${d.question}"${reason ? `: ${reason}` : ""}`, at: now() });
+      if (facts && rb?.ok) {
+        const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, actor.agentId));
+        await noticeWithdrawn(d, facts, { agentId: actor.agentId, agent: who?.name ?? "An agent", reason: rb.reason, replacedBy: rb.replacedBy });
+      }
       return { id, withdrawn: true };
     },
 

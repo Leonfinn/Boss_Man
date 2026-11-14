@@ -17,6 +17,19 @@ describe("error buffer", () => {
     expect(redact("Cookie: bm_session=abc123secret")).not.toContain("abc123secret");
   });
 
+  it("redacts the shapes tool output carries, not just error lines (BOS-1368 security review)", () => {
+    const begin = "-----BEGIN RSA " + "PRIVATE KEY-----";
+    const end = "-----END RSA " + "PRIVATE KEY-----";
+    const pem = `${begin}\nMIIEowIBAAKCAQEA\nsecretbytes\n${end}`;
+    expect(redact(pem)).not.toContain("secretbytes");
+    expect(redact(pem)).toContain(begin);
+    const jwt = "token " + ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0In0", "abcdefghijklmnop"].join(".");
+    expect(redact(jwt)).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+    expect(redact("database:\n  password: hunter2\n  user: bob")).not.toContain("hunter2");
+    expect(redact("api_key: abc123def")).not.toContain("abc123def");
+    expect(redact("Authorization: Basic dXNlcjpwYXNzd29yZA==")).not.toContain("dXNlcjpwYXNzd29yZA==");
+  });
+
   it("drops a query and its parameters from a drizzle message", () => {
     const line = 'Failed query: select * from tickets where id = $1 params: ["B Co private plan: acquire Acme"]';
     expect(redact(line)).not.toContain("B Co private plan");

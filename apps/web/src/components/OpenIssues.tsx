@@ -1,6 +1,7 @@
 import { api } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "../pages/Runs";
+import { Loader } from "./Loader";
 
 export type OpenIssue = {
   id: string;
@@ -28,7 +29,7 @@ export function OpenIssues({ companyId }: { companyId: string }) {
     <section id="open-now" aria-label="Open now" style={{ scrollMarginTop: 16, marginBottom: 24 }}>
       <h2 className="section-label">Open now{issues.data ? ` (${rows.length})` : ""}</h2>
       {!issues.data ? (
-        <p className="muted">Loading…</p>
+        <Loader label="Loading open issues" />
       ) : !rows.length ? (
         <p className="muted">Nothing open</p>
       ) : (

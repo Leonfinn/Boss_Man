@@ -9,8 +9,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { RUNNER_CODE_PATHS, touchesRunnerCode } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, companies, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { INFRA_RETRY_BASE_MS, setInfraRetryBase } from "../src/services/review.js";
 import { type StandInReplies, standInRunner } from "./helpers/stand-in-runner.js";
 
 let server: Awaited<ReturnType<typeof boot>>;
@@ -26,11 +27,19 @@ async function boot() {
   return { built, db, close, base, cookie, companies: 0 };
 }
 
-async function setup() {
+/**
+ * A fresh company for each test. By default it is made the home company (the oldest: BOS-1345), whose merges go live
+ * with the Boss Man server update; `home: false` gives a company that puts its own work live, with an older one present.
+ */
+async function setup(opts: { home?: boolean } = {}) {
   const { built, db, base, cookie } = server;
   const clients: Client[] = [];
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
-  const co = (await req("POST", "/api/companies", { name: `Live Co ${++server.companies}` })).json() as { company: { id: string }; ceo: { id: string } };
+  const n = ++server.companies;
+  const co = (await req("POST", "/api/companies", { name: `Live Co ${n}` })).json() as { company: { id: string }; ceo: { id: string } };
+  // Each home company is older than every company made before it; a non-home one gets an older home beside it.
+  if (opts.home !== false) await db.update(companies).set({ createdAt: new Date(Date.UTC(1990, 0, 1) - n * 1000) }).where(eq(companies.id, co.company.id));
+  else await db.insert(companies).values({ name: `Home before ${n}`, createdAt: new Date(Date.UTC(1980, 0, 1) - n * 1000) });
   const dev = (await req("POST", `/api/companies/${co.company.id}/agents`, { name: "Dev" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Customer app" })).json() as { id: string };
   await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
@@ -70,7 +79,8 @@ async function mergeOne(commit: string, path: string, opts: { noFileList?: boole
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Live panel", assigneeAgentId: dev.id, acceptanceCriteria: [LIVE] })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${t.id}`, systemState: "review" }).where(eq(tickets.id, t.id));
   const r = await ctx.review.landVisible(t.id, "the owner");
-  expect(stand).toEqual(opts.noFileList ? ["workspace.diff"] : []);
+  // With no file list the gate asks again before giving up (BOS-1396): the first try plus its retries.
+  expect(stand).toEqual(opts.noFileList ? Array(4).fill("workspace.diff") : []);
   expect(co.company.id).toBeTruthy();
   return { id: t.id, r };
 }
@@ -164,17 +174,24 @@ describe("after-merge checks wait for go-live", () => {
     expect(textOf(await c.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
   });
 
-  it("a merge whose changed files are unknown waits for the server and the runners", { timeout: 120_000 }, async () => {
+  // BOS-1094: a branch ticket whose changed files can't be read is not merged (it might change scripts/check-all.sh,
+  // which the owner approves), so there is no merge whose go-live wait could be unknown.
+  it("a merge whose changed files are unknown does not happen", { timeout: 120_000 }, async () => {
     await serverRuns(OLD);
     await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));
-    const { id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true });
-    expect(r.outcome).toBe("merged");
+    // The gate asks again (BOS-1396) before it gives up; make the pauses between tries short.
+    const before = INFRA_RETRY_BASE_MS;
+    setInfraRetryBase(1);
+    let id: string, r: Awaited<ReturnType<typeof mergeOne>>["r"];
+    try {
+      ({ id, r } = await mergeOne(NEW, "apps/web/src/x.tsx", { noFileList: true }));
+    } finally {
+      setInfraRetryBase(before);
+    }
+    expect(r.outcome).toBe("check_stuck");
     const t = await ctx.row(id);
-    expect(t.touchesRunner).toBe(true);
-    expect(t.goLiveWait).toBe("both");
-    await serverRuns(NEW);
-    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
-    expect((await ctx.row(id)).goLiveWait).toBe("runner");
+    expect(t.mergeCommit).toBeNull();
+    expect(t.goLiveWait).toBeNull();
   });
 
   it("a merge that is already live is handed to the assignee at once, as before", { timeout: 120_000 }, async () => {
@@ -210,5 +227,122 @@ describe("after-merge checks wait for go-live", () => {
     // so the ticket that was waiting for the server is released as soon as the hand-apply's commit is recorded.
     expect((await ctx.row(id)).goLiveWait).toBeNull();
     expect(await afterMergeWakes(id)).toHaveLength(1);
+  });
+
+  it("the home company's CEO can't mark a merge live: the server update settles it", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "apps/server/src/app.ts");
+    const ceo = await ctx.agent(ctx.co.ceo.id);
+    const out = textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: NEW, reason: "It is live" } }));
+    expect(out).toContain("goes live with the Boss Man server update");
+    const t = await ctx.row(id);
+    expect(t.goLiveWait).toBe("server");
+    expect(t.liveMarkedAt).toBeNull();
+  });
+});
+
+// BOS-1345: a company that works in its own repository and puts its work live itself. Boss Man's server commit is
+// recorded for it too (self-deploy notes it for every company), but that says nothing about its merges.
+describe("go-live for a company that puts its own work live", () => {
+  beforeAll(async () => {
+    server = await boot();
+  });
+  afterAll(async () => {
+    await server.built.app.close();
+    await server.close();
+  });
+  beforeEach(async () => {
+    ctx = await setup({ home: false });
+  });
+  afterEach(async () => {
+    await ctx.done();
+  });
+
+  it("waits for its CEO's mark, never for our server or runners, and the server update doesn't release it", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    await ctx.db.update(runners).set({ imageCommit: OLD }).where(eq(runners.id, ctx.reg.runnerId));
+    // pnpm-lock.yaml counts as runner code in the home repo; here it means nothing for our runners.
+    const { id, r } = await mergeOne(NEW, "pnpm-lock.yaml");
+    expect(r.outcome).toBe("merged");
+    const t = await ctx.row(id);
+    expect(t.goLiveWait).toBe("own");
+    expect(t.systemState).toBe("blocked");
+    expect(await afterMergeWakes(id)).toEqual([]);
+    // Our server and runners moving on (even onto a commit of the same name) changes nothing for it.
+    await serverRuns(NEW);
+    await ctx.db.update(runners).set({ imageCommit: NEW }).where(eq(runners.id, ctx.reg.runnerId));
+    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
+    expect((await ctx.row(id)).goLiveWait).toBe("own");
+    // The assignee can't close it, and is told the CEO marks it.
+    const dev = await ctx.agent(ctx.dev.id);
+    expect(textOf(await dev.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "1 pass" } }))).toContain("the CEO marks it with update_ticket markLive");
+  });
+
+  it("a ticket stuck on the old server wait moves to the CEO's wait on the next pass", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "src/app.ts");
+    // As HOL-610 was before this change: stored as waiting for our server update.
+    await ctx.db.update(tickets).set({ goLiveWait: "server" }).where(eq(tickets.id, id));
+    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
+    expect((await ctx.row(id)).goLiveWait).toBe("own");
+  });
+
+  it("its CEO marks it live with a commit sha: the wait ends, the assignee is woken once, the evidence is kept", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "src/app.ts");
+    const ceo = await ctx.agent(ctx.co.ceo.id);
+    const sha = "e".repeat(40);
+    const out = textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: sha, reason: "Their release script put it live" } }));
+    expect(out).toContain("Marked live");
+    expect(out).toContain("assignee was woken");
+    const t = await ctx.row(id);
+    expect(t.goLiveWait).toBeNull();
+    expect(t.liveMarkedAt).not.toBeNull();
+    expect(t.liveEvidence).toBe(sha);
+    expect(t.systemState).toBe("in_progress");
+    const wakeNotes = await afterMergeWakes(id);
+    expect(wakeNotes).toHaveLength(1);
+    expect(wakeNotes[0]!.note).toContain(LIVE.text);
+    expect(wakeNotes[0]!.note).toContain(`the CEO marked it live: ${sha}`);
+    expect(wakeNotes[0]!.note).not.toContain("runners");
+    const events = (await ctx.db.select().from(activity).where(eq(activity.ticketId, id))).filter((e) => e.kind === "go_live_marked");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.summary).toContain(sha);
+    // The owner can be asked now, and a later pass changes nothing.
+    expect(await ctx.review.releaseGoLiveWaiters(ctx.co.company.id)).toBe(0);
+    expect(await afterMergeWakes(id)).toHaveLength(1);
+    const dev = await ctx.agent(ctx.dev.id);
+    const ask = { question: "Is the new thing live?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: id, triedFirst: "Looked at it myself; only the owner sees their site.", ownerMustDo: false };
+    expect(textOf(await dev.callTool({ name: "raise_decision", arguments: ask }))).not.toContain("isn't live yet");
+    // With the check reported, the ticket closes.
+    expect(textOf(await dev.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "1 pass: the panel shows the host" } }))).not.toContain("isn't live yet");
+    expect((await ctx.row(id)).systemState).toBe("done");
+  });
+
+  it("its CEO can mark it live with a short note instead of a sha", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "src/app.ts");
+    const ceo = await ctx.agent(ctx.co.ceo.id);
+    textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: "  Deployed by their\nrelease script at 09:30  ", reason: "Live" } }));
+    const t = await ctx.row(id);
+    expect(t.goLiveWait).toBeNull();
+    expect(t.liveEvidence).toBe("Deployed by their release script at 09:30");
+    expect(await afterMergeWakes(id)).toHaveLength(1);
+  });
+
+  it("refuses a mark with no evidence, from anyone but the CEO, and on an unmerged ticket", { timeout: 120_000 }, async () => {
+    await serverRuns(OLD);
+    const { id } = await mergeOne(NEW, "src/app.ts");
+    const ceo = await ctx.agent(ctx.co.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: "   ", reason: "Live" } }))).toContain("Give the evidence");
+    const dev = await ctx.agent(ctx.dev.id);
+    expect(textOf(await dev.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: NEW, reason: "Live" } }))).toContain("Only the CEO marks a merged ticket live");
+    expect(textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: id, markLive: NEW, title: "Renamed", reason: "Live" } }))).toContain("markLive goes on its own");
+    const t = await ctx.row(id);
+    expect(t.goLiveWait).toBe("own");
+    expect(t.liveMarkedAt).toBeNull();
+    expect(await afterMergeWakes(id)).toEqual([]);
+    const fresh = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Not merged", assigneeAgentId: ctx.dev.id })).json() as { id: string };
+    expect(textOf(await ceo.callTool({ name: "update_ticket", arguments: { ticketId: fresh.id, markLive: NEW, reason: "Live" } }))).toContain("hasn't merged");
   });
 });

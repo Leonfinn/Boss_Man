@@ -138,7 +138,7 @@ async function changeTrace(name: string, input: Record<string, unknown>, ref: (i
     case "review":
       return action === "submit"
         ? `reviewed a ticket (${input.verdict === "approved" ? "approved" : "asked for changes"})`
-        : action === "sequence" || action === "overrule" || action === "retry_merge"
+        : action === "sequence" || action === "overrule" || action === "retry_merge" || action === "prioritise_merge"
           ? "arranged a ticket's reviews"
           : null;
     case "request_note":

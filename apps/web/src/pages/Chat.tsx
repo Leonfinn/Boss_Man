@@ -10,12 +10,14 @@ import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
+import { ThinkingTrace } from "../components/ThinkingTrace";
 import { linkPieces, type LinkContext } from "../links";
+import type { TraceBody } from "@boss-man/shared";
 
-type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
-type Chat = { agentId: string; items: Message[]; state: string };
+type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
+type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; runs: number; chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -70,6 +72,14 @@ function busyText(state: string, name: string) {
 /** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "settings")
+    return (
+      <p className="banner" role="status">
+        {m.chatOpen
+          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open until then.`
+          : "Applying a runner setting change (not an update), back in a moment. New messages are saved and answered when it is done."}
+      </p>
+    );
   return (
     <p className="banner" role="status">
       {m.chatOpen
@@ -101,6 +111,12 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
   const end = useRef<HTMLDivElement>(null);
   const state = chat.data?.state ?? "idle";
   const items = chat.data?.items ?? [];
+  const live = chat.data?.live ?? null;
+  // Which traces and steps the owner has opened, kept by message (or the live run) so the 2 s poll
+  // doesn't close them; not kept after a reload (BOS-1367). Keyed by message id, or `live:<agentId>`.
+  const [traceOpen, setTraceOpen] = useState<Record<string, boolean>>({});
+  const [stepOpen, setStepOpen] = useState<Record<string, Record<number, boolean>>>({});
+  const liveKey = `live:${current?.id ?? ""}`;
   const latest = items.at(-1)?.createdAt;
   useEffect(() => setBusy(state !== "idle"), [state]);
   // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
@@ -212,25 +228,52 @@ export function ChatPage({ companies, companyId, agentId, maintenance = null, go
                     {current.role === "ceo" || current.duty === "assistant" ? 'Try: "Add rate limiting to the login API before the beta, after the auth refactor."' : `Ask ${current.name} about their work, or for something to go on the board.`}
                   </p>
                 )}
-                {items.map((m, i) => (
-                  <div key={m.id} className={`chat-msg ${m.role}`}>
-                    <p>
-                      {m.text.includes(ASK_CEO) && ceo ? (
-                        <>
-                          {linked(m.text.split(ASK_CEO)[0]!)}
-                          <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
-                            Ask the CEO
-                          </button>
-                        </>
-                      ) : (
-                        linked(m.text)
+                {items.map((m, i) => {
+                  const trace = m.trace;
+                  return (
+                    <div key={m.id} className={`chat-msg ${m.role}${trace ? " has-trace" : ""}`}>
+                      {trace && m.role === "assistant" && (
+                        <ThinkingTrace
+                          trace={trace}
+                          open={traceOpen[m.id]}
+                          onToggle={(v) => setTraceOpen((s) => ({ ...s, [m.id]: v }))}
+                          stepOpen={stepOpen[m.id]}
+                          onStepToggle={(idx, v) => setStepOpen((s) => ({ ...s, [m.id]: { ...s[m.id], [idx]: v } }))}
+                        />
                       )}
+                      <p>
+                        {m.text.includes(ASK_CEO) && ceo ? (
+                          <>
+                            {linked(m.text.split(ASK_CEO)[0]!)}
+                            <button type="button" className="linkish" onClick={() => send(undefined, ceo, items.slice(0, i).reverse().find((x) => x.role === "owner")?.text ?? "")}>
+                              Ask the CEO
+                            </button>
+                          </>
+                        ) : (
+                          linked(m.text)
+                        )}
+                      </p>
+                      <small>
+                        {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
+                      </small>
+                    </div>
+                  );
+                })}
+                {live && (
+                  <div className="chat-msg assistant live has-trace" key={liveKey}>
+                    <ThinkingTrace
+                      trace={live}
+                      live
+                      open={traceOpen[liveKey]}
+                      onToggle={(v) => setTraceOpen((s) => ({ ...s, [liveKey]: v }))}
+                      stepOpen={stepOpen[liveKey]}
+                      onStepToggle={(idx, v) => setStepOpen((s) => ({ ...s, [liveKey]: { ...s[liveKey], [idx]: v } }))}
+                    />
+                    <p>
+                      <span className="muted">{current.name} is working…</span>
                     </p>
-                    <small>
-                      {m.role === "owner" ? "You" : m.role === "assistant" ? current.name : "Boss Man"} · {when(m.createdAt)}
-                    </small>
                   </div>
-                ))}
+                )}
                 <div ref={end} />
               </div>
               <form onSubmit={send} className="chat-form">

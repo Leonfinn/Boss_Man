@@ -120,7 +120,7 @@ export function notificationRoutes(
         company: z.union([z.literal("none"), Uuid]).optional(),
       })
       .parse(req.query);
-    return { items: await notes.list(q), unread: await notes.unread() };
+    return { items: await notes.list(q), unread: await notes.unread(), counts: await notes.unreadCounts() };
   });
   // The last 20 phone pushes, with why each was urgent and whether its card is still open (BOS-1097).
   owner.get("/api/notifications/pushes", async () => ({ items: await notes.recentPushes(20) }));

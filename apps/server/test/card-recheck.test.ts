@@ -58,9 +58,10 @@ const wakeLog = () => {
 /** An ExitPlanMode-shaped plan card (kind approval, type permission) whose run is alive or ended. */
 async function exitPlanCard(c: S, ticketId: string, runEnded: boolean) {
   const runId = randomUUID();
+  const [tk] = await c.db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
   await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId, startedAt: new Date(Date.now() - 3_600_000), ...(runEnded ? { endedAt: new Date() } : {}) });
   const [d] = await c.db.insert(decisions).values({
-    companyId: c.company.id, kind: "approval", question: "Engineer's plan: approve it to start building?", options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", raisedByAgentId: c.worker.id,
+    companyId: c.company.id, kind: "approval", question: `Approve Engineer's plan for "${tk!.title}"?`, options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", raisedByAgentId: c.worker.id,
     context: { type: "permission", runnerId: randomUUID(), runId, requestId: randomUUID(), plan: true, ticketId, planText: "x" },
   }).returning();
   return d!;
@@ -141,6 +142,38 @@ describe("the validity table closes a dead card by itself (BOS-1193)", () => {
     // a first plan carries no such line
     const fresh = await c.ticket("First plan");
     expect((await cardOf(c, (await plan(c, fresh.id)).id)).question).not.toContain("amends");
+  });
+
+  // BOS-1247: Claude's plan-mode card (ExitPlanMode, a permission card carrying the plan) is the path most agents use;
+  // submit_plan refuses an already-approved plan, so this is the only path that reaches the amend line.
+  async function planModeCard(c: S, ticketId: string, planText: string) {
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId, startedAt: new Date() });
+    const requestId = randomUUID();
+    await c.decisions.onPermissionRequest({ id: randomUUID(), companyId: c.company.id }, { type: "run.permission_request", runId, requestId, title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once", "reject_once"], detail: planText } as never);
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
+    return card!;
+  }
+
+  it("BOS-1247: a plan-mode card on an approved ticket says it amends the approved plan, and the approval and plan text stay", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("Amended by plan mode");
+    const approvedAt = new Date(Date.now() - 60_000);
+    await c.db.update(tickets).set({ planApprovedAt: approvedAt, plan: "first" }).where(eq(tickets.id, tk.id));
+    const card = await planModeCard(c, tk.id, "second");
+    expect((card.context as { plan?: boolean }).plan).toBe(true); // it is the plan-mode card, not a submitted plan
+    expect(card.question).toContain(`This amends the approved plan of ${approvedAt.toISOString()}`);
+    const [after] = await c.db.select({ at: tickets.planApprovedAt, plan: tickets.plan }).from(tickets).where(eq(tickets.id, tk.id));
+    expect(after!.at?.getTime()).toBe(approvedAt.getTime());
+    expect(after!.plan).toBe("first");
+  });
+
+  it("BOS-1247: a plan-mode card on a ticket with no approved plan has no amend line", async () => {
+    const c = (ctx = await setup());
+    const tk = await c.ticket("First plan by plan mode");
+    const card = await planModeCard(c, tk.id, "first");
+    expect((card.context as { plan?: boolean }).plan).toBe(true);
+    expect(card.question).not.toContain("amends");
   });
 
   it("BOS-1219: the owner's open 'Ask the CEO' request moves to the newer plan card", async () => {
@@ -309,7 +342,7 @@ describe("being re-checked (BOS-1193)", () => {
     expect((await cardOf(c, card.id)).recheckStage).toBeNull();
     // Flag again and let the CEO withdraw it.
     await c.db.update(decisions).set({ staleAt: new Date(), recheckStage: "ceo", recheckStageAt: new Date() }).where(eq(decisions.id, card.id));
-    const w = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: card.id, note: "Duplicate of the decision already answered." } });
+    const w = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: card.id, note: "Duplicate of the decision already answered.", replacedBy: "none" } });
     expect(isError(w)).toBe(false);
     expect((await cardOf(c, card.id)).status).toBe("withdrawn");
   });
@@ -355,11 +388,11 @@ describe("who can withdraw a plan card (BOS-1193)", () => {
     // Being re-checked (the owner wrote on the ticket): the CEO settles it, even though it is a permission-type plan card.
     await ownerActed(c.db, { companyId: c.company.id, ticketIds: [t.id], reason: "the owner wrote on this ticket", now: new Date() });
     expect((await cardOf(c, ended.id)).recheckStage).toBe("author");
-    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: ended.id, note: "This plan is a duplicate; the work moved on." } });
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: ended.id, note: "This plan is a duplicate; the work moved on.", replacedBy: "none" } });
     expect(isError(ok)).toBe(false);
     expect((await cardOf(c, ended.id)).status).toBe("withdrawn");
     const second = await exitPlanCard(c, t.id, true);
-    expect(isError(await worker.callTool({ name: "withdraw_decision", arguments: { decisionId: second.id, reason: "Replaced by a better plan" } }))).toBe(false);
+    expect(isError(await worker.callTool({ name: "withdraw_decision", arguments: { decisionId: second.id, reason: "Replaced by a better plan, so this older plan is no longer needed.", replacedBy: "none" } }))).toBe(false);
   });
 });
 

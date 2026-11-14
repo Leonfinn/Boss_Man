@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, asc, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AddonReport, isInfiniteModel, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
@@ -10,10 +10,6 @@ import { recordRestart, type HelloRestart, type LastRestart } from "./runner-res
 import { redact } from "./error-buffer.js";
 import { costEvents, decisions, engagements, notifications, runnerEventAttempts, runnerEvents, runners, runs, runTokens, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
-
-/** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
-const RESTART_PULL_MAX = 20;
-const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
 
 /** How many times one event may fail with an unexplained (uncoded) error before it is stored, marked and acked (BOS-606). */
 const MAX_APPLY_ATTEMPTS = 3;
@@ -205,6 +201,31 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   }
 
   /**
+   * The run.update payload as it is stored in runner_events (BOS-1368 security review): the Thinking
+   * trace's short input, output and reasoning are redacted here too, so a raw secret can never sit in
+   * that table even for a run whose trace is never read, and even from a runner image that predates
+   * the runner-side redaction. Every other field is left exactly as the runner sent it.
+   */
+  function storedEvent(event: RunnerEvent): RunnerEvent {
+    if (event.type !== "run.update") return event;
+    const u = event.update as Record<string, unknown>;
+    if (!u) return event;
+    const redacted: Record<string, unknown> = { ...u };
+    let changed = false;
+    for (const k of ["inputSummary", "resultSummary", "text", "title"] as const) {
+      const v = redacted[k];
+      if (typeof v === "string") {
+        const r = redact(v);
+        if (r !== v) {
+          redacted[k] = r;
+          changed = true;
+        }
+      }
+    }
+    return changed ? ({ ...event, update: redacted } as RunnerEvent) : event;
+  }
+
+  /**
    * Applies one newly stored event inside `tx`, so the event insert and its effects commit together
    * and a transient failure rolls the insert back for the runner's resend (BOS-584). Returns the work
    * that must run after the commit because it talks to the outside world (the permission hook may send
@@ -342,7 +363,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         const { inserted, afterCommit } = await db.transaction(async (tx) => {
           const rows = await tx
             .insert(runnerEvents)
-            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: storedEvent(entry.event), occurredAt: at })
             .onConflictDoNothing()
             .returning({ id: runnerEvents.id });
           if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
@@ -376,7 +397,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         await db.transaction(async (tx) => {
           await tx
             .insert(runnerEvents)
-            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: storedEvent(entry.event), occurredAt: at })
             .onConflictDoNothing();
           await record(tx, {
             companyId: runner.companyId,
@@ -472,9 +493,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     /**
      * A runner said hello with its boot id (BOS-352). A new id means the process restarted, which
-     * silently kills any background check an agent started, so the checks parked on a schedule_check
-     * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
-     * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
+     * silently kills any background check an agent started. The checks parked on a schedule_check
+     * keep their booked time (BOS-1075): pulling them forward here fired every pending check on
+     * every restart, so a deploy check booked for later went off seven times in a day. Mark them
+     * instead, so the wake at its own time still says the runner restarted; runs cut off are
+     * resumed by the recovery sweep. A reconnect (same id) changes nothing.
      */
     async bootSeen(runner: Runner, bootId: string | undefined, hello: Omit<HelloRestart, "bootId"> = {}): Promise<number> {
       if (!bootId || bootId === runner.bootId) return 0;
@@ -483,24 +506,19 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       // A runner with no boot id on record (new, or older than BOS-352) can't be told apart from a reconnect.
       if (runner.bootId) restartedAt.set(runner.id, at.getTime());
       await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
-      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the wakes below.
+      // Why it restarted, for the feed and server_status (BOS-594). A failure here must not stop the marking below.
       try {
         const last = await recordRestart(db, runner, { bootId, ...hello }, { firstBoot: !runner.bootId, at });
         if (runner.bootId) for (const l of [...restartListeners]) void Promise.resolve(l(runner, last)).catch(() => {});
       } catch {
         /* the restart still happened; only its reason is lost */
       }
-      if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
       const pending = await db
-        .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
+        .select({ id: tickets.id })
         .from(tickets)
-        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)))
-        .orderBy(asc(tickets.monitorAt))
-        .limit(RESTART_PULL_MAX);
+        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)));
       if (!pending.length) return 0;
-      await db.update(runners).set({ bootPulledAt: at }).where(eq(runners.id, runner.id));
-      await db.update(tickets).set({ monitorAt: at, monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
-      for (const p of pending) await record(db, { companyId: runner.companyId, agentId: p.assigneeAgentId, ticketId: p.id, kind: "monitor", summary: "The runner restarted: the scheduled check was brought forward", at });
+      await db.update(tickets).set({ monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
       return pending.length;
     },
 

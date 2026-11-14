@@ -1090,6 +1090,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <div style={{ fontSize: 14 }}><StepText text={d.context.rollback} refs={d.refs} /></div>
                       </div>
                     )}
+                    {d.context?.quiet && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>{d.context.quiet.ready ? "Ready: the machine is quiet" : "Making room on the machine"}</p>
+                        <p style={{ fontSize: 14 }}>
+                          {d.context.quiet.ready ? "You can apply the update now." : `Not yet: ${d.context.quiet.why.join("; ")}.`} {d.context.quiet.runs} runs going, {d.context.quiet.checks} merge checks running
+                          {d.context.quiet.freeMb != null && d.context.quiet.needMb != null ? `, ${(d.context.quiet.freeMb / 1024).toFixed(1)} GB of memory free (the update needs ${(d.context.quiet.needMb / 1024).toFixed(1)} GB)` : ""}.
+                        </p>
+                        <p className="muted" style={{ fontSize: 12 }}>Checked {when(d.context.quiet.at)}</p>
+                      </div>
+                    )}
                     {d.context?.lastFailure && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>
@@ -1286,9 +1296,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                   )}
                                 </div>
                                 {/* The note keeps its place under the answers, and names the button that sends it (BOS-1236). */}
-                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
+                                {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed" || (o === "Edit" && d.options.includes("Add"))) && (
                                   <div className="field">
-                                    <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
+                                    <label htmlFor={`note-${d.id}`}>{d.options.includes("Edit") && d.options.includes("Add") ? "Your one-line reason, or the corrected lesson (needed for Edit)" : d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : `Note for ${d.context?.type === "risk_review" ? (d.context.builder ?? "the builder") : agentOf(d)}, sent with "${d.options.find((o) => o === "Keep planning" || o === "Send it back")}"`}</label>
                                     <DraftTextarea draftKey={draftNote(d.id)} id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(text) => editNote(d.id, text)} />
                                   </div>
                                 )}
@@ -1516,7 +1526,7 @@ function ClosedGroup({ notices, advised }: { notices: ClosedNoticeCard[]; advise
                   <p style={{ margin: "0 0 4px" }}>{n.notice.text}</p>
                   {n.notice.newer && (
                     <p style={{ margin: "0 0 4px" }}>
-                      <a href="#/decisions">Follow the newer card: {n.notice.newer.label}</a>
+                      <a href={`#/decisions/${n.notice.newer.decisionId}`}>Follow the newer card: {n.notice.newer.label}</a>
                     </p>
                   )}
                   {steps?.length ? (

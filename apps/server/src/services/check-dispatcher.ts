@@ -2,10 +2,11 @@
 // The queue itself (order, slots, reuse, reasons) is check-queue.ts; this file only moves jobs between it and the runner,
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 import { and, eq } from "drizzle-orm";
-import type { RunnerCommand } from "@boss-man/shared";
+import { fullLogPointer, type RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
+import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
 export type CheckDispatcherDeps = {
   send: (runnerId: string, command: RunnerCommand) => boolean;
@@ -19,6 +20,10 @@ export type CheckDispatcherDeps = {
   defaultCommand?: (job: CheckJob) => string;
   /** The runner's own time limit for a job, in ms. */
   timeoutMs?: number;
+  /** The owner's private-details list for the merge-line scan (BOS-979); null or absent when none is set. Never logged. */
+  scanList?: () => Promise<string | null>;
+  /** Says so when a set list can't be read (BOS-1093): one warning and one owner notification per failure streak. */
+  scanListWarning?: ScanListWarning;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -29,10 +34,13 @@ const verdict = (j: CheckJob) =>
 
 export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
+  const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
 
   async function ended(job: CheckJob) {
     if (job.requestedBy && deps.wake) {
-      const tail = job.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "";
+      const kept = job.state === "failed" ? await queue.logChars(job.id).catch(() => null) : null;
+      const where = kept ? `\n\n${fullLogPointer(job.id, job.ticketId, kept)}` : "";
+      const tail = (job.logTail ? `\n\nEnd of the log:\n${job.logTail.slice(-1500)}` : "") + where;
       await Promise.resolve(deps.wake(job.requestedBy, { ticketId: job.ticketId, reason: "check_result", note: `${verdict(job)}${tail}`, priority: 2 })).catch(() => {});
     }
     await Promise.resolve(deps.onEnded?.(job)).catch(() => {});
@@ -45,7 +53,12 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     for (const { companyId } of queuedCompanies) {
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       if (!runner || !deps.isConnected(runner.id) || !deps.can(runner.id)) continue;
+      // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
+      const list = await scanList?.forScan();
       for (const job of await queue.claimNext(runner.id, new Date(), companyId)) {
+        // BOS-1043: only the merge gate's job carries the list. An agent-requested check reports its scan result back to the
+        // agent, so a listed value named by file and line would let it test guesses against the owner's list.
+        const sendList = !!list && job.kind === "merge";
         const sent = deps.send(runner.id, {
           type: "check.run",
           jobId: job.id,
@@ -54,6 +67,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           commit: job.commit,
           command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
           timeoutMs: deps.timeoutMs ?? (job.scope === "full" ? FULL_TIMEOUT : DEFAULT_TIMEOUT),
+          ...(sendList ? { scanList: list } : {}),
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
       }
@@ -63,8 +77,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   return {
     pump,
 
-    async onDone(runnerId: string, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string }) {
-      const job = await queue.complete(msg.jobId, { runnerId, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut });
+    async onDone(runnerId: string, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
+      const job = await queue.complete(msg.jobId, { runnerId, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
       // The runner may forget the result once the server has seen the job end, whether or not this answer counted.
       deps.send(runnerId, { type: "check.ack", jobId: msg.jobId });
       if (job) await ended(job);
@@ -85,6 +99,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
 
     /** Periodic: running jobs with no output for too long become stuck (and are stopped on the runner); everyone is told why. */
     async sweep(now = new Date()) {
+      await queue.pruneLogs(now).catch(() => 0); // BOS-1228: kept logs older than the retention period go
       const stuck = await queue.sweepStuck(now);
       for (const job of stuck) {
         if (job.runnerId) deps.send(job.runnerId, { type: "check.cancel", jobId: job.id });
