@@ -11,6 +11,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { clearDraft, saveDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
+import { MoreAbout } from "../components/MoreAbout";
 
 type Template = { id: string; title: string; role: "manager" | "worker"; modelTier: string; summary: string; instructions: string };
 type AgentRow = {
@@ -681,7 +682,11 @@ function CeoApprovals({ companyId }: { companyId: string }) {
           </option>
         ))}
       </select>
-      <small className="muted">Every hire and model change always waits for you, whatever this setting says: it shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. This setting only decides whether the CEO may change an agent's instructions without waiting. Anything else you're told about, and can undo from the agent's history.</small>
+      <MoreAbout lead="Choose whether the CEO's changes to an agent's instructions wait for you.">
+        <li>Hires and model changes always wait for you, whichever you choose. Each one is a card in Decisions showing four fields: harness, provider, model and paid from. You can approve, edit or reject it.</li>
+        <li>If instructions apply at once, you get a note each time the CEO changes them. You can see the change, or undo it, in Agents → the agent → History.</li>
+        <li>Any other change is not held for you either: you're told about it, and you can undo it from the agent's history.</li>
+      </MoreAbout>
       {error && (
         <p className="error" role="alert">
           {error}

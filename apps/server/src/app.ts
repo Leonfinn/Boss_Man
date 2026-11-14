@@ -71,6 +71,8 @@ import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
 import { TicketImageError, ticketImagesService } from "./services/ticket-images.js";
 import { ChatError, chatService } from "./services/chat.js";
+import { chatTraceService } from "./services/chat-trace.js";
+import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
@@ -91,6 +93,7 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
+import type { ScanListWarning } from "./services/scan-list.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkRequestService } from "./services/check-request.js";
@@ -98,6 +101,8 @@ import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
+import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { mailerService } from "./services/mailer.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
 import { policyRoutes } from "./routes/policy.js";
@@ -128,6 +133,8 @@ export type AppOptions = {
   db: Db;
   master: MasterKey;
   liveValidator?: LiveValidator;
+  /** Tests only: extra TLS options for the outgoing mail connection (a test CA). */
+  mailTlsOptions?: import("node:tls").ConnectionOptions;
   /**
    * Mark cookies Secure: true always (default), false never (plain-HTTP development), or "auto" to
    * decide per request from req.protocol, which is https only behind a trusted proxy (BOS-242).
@@ -265,6 +272,7 @@ export async function buildApp(opts: AppOptions) {
   });
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
+  const mailer = mailerService(db, { reveal: (id) => secretsSvc.reveal(id), tlsOptions: opts.mailTlsOptions });
   const privateDetails = privateDetailsService(db, master);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
@@ -314,7 +322,13 @@ export async function buildApp(opts: AppOptions) {
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
   let checkWake: ((agentId: string, w: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>) | undefined;
-  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+  // BOS-1093: a set private-details list that can't be read says so once, in the log and to the owner, and the scan runs its secret rules only.
+  const scanListWarning: ScanListWarning = {
+    log: (m) => app.log.warn(m),
+    notify: (n) => notes.notify({ companyId: null, agentId: null, level: n.level, title: n.title, body: n.body, link: n.link }),
+    isSet: () => privateDetails.isSet(),
+  };
+  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -394,7 +408,8 @@ export async function buildApp(opts: AppOptions) {
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
-  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const trace = chatTraceService();
+  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", trace });
   const pa = paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     now: opts.now,
@@ -630,6 +645,12 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // The Thinking trace (BOS-1368): every step a run takes, kept for its owner-chat reply. The runner
+    // clips and redacts before it emits, and runner_events redacts the same fields again as it stores
+    // them (security review), so no raw secret is kept there; this service redacts once more for the
+    // trace itself. A ticket run's steps are simply never asked for and dropped when the run ends.
+    if (event.type === "run.started") trace.begin(event.runId);
+    if (event.type === "run.update") trace.onUpdate(event.runId, event.update as TraceUpdate);
     // A tool call a fenced agent got a kernel refusal for (BOS-325).
     if (event.type === "run.update" && (event.update as { fenceDenied?: unknown } | null)?.fenceDenied === true) void decisionsSvc.onFenceDenied(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "fence refusal log failed"));
     // A tool call the agent says was refused (BOS-306).
@@ -764,12 +785,13 @@ export async function buildApp(opts: AppOptions) {
     cancelRun: (runId, reason) => runsSvc.cancel(runId, undefined, reason),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
-    resumeLand: (ticketId) => review.startLanding(ticketId, "Boss Man (the server restarted during this merge; starting it again)"),
+    resumeLand: (ticketId, adopt) => review.startLanding(ticketId, adopt ? "Boss Man (the server restarted; carrying on with the merge check that is still running)" : "Boss Man (the server restarted during this merge; starting it again)", undefined, adopt ? { adopt } : undefined),
     // Approved work held on a fix goes on once the fix is merged and live (BOS-1173); a repeat round on passed code is withdrawn.
     releaseHolds: () => review.releaseHolds(),
     withdrawRepeatRounds: (judged) => review.withdrawRepeatRounds(judged),
     releaseUnblocked: (ticketId) => scheduler.releaseIfUnblocked(ticketId),
     landingActive: (ticketId) => review.landingActive(ticketId),
+    landingRunning: (ticketId) => review.runningMerges().some((m) => m.ticketId === ticketId),
     branchClash: (ticketId) => review.branchClash(ticketId),
     signoffCovers: (ticketId, signed, head) => review.signoffCovers(ticketId, signed, head),
     signoffWithdraw: (ticketId, cardHead, head, why) => review.withdrawStaleSignoff(ticketId, cardHead, head, why),
@@ -896,6 +918,7 @@ export async function buildApp(opts: AppOptions) {
     notes,
     onMerged: (ticketId) => scheduler.onTicketMerged(ticketId),
     scanList: () => privateDetails.forRunner(),
+    scanListWarning,
     isLeader: () => leader.isLeader(),
     ciTiming: opts.ciTiming,
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
@@ -1298,6 +1321,8 @@ export async function buildApp(opts: AppOptions) {
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
     notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
+    // BOS-1387: Settings → Outgoing email.
+    emailSettingsRoutes(owner, { mailer, secretsSvc });
 
     /** Issues the company's runner token. It is shown once; issuing again replaces it. */
     owner.post("/api/companies/:id/runner", async (req, reply) => {
@@ -2117,6 +2142,21 @@ export async function buildApp(opts: AppOptions) {
       return r;
     });
     owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
+    // The host's build result on the ticket's branch head (BOS-1418); null when there's nothing to show. Cached 30 s so page polls don't hammer the host.
+    const ciCache = new Map<string, { at: number; value: unknown }>();
+    owner.get("/api/tickets/:id/ci", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const hit = ciCache.get(id);
+      if (hit && Date.now() - hit.at < 30_000) return { ci: hit.value };
+      const r = await review.branchChecks(id);
+      // A host that reported no checks ("none") has nothing to show either: the page renders nothing for null (BOS-1418).
+      const value = r && r.state !== "none" ? { state: r.state, failing: r.failing, total: r.total ?? null, url: r.url ?? null, sha: r.sha } : null;
+      ciCache.delete(id);
+      ciCache.set(id, { at: Date.now(), value });
+      // Bounded: past 200 tickets the oldest answer goes (Map keeps insertion order).
+      if (ciCache.size > 200) ciCache.delete(ciCache.keys().next().value as string);
+      return { ci: value };
+    });
     // A reviewer's hold on the merge (BOS-808): the owner can release it (the normal approval and merge follow) or cancel it (the pass is withdrawn).
     owner.get("/api/tickets/:id/hold", async (req) => ({ hold: await holdView(db, IdParam.parse(req.params).id) }));
     owner.post("/api/tickets/:id/hold/release", async (req, reply) => {
@@ -2203,5 +2243,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

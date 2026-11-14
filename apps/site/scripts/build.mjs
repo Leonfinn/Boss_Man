@@ -94,7 +94,7 @@ function footer(vars) {
       <p>Boss Man is in alpha. Its own agents build it, and some parts are still rough. Free and open source under the Apache 2.0 licence.</p>
     </div>
     <nav aria-label="Footer">
-      <a href="/guides/">Guides</a>${roadmap}<a href="/faq">FAQ</a><a href="${vars.repo}">GitHub</a><a href="${vars.issues}">Report a problem</a><a href="${vars.licence}">Licence</a>
+      <a href="/guides/">Guides</a>${roadmap}<a href="/about">About</a><a href="/faq">FAQ</a><a href="${vars.repo}">GitHub</a><a href="${vars.issues}">Report a problem</a><a href="${vars.licence}">Licence</a>
     </nav>
   </div>
 </footer>`;

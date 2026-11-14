@@ -15,6 +15,8 @@ import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
 import { wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
+import { checkQueue } from "./check-queue.js";
+import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
 
 export { WorkError };
 
@@ -412,7 +414,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && (doneIds.has(d.blockerTicketId) || (d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit)))).map((d) => ({ ticketId: d.blockerTicketId, until: d.blockerTicketId ? d.until : null, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, ticketNumber: rows.find((r) => r.t.id === d.blockerTicketId)?.t.number ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         // Why an in-progress ticket doesn't count towards a WIP limit (BOS-1172); null when it counts.
         wipExempt: t.systemState === "in_progress" ? wipExemptKind(t, deps.some((d) => d.blockedTicketId === t.id && !!d.blockerTicketId && !doneIds.has(d.blockerTicketId) && !(d.until === "merged" && !!rows.find((r) => r.t.id === d.blockerTicketId)?.t.mergeCommit))) : null,
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
@@ -540,6 +542,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.by) {
         if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");
         if (input.at.getTime() <= now().getTime()) throw new WorkError(422, "The time must be in the future.");
+        // BOS-1412: while the agent's own check waits or runs, its result wakes them, so one booked fallback is all it
+        // needs. A second would be an empty run that only re-reads the queue. Re-booking the same time is just a rewrite.
+        const own = await ownLiveCheck(db, t.id, input.by.agentId);
+        if (own) {
+          const booked = await pendingFallback(db, t.id, CARRY_ON_NOTE);
+          if (booked && booked.at.getTime() !== input.at.getTime()) {
+            const place = await checkPlace(checkQueue(db), t.companyId, own);
+            throw new WorkError(422, `Your check for ${own.commit.slice(0, 8)} is ${place}; its result will wake you. You already have a fallback booked for ${hhmm(booked.at)}.`);
+          }
+        }
       }
       const [row] = await db
         .update(tickets)
