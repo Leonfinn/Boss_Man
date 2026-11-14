@@ -34,7 +34,9 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
       grants.reload();
       onTokenSaved();
       onChanged();
-      return "Saved. The token is stored encrypted and is not shown again. It also pays for the CEO, so the \"What pays for the CEO\" step is done.";
+      return ceo
+        ? "Saved. The token is stored encrypted and is not shown again. It also pays for the CEO, so the \"What pays for the CEO\" step is done."
+        : "Saved. The token is stored encrypted and is not shown again. This company has no CEO yet, so choose what pays for it on the \"What pays for the CEO\" step.";
     });
   };
   return (
@@ -47,7 +49,11 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
         <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }}>
           <div className="field">
             <label htmlFor="setup-claude-token">Claude setup token</label>
-            <input id="setup-claude-token" type="password" autoComplete="off" spellCheck={false} required value={value} onChange={(e) => setValue(e.target.value)} />
+            <input id="setup-claude-token" type="password" autoComplete="off" spellCheck={false} required value={value} onChange={(e) => {
+              // A corrected token after a partly failed save must make a new secret, not reuse the first.
+              made.current = {};
+              setValue(e.target.value);
+            }} />
           </div>
           <p className="muted" style={{ fontSize: 14, margin: 0 }}>
             On your own computer, run <code>claude setup-token</code>, sign in with your Claude Pro or Max account, and paste the token it prints.

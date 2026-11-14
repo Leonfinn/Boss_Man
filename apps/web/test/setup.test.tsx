@@ -86,6 +86,59 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     expect(mine[3]!.body).toEqual({ fundingSourceId: "f1" });
   });
 
+  const allDone = ["company", "project", "runner", "credential", "git", "checks", "funding", "ticket"].map((id) => ({ id, label: id, done: true }));
+
+  it("leaves a company that is already set up alone: connected, no writes, funding step still done", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          : url.endsWith("/grants") ? [{ id: "g1", envName: "CLAUDE_CODE_OAUTH_TOKEN", secretId: "s1", secretName: "App Co Claude setup-token", hint: null, deployTargetId: null, agentIds: [] }]
+          : url.endsWith("/setup-checklist") ? allDone
+          : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    const funded: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: "f1" } as Company["agents"][number]] };
+    render(<Setup companies={[funded]} go={() => {}} onChanged={() => {}} />);
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(screen.queryByLabelText("Claude setup token")).toBeNull();
+    expect(screen.getByText("What pays for the CEO").closest("li")!.className).toBe("done");
+    expect(calls.filter((c) => !c.startsWith("GET") && !c.startsWith("PUT /api/setup-progress"))).toEqual([]);
+  });
+
+  it("skips 'What pays for the CEO' going forward once the token is saved", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 3, companyId: "c1" }
+          : url === "/api/secrets" && method === "POST" ? { secret: { id: "s1" }, warnings: [] }
+          : url === "/api/funding-sources" && method === "POST" ? { id: "f1" }
+          : url.endsWith("/setup-checklist") ? allDone
+          : url.endsWith("/projects") ? [project]
+          : url.endsWith("/grants") || url === "/api/secrets" ? []
+          : url.includes("check-presets") ? { standard: [], none: { id: "none", label: "Nothing", command: "", needs: [] }, detected: [], tools: null, error: null }
+          : {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[{ ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] }]} go={() => {}} onChanged={() => {}} />);
+    fireEvent.change(await screen.findByLabelText("Claude setup token"), { target: { value: "sk-ant-oat01-made-up" } });
+    fireEvent.click(screen.getByText("Save the token"));
+    await screen.findByText(/stored encrypted/);
+    fireEvent.click(await screen.findByText("Next")); // Claude -> git token
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A git token");
+    fireEvent.click(await screen.findByText("Next")); // git token -> checks
+    await screen.findByText("Before merging, Boss Man will");
+    fireEvent.click(screen.getByText("Next")); // checks -> would be funding, goes to the first task
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).toBe("A first task");
+  });
+
   it("shows the runner as one line, with the one thing to do when it is not connected", async () => {
     vi.stubGlobal(
       "fetch",
