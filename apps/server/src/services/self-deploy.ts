@@ -23,7 +23,9 @@ import type { BlueGreen } from "./bluegreen.js";
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
 /** The runner rebuild, by button path; a server card whose update changes runner code names it (BOS-835). */
-const RUNNER_STEP = "rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
+/** The role the Server panel should show after an update. A host without blue/green copies reports "single", which server-status counts as healthy too. */
+const ROLE_EXPECTED = "leader (or single on a server that runs one copy)";
+const RUNNER_STEP ="rebuild the runners: Settings → Server and runner → Updates → Build and update runners";
 
 const Available = z.object({
   checkedAt: z.string(),
@@ -533,7 +535,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // Only when the runner's files changed: the same flag drives the summary line on the card.
       if (a?.runnerChanged) handSteps.push(`${RUNNER_STEP[0]!.toUpperCase()}${RUNNER_STEP.slice(1)}.`);
     }
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}.`: undefined;
     const rollbackNote = "Database restore isn't a fallback yet.";
     const rollback = infra
       ? src && shaOk && bg !== undefined
@@ -1024,8 +1026,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     steps.push(
       missing ??
         (live
-          ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is leader:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
-          : "Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read leader. (Boss Man can't tell which server copy is live, so no command is shown.)"),
+          ? step(`Check Boss Man reconnected. Run this on the same machine; it asks the running server (${live}) whether it is ready. The answer should say ok is true and the role is ${ROLE_EXPECTED}:`, cmd(`cd ${src} && docker compose exec -T ${live} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`))
+          : `Check Boss Man reconnected: open Settings → Server and runner → Server. Role should read ${ROLE_EXPECTED}. (Boss Man can't tell which server copy is live, so no command is shown.)`),
     );
     return steps;
   }
@@ -1075,7 +1077,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         question: `This update changes the ${word}'s settings, and they are not applied yet. Apply them when you are ready: Boss Man is unreachable for a few seconds.`,
         key: `${SERVICE_KEY}${svc}:${a.deployed}`,
         steps: serviceSteps(svc, a.deployed, a, host),
-        check: `Settings → Server and runner → Server: Role reads leader, and this card clears by itself once the host sees the ${word} running with its new settings.`,
+        check: `Settings → Server and runner → Server: Role reads ${ROLE_EXPECTED}, and this card clears by itself once the host sees the ${word} running with its new settings.`,
         rollback: serviceRollback(svc),
         ofDecisionId: "system",
       });
