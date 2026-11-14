@@ -428,10 +428,15 @@ export function alertLadder(
       const items = [...(ctx.items ?? []), { question: input.question, at: now().toISOString(), ...(input.cause?.agents?.length ? { agents: input.cause.agents.filter((x): x is string => !!x) } : {}) }];
       // The cause carries every agent named so far, so the heading says how many, not just the last one.
       const agents = [...new Set(items.flatMap((i) => i.agents ?? []))];
-      const question = heading ? heading({ ...input.cause, agents }, items.length) : open.question;
+      // A resetsAt is a fact as of the raise that reported it (BOS-1425): the folded card names the latest, not
+      // the one on its first raise. Other cause facts (the account, the window) stay as the card was raised.
+      const cause = input.cause
+        ? { ...input.cause, ...(input.cause.account && "resetsAt" in input.cause.account ? { account: { ...input.cause.account, resetsAt: input.cause.account.resetsAt ?? null } } : {}) }
+        : undefined;
+      const question = heading && cause ? heading({ ...cause, agents }, items.length) : open.question;
       await db
         .update(decisions)
-        .set({ question, context: mergeContext({ items, lastAppendedAt: now().toISOString() }) })
+        .set({ question, context: mergeContext({ items, lastAppendedAt: now().toISOString(), ...(cause ? { cause } : {}) }) })
         .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")));
     },
 

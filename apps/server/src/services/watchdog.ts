@@ -503,10 +503,13 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
   }
 
   /**
-   * A wake held by the subscription quota is not a plan (BOS-450). Once one has been held an hour (half an hour for an
-   * urgent ticket) the CEO gets one alert for it, saying who, what, which account and window, for how long and whether
-   * another account could take over. One per held wake: the log remembers it, so the next sweep adds nothing.
-   * Wakes behind a paused agent are a different cause and are not touched here. No wake is exempt, merge wakes included.
+   * A wake held by the subscription quota is not a plan (BOS-450). Once one has been held an hour (half an
+   * hour for an urgent ticket) the CEO is told, saying who, what, which account and window, for how long and
+   * whether another account could take over. One card per account and limit window (BOS-1425), listing every
+   * wake held by it: the night of 13–14 Nov raised about 45 cards for one weekly limit, each answerable only
+   * with "Got it". The card is updated as wakes join it, and cleared by its own closer when the window resets.
+   * A wake already handed on is remembered in the log, so it is never raised again. Wakes behind a paused agent
+   * are a different cause and are not touched here. No wake is exempt, merge wakes included.
    */
   async function quotaHeldAlerts(c: typeof companies.$inferSelect, s: WatchdogSettings, t: Date) {
     if (!deps.alertCeo) return;
@@ -516,6 +519,47 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       .innerJoin(agents, eq(agents.id, wakes.agentId))
       .leftJoin(tickets, eq(tickets.id, wakes.ticketId))
       .where(and(eq(wakes.companyId, c.id), eq(wakes.status, "deferred"), like(wakes.statusReason, "subscription %"), eq(agents.paused, false)));
+    const sources = new Map<string, typeof fundingSources.$inferSelect>();
+    for (const id of new Set(held.map((h) => h.sourceId).filter((x): x is string => !!x))) {
+      const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
+      if (source) sources.set(id, source);
+    }
+    // When the account's window resets, from its latest reading (BOS-1425): the card says it, and a wake that
+    // joins later brings the fresher time with it.
+    const resetAt = async (sourceId: string, window: string) => {
+      const [sample] = await db
+        .select({ resetsAt: quotaSamples.resetsAt })
+        .from(quotaSamples)
+        .where(and(eq(quotaSamples.fundingSourceId, sourceId), eq(quotaSamples.window, window)))
+        .orderBy(desc(quotaSamples.observedAt))
+        .limit(1);
+      return sample?.resetsAt ?? null;
+    };
+    const resetWords = (at: Date | null) => (at ? `${formatDate("en-GB", at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "UTC" })} UTC` : null);
+    const elsewhereFor = async (source: typeof fundingSources.$inferSelect | undefined) => {
+      const others = source
+        ? await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank), ne(fundingSources.id, source.id)))
+        : [];
+      let roomOn: string | null = null;
+      for (const o of others) if (await accountHasRoom(o, t)) { roomOn = o.name; break; }
+      return {
+        roomOn,
+        elsewhere: roomOn
+          ? `Another account has room: ${roomOn}.${source?.fallbackRank == null ? ` ${source?.name} has no order set, so work cannot switch to it by itself: set its order on the Funding page.` : " Check why work did not move to it."}`
+          : others.length
+            ? "No other account has room right now."
+            : "No other account is set up to take over (add one on the Funding page).",
+      };
+    };
+    const line = (h: (typeof held)[number]) => {
+      const ref = h.number != null ? ticketRef(c.ticketPrefix, h.number) : null;
+      const what = ref ? `${ref} "${title(h.title ?? "")}"` : "work with no ticket";
+      return `${h.agentName}'s wake for ${what}, held ${ago(t.getTime() - h.wake.createdAt.getTime())}`;
+    };
+    // Wakes old enough to tell the CEO about, and not told of already: grouped by account and window, so one
+    // limit gets one card however many wakes it holds (BOS-1425).
+    const byLimit = new Map<string, { sourceId: string; window: string; wakes: typeof held }>();
+    const noAccount: typeof held = [];
     for (const h of held) {
       const age = t.getTime() - h.wake.createdAt.getTime();
       if (age < (h.urgent ? QUOTA_HELD_URGENT_MS : QUOTA_HELD_MS)) continue;
@@ -526,22 +570,45 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         .limit(1);
       if (told) continue;
       const window = /^subscription (.+?) window nearly used up/.exec(h.wake.statusReason ?? "")?.[1] ?? "usage";
-      const [source] = h.sourceId ? await db.select().from(fundingSources).where(eq(fundingSources.id, h.sourceId)) : [];
-      const others = source
-        ? await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank), ne(fundingSources.id, source.id)))
-        : [];
-      let roomOn: string | null = null;
-      for (const o of others) if (await accountHasRoom(o, t)) { roomOn = o.name; break; }
-      const elsewhere = roomOn
-        ? `Another account has room: ${roomOn}.${source?.fallbackRank == null ? ` ${source?.name} has no order set, so work cannot switch to it by itself: set its order on the Funding page.` : " Check why work did not move to it."}`
-        : others.length
-          ? "No other account has room right now."
-          : "No other account is set up to take over (add one on the Funding page).";
-      const ref = h.number != null ? ticketRef(c.ticketPrefix, h.number) : null;
-      const what = ref ? `${ref} "${h.title}"` : "work with no ticket";
-      const summary = `${h.agentName}'s wake for ${what} has been held ${ago(age)} by the ${window} usage limit on ${source?.name ?? "its account"}. ${elsewhere}`;
+      if (!h.sourceId) {
+        noAccount.push(h);
+        continue;
+      }
+      const key = `${h.sourceId}:${window}`;
+      const group = byLimit.get(key) ?? { sourceId: h.sourceId, window, wakes: [] };
+      group.wakes.push(h);
+      byLimit.set(key, group);
+    }
+    for (const group of byLimit.values()) {
+      const source = sources.get(group.sourceId);
+      const resets = await resetAt(group.sourceId, group.window);
+      const { roomOn, elsewhere } = await elsewhereFor(source);
+      const lines = group.wakes.map(line);
+      const summary = `${lines.join("; ")}. ${group.wakes.length} wake${group.wakes.length === 1 ? "" : "s"} held by the ${group.window} usage limit on ${source?.name ?? "their account"}${resets ? `, which resets at ${resetWords(resets)}` : ""}. ${elsewhere}`;
       if (s.recordOnly) {
-        await recordMove({ companyId: c.id, kind: "record_quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(age)} by the usage limit`, after: { wakeId: h.wake.id }, summary: `Record only: would have told the CEO. ${summary}` });
+        for (const h of group.wakes) await recordMove({ companyId: c.id, kind: "record_quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(t.getTime() - h.wake.createdAt.getTime())} by the usage limit`, after: { wakeId: h.wake.id, window: group.window, account: source?.name ?? null }, summary: `Record only: would have told the CEO. ${summary}` });
+        continue;
+      }
+      await deps.alertCeo({
+        companyId: c.id,
+        kind: "quota_held",
+        from: "ceo",
+        why: "work is held by the usage limit, which only the CEO can act on",
+        question: `${lines.join("\n")}\n${summary} Work stays stopped until the window resets or an account with room is available. Decide whether to switch the agents' account, mark the ticket urgent, or wait.`,
+        ticketId: group.wakes[0]!.wake.ticketId,
+        about: group.wakes.map((h) => h.wake.agentId),
+        cause: { ...(source ? { account: { fundingSourceId: source.id, name: source.name, window: group.window, resetsAt: resets ? resets.toISOString() : null } } : {}), agents: group.wakes.map((h) => h.wake.agentId) },
+      });
+      for (const h of group.wakes) {
+        await log({ companyId: c.id, kind: "quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(t.getTime() - h.wake.createdAt.getTime())} by the usage limit`, after: { wakeId: h.wake.id, window: group.window, account: source?.name ?? null, anotherAccountHasRoom: roomOn }, summary: `Told the CEO: ${line(h)}`, undoable: false });
+      }
+    }
+    // A held wake whose agent has no account set can't be grouped: it is told as its own card, once.
+    for (const h of noAccount) {
+      const { roomOn, elsewhere } = await elsewhereFor(undefined);
+      const summary = `${line(h)} by the usage limit on its account. ${elsewhere}`;
+      if (s.recordOnly) {
+        await recordMove({ companyId: c.id, kind: "record_quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(t.getTime() - h.wake.createdAt.getTime())} by the usage limit`, after: { wakeId: h.wake.id }, summary: `Record only: would have told the CEO. ${summary}` });
         continue;
       }
       await deps.alertCeo({
@@ -553,9 +620,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         ticketId: h.wake.ticketId,
         about: [h.wake.agentId],
         dedupeKey: `quota-held:${h.wake.id}`,
-        cause: { ...(source ? { account: { fundingSourceId: source.id, name: source.name, window } } : {}), agents: [h.wake.agentId] },
+        cause: { agents: [h.wake.agentId] },
       });
-      await log({ companyId: c.id, kind: "quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(age)} by the usage limit`, after: { wakeId: h.wake.id, window, account: source?.name ?? null, anotherAccountHasRoom: roomOn }, summary: `Told the CEO: ${summary}`, undoable: false });
+      await log({ companyId: c.id, kind: "quota_held_alert", ticketId: h.wake.ticketId, targetAgentId: h.wake.agentId, reason: `held ${ago(t.getTime() - h.wake.createdAt.getTime())} by the usage limit`, after: { wakeId: h.wake.id, account: null, anotherAccountHasRoom: roomOn }, summary: `Told the CEO: ${summary}`, undoable: false });
     }
   }
 
