@@ -558,8 +558,22 @@ export class Workspaces {
       const readWrite = [tmp, ...(extra.GIT_INDEX_FILE ? [path.dirname(extra.GIT_INDEX_FILE)] : [])];
       const cmd = fencedCommand(fenceProfile({ cwd: dir, home: tmp, tmp, readOnly: [repo, ...reads], readWrite }), "git", args);
       const env = { PATH: this.baseEnv.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: "/dev/null", ...safeGitEnv(extra) };
-      const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
-      return stdout.trim();
+      try {
+        const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+        return stdout.trim();
+      } catch (err) {
+        // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
+        // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
+        const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
+        const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
+        const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
+        // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
+        throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
+          code: e.code,
+          stdout: e.stdout,
+          stderr: e.stderr,
+        });
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
