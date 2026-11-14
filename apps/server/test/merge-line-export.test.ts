@@ -102,15 +102,16 @@ describe("merge_line_records", () => {
     const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T00:00:00Z", what: "check_jobs" }))) as { note: string; rows: Array<Record<string, unknown>> };
     const t = ctx.mine.ticket.id;
     expect(out.rows).toEqual([
-      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:00:00.000Z", started: "2026-11-09T00:04:00.000Z", finished: "2026-11-09T00:07:00.000Z", outcome: "passed", reused: null },
-      { ticket_id: t, kind: "merge", scope: "full", queued: "2026-11-09T00:02:00.000Z", started: null, finished: null, outcome: "queued", reused: null },
-      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:03:00.000Z", started: null, finished: null, outcome: "passed", reused: "passed" },
+      // ran_on (BOS-1435): where a started job ran; null for one that never started and for a reused request.
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:00:00.000Z", started: "2026-11-09T00:04:00.000Z", finished: "2026-11-09T00:07:00.000Z", outcome: "passed", reused: null, ran_on: "company runner" },
+      { ticket_id: t, kind: "merge", scope: "full", queued: "2026-11-09T00:02:00.000Z", started: null, finished: null, outcome: "queued", reused: null, ran_on: null },
+      { ticket_id: t, kind: "pre_review", scope: "quick", queued: "2026-11-09T00:03:00.000Z", started: null, finished: null, outcome: "passed", reused: "passed", ran_on: null },
     ]);
     const cut = JSON.parse(textOf(await call(c, { since: "2026-11-08T00:00:00Z", what: "check_jobs", limit: 2 }))) as { note: string; rows: unknown[] };
     expect(cut.rows).toHaveLength(2);
     expect(cut.note).toContain("since=2026-11-09T00:02:00.000Z");
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-09T00:01:00Z", what: "check_jobs", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,kind,scope,queued,started,finished,outcome,reused");
+    expect(all.split("\n")[0]).toBe("ticket_id,kind,scope,queued,started,finished,outcome,reused,ran_on");
     expect(all.split("\n")).toHaveLength(4);
     for (const leak of ["secret", "Other Co"]) expect(all).not.toContain(leak);
     await c.close();

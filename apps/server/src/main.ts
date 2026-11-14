@@ -4,6 +4,7 @@ import { buildApp } from "./app.js";
 import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
+import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
 import { checkLimitReconciler } from "./services/check-limit.js";
@@ -166,6 +167,12 @@ await app.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.PORT ?? 3100) }
 // The feedback portal on its own port, serving nothing else, so it can be shared without the owner's side.
 if (env.BOSSMAN_PORTAL_PORT) {
   // The portal is never fronted by Serve (plain http), so its voter cookie is not Secure once the sidecar is in use.
-  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true });
+  // BOSSMAN_PORTAL_TRUSTED_PROXY (BOS-1386): the reverse proxy's own address(es), so each visitor gets their own limit.
+  const portalProxy = parseTrustedProxies(env.BOSSMAN_PORTAL_TRUSTED_PROXY);
+  if (portalProxy.ignored.length) console.warn(`BOSSMAN_PORTAL_TRUSTED_PROXY: ignoring ${portalProxy.ignored.length} entr${portalProxy.ignored.length === 1 ? "y" : "ies"} that are not an address or CIDR (or are a /0): ${portalProxy.ignored.join(", ")}`);
+  // BOSSMAN_PORTAL_CLIENT_HEADER: which header names the visitor; default X-Forwarded-For, cf-connecting-ip only for Cloudflare.
+  const portalHeader = parseClientHeader(env.BOSSMAN_PORTAL_CLIENT_HEADER);
+  if (portalHeader.bad) console.warn(`BOSSMAN_PORTAL_CLIENT_HEADER: "${portalHeader.bad}" is not x-forwarded-for or cf-connecting-ip, using x-forwarded-for`);
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header });
   await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
 }

@@ -309,7 +309,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -363,6 +363,8 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
                 {r.why && !r.fixesMain ? <span className="tag grey"> {r.why}</span> : null}{" "}
                 {upFirst(KIND[r.kind])}
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
+                {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
+                {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
               </p>
             </article>
           ))}
