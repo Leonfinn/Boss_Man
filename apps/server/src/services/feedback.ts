@@ -164,7 +164,7 @@ export function feedbackService(
         const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
         // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
-        const portal = portalVerdict({ title: f.title, description: f.description, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
+        const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
         return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
@@ -261,7 +261,8 @@ export function feedbackService(
       // A new feature goes on the portal by default (BOS-957), unless it is marked sensitive or reads as security work.
       // The public-summary gate only holds it back from visitors; the tick stays on, so writing a summary later shows it.
       const facts = await portalFacts(companyId, input.areaId, input.driverScores);
-      const verdict = portalVerdict({ title: input.title, description: input.description, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
+      // Judge what a visitor would see once a public summary is written; internal wording only counts until then (BOS-1419).
+      const verdict = portalVerdict({ title: input.title, description: input.description, publicTitle, publicSummary, ...facts, keepOffPortal, hasPublicSummary: !!publicSummary });
       const mayGoOn = !(verdict.reason === "sensitive" || verdict.reason === "security");
       const [f] = await db
         .insert(features)

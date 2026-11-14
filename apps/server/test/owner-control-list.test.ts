@@ -87,6 +87,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
+  // The page-intro fold, on four screens (P7, BOS-1278).
+  "components/MoreAbout.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",
@@ -96,6 +98,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/TicketReviews.tsx": "Ticket",
   // The Board's filters panel, opened by its Filter button (BOS-1194).
   "components/FilterPanel.tsx": "Board",
+  // The Thinking trace above each agent reply, rendered in the Chat page (BOS-1368).
+  "components/ThinkingTrace.tsx": "Chat",
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
