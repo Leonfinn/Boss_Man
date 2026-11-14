@@ -35,7 +35,7 @@ describe("Checks in Settings", () => {
     fireEvent.change(screen.getByLabelText(/Checks at once/), { target: { value: "2" } });
     fireEvent.click(save);
     await vi.waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 2 });
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ mode: "server", slots: 2, train: false }); // the merge train switch (BOS-1366) is sent as shown: off
   });
 
   it("won't save slots outside 1 to 8, and warns about a runner too old for queued checks", async () => {
