@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forecastQuota, FORECAST_WINDOW_MS } from "../src/forecast.js";
+import { currentWindowReadings, forecastQuota, FORECAST_WINDOW_MS } from "../src/forecast.js";
 
 const at = (h: number, m = 0) => new Date(Date.UTC(2026, 9, 17, h, m));
 const reset = at(15);
@@ -144,5 +144,58 @@ describe("quota forecast over the whole window (BOS-1012)", () => {
 
   it("uses a day of readings on a window that has been running longer", () => {
     expect(FORECAST_WINDOW_MS).toBe(24 * 3_600_000);
+  });
+});
+
+// BOS-1422: the readings a forecast is built from must all come from the window that's running now.
+describe("currentWindowReadings (BOS-1422)", () => {
+  const nextReset = new Date(at(15).getTime() + 5 * 3_600_000);
+  const oldReset = at(10);
+
+  it("keeps only the latest reading's window, and nothing from an older or a newer one", () => {
+    const latest = { utilization: 0.5, resetsAt: reset, observedAt: at(11) };
+    const readings = [
+      latest,
+      { utilization: 0.4, resetsAt: nextReset, observedAt: at(12) },
+      { utilization: 0.3, resetsAt: reset, observedAt: at(10) },
+      { utilization: 0.9, resetsAt: oldReset, observedAt: at(9) },
+    ];
+    expect(currentWindowReadings(readings, latest)).toEqual([
+      { utilization: 0.3, resetsAt: reset, observedAt: at(10) },
+      latest,
+    ]);
+  });
+
+  it("returns readings oldest first even when they're given out of order", () => {
+    const latest = { utilization: 0.5, resetsAt: reset, observedAt: at(11) };
+    const readings = [
+      latest,
+      { utilization: 0.4, resetsAt: reset, observedAt: at(10, 30) },
+      { utilization: 0.3, resetsAt: reset, observedAt: at(9, 30) },
+    ];
+    expect(currentWindowReadings(readings, latest).map((r) => r.observedAt)).toEqual([
+      at(9, 30),
+      at(10, 30),
+      at(11),
+    ]);
+  });
+
+  it("keeps only readings with no reset time when the latest has none", () => {
+    const latest = { utilization: 0.5, resetsAt: null, observedAt: at(11) };
+    const readings = [
+      latest,
+      { utilization: 0.4, resetsAt: reset, observedAt: at(10) },
+      { utilization: 0.2, resetsAt: null, observedAt: at(9) },
+    ];
+    expect(currentWindowReadings(readings, latest)).toEqual([
+      { utilization: 0.2, resetsAt: null, observedAt: at(9) },
+      latest,
+    ]);
+  });
+
+  it("returns an empty list for an empty list", () => {
+    expect(
+      currentWindowReadings([], { utilization: 0.5, resetsAt: reset, observedAt: at(11) }),
+    ).toEqual([]);
   });
 });

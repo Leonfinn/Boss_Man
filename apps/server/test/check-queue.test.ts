@@ -163,6 +163,72 @@ describe("check queue", () => {
     await s.close();
   });
 
+  it("a pre-review job claimed between the read and the lift is not turned into a merge job; the merge gets a fresh one (BOS-1390)", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const a = (await s.req({ ticketId, tree: "r", kind: "pre_review" })).job;
+    expect(a.state).toBe("queued");
+    // Reproduce the race: a pump holds check_jobs_claim (a different lock from enqueue's), so it can claim the queued job and
+    // dispatch it as pre-review between enqueue's read and the lift's UPDATE. enqueue runs inside db.transaction, so wrap the
+    // tx it hands the callback: the first checkJobs UPDATE of a row (the lift) first marks the row running the way a pump does
+    // (pglite is one connection, so a real claimNext would open a nested transaction and block), so the row is queued at the
+    // read and running by the time the lift's WHERE is evaluated.
+    const real = s.db as unknown as {
+      transaction: (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+    };
+    type Chain = { set: (v: unknown) => { where: (w: unknown) => Promise<unknown> } };
+    let fired = false;
+    const wrapTx = (tx: unknown) => {
+      const t = tx as { update: (x: unknown) => Chain; execute: (q: unknown) => Promise<unknown> };
+      return new Proxy(tx as object, {
+        get(target, prop, recv) {
+          if (prop !== "update") return Reflect.get(target, prop, recv);
+          return (table: unknown) => {
+            const upd = t.update(table);
+            if (table !== checkJobs) return upd;
+            return {
+              set: (v: unknown) => {
+                const after = upd.set(v);
+                return {
+                  where: (w: unknown) => {
+                    const q = after.where(w) as unknown as { then: (a: (v: unknown) => unknown, b?: (e: unknown) => unknown) => Promise<unknown>; returning?: () => Promise<unknown> };
+                    if (fired) return q;
+                    fired = true;
+                    // The pump claims the still-queued job first (state running, no owner's list in its dispatch), then the
+                    // lift's own WHERE runs against the claimed row: the queued guard sees "running", so no row comes back.
+                    const claim = () => (t.update(checkJobs) as Chain).set({ state: "running", startedAt: new Date() } as never).where(eq(checkJobs.id, a.id));
+                    return {
+                      then: (a: (v: unknown) => unknown, b?: (e: unknown) => unknown) => claim().then(() => q.then(a, b)),
+                      returning: () => claim().then(() => (q.returning ? q.returning() : q as unknown as Promise<unknown>)),
+                    };
+                  },
+                };
+              },
+            };
+          };
+        },
+      });
+    };
+    const wrapped = new Proxy(s.db as object, {
+      get(target, prop, recv) {
+        if (prop !== "transaction") return Reflect.get(target, prop, recv);
+        return (fn: (tx: unknown) => Promise<unknown>) => real.transaction((tx) => fn(wrapTx(tx)));
+      },
+    });
+    const q = checkQueue(wrapped as never);
+    const m = await q.enqueue({ companyId: s.companyId, projectId: s.projectId, ticketId, kind: "merge", commit: "c-r", tree: "r", requestedBy: null });
+    expect(fired).toBe(true); // the lift's UPDATE ran (after the claim)
+    // The claimed job was NOT turned into a merge job: it is still a running pre-review job.
+    const after = (await s.db.select().from(checkJobs).where(eq(checkJobs.id, a.id)))[0]!;
+    expect(after.state).toBe("running");
+    expect(after.kind).toBe("pre_review");
+    // The merge request got a fresh merge job instead of reusing the claimed one as "live".
+    expect(m.reused).toBeNull();
+    expect(m.job.id).not.toBe(a.id);
+    expect(m.job.kind).toBe("merge");
+    await s.close();
+  });
+
   it("a merge request is never answered by a running pre-review job, which ran without the owner's list (BOS-1043)", async () => {
     const s = await setup();
     const ticketId = await s.ticket();

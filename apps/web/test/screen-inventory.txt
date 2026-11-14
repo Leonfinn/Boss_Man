@@ -29,6 +29,7 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Filter tasks
   - Most expensive tasks
   - Passed, held
   - Project brief

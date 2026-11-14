@@ -122,6 +122,28 @@ export type JournalEntry = z.infer<typeof JournalEntry>;
 /** Thinking levels an agent can ask for; the adapter's thought_level option says which its model takes. */
 export const THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
+/**
+ * Per-check caps for the machine that runs it (BOS-1435): the owner sets them per check worker in Settings, so nothing
+ * host-specific lives in code. The runner turns them into BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB in the job's
+ * environment. Bounded numbers only, never free-form environment variables.
+ */
+export const CheckLimits = z.object({ threads: z.number().int().min(1).max(256).optional(), memoryMb: z.number().int().min(256).max(1_048_576).optional() });
+export type CheckLimits = z.infer<typeof CheckLimits>;
+
+/**
+ * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
+ * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
+ */
+export const CheckRunCommand = z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional(), scanList: z.string().max(60_000).optional(), limits: CheckLimits.optional() });
+/** Stop a check job. Only the server sends this; agents have no way to. */
+export const CheckCancelCommand = z.object({ type: z.literal("check.cancel"), jobId: Uuid });
+/** The server has recorded this job’s result; the runner can stop re-sending it. */
+export const CheckAckCommand = z.object({ type: z.literal("check.ack"), jobId: Uuid });
+/** A running check job printed something: the log tail so far (BOS-316). */
+export const CheckProgressMessage = z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) });
+/** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
+export const CheckDoneMessage = z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional() });
+
 export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("run.start"),
@@ -197,7 +219,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(),
+    /** Merge train (BOS-1366, runner feature "merge-base"): prepare on this commit (main's tip or a train member ahead) instead of main's tip. */
+    base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
+    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -234,11 +260,9 @@ export const RunnerCommand = z.discriminatedUnion("type", [
    * Run a queued check job (DR-003, BOS-316) in a process the runner owns, in its own detached worktree of this exact commit.
    * It is not tied to any agent session. Answered with check.progress and check.done messages, not a reply.
    */
-  z.object({ type: z.literal("check.run"), jobId: Uuid, projectId: Uuid, ticketId: Uuid, commit: z.string().min(7).max(64), command: z.string().min(1), timeoutMs: z.number().int().positive().optional(), scanList: z.string().max(60_000).optional() }),
-  /** Stop a check job. Only the server sends this; agents have no way to. */
-  z.object({ type: z.literal("check.cancel"), jobId: Uuid }),
-  /** The server has recorded this job’s result; the runner can stop re-sending it. */
-  z.object({ type: z.literal("check.ack"), jobId: Uuid }),
+  CheckRunCommand,
+  CheckCancelCommand,
+  CheckAckCommand,
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /**
    * Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current
@@ -283,22 +307,22 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
     /** Check jobs this runner is running now (BOS-316): the server puts back in line any it thinks run here but are not listed. */
     checkJobs: z.array(Uuid).max(100).optional(),
+    /** BOS-1435: how many checks this machine runs at once (BOSSMAN_CHECK_SLOTS); read only from a check worker. */
+    checkSlots: z.number().int().min(1).max(64).optional(),
   }),
 
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),
-  /** A running check job printed something: the log tail so far (BOS-316). */
-  z.object({ type: z.literal("check.progress"), jobId: Uuid, tail: z.string().max(20_000) }),
-  /** A check job ended (BOS-316). commit is the commit that was checked; the server ignores an answer for any other. */
-  z.object({ type: z.literal("check.done"), jobId: Uuid, commit: z.string().max(64), exitCode: z.number().int().nullable(), timedOut: z.boolean(), tail: z.string().max(20_000), fullLog: z.string().max(2_000_000).optional() }),
+  CheckProgressMessage,
+  CheckDoneMessage,
   /** An answer to a request command. Not journalled: it can always be asked for again. */
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). A check worker (BOS-1435) announces WORKER_FEATURES instead, plus "check-bundle" once it can fetch code itself (BOS-1436). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -312,6 +336,36 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
+
+/**
+ * Check workers (DR-060, BOS-1435): a runner image started with BOSSMAN_ROLE=check-worker dials /api/check-worker/connect
+ * with its own token. That socket carries check jobs and nothing else: no journal events, no replies to requests, no runs,
+ * merges or secrets. These schemas are the whole of it; the server parses with WorkerMessage, so any other message type is
+ * refused there. "check-bundle" in hello.features says the worker can fetch the code itself (BOS-1436); without it the
+ * server never sends it a job.
+ */
+export const WORKER_FEATURES = ["check-jobs"] as const;
+export const WorkerMessage = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("hello"),
+    protocol: z.number().int(),
+    runnerVersion: z.string().max(100),
+    imageVersion: z.string().max(200).nullable(),
+    imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+    features: z.array(z.string().max(40)).max(50).optional(),
+    bootId: z.string().max(100).optional(),
+    checkJobs: z.array(Uuid).max(100).optional(),
+    checkSlots: z.number().int().min(1).max(64).optional(),
+  }),
+  z.object({ type: z.literal("ping") }),
+  z.object({ type: z.literal("pong") }),
+  CheckProgressMessage,
+  CheckDoneMessage,
+]);
+export type WorkerMessage = z.infer<typeof WorkerMessage>;
+/** Server → worker commands: check jobs only. */
+export const WorkerCommand = z.discriminatedUnion("type", [CheckRunCommand, CheckCancelCommand, CheckAckCommand]);
+export type WorkerCommand = z.infer<typeof WorkerCommand>;
 
 /** What a ticket changed against its base (R39). */
 export type WorkspaceDiff = {

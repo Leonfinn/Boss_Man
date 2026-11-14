@@ -4,7 +4,9 @@ import {
   DEFAULT_COLUMNS,
   defaultTicketPrefix,
   effectiveDueDate,
+  staleNoteWhy,
   stateNoteLine,
+  systemAuthor,
   TICKET_PREFIX,
   ticketRef,
   type ColumnSpec,
@@ -98,14 +100,29 @@ describe("stateNoteLine: the state note an agent reads, with its age (R85, BOS-1
   });
 });
 
+describe("staleNoteWhy: what the owner did after a state note was written (BOS-1192)", () => {
+  it("states the reason and when it happened", () => {
+    expect(staleNoteWhy("the owner answered the question", "2h")).toBe("after this was written, the owner answered the question, 2h ago");
+  });
+
+  it("says the owner acted when there is no reason", () => {
+    expect(staleNoteWhy(null, "1h")).toBe("the owner acted on this ticket 1h ago, after this was written");
+  });
+});
+
 describe("defaultTicketPrefix: the prefix a new company starts with (BOS-1129)", () => {
   it("takes the first three letters or digits of the name", () => {
     expect(defaultTicketPrefix("Boss Man Co")).toBe("BOS");
     expect(defaultTicketPrefix("a1-b")).toBe("A1B");
   });
 
+  it("keeps a short name as it is, upper-cased", () => {
+    expect(defaultTicketPrefix("ab")).toBe("AB");
+  });
+
   it("falls back to TKT when the name has no letters or digits", () => {
     expect(defaultTicketPrefix("!!")).toBe("TKT");
+    expect(defaultTicketPrefix("")).toBe("TKT");
   });
 });
 
@@ -116,11 +133,25 @@ describe("ticketRef: how a ticket is referred to, as in BOS-12 (BOS-1129)", () =
 
   it("uses T when there is no prefix", () => {
     expect(ticketRef(null, 12)).toBe("T-12");
+    expect(ticketRef(undefined, 12)).toBe("T-12");
+    expect(ticketRef("", 12)).toBe("T-12");
   });
 
   it("is null for a ticket without a number yet", () => {
     expect(ticketRef("BOS", 0)).toBeNull();
     expect(ticketRef("BOS", null)).toBeNull();
+  });
+});
+
+describe("systemAuthor: who a system note on a ticket is from", () => {
+  it("names the tool an imported note came from", () => {
+    expect(systemAuthor("from:Jira")).toBe("Jira (imported)");
+  });
+
+  it("is Boss Man for any other delivery or none", () => {
+    expect(systemAuthor("email")).toBe("Boss Man");
+    expect(systemAuthor(null)).toBe("Boss Man");
+    expect(systemAuthor(undefined)).toBe("Boss Man");
   });
 });
 

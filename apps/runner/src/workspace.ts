@@ -107,6 +107,8 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
+/** A server-queued merge's phase (BOS-316); `base` / `expectBase` are the merge train's (BOS-1366). */
+export type MergePhase = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
 
 /**
  * Git credentials from the run's granted secrets, passed through the environment only.
@@ -1320,7 +1322,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string; limitsEnv?: Record<string, string> } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1335,7 +1337,11 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, { projectId: spec.projectId, list: hooks.scanList });
+        // BOS-1435: the machine's per-check caps (BOSSMAN_CHECK_THREADS / _MEMORY_MB), already bounded by checkLimitsEnv. The
+        // job's environment is a whitelist built from the fence env, so they go there.
+        const fence = this.jobFenceFor(repo, dir, home);
+        Object.assign(fence.env, hooks.limitsEnv ?? {});
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence }, null, { projectId: spec.projectId, list: hooks.scanList });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -1749,7 +1755,7 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string } | null = null): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
     if (phase) return this.mergePhase(spec, target, message, secrets, phase);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
@@ -1785,8 +1791,10 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string }): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
+    // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
+    const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
     const keep = `refs/bossman/merge/${spec.ticketId}`;
@@ -1798,7 +1806,9 @@ export class Workspaces {
         // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
         if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
-      const tried = await this.tryMerge(repo, branch, target, auth);
+      // finish with expectBase: tryMerge's own fetch tells whether main is still at that base; anything else is main_moved
+      // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
+      const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
@@ -1915,10 +1925,24 @@ export class Workspaces {
     });
   }
 
-  /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
-  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
+  /**
+   * Fetches, then tries the ticket's branch on top of origin's target with merge-tree. `on` (merge train, BOS-1366): try it on
+   * `on.base` instead, a commit that must be the target's tip or built on it (a train member ahead's prepared merge); with
+   * `on.exact` the target's tip must be that very commit. Otherwise main_moved: the train restacks on the real main.
+   */
+  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>, on?: { base: string; exact: boolean }) {
     await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
-    const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    let targetSha = tip;
+    if (on && on.base !== tip) {
+      if (on.exact) return { status: "main_moved" as const };
+      // The base must be here (a member ahead re-prepared and its old commit may be gone) and descend from main's tip.
+      const known = await this.gitCode(["rev-parse", "--verify", "--quiet", `${on.base}^{commit}`], { cwd: repo });
+      if (known.code !== 0) return { status: "main_moved" as const };
+      const onMain = await this.gitCode(["merge-base", "--is-ancestor", tip, on.base], { cwd: repo });
+      if (onMain.code !== 0) return { status: "main_moved" as const };
+      targetSha = on.base;
+    }
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
     if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
@@ -2122,6 +2146,7 @@ export class Workspaces {
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
+      if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);

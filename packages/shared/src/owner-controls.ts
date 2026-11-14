@@ -56,8 +56,11 @@ export const OWNER_CONTROLS = {
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
-    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
+    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
     "Show all done tasks", "Run now", "Discard draft",
+    // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
+    // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
+    "Filter", "Clear all", "Clear filters",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
@@ -251,6 +254,8 @@ export const OWNER_FIELDS = {
     "Tickets in progress, whole company (leave empty for no limit)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
+    // Settings → Checks: the merge train switch (BOS-1366).
+    "Land approved merges in order (merge train)",
     // Workspace disk.
     "Disk cap (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).
