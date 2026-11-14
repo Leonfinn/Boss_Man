@@ -54,13 +54,17 @@ describe("setup", () => {
 });
 
 describe("dropToUnprivileged", () => {
-  const fake = (uid: number) => {
+  const fake = (start: number, stuck = false) => {
     const calls: string[] = [];
-    return { calls, ids: { getuid: () => uid, setgroups: (g: number[]) => calls.push(`groups ${g}`), setgid: (g: number) => calls.push(`gid ${g}`), setuid: (u: number) => calls.push(`uid ${u}`) } };
+    let uid = start;
+    return {
+      calls,
+      ids: { getuid: () => uid, geteuid: () => uid, setgroups: (g: number[]) => calls.push(`groups ${g}`), setgid: (g: number) => calls.push(`gid ${g}`), setuid: (u: number) => { calls.push(`uid ${u}`); if (!stuck) uid = u; } },
+    };
   };
   it("joins the socket's group, then drops gid and uid in that order", () => {
     const f = fake(0);
-    dropToUnprivileged("/s", f.ids, () => ({ gid: 998 }));
+    dropToUnprivileged("/s", f.ids, () => ({ gid: 998, mode: 0o660 }));
     expect(f.calls).toEqual(["groups 998", "gid 1000", "uid 1000"]);
   });
   it("does nothing when it already is not root (the build install)", () => {
@@ -68,10 +72,19 @@ describe("dropToUnprivileged", () => {
     dropToUnprivileged("/s", f.ids, () => ({ gid: 998 }));
     expect(f.calls).toEqual([]);
   });
-  it("never gives root's group back", () => {
+  it("allows socket group 0 (Docker Desktop): uid 1000 with group 0 added, and says so", () => {
     const f = fake(0);
-    dropToUnprivileged("/s", f.ids, () => ({ gid: 0 }));
-    expect(f.calls[0]).toBe("groups ");
+    const line = dropToUnprivileged("/s", f.ids, () => ({ gid: 0, mode: 0o660 }));
+    expect(f.calls).toEqual(["groups 0", "gid 0", "uid 1000"]);
+    expect(line).toBe("socket group is root (0), running as uid 1000 with that group");
+  });
+  it("stops instead of staying root when the uid did not change", () => {
+    expect(() => dropToUnprivileged("/s", fake(0, true).ids, () => ({ gid: 998, mode: 0o660 }))).toThrow(/stopping instead of running as root/);
+  });
+  it("stops with a plain message when the socket's group cannot read and write it", () => {
+    const f = fake(0);
+    expect(() => dropToUnprivileged("/s", f.ids, () => ({ gid: 998, mode: 0o600 }))).toThrow(/not read-write for its group/);
+    expect(f.calls).toEqual([]);
   });
 });
 
