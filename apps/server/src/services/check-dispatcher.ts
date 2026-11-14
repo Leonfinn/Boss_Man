@@ -2,7 +2,7 @@
 // The queue itself (order, slots, reuse, reasons) is check-queue.ts; this file only moves jobs between it and the runner,
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 import { and, eq } from "drizzle-orm";
-import { fullLogPointer, type NotifyLevel, type RunnerCommand } from "@boss-man/shared";
+import { fullLogPointer, type RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
