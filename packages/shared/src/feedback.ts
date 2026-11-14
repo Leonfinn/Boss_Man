@@ -134,19 +134,23 @@ const SECURITY_WORDS = new Set([
   "security", "secure", "permission", "permissions", "credential", "credentials", "secret", "secrets", "token", "tokens",
   "password", "passwords", "vulnerability", "vulnerable", "exploit", "auth", "authentication", "authorisation", "authorization",
   "sandbox", "firewall", "encrypt", "encryption", "decrypt", "crypto", "cryptography", "ssh", "ssl", "tls",
-  "certificate", "certificates", "privilege", "privileges", "sudo", "acl",
+  "certificate", "certificates", "privilege", "privileges", "sudo", "acl", "hostname", "hostnames",
 ]);
+/** An IPv4 address, so a summary naming the server's own address is caught (BOS-1419): four dot-separated groups of 1-3
+ * digits that don't run on into a fifth group or a word. A trailing full stop ("...50.") still counts. */
+const IPV4 = /(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?!\.?\d)/;
 /** Phrases that make a feature security work even though each word on its own could be ordinary. "keys" and "key" are not
  * here on their own because a shortcut key or a sort key isn't security work. */
 const SECURITY_PHRASES = ["access control", "api key", "api keys", "private key", "network guard", "agent fence", "key rotation", "role based"];
 
-/** Whether text reads as security work: a security word, or one of the security phrases. A simple rule, not AI. */
+/** Whether text reads as security work: a security word, one of the security phrases, or an IP address. A simple rule, not AI. */
 export function looksLikeSecurity(text: string): boolean {
   const lower = text.toLowerCase();
   // Split on anything that isn't a letter or digit, so "token-based" and "the token's expiry" count as "token",
   // the same way the migration's SQL word boundaries do.
   const words = lower.match(/[a-z0-9]+/g) ?? [];
   if (words.some((w) => SECURITY_WORDS.has(w) || SECURITY_WORDS.has(w.replace(/s$/, "")))) return true;
+  if (IPV4.test(lower)) return true;
   return SECURITY_PHRASES.some((p) => lower.includes(p));
 }
 
@@ -161,24 +165,33 @@ export function looksLikeSecurityPhrase(text: string): boolean {
 
 /**
  * Whether a feature goes on the feedback portal by default (BOS-957). A feature is off, and says why, when
- * someone marked it "keep off the portal (sensitive)"; that mark always wins. Otherwise it is security work if
- * its area, criteria, title or description read that way. A feature that may go on is still held back while it
- * has no public summary, because the portal shows visitors its internal title and description. No model call.
+ * someone marked it "keep off the portal (sensitive)"; that mark always wins. Otherwise, once it has a public
+ * summary, only the text a visitor would actually see is judged — the stored public title and the stored public
+ * summary — because the internal title and description never reach visitors (BOS-1419). Without a public summary
+ * the internal title and description are judged, as before, so internal wording alone can't put a feature out.
+ * The area and criteria are still read, as they describe the work whoever reads it. No model call.
  */
 export function portalVerdict(input: {
   title: string;
   description?: string | null;
+  publicTitle?: string | null;
+  publicSummary?: string | null;
   area?: string | null;
   criteria?: string[];
   keepOffPortal?: boolean;
   hasPublicSummary?: boolean;
 }): PortalVerdict {
   if (input.keepOffPortal) return { onPortal: false, reason: "sensitive" };
-  const text = [input.title, input.description ?? "", input.area ?? ""].join(" ");
-  if (looksLikeSecurity(text)) return { onPortal: false, reason: "security" };
+  const summary = input.publicSummary?.trim();
+  const hasPublicSummary = input.hasPublicSummary ?? !!summary;
+  // Judge the stored values, never a decoy supplied in the same call (BOS-991). With a public summary the visitor sees
+  // its first line as the title, so the public title and public summary are what matters; without one, the internal title
+  // and description are judged as before (BOS-1419).
+  const judged = summary ? [input.publicTitle ?? "", summary, portalTitle(input.publicTitle, summary) ?? ""].join(" ") : [input.title, input.description ?? ""].join(" ");
+  if (looksLikeSecurity([judged, input.area ?? ""].join(" "))) return { onPortal: false, reason: "security" };
   // A criterion is a scoring axis, so only a security phrase in one counts ("agent fence"), never a bare word
   // such as a criterion simply named "Security" (BOS-1260).
   if (looksLikeSecurityPhrase((input.criteria ?? []).join(" "))) return { onPortal: false, reason: "security" };
-  if (!input.hasPublicSummary) return { onPortal: false, reason: "needs public summary" };
+  if (!hasPublicSummary) return { onPortal: false, reason: "needs public summary" };
   return { onPortal: true, reason: null };
 }

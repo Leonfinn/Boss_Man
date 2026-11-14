@@ -51,7 +51,7 @@ export const OWNER_CONTROLS = {
     "Copy",
   ],
   Notifications: ["Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
-  Chat: ["Ask the CEO", "Send"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",

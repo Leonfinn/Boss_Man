@@ -888,13 +888,19 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           if (input.portalVisible === true) {
             const target = await feedback.feature(input.featureId, scope.companyId);
             const facts = await feedback.portalFacts(scope.companyId, target.areaId, target.driverScores as Record<string, number | null>);
-            // Judge the stored feature: update_feature never saves title/description, so input values must not be used here.
+            // Judge what a visitor would see: the stored public title and the public summary (the one being written in
+            // this call if there is one, else the stored one). update_feature never saves title/description, so the input
+            // title and description must not be used here, and they are refused above as decoys (BOS-991, BOS-1419).
+            const publicSummary = input.publicSummary !== undefined ? input.publicSummary : target.publicSummary;
+            const publicTitle = input.publicTitle !== undefined ? input.publicTitle : target.publicTitle;
             const verdict = portalVerdict({
               title: target.title,
               description: target.description,
+              publicTitle,
+              publicSummary,
               ...facts,
               keepOffPortal: input.keepOffPortal ?? target.keepOffPortal,
-              hasPublicSummary: true,
+              hasPublicSummary: !!publicSummary?.trim(),
             });
             if (verdict.reason === "security") return fail("This feature reads as security work, so it stays off the feedback portal. Only the owner can put it there, in the Features page.");
           }

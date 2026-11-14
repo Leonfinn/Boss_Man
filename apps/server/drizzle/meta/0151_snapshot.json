@@ -1,5 +1,5 @@
 {
-  "id": "dcece912-2b9a-4371-9604-2aa32c44bbb9",
+  "id": "fb1aa73b-4098-4860-ab8a-859df806114f",
   "prevId": "3957ab38-cd85-465f-bd2e-4bbda3fa3ae3",
   "version": "7",
   "dialect": "postgresql",
@@ -3382,12 +3382,6 @@
           "notNull": true,
           "default": false
         },
-        "keep_off_reason": {
-          "name": "keep_off_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "public_summary": {
           "name": "public_summary",
           "type": "text",
@@ -5234,6 +5228,125 @@
         "owner_chat_messages_run_id_runs_id_fk": {
           "name": "owner_chat_messages_run_id_runs_id_fk",
           "tableFrom": "owner_chat_messages",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.owner_chat_traces": {
+      "name": "owner_chat_traces",
+      "schema": "",
+      "columns": {
+        "message_id": {
+          "name": "message_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "trace": {
+          "name": "trace",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "owner_chat_traces_created": {
+          "name": "owner_chat_traces_created",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "owner_chat_traces_message_id_owner_chat_messages_id_fk": {
+          "name": "owner_chat_traces_message_id_owner_chat_messages_id_fk",
+          "tableFrom": "owner_chat_traces",
+          "tableTo": "owner_chat_messages",
+          "columnsFrom": [
+            "message_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "owner_chat_traces_company_id_companies_id_fk": {
+          "name": "owner_chat_traces_company_id_companies_id_fk",
+          "tableFrom": "owner_chat_traces",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "owner_chat_traces_agent_id_agents_id_fk": {
+          "name": "owner_chat_traces_agent_id_agents_id_fk",
+          "tableFrom": "owner_chat_traces",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "owner_chat_traces_run_id_runs_id_fk": {
+          "name": "owner_chat_traces_run_id_runs_id_fk",
+          "tableFrom": "owner_chat_traces",
           "tableTo": "runs",
           "columnsFrom": [
             "run_id"
