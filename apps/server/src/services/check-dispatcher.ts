@@ -35,6 +35,8 @@ export type CheckDispatcherDeps = {
   };
   /** How long a dropped worker has to come back before its jobs go back in line (default three heartbeats). */
   workerGraceMs?: number;
+  /** Only the leader re-queues a dropped worker's jobs (a standby closed the socket itself). Absent: always the leader. */
+  isLeader?: () => boolean;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -47,8 +49,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
   const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
   const graceMs = deps.workerGraceMs ?? HEARTBEAT_MS * 3;
-  // A dropped worker's pending re-queue, cancelled if it says hello again in time. Lost on restart: requeueRunning(null)
-  // at start-up already puts every running job back.
+  // A dropped worker's pending re-queue, cancelled if it says hello again in time. Lost on a server restart: a worker that
+  // comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
   const graceTimers = new Map<string, NodeJS.Timeout>();
 
   async function ended(job: CheckJob) {
@@ -179,7 +181,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       if (old) clearTimeout(old);
       const t = setTimeout(() => {
         graceTimers.delete(workerId);
-        if (deps.workers?.isConnected(workerId)) return;
+        // A server that stepped down closed every socket itself; the worker redials the new leader, which owns its jobs now.
+        if (deps.workers?.isConnected(workerId) || (deps.isLeader && !deps.isLeader())) return;
         void queue
           .requeueWorker(workerId, "The check worker running this check went offline, so it was put back in line.")
           .then(() => pump())

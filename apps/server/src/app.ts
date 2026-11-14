@@ -330,7 +330,7 @@ export async function buildApp(opts: AppOptions) {
   };
   // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
   const checkWorkersSvc = checkWorkersService(db);
-  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc });
+  const checks = checkDispatcher(db, { scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc, isLeader: () => leader.isLeader() });
   await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
