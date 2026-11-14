@@ -342,7 +342,7 @@ describe("being re-checked (BOS-1193)", () => {
     expect((await cardOf(c, card.id)).recheckStage).toBeNull();
     // Flag again and let the CEO withdraw it.
     await c.db.update(decisions).set({ staleAt: new Date(), recheckStage: "ceo", recheckStageAt: new Date() }).where(eq(decisions.id, card.id));
-    const w = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: card.id, note: "Duplicate of the decision already answered." } });
+    const w = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: card.id, note: "Duplicate of the decision already answered.", replacedBy: "none" } });
     expect(isError(w)).toBe(false);
     expect((await cardOf(c, card.id)).status).toBe("withdrawn");
   });
@@ -388,11 +388,11 @@ describe("who can withdraw a plan card (BOS-1193)", () => {
     // Being re-checked (the owner wrote on the ticket): the CEO settles it, even though it is a permission-type plan card.
     await ownerActed(c.db, { companyId: c.company.id, ticketIds: [t.id], reason: "the owner wrote on this ticket", now: new Date() });
     expect((await cardOf(c, ended.id)).recheckStage).toBe("author");
-    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: ended.id, note: "This plan is a duplicate; the work moved on." } });
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: ended.id, note: "This plan is a duplicate; the work moved on.", replacedBy: "none" } });
     expect(isError(ok)).toBe(false);
     expect((await cardOf(c, ended.id)).status).toBe("withdrawn");
     const second = await exitPlanCard(c, t.id, true);
-    expect(isError(await worker.callTool({ name: "withdraw_decision", arguments: { decisionId: second.id, reason: "Replaced by a better plan" } }))).toBe(false);
+    expect(isError(await worker.callTool({ name: "withdraw_decision", arguments: { decisionId: second.id, reason: "Replaced by a better plan, so this older plan is no longer needed.", replacedBy: "none" } }))).toBe(false);
   });
 });
 

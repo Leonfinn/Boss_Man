@@ -228,7 +228,7 @@ describe("placing features on the roadmap", () => {
     expect(await row()).toMatchObject({ publicSummary: null, showPublicly: false });
   });
 
-  it("refuses to put a feature the rule calls security work on the portal, though the owner still can (BOS-991)", async () => {
+  it("refuses to put a feature the rule calls security work on the portal, though the owner still can (BOS-991, BOS-1419)", async () => {
     const c = await setup();
     // A security-worded feature is held off by the default; the guard uses the same rule as the default.
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate the host-deployer token", description: "Rotate it every week." })).json();
@@ -236,17 +236,22 @@ describe("placing features on the roadmap", () => {
     expect(f).toMatchObject({ portalVisible: false, keepOffPortal: false });
 
     const ceo = await c.mcp(c.ceo.id);
-    const refused = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
+    // With no public summary, the internal wording the visitor would see is judged: still refused.
+    const refused = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, reason: "A portal note asked for this." } }));
     expect(refused).toMatch(/security work/);
     expect(await row()).toMatchObject({ portalVisible: false, publicSummary: null });
     // The refusal is the tick only: the same agent can still write the summary or take it off.
     expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, publicSummary: "A tidier weekly routine for the team.", reason: "Write its public summary." } }))).toBe('Updated "Rotate the host-deployer token": wrote its public summary.');
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: false, reason: "Take it off." } })).isError).not.toBe(true);
-    // A decoy title and description must not slip the security-worded feature past the rule: update_feature never
+    // A public summary that itself names a token is refused (BOS-1419).
+    const leaky = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Weekly routine", description: "Rotate it weekly." })).json();
+    const leakyText = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: leaky.id, portalVisible: true, publicSummary: "Rotate the deployment token.", reason: "A portal note asked for this." } }));
+    expect(leakyText).toMatch(/security work/);
+    // A decoy title and description must not slip a security-worded feature past the rule: update_feature never
     // saves them, so the guard judges the stored feature, and the call is refused outright (Jane's BOS-991 finding).
     const decoy = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, portalVisible: true, title: "Dark mode", description: "A dark theme", publicSummary: "A tidier weekly routine for the team.", reason: "A portal note asked for this." } }));
     expect(decoy).toMatch(/does not change a feature's title or description/);
-    expect(await row()).toMatchObject({ title: "Rotate the host-deployer token", portalVisible: false });
+    expect(await row()).toMatchObject({ title: "Rotate the host-deployer token", publicSummary: "A tidier weekly routine for the team.", portalVisible: false });
     await ceo.close();
 
     // An ordinary feature may still be put on the portal by an agent, and the public title is written too.
@@ -279,7 +284,7 @@ describe("placing features on the roadmap", () => {
 describe("QA: the portal security guard on update_feature (BOS-991)", () => {
   const call = (cl: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>["mcp"]>>, args: Record<string, unknown>) => cl.callTool({ name: "feedback", arguments: { action: "update_feature", reason: "A portal note asked for this.", ...args } });
 
-  it("judges the stored title AND the stored description: security wording in either one refuses the tick", async () => {
+  it("judges the stored title and description until a public summary exists (BOS-991, BOS-1419)", async () => {
     const c = await setup();
     const row = async (id: string) => (await c.db.select().from(features).where(eq(features.id, id)))[0]!;
     const inTitle = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate API keys", description: "Make it nicer." })).json();
@@ -287,11 +292,18 @@ describe("QA: the portal security guard on update_feature (BOS-991)", () => {
     expect(inTitle.portalVisible).toBe(false);
     expect(inDescription.portalVisible).toBe(false);
     const ceo = await c.mcp(c.ceo.id);
+    // No public summary yet: the stored internal text is what would be judged, so a security description still refuses.
     for (const f of [inTitle, inDescription]) {
-      const r = await call(ceo, { featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine." });
+      const r = await call(ceo, { featureId: f.id, portalVisible: true });
       expect(r.isError).toBe(true);
       expect(textOf(r)).toMatch(/security work/);
       expect(await row(f.id)).toMatchObject({ portalVisible: false });
+    }
+    // With a clean public summary, the internal wording no longer blocks: visitors never see it (BOS-1419).
+    for (const f of [inTitle, inDescription]) {
+      const r = await call(ceo, { featureId: f.id, portalVisible: true, publicSummary: "A tidier weekly routine." });
+      expect(r.isError).not.toBe(true);
+      expect(await row(f.id)).toMatchObject({ portalVisible: true });
     }
     await ceo.close();
   });
@@ -321,6 +333,36 @@ describe("QA: the portal security guard on update_feature (BOS-991)", () => {
     await ceo.close();
   });
 
+  it("judges the public title and summary, not the internal description, when publishing (BOS-1419)", async () => {
+    const c = await setup();
+    // The internal description names an API key, so the feature starts held off; the public copy is clean.
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Add Synthetic as a model provider", description: "Store the API key in the vault." })).json();
+    expect(f).toMatchObject({ portalVisible: false });
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await call(ceo, { featureId: f.id, portalVisible: true, publicSummary: "Use another provider for models.", reason: "Florence wrote the public copy." });
+    expect(r.isError).not.toBe(true);
+    expect(textOf(r)).toContain("put it on the feedback portal");
+    expect((await c.db.select().from(features).where(eq(features.id, f.id)))[0]).toMatchObject({ portalVisible: true, publicSummary: "Use another provider for models." });
+    await ceo.close();
+
+    // A summary that itself names a key, or a stored public title that names a token, is still refused.
+    const g = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Dark mode", description: "A dark theme." })).json();
+    const ceo2 = await c.mcp(c.ceo.id);
+    const leaky = await call(ceo2, { featureId: g.id, portalVisible: true, publicSummary: "Add your API key to sync.", reason: "A portal note asked for this." });
+    expect(leaky.isError).toBe(true);
+    expect(textOf(leaky)).toMatch(/security work/);
+    // The refusal saves nothing: the leaky summary is not stored.
+    expect((await c.db.select().from(features).where(eq(features.id, g.id)))[0]).toMatchObject({ publicSummary: null });
+    await ceo2.close();
+    // Written through the owner's app first, the stored public title is what the guard reads next.
+    await c.req("PATCH", `/api/features/${g.id}`, { publicTitle: "Rotate the token", publicSummary: "A quick weekly job." });
+    const ceo3 = await c.mcp(c.ceo.id);
+    const titled = await call(ceo3, { featureId: g.id, portalVisible: true, reason: "Try again." });
+    expect(titled.isError).toBe(true);
+    expect(textOf(titled)).toMatch(/security work/);
+    await ceo3.close();
+  });
+
   it("an engineer cannot place features at all, so the guard is never the only wall", async () => {
     const c = await setup();
     const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Rotate API keys" })).json();
@@ -338,5 +380,52 @@ describe("QA: the portal security guard on update_feature (BOS-991)", () => {
     expect(textOf(await call(ceo, { featureId: f.id, publicTitle: "   " }))).toContain("cleared its public title");
     expect((await c.db.select().from(features).where(eq(features.id, f.id)))[0]!.publicTitle).toBeNull();
     await ceo.close();
+  });
+});
+
+describe("a product manager runs features, roadmap and portal (BOS-1359)", () => {
+  it("creates and links features, attaches any ticket to one, runs the roadmap, logs each change, and stays out of everything else", async () => {
+    const c = await setup();
+    const pmAgent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Florence", template: "product-manager" })).json() as { id: string };
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Grow" })).json();
+    const note = (await c.req("POST", `/api/companies/${c.company.id}/feedback`, { text: "Please add CSV export." })).json();
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Someone else's task" })).json();
+    const pm = await c.mcp(pmAgent.id);
+    const call = async (name: string, args: Record<string, unknown>) => textOf(await pm.callTool({ name, arguments: args }));
+
+    // Create, link and mark: a reason is required and is kept in the activity log.
+    expect(await call("feedback", { action: "create_feature", title: "CSV export" })).toMatch(/Say why/);
+    const created = await call("feedback", { action: "create_feature", title: "CSV export", reason: "Backfill from the review." });
+    const featureId = /Created feature (\S+?)\./.exec(created)![1]!;
+    expect(await call("feedback", { action: "link", noteId: note.id, featureId, reason: "Asked for it." })).toBe("Linked.");
+    expect(await call("feedback", { action: "mark", noteId: note.id, state: "processed", reason: "Triaged." })).toBe("Marked processed.");
+    const logged = await c.db.select().from(activity).where(eq(activity.kind, "feedback_triaged"));
+    expect(logged).toHaveLength(3);
+    expect(logged.map((l) => l.summary).join("\n")).toContain("Florence created the feature \"CSV export\": Backfill from the review.");
+
+    // The roadmap tool.
+    expect(await call("roadmap", { action: "list" })).toContain(goal.id);
+    expect(await call("roadmap", { action: "add_objective", title: "Reach", priority: 2, reason: "Planning." })).toMatch(/Added the objective/);
+
+    // Attach a task to a feature: featureId alone, on a ticket that isn't theirs.
+    expect(await call("update_ticket", { ticketId: t.id, featureId, reason: "It delivers the feature." })).toMatch(/updated/);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.featureId).toBe(featureId);
+    expect(await call("update_ticket", { ticketId: t.id, featureId: null, reason: "Detach." })).toMatch(/updated/);
+    // Nothing else on others' tickets.
+    expect(await call("update_ticket", { ticketId: t.id, featureId, title: "Renamed", reason: "x" })).toMatch(/Only your company's CEO or a manager/);
+    expect(await call("update_ticket", { ticketId: t.id, assignee: "Engineer", reason: "x" })).toMatch(/Only your company's CEO or a manager/);
+
+    // The portal: a normal feature can be published; a security one only once its public summary is clean (BOS-1419).
+    expect(await call("feedback", { action: "update_feature", featureId, publicSummary: "Export your data as CSV.", showPublicly: true, portalVisible: true, reason: "Ready to show." })).toContain("put it on the feedback portal");
+    const sec = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Fix security vulnerability in login" })).json();
+    expect(await call("feedback", { action: "update_feature", featureId: sec.id, publicSummary: "Store the API key in the vault.", portalVisible: true, reason: "x" })).toMatch(/reads as security work/);
+    expect(await call("feedback", { action: "update_feature", featureId: sec.id, publicSummary: "Safer sign-in, in plain words.", portalVisible: true, reason: "x" })).toContain("put it on the feedback portal");
+    await pm.close();
+
+    // A plain worker still can't.
+    const worker = await c.mcp(c.worker.id);
+    expect(textOf(await worker.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Nope", reason: "x" } }))).toMatch(/Only your company's CEO or a product manager/);
+    expect(textOf(await worker.callTool({ name: "roadmap", arguments: { action: "list" } }))).toMatch(/Only your company's CEO, a manager or a product manager/);
+    await worker.close();
   });
 });

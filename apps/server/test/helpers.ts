@@ -6,10 +6,10 @@ import { openPglite } from "../src/db/client.js";
 import type { LiveValidator } from "../src/services/secrets.js";
 import type { PortalLimits } from "../src/portal.js";
 
-export async function makeApp(opts: { liveValidator?: LiveValidator; portalLimits?: Partial<PortalLimits>; portalUrl?: string } = {}) {
+export async function makeApp(opts: { liveValidator?: LiveValidator; mailTlsOptions?: import("node:tls").ConnectionOptions; portalLimits?: Partial<PortalLimits>; portalUrl?: string } = {}) {
   const { db, close } = await openPglite();
   const master = { version: 1, key: randomBytes(32) };
-  const built = await buildApp({ db, master, secureCookies: false, liveValidator: opts.liveValidator, portalLimits: opts.portalLimits, portalUrl: opts.portalUrl });
+  const built = await buildApp({ db, master, secureCookies: false, liveValidator: opts.liveValidator, mailTlsOptions: opts.mailTlsOptions, portalLimits: opts.portalLimits, portalUrl: opts.portalUrl });
   return { ...built, db, master, close: async () => (await built.app.close(), await close()) };
 }
 

@@ -3,6 +3,7 @@ import { api, type Company, type FundingSource, type Project } from "../../api";
 import { usePoll } from "../../hooks";
 import { ProjectBudget } from "../ProjectBudget";
 import { Section, useAction } from "./shared";
+import { Loader } from "../../components/Loader";
 
 const PROVIDERS: Array<[string, string]> = [
   ["anthropic", "Anthropic"],
@@ -167,7 +168,7 @@ export function ProjectBudgets({ company }: { company: Company }) {
         What each project has cost, and its cap per task and per month. Set a project's caps on its Config tab.
       </p>
       {projects.error ? <p className="error" role="alert">{projects.error.message}</p> : null}
-      {projects.data === null ? <p className="muted">Loading…</p> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (
+      {projects.data === null ? <Loader label="Loading projects" /> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {rows.map((p) => (
             <div key={p.id}>

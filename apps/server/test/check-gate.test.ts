@@ -51,6 +51,8 @@ describe("check gate", () => {
     await Promise.all(all);
     expect(checkPriority({ title: "Arch fix 7: one check" })).toBe(0);
     expect(checkPriority({ title: "Add a button" })).toBe(1);
+    expect(checkPriority({ title: "Add a button", fixesMergeCheck: true })).toBe(0);
+    expect(checkPriority({ title: "Add a button", fixesMergeCheck: false })).toBe(1);
 
     await gate.setLimit(2);
     order.length = 0;
