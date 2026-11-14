@@ -820,6 +820,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         showPublicly: z.boolean().optional(),
         portalVisible: z.boolean().optional(),
         keepOffPortal: z.literal(true).optional(),
+        keepOffReason: z.string().trim().max(500).optional(),
         importance: z.enum(IMPORTANCE).optional(),
         highlight: z.string().max(2000).optional(),
         title: z.string().min(1).max(200).optional(),
@@ -878,7 +879,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             ...(input.portalVisible !== undefined ? { portalVisible: input.portalVisible } : {}),
             // An agent may mark a feature sensitive, but only the owner clears that mark: these agents read outside
             // feedback during triage, so a hostile note must not be able to talk one into publishing a marked feature.
-            ...(input.keepOffPortal === true ? { keepOffPortal: true } : {}),
+            ...(input.keepOffPortal === true ? { keepOffPortal: true, ...(input.keepOffReason ? { keepOffReason: input.keepOffReason } : {}) } : {}),
           };
           if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later), status, publicSummary, publicTitle, showPublicly, portalVisible or keepOffPortal (true only).");
           if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
@@ -914,7 +915,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
             input.publicTitle !== undefined ? (input.publicTitle ? "wrote its public title" : "cleared its public title") : null,
             input.showPublicly !== undefined ? (input.showPublicly ? "shows it publicly" : "hides it from the public roadmap") : null,
             input.portalVisible !== undefined ? (input.portalVisible ? "put it on the feedback portal" : "took it off the feedback portal") : null,
-            input.keepOffPortal === true ? "kept it off the portal (sensitive)" : null,
+            input.keepOffPortal === true ? `kept it off the portal (sensitive${input.keepOffReason ? `: ${input.keepOffReason}` : ""})` : null,
           ].filter(Boolean);
           await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
           return text(`Updated "${f.title}": ${parts.join(", ")}.`);
@@ -963,7 +964,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           if (!input.title) return fail("Give the feature a title.");
           const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title!.toLowerCase());
           if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; link to it.`);
-          const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, createdByAgentId: scope.agentId });
+          const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, keepOffPortal: input.keepOffPortal ?? false, keepOffReason: input.keepOffReason ?? null, createdByAgentId: scope.agentId });
           await logTriage(`created the feature "${f.title}"`);
           return text(`Created feature ${f.id}.`);
         }
@@ -1450,14 +1451,14 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   server.registerTool(
     "create_feature",
     {
-      description: "Add a feature to the company's feature requests (it starts as an idea). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. Pass the returned id as featureId to create_ticket to deliver it.",
-      inputSchema: { title: z.string().min(1).max(200), description: z.string().max(10_000).optional(), objectiveId: z.string().uuid().optional(), milestoneId: z.string().uuid().optional() },
+      description: "Add a feature to the company's feature requests (it starts as an idea, and goes on the feedback portal by default unless it reads as security work). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. If it should be held off the portal for a reason other than security, pass keepOffPortal true and a short keepOffReason: the owner is asked whether to keep it off or publish it. Pass the returned id as featureId to create_ticket to deliver it.",
+      inputSchema: { title: z.string().min(1).max(200), description: z.string().max(10_000).optional(), objectiveId: z.string().uuid().optional(), milestoneId: z.string().uuid().optional(), keepOffPortal: z.boolean().optional(), keepOffReason: z.string().trim().max(500).optional() },
     },
     async (input) => {
       const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title.toLowerCase());
       if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; use its id as featureId.`);
       try {
-        const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, createdByAgentId: scope.agentId });
+        const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, keepOffPortal: input.keepOffPortal ?? false, keepOffReason: input.keepOffReason ?? null, createdByAgentId: scope.agentId });
         return text(`Created feature ${f.id} "${f.title}": #/features/${scope.companyId}/${f.id}`);
       } catch (err) {
         if (err instanceof FeedbackError) return fail(err.message);
