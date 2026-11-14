@@ -39,7 +39,7 @@ describe("ticket in review", () => {
     expect(screen.queryByText("waiting for you")).toBeNull();
     expect(screen.getByText("waiting for Ada")).toBeTruthy();
     expect(screen.getByText("Waiting for Ada")).toBeTruthy();
-    expect(screen.getByText("Being reviewed by Ada.")).toBeTruthy();
+    expect(screen.getByText("Reviewed by Ada.")).toBeTruthy();
     expect(screen.getByText("Written by")).toBeTruthy();
     expect(screen.getByText("Decide now instead").closest("details")!.open).toBe(false);
     expect(screen.getByText("Deciding now skips the waiting review.")).toBeTruthy();

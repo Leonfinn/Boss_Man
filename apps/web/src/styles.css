@@ -955,7 +955,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .ticket-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .ticket-props { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; }
 .ticket-props .section-label { margin: 6px 0 0; }
-.ticket-props dl { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 10px; margin: 0; align-items: start; font-size: 14px; }
+.ticket-props dl { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px 10px; margin: 0; align-items: start; font-size: 14px; }
 .ticket-props dt { color: var(--muted); padding-top: 6px; }
 .ticket-props dd { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding-top: 4px; }
 .ticket-props dd select { align-self: stretch; }
@@ -993,6 +993,55 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .fold[open] > summary::before { content: "▾"; }
 .fold-title { font-size: 16px; font-weight: 600; }
 .fold-body { padding: 0 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+
+/* ---------- Ticket page: field help behind "?" (BOS-1195) ---------- */
+/* A 22px circle after the label; on touch and a phone its tap area is 44px without the circle growing. */
+.ticket-props dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.field-help { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: none; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1; cursor: pointer; }
+.field-help:hover { color: var(--ink); border-color: var(--muted); }
+.field-help[aria-expanded="true"] { color: var(--ink); border-color: var(--link); }
+.field-help::after { content: ""; position: absolute; inset: 0; }
+@media (pointer: coarse), (max-width: 640px) {
+  .field-help::after { inset: -11px; }
+}
+/* The pop-over opens under the field's row, right-aligned to the panel, and spills left over the main column
+   so a wide help (Risk's levels) has room. On a phone it spans the panel. */
+.help-pop { position: absolute; right: 0; z-index: 20; width: min(380px, 100vw - 40px); margin-top: 6px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raise, var(--card)); color: var(--ink); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); font-size: 13px; line-height: 1.5; text-align: left; }
+.ticket-props dd { position: relative; }
+.help-pop.above { margin-top: 0; margin-bottom: 6px; }
+.help-pop-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.help-pop-title { font-weight: 600; color: var(--head, var(--ink)); }
+.help-pop-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.help-pop-close:hover { color: var(--ink); }
+.help-pop-body p { margin: 0 0 6px; }
+.help-pop-body p:last-child { margin-bottom: 0; }
+.help-pop-body a { display: inline-block; }
+.risk-levels dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.risk-levels dt { font-weight: 600; }
+.risk-levels dd { margin: 0; }
+@media (pointer: coarse), (max-width: 640px) {
+  .help-pop-close { width: 44px; height: 44px; }
+}
+
+/* ---------- Ticket page: one Details card (BOS-1195) ---------- */
+.details-card { padding: 0; overflow: hidden; }
+.detail-row + .detail-row { border-top: 1px solid var(--line); }
+.detail-row > summary { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 18px; cursor: pointer; list-style: none; }
+.detail-row > summary::-webkit-details-marker { display: none; }
+/* A CSS chevron rather than ▸, so it looks the same in every browser (P12), and turns when open. */
+.detail-row > summary::before { content: ""; flex: none; width: 7px; height: 7px; margin-right: 2px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 0.15s; }
+.detail-row[open] > summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { .detail-row > summary::before { transition: none; } }
+.detail-title { font-size: 16px; font-weight: 600; }
+.detail-count { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.detail-count.amber { color: var(--amber-ink); }
+.detail-body { padding: 0 18px 16px 40px; display: flex; flex-direction: column; gap: 12px; }
+.details-card .fixes-live { margin: 0; padding: 10px 18px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  /* A thumb needs 44px; the body lines up under the title with less indent. */
+  .detail-row > summary { min-height: 44px; }
+  .detail-body { padding-left: 18px; }
+}
 .activity { padding: 0; display: flex; flex-direction: column; }
 .activity > h2 { font-size: 17px; font-weight: 600; padding: 16px 18px 0; }
 .activity-feed { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; max-height: 70vh; overflow-y: auto; }
@@ -1265,6 +1314,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
 
+/* ---------- Page intros: one lead line and a "More about this" fold (P7, BOS-1278) ---------- */
+/* The fold draws its own chevron (P12) rather than the browser's ▸/▾, which some phones did not show. */
+.more-about { display: flex; flex-direction: column; gap: 4px; }
+.more-about-lead { margin: 0; font-size: 14px; }
+.more-about-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; min-height: 32px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; font-size: 14px; color: var(--link); text-align: left; }
+.more-about-toggle:hover { text-decoration: underline; }
+.more-about-chevron { width: 6px; height: 6px; flex: none; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 0.15s; }
+.more-about-toggle[aria-expanded="true"] .more-about-chevron { transform: rotate(45deg); }
+.more-about-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+@media (pointer: coarse) {
+  .more-about-toggle { min-height: 44px; }
+}
 /* Shared loading mark (BOS-1276). Three columns rise in turn; still under reduced motion. */
 .loader { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; animation: loader-in 0.2s ease-out; }
 .loader.sm { gap: 6px; font-size: 13px; }
@@ -1330,4 +1391,43 @@ table.features .cell { min-height: 26px; }
 .fcard-title > * { max-width: 100%; }
 @media (max-width: 640px) {
   .features-add { flex-basis: 100%; }
+}
+
+/* Notifications: filters as one row of chips with unread counts, and the phone-push history folded (BOS-1277). */
+.nf-wrap { margin-bottom: 12px; }
+.nf-bar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.nf-group { display: flex; align-items: center; gap: 8px; flex: none; }
+.nf-group + .nf-group { padding-left: 12px; border-left: 1px solid var(--line); }
+.chip.nf { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; white-space: nowrap; }
+.chip.nf[aria-pressed="true"], .chip.nf[data-on="true"] { border-color: var(--grey-ink); background: var(--raise); color: var(--head); font-weight: 700; }
+.chip.nf .nf-name { overflow: hidden; text-overflow: ellipsis; }
+.nf-count { font-family: var(--mono); font-size: 12px; font-weight: 500; line-height: 1.4; padding: 0 6px; border-radius: 6px; background: var(--grey-soft); color: var(--grey-ink); }
+.nf-count.amber { background: var(--amber-soft); color: var(--amber-ink); }
+.nf-select select { min-height: 0; padding: 0 2px; border: 0; background: transparent; color: inherit; font: inherit; max-width: 140px; }
+.nf-help { width: 28px; height: 28px; padding: 0; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--card); color: var(--ink); font-weight: 600; cursor: pointer; flex: none; }
+.nf-help[aria-expanded="true"] { background: var(--raise); border-color: var(--grey-ink); }
+.nf-legend { margin: 8px 0 0; font-size: 13px; }
+.nf-legend[hidden] { display: none; }
+.nf-summary { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; font-size: 14px; }
+.nf-summary::before { content: none; }
+details.pushes { margin-bottom: 16px; }
+details.pushes > summary { display: flex; flex-wrap: wrap; gap: 0 2px; align-items: center; min-height: 32px; cursor: pointer; list-style: none; font-size: 15px; font-weight: 600; }
+details.pushes > summary::-webkit-details-marker { display: none; }
+details.pushes > summary::before { content: "▸"; color: var(--muted); width: 16px; flex: none; }
+details.pushes[open] > summary::before { content: "▾"; }
+details.pushes > summary .muted { font-weight: 400; }
+details.pushes .pushes-open { color: var(--amber-ink); font-weight: 400; }
+details.pushes > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+details.pushes[open] > summary { margin-bottom: 8px; }
+@media (pointer: coarse) {
+  .chip.nf, .nf-help { min-height: 44px; }
+  .nf-help { width: 44px; height: 44px; }
+  details.pushes > summary { min-height: 44px; }
+}
+@media (max-width: 640px) {
+  .chip.nf, .nf-help { min-height: 44px; }
+  .nf-help { width: 44px; height: 44px; }
+  .nf-bar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); padding-right: 32px; }
+  .nf-bar::-webkit-scrollbar { display: none; }
+  details.pushes > summary { min-height: 44px; }
 }

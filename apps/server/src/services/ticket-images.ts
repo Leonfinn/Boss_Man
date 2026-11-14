@@ -1,7 +1,7 @@
 // Images on a ticket (screenshots from testing). The agent names a file it saved where it works; the
 // runner sends the bytes straight to the server, so the picture never passes through the model.
 import path from "node:path";
-import { and, asc, count, eq, like } from "drizzle-orm";
+import { and, asc, count, eq, inArray, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { runners, ticketImages, tickets } from "../db/schema.js";
 import { pictureType } from "./company-import.js";
@@ -35,6 +35,18 @@ export function fileType(bytes: Buffer): string {
   const sample = bytes.subarray(0, 64 * 1024);
   if (!sample.includes(0) && Buffer.from(sample.toString("utf8"), "utf8").equals(sample)) return "text/plain";
   return "application/octet-stream";
+}
+
+/**
+ * The created-at of every ticket image a card's steps cite as "seen: <id>" (R19), for the company. Undefined when no
+ * step cites one, so a card without outside-site steps costs no query. An id that isn't an image of this company is
+ * left out, and the lint then refuses it.
+ */
+export async function seenImageDates(db: Db, companyId: string, steps: readonly string[] | undefined): Promise<Record<string, string> | undefined> {
+  const ids = [...new Set((steps ?? []).flatMap((s) => [...s.matchAll(/(?<!not )\bseen:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi)].map((m) => m[1]!.toLowerCase())))];
+  if (!ids.length) return undefined;
+  const rows = await db.select({ id: ticketImages.id, createdAt: ticketImages.createdAt }).from(ticketImages).where(and(eq(ticketImages.companyId, companyId), inArray(ticketImages.id, ids)));
+  return Object.fromEntries(rows.map((r) => [r.id.toLowerCase(), new Date(r.createdAt as unknown as string | Date).toISOString()]));
 }
 
 export class TicketImageError extends Error {
