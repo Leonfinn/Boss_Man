@@ -245,10 +245,11 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number): Promise<CheckJob[]> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     if ((await softHold(db, now)).on) return [];
-    const limit = await slots();
+    // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
+    const limit = Math.min(await slots(), runnerSlots ?? Infinity);
     const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {

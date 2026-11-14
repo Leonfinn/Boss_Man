@@ -104,9 +104,15 @@ export function settingsLimitsRoutes(
           applying: hold?.kind === "settings",
         }
       : null;
+    // BOS-1471: what the runners said they run at once (hello). The server hands out at most the smaller of that and the setting,
+    // so the number that really applies is the least over the connected runners that reported one.
+    const reported = live.map((r) => checks.runnerSlots(r.id)).filter((n): n is number => typeof n === "number");
+    const effectiveSlots = reported.length ? Math.min(slots, ...reported) : slots;
     return {
       mode: await checkQueueSvc.mode(),
       slots,
+      effectiveSlots,
+      runnerSlotsReported: reported.length ? Math.min(...reported) : null,
       runner,
       maxSlots: MAX_CHECK_SLOTS,
       defaultSlots: DEFAULT_CHECK_SLOTS,

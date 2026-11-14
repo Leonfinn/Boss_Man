@@ -1,7 +1,7 @@
 // The ticket tools, moved out of mcp.ts unchanged (BOS-298 step 15): create_ticket, update_ticket,
 // assign_ticket, set_ticket_state, set_ticket_risk, schedule_check and clear_check. Registered from the
 // same places and in the same order as before, so every kind of run sees the same tools.
-import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
@@ -22,7 +22,7 @@ import { moveTicket } from "./services/ticket-moves.js";
 import { addTicketDependency } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
-import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
+import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, unlinkedOrderWarning, type Scope } from "./mcp-common.js";
 import type { McpHooks, Services } from "./mcp.js";
 
 /** The state note after update_ticket replaces the criteria: the old note's verdicts belong to the old list, so none carries over. */
@@ -139,8 +139,8 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         feature: z.string().optional(),
         parent: z.string().uuid().optional(),
         assignee: z.string().optional(),
-        waitsOn: z.string().uuid().optional(),
-        waitsOnUntil: z.enum(["merged", "done"]).optional().describe("With waitsOn: when the wait ends, the other ticket's merge on main (merged, the default) or its done state (done)."),
+        waitsOn: z.union([z.string().uuid(), z.array(z.string().uuid()).min(1).max(10)]).optional().describe("One ticket id, or a list of ids, this ticket waits on. If the text says it comes after BOS-n, link BOS-n here."),
+        waitsOnUntil: z.enum(["merged", "done"]).optional().describe("With waitsOn: when each wait ends, the other ticket's merge on main (merged, the default) or its done state (done)."),
         acceptanceCriteria: acceptanceCriteriaSchema.optional(),
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
         ownerSetup: z.string().max(4000).optional().describe(`What the owner has to do once this change is live (a setting, a secret, a button), in plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps only when the change goes live, not at merge. Leave it off when there is nothing for them to do. ${SETUP_HELP}`),
@@ -148,7 +148,8 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(FIXES_LIVE_HELP),
       },
     },
-    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, waitsOnUntil, acceptanceCriteria, noCode, ownerSetup, lintOverride, fixesLive, ...rest }) => {
+    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn: waitsOnGiven, waitsOnUntil, acceptanceCriteria, noCode, ownerSetup, lintOverride, fixesLive, ...rest }) => {
+      const waitsOn = [...new Set(typeof waitsOnGiven === "string" ? [waitsOnGiven] : (waitsOnGiven ?? []))];
       const badFix = fixesLive ? fixesLiveProblem(fixesLive) : null;
       if (badFix) return fail(badFix);
       const setup = await checkSetupWrite(db, hostFacts, scope, ownerSetup, lintOverride);
@@ -158,7 +159,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       // Attaching a sub-task to an open skill-review task, or making a ticket wait on it, is a way
       // into the reviewer's tree: only the reviewer assigned to the review may do it (BOS-86, round 10).
-      for (const linked of [parent, waitsOn]) {
+      for (const linked of [parent, ...waitsOn]) {
         if (!linked) continue;
         const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, linked, scope.agentId);
         if (reviewWrite) return fail(reviewWrite);
@@ -197,8 +198,8 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
           throw err;
         }
       }
-      const [blocker] = waitsOn ? await db.select({ state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, waitsOn), eq(tickets.companyId, scope.companyId))) : [];
-      if (waitsOn && !blocker) return fail("No task with that waitsOn id in your company.");
+      const blockers = waitsOn.length ? await db.select({ id: tickets.id, state: tickets.systemState, number: tickets.number }).from(tickets).where(and(inArray(tickets.id, waitsOn), eq(tickets.companyId, scope.companyId))) : [];
+      for (const id of waitsOn) if (!blockers.some((b) => b.id === id)) return fail(`No task with the waitsOn id ${id} in your company.`);
       // Safe to repeat (R42): a resumed run that calls this again gets the same open ticket back.
       if (scope.agentId) {
         const [same] = await db
@@ -220,15 +221,15 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
       // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
-      if (blocker && blocker.state !== "done") await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
+      if (blockers.some((b) => b.state !== "done")) await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
-      if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn, until: waitsOnUntil ?? "merged" }, scope.agentId);
+      for (const id of waitsOn) await work.addDependency(t!.id, { ticketId: id, until: waitsOnUntil ?? "merged" }, scope.agentId);
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
       const thin = noCode ? "" : thinTicketWarning(body, assignee);
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}`);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}${unlinkedOrderWarning([title, body], new Set(blockers.flatMap((b) => (b.number === null ? [] : [b.number]))))}`);
     },
   );
 }
@@ -428,7 +429,9 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${!planGiven ? "" : ceoPlan ? ` (plan set, due ${ceoPlanDeadline})` : " (plan cleared)"}${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${fixesLive === undefined ? "" : fixesLive?.trim() ? ` (fixes live: ${fixesLive.trim()})` : " (no longer marked fixes live)"}${fixesMergeCheck === undefined ? "" : fixesMergeCheck ? " (marked as fixing the merge check: approved work in the project waits on it in Passed, held)" : " (no longer marked as fixing the merge check)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}${ownerSetup === undefined ? "" : ownerSetup?.trim() ? " (owner setup steps changed)" : " (owner setup steps cleared)"}${acceptanceCriteria === undefined ? "" : ` (acceptance criteria replaced: ${acceptanceCriteria.length ? acceptanceCriteria.map((c, i) => `${i + 1}. ${criteriaText([c])}`).join(" ") : "none now"})`}${waitsLines.length ? ` (${waitsLines.join("; ")})` : ""}: ${reason}` });
         await noteRunTicket(ticketId);
-        return text(`Ticket ${ticketId} updated (version ${u.version}).${waitsLines.length ? ` ${waitsLines.join("; ")}.` : waitsOn ? " No waitsOn link changed." : ""}${acceptanceCriteria !== undefined ? ` Its acceptance criteria are replaced and none is reported yet.${t.state === "review" ? " It is in review: reviews were NOT re-requested, so tell the assignee and reviewers the criteria changed." : ""}${criteriaWarning(acceptanceCriteria)}` : ""}${acceptanceCriteria !== undefined || body !== undefined ? await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body)) : ""}`);
+        // The new title or body says "after BOS-n" with no link to it (BOS-1375): advice only, read after the links above are written.
+        const orderWarn = title !== undefined || body !== undefined ? unlinkedOrderWarning([title, body], new Set((await db.select({ number: tickets.number }).from(ticketDependencies).innerJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId)).where(eq(ticketDependencies.blockedTicketId, ticketId))).flatMap((r) => (r.number === null ? [] : [r.number])))) : "";
+        return text(`Ticket ${ticketId} updated (version ${u.version}).${waitsLines.length ? ` ${waitsLines.join("; ")}.` : waitsOn ? " No waitsOn link changed." : ""}${acceptanceCriteria !== undefined ? ` Its acceptance criteria are replaced and none is reported yet.${t.state === "review" ? " It is in review: reviews were NOT re-requested, so tell the assignee and reviewers the criteria changed." : ""}${criteriaWarning(acceptanceCriteria)}` : ""}${acceptanceCriteria !== undefined || body !== undefined ? await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body)) : ""}${orderWarn}`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
