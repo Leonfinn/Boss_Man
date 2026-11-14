@@ -564,10 +564,15 @@ export class Workspaces {
       } catch (err) {
         // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
         // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
-        const e = err as { stderr?: string; code?: number | string; killed?: boolean; signal?: string };
+        const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
         const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
         const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
-        throw new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err });
+        // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
+        throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
+          code: e.code,
+          stdout: e.stdout,
+          stderr: e.stderr,
+        });
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
