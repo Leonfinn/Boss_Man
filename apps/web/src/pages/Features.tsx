@@ -588,15 +588,18 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
         <div>
           <h1>Features</h1>
           <p className="sub">
-            What people have asked for and what to build next. New features go on the feedback portal by default.{" "}
+            New features show on your feedback portal unless they look like security work.{" "}
             <button type="button" className="link" style={{ padding: 0 }} aria-expanded={showHelp} aria-controls="features-portal-help" onClick={() => setShowHelp(!showHelp)}>
               {showHelp ? "Less" : "How the portal works"}
             </button>
           </p>
           {showHelp && (
-            <p id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-              Security-looking work is kept off. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
-            </p>
+            <ul id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+              <li>Tick "On portal" on a row to put a feature on the portal or take it off.</li>
+              <li>Visitors only see a feature once it has a public summary.</li>
+              <li>Visitors see the public title if you write one. If not, the first line of the public summary is the title. They never see the internal title or description.</li>
+              <li>To keep a feature off on purpose, open it and tick "Keep off the portal (sensitive)".</li>
+            </ul>
           )}
         </div>
       </header>

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, type Company, type Notice, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
+import { api, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
+import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
 import { MoreText } from "./Decisions";
+import { MoreAbout } from "../components/MoreAbout";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
 
@@ -21,12 +23,20 @@ const PUSH_STATE: Record<PhonePush["state"], string> = { open: "Still open", wit
 function RecentPhonePushes() {
   const pushes = usePoll((signal) => api<{ items: PhonePush[] }>("/api/notifications/pushes", { signal }), 30_000, "phone-pushes");
   const items = pushes.data?.items ?? [];
+  const openCount = items.filter((p) => p.state === "open").length;
   const tooOld = items.some((p) => p.clearNote?.startsWith("unsupported"));
   return (
-    <section aria-labelledby="recent-pushes-h" style={{ marginBottom: 24 }}>
-      <h2 id="recent-pushes-h" style={{ fontSize: 17, fontWeight: 600 }}>
-        Recent phone pushes
-      </h2>
+    <details className="pushes">
+      <summary>
+        <span>Recent phone pushes</span>
+        {pushes.data && (
+          <span className="muted">
+            {" · "}
+            {items.length ? `${items.length} · last ${raisedAgo(items[0]!.pushedAt)}` : "none yet"}
+          </span>
+        )}
+        {openCount > 0 && <span className="pushes-open">{` · ${openCount} still open`}</span>}
+      </summary>
       <p className="muted" style={{ fontSize: 13 }}>
         The last 20 messages sent to your phone, and why each counted as urgent. Plans, sign-offs and after-merge checks only push if the CEO marks them urgent.
       </p>
@@ -57,7 +67,7 @@ function RecentPhonePushes() {
           ))}
         </ul>
       )}
-    </section>
+    </details>
   );
 }
 
@@ -220,9 +230,13 @@ function SettingsForm() {
       <h2 id="notify-settings-h" style={{ fontSize: 17, fontWeight: 600 }}>
         How you're told
       </h2>
-      <p className="muted" style={{ fontSize: 14 }}>
-        Notes stay in this feed. Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Quiet hours and each agent's hourly cap lower a notification's level instead of dropping it.
-      </p>
+      <MoreAbout lead="Choose how loudly Boss Man tells you about things, and whether it reaches your phone.">
+        <li>Notes stay in this feed.</li>
+        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" in the sidebar.</li>
+        <li>In quiet hours, each notification is one step quieter: pages and asks become flags, and flags become notes.</li>
+        <li>Once an agent reaches its hourly number, the rest it sends that hour become notes.</li>
+        <li>Nothing is dropped: every notification still lands in this feed.</li>
+      </MoreAbout>
 
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 10 }}>
         <label style={check}>
@@ -420,49 +434,85 @@ function readFilters(): Filters {
   return NO_FILTERS;
 }
 
-function FilterBar({ filters, companies, set }: { filters: Filters; companies: Company[]; set: (patch: Partial<Filters>) => void }) {
-  const sorted = [...companies].sort((a, b) => a.name.localeCompare(b.name));
+const TYPE_TITLE: Record<NotifyLevel, string> = {
+  ask: "Asks need your answer.",
+  page: "Pages are urgent and also go to your phone.",
+  flag: "Flags also show as a browser notification.",
+  note: "Notes stay in this list.",
+};
+const LEGEND_ID = "nf-legend";
+
+/** A chip's number: hidden at 0 or while the counts are unknown, "99+" above 99. */
+function Count({ n, amber }: { n: number | undefined; amber?: boolean }) {
+  if (!n) return null;
   return (
-    <div role="search" aria-label="Filter notifications" style={{ display: "flex", flexWrap: "wrap", gap: "12px 20px", alignItems: "center", marginBottom: 12 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span className="label" id="nf-status">
-          Status
-        </span>
-        <div className="segmented" role="group" aria-labelledby="nf-status">
-          {(["all", "unread", "read"] as const).map((v) => (
-            <button key={v} type="button" className="chip" aria-pressed={filters.status === v} style={filters.status === v ? { fontWeight: 700 } : undefined} onClick={() => set({ status: v })}>
-              {v === "all" ? "All" : v === "unread" ? "Unread" : "Read"}
-            </button>
-          ))}
+    <span className={`nf-count${amber ? " amber" : ""}`} aria-hidden="true">
+      {n > 99 ? "99+" : n}
+    </span>
+  );
+}
+
+const unreadLabel = (name: string, n: number | undefined) => (n ? `${name}, ${n > 99 ? "more than 99" : n} unread` : name);
+
+/** One row of toggle chips in three groups; a second press turns a chip off (BOS-1277). */
+function FilterBar({ filters, companies, counts, set }: { filters: Filters; companies: Company[]; counts: NoticeCounts | undefined; set: (patch: Partial<Filters>) => void }) {
+  const [help, setHelp] = useState(false);
+  const sorted = [...companies].sort((a, b) => a.name.localeCompare(b.name));
+  const showNone = filters.company === NO_COMPANY || (counts?.company[NO_COMPANY] ?? 0) > 0;
+  const hideCompanies = sorted.length === 1 && !showNone;
+  const many = sorted.length > 4;
+  const reveal = (e: { currentTarget: HTMLElement }) => e.currentTarget.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  const chip = (key: string, on: boolean, label: string, onClick: () => void, opts: { count?: number | undefined; amber?: boolean; title?: string; shown?: string } = {}) => (
+    <button key={key} type="button" className="chip nf" aria-pressed={on} aria-label={unreadLabel(label, opts.count)} title={opts.title ?? (opts.shown && opts.shown !== label ? label : undefined)} onClick={onClick} onFocus={reveal}>
+      {on && <span aria-hidden="true">✓ </span>}
+      <span className="nf-name">{opts.shown ?? label}</span>
+      <Count n={opts.count} amber={opts.amber} />
+    </button>
+  );
+  const toggleStatus = (v: "unread" | "read") => set({ status: filters.status === v ? "all" : v });
+  const toggleLevel = (v: NotifyLevel) => set({ level: filters.level === v ? "all" : v });
+  const toggleCompany = (v: string) => set({ company: filters.company === v ? "all" : v });
+  return (
+    <div className="nf-wrap">
+      <div className="nf-bar" role="search" aria-label="Filter notifications">
+        <div className="nf-group" role="group" aria-label="Read or unread">
+          {chip("unread", filters.status === "unread", "Unread", () => toggleStatus("unread"), { count: counts ? Object.values(counts.level).reduce<number>((a, b) => a + (b ?? 0), 0) : undefined })}
+          {chip("read", filters.status === "read", "Read", () => toggleStatus("read"))}
         </div>
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span className="label" id="nf-type">
-          Type
-        </span>
-        <div className="segmented" role="group" aria-labelledby="nf-type" style={{ flexWrap: "wrap" }}>
-          {(["all", "note", "flag", "page", "ask"] as const).map((v) => (
-            <button key={v} type="button" className="chip" aria-pressed={filters.level === v} style={filters.level === v ? { fontWeight: 700 } : undefined} onClick={() => set({ level: v })}>
-              {v === "all" ? "All" : LEVEL_PLURAL[v]}
-            </button>
-          ))}
+        <div className="nf-group" role="group" aria-label="Type">
+          {(["ask", "page", "flag", "note"] as const).map((v) => chip(v, filters.level === v, LEVEL_PLURAL[v], () => toggleLevel(v), { count: counts?.level[v], amber: v === "ask", title: TYPE_TITLE[v] }))}
+          <button type="button" className="nf-help" aria-expanded={help} aria-controls={LEGEND_ID} aria-label="What the types mean" onClick={() => setHelp(!help)} onFocus={reveal}>
+            ?
+          </button>
         </div>
+        {!hideCompanies && (
+          <div className="nf-group" role="group" aria-label="Company">
+            {many ? (
+              <label className="chip nf nf-select" data-on={filters.company !== "all"}>
+                <span className="nf-name">Company</span>
+                <select aria-label="Company" value={filters.company} onChange={(e) => set({ company: e.target.value })}>
+                  <option value="all">All companies</option>
+                  {sorted.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                  <option disabled>──────────</option>
+                  <option value={NO_COMPANY}>No company</option>
+                </select>
+              </label>
+            ) : (
+              <>
+                {sorted.map((c) => chip(c.id, filters.company === c.id, c.name, () => toggleCompany(c.id), { count: counts?.company[c.id], title: c.name }))}
+                {showNone && chip(NO_COMPANY, filters.company === NO_COMPANY, "No company", () => toggleCompany(NO_COMPANY), { count: counts?.company[NO_COMPANY] })}
+              </>
+            )}
+          </div>
+        )}
       </div>
-      <div className="nf-company" style={{ display: "flex", gap: 8, alignItems: "center", flex: "1 1 200px", minWidth: 200, maxWidth: 280 }}>
-        <label className="label" htmlFor="nf-company">
-          Company
-        </label>
-        <select id="nf-company" value={filters.company} onChange={(e) => set({ company: e.target.value })} style={{ flex: 1, minWidth: 0 }}>
-          <option value="all">All companies</option>
-          {sorted.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-          <option disabled>──────────</option>
-          <option value={NO_COMPANY}>No company</option>
-        </select>
-      </div>
+      <p id={LEGEND_ID} className="nf-legend muted" hidden={!help}>
+        <strong>Asks</strong> need your answer. <strong>Pages</strong> are urgent and also go to your phone. <strong>Flags</strong> also show as a browser notification. <strong>Notes</strong> stay in this list. The numbers count unread ones.
+      </p>
     </div>
   );
 }
@@ -504,10 +554,7 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
   const unreadShown = items.filter((n) => !n.readAt);
   const clear = () => setFilters(NO_FILTERS);
 
-  const companyName = filters.company === NO_COMPANY ? "No company" : companies?.find((c) => c.id === filters.company)?.name;
-  const parts = [filters.status !== "all" ? (filters.status === "unread" ? "Unread" : "Read") : null, filters.level !== "all" ? LEVEL_PLURAL[filters.level] : null, filters.company !== "all" ? companyName : null].filter(Boolean);
-  const full = items.length >= 50;
-  const summary = updating ? "Updating…" : `Showing ${full ? "the latest " : ""}${items.length} · ${parts.join(", ")}`;
+  const summary = updating ? "Updating…" : `${items.length >= 50 ? "Latest " : ""}${items.length} shown`;
   const neverAny = !active && feed && !items.length;
 
   return (
@@ -531,9 +578,9 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
       </header>
       <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
-      {!neverAny && <FilterBar filters={filters} companies={companies ?? []} set={setFilters} />}
+      {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} set={setFilters} />}
       {active && (
-        <div role="status" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12, fontSize: 14 }}>
+        <div role="status" className="nf-summary">
           <span className="muted">{summary}</span>
           <button type="button" className="btn small" onClick={clear}>
             Clear filters

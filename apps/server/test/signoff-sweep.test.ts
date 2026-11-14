@@ -255,8 +255,9 @@ describe("owner sign-off cards (BOS-503)", () => {
     const t = await c.approvedHighRisk();
     await c.signedOffCard(t.id, "b".repeat(40));
     c.diffErrors.push("The runner couldn't read the branch.");
-    await c.review.land(t.id, "Boss Man");
-    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    // land() resolves with what it did: assert on that rather than polling the row, which raced under a loaded suite.
+    const land = await c.review.land(t.id, "Boss Man");
+    expect(land.outcome).toBe("merged");
     expect(c.merges()).toBe(1);
     const stuck = await c.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'check_stuck'`);
     expect(stuck).toHaveLength(0);
@@ -268,8 +269,8 @@ describe("owner sign-off cards (BOS-503)", () => {
     const t = await c.approvedHighRisk();
     await c.signedOffCard(t.id, "b".repeat(40));
     c.diffErrors.push("Timed out waiting for the lock on project-1.");
-    await c.review.land(t.id, "Boss Man");
-    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    const land = await c.review.land(t.id, "Boss Man");
+    expect(land.outcome).toBe("merged");
     expect(c.merges()).toBe(1);
     expect(await c.db.select().from(decisions).where(sql`${decisions.context}->>'type' = 'check_stuck'`)).toHaveLength(0);
   });

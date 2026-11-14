@@ -39,7 +39,8 @@ async function staleCopy() {
   git(seed, "commit", "-qm", "init");
   git(seed, "push", "-q", "origin", "HEAD:main");
 
-  const ws = new Workspaces(tmp("bm-ws-root-"));
+  // Pinned to worktrees: the bug is two folders sharing one repo (a clone cannot check out another ticket's branch).
+  const ws = new Workspaces(tmp("bm-ws-root-"), { ...process.env, BOSSMAN_TICKET_COPIES: "worktree" });
   const spec = { projectId: ids.project, ticketId: ids.mine, repoUrl: bare, baseRef: "main" };
   const mine = await ws.ensure(spec);
   const other = await ws.ensure({ ...spec, ticketId: ids.other });

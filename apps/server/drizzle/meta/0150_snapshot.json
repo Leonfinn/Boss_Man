@@ -1,5 +1,5 @@
 {
-  "id": "e991d76e-285d-4092-88fe-66e4228dc5fa",
+  "id": "3957ab38-cd85-465f-bd2e-4bbda3fa3ae3",
   "prevId": "01d56c7a-928b-4561-bb2e-b27572fb79d8",
   "version": "7",
   "dialect": "postgresql",
@@ -3381,12 +3381,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "keep_off_reason": {
-          "name": "keep_off_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "public_summary": {
           "name": "public_summary",
