@@ -756,6 +756,8 @@ export async function buildApp(opts: AppOptions) {
     featuresWithoutTickets: async () => {
       let raised = 0;
       for (const companyId of [...new Set((await db.select({ id: featuresTable.companyId }).from(featuresTable)).map((r) => r.id))]) {
+        // BOS-1388: the same pass deletes unconfirmed portal posts whose emailed link ran out.
+        await feedback.purgeUnconfirmed().catch((err) => app.log.error({ err }, "deleting expired unconfirmed portal posts failed"));
         raised += await feedback.raiseFeatureNoTicket(companyId, async (f) => {
           const column = featureHorizon(f);
           const where = column === "now" ? "on the roadmap's Now column" : column === "next" ? "on the roadmap's Next column" : "in progress";
@@ -1052,7 +1054,7 @@ export async function buildApp(opts: AppOptions) {
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
-  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
+  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 
   app.setErrorHandler((err, _req, reply) => {
     // `message` is what the web app shows, so it names the first problem and its field.
@@ -1924,7 +1926,7 @@ export async function buildApp(opts: AppOptions) {
     objectiveRoutes(owner, db, { work, teamCheck });
 
     // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
-    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
+    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl, mailer });
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });

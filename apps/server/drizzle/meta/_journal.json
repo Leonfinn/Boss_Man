@@ -946,6 +946,13 @@
       "when": 1794665577204,
       "tag": "0153_live_marked",
       "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1794695397339,
+      "tag": "0154_confirm_by_email",
+      "breakpoints": true
     }
   ]
 }
