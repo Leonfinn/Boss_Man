@@ -239,22 +239,55 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
 
 export type BuildResult = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total: number | null; url: string | null; sha: string };
 const BUILD_WORDS = { passed: "passed", failed: "failed", pending: "running", none: "no checks reported yet" } as const;
+/** Only ordinary web addresses are clickable; a host could otherwise hand us a javascript: link (BOS-1418). */
+const webLink = (url: string | null | undefined) => (url && /^https?:\/\//i.test(url) ? url : null);
 /** One line on the host's build result, or nothing when the host reported none (BOS-1418). */
 export function BuildLine({ ci }: { ci: BuildResult | null }) {
   if (!ci) return null;
+  const href = webLink(ci.url);
   return (
     <p className="muted" data-testid="build-result" style={{ overflowWrap: "anywhere" }}>
       Build on {ci.sha.slice(0, 7)}: <strong>{BUILD_WORDS[ci.state]}</strong>
       {ci.state === "failed" && ci.failing.length ? ` (${ci.failing.join(", ")})` : ""}
-      {ci.url && (
+      {href && (
         <>
           {" · "}
-          <a href={ci.url} target="_blank" rel="noopener noreferrer">
+          <a href={href} target="_blank" rel="noopener noreferrer">
             View run
           </a>
         </>
       )}
     </p>
+  );
+}
+
+/** The "Changes" fold: the branch, the build line, and the two ways of reading the diff (BOS-1418). */
+export function ChangesFold({
+  hint,
+  ci,
+  onAll,
+  onTurn,
+  children,
+}: {
+  hint?: string;
+  ci: BuildResult | null;
+  onAll: () => void;
+  onTurn: () => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <Fold title="Changes" hint={hint}>
+      <BuildLine ci={ci} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
+        <button type="button" className="btn" onClick={onAll}>
+          All changes
+        </button>
+        <button type="button" className="btn" onClick={onTurn}>
+          The last turn
+        </button>
+      </div>
+      {children}
+    </Fold>
   );
 }
 
@@ -864,8 +897,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </Fold>
 
           {t.repoUrl && (
-            <Fold title="Changes" hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}${ci ? ` · build ${BUILD_WORDS[ci.state]}` : ""}` : undefined}>
-              <BuildLine ci={ci} />
+            <ChangesFold
+              hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}${ci ? ` · build ${BUILD_WORDS[ci.state]}` : ""}` : undefined}
+              ci={ci}
+              onAll={() => void loadDiff("base")}
+              onTurn={() => void loadDiff("last_turn")}
+            >
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
                 <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
                   {diff && range === "base" ? "Refresh all changes" : "All changes"}
@@ -886,7 +923,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   Merged into {t.defaultBranch} as <span className="mono">{t.mergeCommit.slice(0, 7)}</span>.
                 </p>
               )}
-            </Fold>
+            </ChangesFold>
           )}
 
           {landing && (
