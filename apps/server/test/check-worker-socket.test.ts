@@ -173,9 +173,10 @@ describe("check worker socket (BOS-1435)", () => {
     expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "running", workerId: id });
     expect((await ctx.app.inject({ method: "DELETE", url: `/api/settings/check-workers/${id}`, headers: { cookie: ctx.cookie } })).statusCode).toBe(200);
     expect((await ctx.db.select().from(checkJobs).where(eq(checkJobs.id, job.id)))[0]).toMatchObject({ state: "queued", workerId: null, runnerId: null, reason: expect.stringMatching(/removed the check worker/) });
+    // The cancel and the close travel over the socket, so wait for them rather than read straight after the DELETE.
+    expect(await w.closed).toBe(4003);
     expect(w.got.some((m) => m.command?.type === "check.cancel" && m.command.jobId === job.id)).toBe(true);
     expect(w.runs()).toEqual([job.id]); // sent once, never again
-    expect(await w.closed).toBe(4003);
   });
 
   it("a second machine with the same token replaces the first, whose socket is closed", async () => {
