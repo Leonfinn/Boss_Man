@@ -71,6 +71,8 @@ import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
 import { TicketImageError, ticketImagesService } from "./services/ticket-images.js";
 import { ChatError, chatService } from "./services/chat.js";
+import { chatTraceService } from "./services/chat-trace.js";
+import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
@@ -397,7 +399,8 @@ export async function buildApp(opts: AppOptions) {
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
-  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const trace = chatTraceService();
+  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces", trace });
   const pa = paService(db, {
     notify: (agentId, input) => scheduler.notify(agentId, input),
     now: opts.now,
@@ -633,6 +636,12 @@ export async function buildApp(opts: AppOptions) {
       void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
+    // The Thinking trace (BOS-1368): every step a run takes, kept for its owner-chat reply. The runner
+    // clips and redacts before it emits, and runner_events redacts the same fields again as it stores
+    // them (security review), so no raw secret is kept there; this service redacts once more for the
+    // trace itself. A ticket run's steps are simply never asked for and dropped when the run ends.
+    if (event.type === "run.started") trace.begin(event.runId);
+    if (event.type === "run.update") trace.onUpdate(event.runId, event.update as TraceUpdate);
     // A tool call a fenced agent got a kernel refusal for (BOS-325).
     if (event.type === "run.update" && (event.update as { fenceDenied?: unknown } | null)?.fenceDenied === true) void decisionsSvc.onFenceDenied(runner, event.runId, ((event.update as { title?: unknown }).title as string | null) ?? null).catch((err) => app.log.error({ err, companyId: runner.companyId }, "fence refusal log failed"));
     // A tool call the agent says was refused (BOS-306).

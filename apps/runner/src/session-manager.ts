@@ -11,7 +11,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
-import { FENCE_DENIED_PATTERN, FENCE_UNAVAILABLE_ERROR, infiniteLaunchModel, isDaemonOnlySecret, isInfiniteModel, parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { FENCE_DENIED_PATTERN, FENCE_UNAVAILABLE_ERROR, clipField, infiniteLaunchModel, isDaemonOnlySecret, isInfiniteModel, parseAcpUsageCost, redact, traceKindOf, TRACE_CLIP, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
@@ -92,6 +92,42 @@ const textOf = (content: ToolCallContent[] | null | undefined) =>
   (content ?? [])
     .flatMap((c) => (c.type === "content" && c.content?.type === "text" && c.content.text ? [c.content.text] : []))
     .join("\n\n");
+
+/**
+ * One short line for a tool call's input, for the Thinking trace (BOS-1368). A command or prompt
+ * comes through as its words; anything else (a path, an object) as JSON. Clipped so a whole file
+ * pasted into a tool can't be carried in a run event.
+ */
+export function shortValue(v: unknown, max: number): string | undefined {
+  if (v == null || isEmpty(v)) return undefined;
+  let s: string;
+  if (typeof v === "string") s = v;
+  else {
+    // The argument shapes the MCP tools use: a `command`, `prompt`, `path` or `title` reads best.
+    const o = v as Record<string, unknown>;
+    const pick = ["command", "cmd", "prompt", "query", "path", "file_path", "title", "pattern"].map((k) => o[k]).find((x) => typeof x === "string" && x.trim());
+    s = typeof pick === "string" ? pick : JSON.stringify(v);
+  }
+  const t = s.replace(/\s+/g, " ").trim();
+  if (!t) return undefined;
+  return t.length > max ? `${t.slice(0, max).trimEnd()}…` : t;
+}
+
+/**
+ * The Thinking trace fields for one tool call (BOS-1368), redacted and clipped ready to emit. Redaction
+ * happens here, before the event leaves the runner, because the server stores every run.update whole in
+ * runner_events: a `cat .env` must not put a key in the database (security review). Exported so a test
+ * can check a fake token never survives.
+ */
+export function traceToolFields(rawInput: unknown, rawText: string, title: string | null): { title: string | null; inputSummary?: string; resultSummary?: { text: string; cut: boolean } } {
+  const input = shortValue(rawInput, TRACE_CLIP.input);
+  const result = clipField(redact(rawText), TRACE_CLIP.output);
+  return {
+    title: title ? redact(title) || null : null,
+    ...(input ? { inputSummary: redact(input) } : {}),
+    ...(result.text ? { resultSummary: result } : {}),
+  };
+}
 
 /** The permission option kinds ACP defines; the runner answers with these only. */
 const KNOWN_PERMISSION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
@@ -1112,7 +1148,43 @@ export class SessionManager {
           }
           // A failed call whose output says the permission was refused: the server logs it with the run and ticket (BOS-306).
           const refused = u.status === "failed" && /User refused permission/i.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : ""));
-          emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null, ...(refused ? { refused: true } : {}), ...(fenced === true && u.status === "failed" && FENCE_DENIED_PATTERN.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "")) ? { fenceDenied: true } : {}) } });
+          // The Thinking trace (BOS-1368): a short input and a short result so the server can record the step.
+          // Clipped here, never raw: a tool call can carry a whole file or a command's output. Redacted
+          // here too, before it leaves the runner: the server stores every run.update whole in
+          // runner_events (security review), so a `cat .env` must not put a key in the database.
+          const rawInput = isEmpty(u.rawInput) ? (id ? (toolCalls.get(id)?.rawInput ?? null) : null) : u.rawInput;
+          const rawText = textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "");
+          const fields = traceToolFields(rawInput, rawText, typeof u.title === "string" ? u.title : null);
+          const title = fields.title;
+          const inputSummary = fields.inputSummary;
+          const resultSummary = fields.resultSummary;
+          const stamp = new Date().toISOString();
+          emit({
+            type: "run.update",
+            runId: cmd.runId,
+            update: {
+              kind: u.sessionUpdate,
+              title,
+              toolKind: u.kind ?? null,
+              status: u.status ?? null,
+              ...(id ? { toolCallId: id } : {}),
+              traceKind: traceKindOf(u.kind as string | null, title),
+              ...(inputSummary ? { inputSummary } : {}),
+              ...(resultSummary?.text ? { resultSummary: resultSummary.text, ...(resultSummary.cut ? { resultCut: true } : {}) } : {}),
+              at: stamp,
+              ...(refused ? { refused: true } : {}),
+              ...(fenced === true && u.status === "failed" && FENCE_DENIED_PATTERN.test(textOf(u.content as ToolCallContent[] | undefined) || (id ? (toolCalls.get(id)?.text ?? "") : "")) ? { fenceDenied: true } : {}),
+            },
+          });
+          return;
+        }
+        case "agent_thought_chunk": {
+          // The model's own reasoning (ACP's thought chunk; Claude Code, and some OpenCode and Codex
+          // models, send it; where they don't, the tool calls still record). Sent as a separate
+          // reasoning update; the server joins consecutive chunks into one step.
+          const content = u.content as { type?: string; text?: string } | undefined;
+          // Redacted before it is sent: this text is stored in runner_events whole (security review BOS-1368).
+          if (content?.type === "text" && content.text) emit({ type: "run.update", runId: cmd.runId, update: { kind: "reasoning", text: redact(content.text.slice(0, 4000)), at: new Date().toISOString() } });
           return;
         }
         case "agent_message_chunk": {
