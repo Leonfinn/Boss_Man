@@ -61,6 +61,7 @@ describe("board", () => {
     // All shows the columns only: the feature cards would grow above them.
     expect(screen.queryByRole("progressbar")).toBeNull();
 
+    fireEvent.click(screen.getByRole("button", { name: "Filter" }));
     fireEvent.click(screen.getByRole("button", { name: "Features" }));
     expect(screen.queryByText("Need infra")).toBeNull();
     expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
@@ -85,6 +86,7 @@ describe("feature state toggles", () => {
     const list = [feature(), feature({ id: "f2", title: "Export", status: "released" }), feature({ id: "f3", title: "Old idea", status: "declined" })];
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => (url.endsWith("/features") ? json({ ...scored, features: list }) : base(url, init))));
     const { unmount } = render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
     fireEvent.click(await screen.findByRole("button", { name: "Features" }));
     await screen.findByRole("article", { name: "Feature Dark mode" });
     expect(screen.getByRole("article", { name: "Feature Export" })).toBeTruthy();
@@ -103,6 +105,7 @@ describe("feature state toggles", () => {
 
     unmount();
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
     fireEvent.click(await screen.findByRole("button", { name: "Features" }));
     expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
     expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
@@ -190,6 +193,7 @@ describe("board lanes", () => {
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     await screen.findByText("Mine to do");
+    fireEvent.click(screen.getByRole("button", { name: "Filter" }));
     fireEvent.change(screen.getByLabelText("Assigned to"), { target: { value: "owner" } });
     expect(screen.queryByText("Agent job")).toBeNull();
     expect(screen.getByText("Mine to do")).toBeTruthy();
@@ -306,6 +310,7 @@ describe("add feature or task", () => {
 
   it("opens New task with the feature preselected from a feature card", async () => {
     const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Filter" }));
     fireEvent.click(await screen.findByRole("button", { name: "Features" }));
     fireEvent.click(await screen.findByRole("button", { name: "Add task to Dark mode" }));
     expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
