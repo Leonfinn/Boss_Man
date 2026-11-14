@@ -75,7 +75,7 @@ function Fold({ title, hint, open, className, children }: { title: string; hint?
 }
 
 /** One row of the Details card (BOS-1195): a `<details>` with a CSS chevron, its title and a muted count on the right. */
-function DetailRow({ title, count, tone, open, children }: { title: string; count?: string; tone?: "amber"; open?: boolean; children: React.ReactNode }) {
+export function DetailRow({ title, count, tone, open, children }: { title: string; count?: string; tone?: "amber"; open?: boolean; children: React.ReactNode }) {
   return (
     <details className="detail-row" open={open || undefined}>
       <summary>
@@ -269,6 +269,33 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
     <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
       Edit steps
     </button>
+  );
+}
+
+export type BuildResult = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total: number | null; url: string | null; sha: string };
+const BUILD_WORDS = { passed: "passed", failed: "failed", pending: "running" } as const;
+/** Only ordinary web addresses are clickable; a host could otherwise hand us a javascript: link (BOS-1418). */
+const webLink = (url: string | null | undefined) => (url && /^https?:\/\//i.test(url) ? url : null);
+/** The one word for the build state, or null when there's no build to show: none reported (BOS-1418). */
+const buildWord = (ci: BuildResult | null) => (ci && ci.state !== "none" ? BUILD_WORDS[ci.state] : null);
+/** One line on the host's build result, or nothing when the host reported none (BOS-1418). */
+export function BuildLine({ ci }: { ci: BuildResult | null }) {
+  const word = buildWord(ci);
+  if (!ci || !word) return null;
+  const href = webLink(ci.url);
+  return (
+    <p className="muted" data-testid="build-result" style={{ overflowWrap: "anywhere" }}>
+      Build on {ci.sha.slice(0, 7)}: <strong>{word}</strong>
+      {ci.state === "failed" && ci.failing.length ? ` (${ci.failing.join(", ")})` : ""}
+      {href && (
+        <>
+          {" · "}
+          <a href={href} target="_blank" rel="noopener noreferrer">
+            View run
+          </a>
+        </>
+      )}
+    </p>
   );
 }
 
@@ -502,6 +529,27 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       clearInterval(timer);
     };
   }, [running, id]);
+  // The git host's build result on the branch head (BOS-1418). Null means nothing to show: no CI, no host, or the host said no.
+  const [ci, setCi] = useState<BuildResult | null>(null);
+  const hasBranch = !!ticket.data?.branch && !ticket.data?.mergeCommit;
+  useEffect(() => {
+    if (!hasBranch) {
+      setCi(null);
+      return;
+    }
+    let stopped = false;
+    const load = () =>
+      api<{ ci: BuildResult | null }>(`/api/tickets/${id}/ci`).then(
+        (r) => !stopped && setCi(r.ci),
+        () => undefined,
+      );
+    void load();
+    const timer = setInterval(() => void load(), 60_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [id, hasBranch]);
   const refreshLanding = async () => {
     try {
       const r = await api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`);
@@ -871,7 +919,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </DetailRow>
 
             {t.repoUrl && (
-              <DetailRow title="Changes" count={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : ""}>
+              <DetailRow title="Changes" count={buildWord(ci) ?? (t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : "")}>
+                <BuildLine ci={ci} />
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
                   <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
                     {diff && range === "base" ? "Refresh all changes" : "All changes"}
