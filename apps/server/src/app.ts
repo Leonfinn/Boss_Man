@@ -39,6 +39,7 @@ import { createStallMonitor } from "./services/stall-monitor.js";
 import { serverHealthService, type ServerHealth, type ServerHealthDeps } from "./services/server-health.js";
 import { createPermissionLog } from "./services/permission-log.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { deployWaitService } from "./services/deploy-wait.js";
 import { hostFactsService, OWNER_FACTS } from "./services/host-facts.js";
 import { netguardAllowReport } from "./services/netguard-allow.js";
 import { deviceProfilesService } from "./services/device-profiles.js";
@@ -953,6 +954,36 @@ export async function buildApp(opts: AppOptions) {
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
     now: opts.now,
   });
+  // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
+  // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
+  const deployWait = deployWaitService(db, {
+    headroom: () => selfDeploy.headroom(),
+    checksRunning: async () => {
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(eq(checkJobs.state, "running"))) as [{ n: number }];
+      return review.gateState().running + n;
+    },
+    openRuns: async () => {
+      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];
+      return n;
+    },
+    send: (ctx, id, o) => selfDeploy.send(ctx, id, o),
+    takeBack: (id) => selfDeploy.takeBack(id),
+    requestWaiting: (id) => selfDeploy.requestWaiting(id),
+    status: () => selfDeploy.status(),
+    available: () => selfDeploy.available(),
+    trialUntil: () => selfDeploy.trialUntil(),
+    runnerCardOpen: () => selfDeploy.runnerCardOpen(),
+    drainOn: async () => !!(await getHold(db)),
+    notify: (n) => notes.notify(n),
+    released: async () => {
+      await review.gatePump();
+      await checks.sweep();
+      await scheduler.tick();
+    },
+    now: opts.now,
+    log: (m) => app.log.warn(m),
+  });
+  decisionsSvc.setDeployWaitHook(deployWait);
   // The merge line jam alert (BOS-766): the same view the Merge queue screen reads, and the owner's own
   // notification service, so quiet hours and caps apply as for every other notification.
   const mergeJam = mergeJamService(db, {
@@ -2003,7 +2034,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
@@ -2240,5 +2271,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

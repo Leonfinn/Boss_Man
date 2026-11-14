@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
 import { FULL_LOG_MAX } from "@boss-man/shared";
 const OTHER_RUNNER = "00000000-0000-4000-8000-000000000001";
 
@@ -31,6 +32,17 @@ async function setup() {
 const T = (n: number) => new Date(Date.UTC(2026, 10, 4, 12, n));
 
 describe("check queue", () => {
+  it("gives out no slot while a server update waits for a quiet machine (BOS-420); queued jobs wait, they don't fail", async () => {
+    const s = await setup();
+    const m1 = (await s.req({ tree: "held" })).job;
+    await s.db.insert(settings).values({ key: DEPLOY_WAIT_KEY, value: { phase: "window", approvedAt: T(0).toISOString() } });
+    expect(await s.q.claimNext(null, T(1))).toEqual([]);
+    const [still] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, m1.id));
+    expect(still!.state).toBe("queued");
+    await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
+    expect((await s.q.claimNext(null, T(2)))[0]!.id).toBe(m1.id);
+  });
+
   it("serves merge jobs first, then fixes of main, urgent, oldest; one slot by default", async () => {
     const s = await setup();
     const pre = (await s.req({ tree: "a", kind: "pre_review", scope: "quick" })).job;

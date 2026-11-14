@@ -65,6 +65,29 @@ type SelfDeployView = {
   queueCancelled?: { at: string; why: string } | null;
 };
 
+/** A server update waiting for a quiet machine (BOS-420). */
+type DeployWaitView =
+  | { on: false }
+  | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
+
+const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+
+/** The plain-words line for a waiting update: what it waits for, and what is held back meanwhile. */
+function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
+  const q = w.quiet;
+  const mem = q?.freeMb != null && q.needMb != null ? ` ${gbOf(q.freeMb)} free of the ${gbOf(q.needMb)} it needs.` : "";
+  const held = " Meanwhile new merge checks wait and fewer runs start.";
+  if (w.phase === "waiting")
+    return w.origin === "hand"
+      ? q?.ready
+        ? `Ready: the machine is quiet. Apply the update to ${w.commit.slice(0, 8)} by hand now.${mem}${held}`
+        : `Making room before you apply the update to ${w.commit.slice(0, 8)} by hand: ${q?.why.join("; ") || "checking"}.${mem}${held}`
+      : `The update to ${w.commit.slice(0, 8)} is waiting for a quiet machine: ${q?.why.join("; ") || "checking"}.${mem} You'll be asked at ${when(w.deadline)} if it is still waiting.${held}`;
+  if (w.phase === "sent") return `The update to ${w.commit.slice(0, 8)} has gone to the machine.${held}`;
+  if (w.phase === "window") return `The update is live; its standby window runs until ${when(w.windowUntil ?? w.deadline)}.${held}`;
+  return `The update is live; waiting for the runner update to start.${held}`;
+}
+
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
 function atTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -175,11 +198,13 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
+  const w = wait.data?.on ? wait.data : null;
   if (!v?.enabled) return null;
   const s = v.status;
   // Right after a deploy the host's offer still names the old commit for a few minutes.
@@ -196,6 +221,28 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       </p>
       <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
+      {w && (
+        <p style={{ fontSize: 14 }}>
+          {waitLine(w)}{" "}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+              })
+            }
+          >
+            {w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now"}
+          </button>
+        </p>
+      )}
       <div>
         <button
           type="button"

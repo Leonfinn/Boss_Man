@@ -1090,6 +1090,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <div style={{ fontSize: 14 }}><StepText text={d.context.rollback} refs={d.refs} /></div>
                       </div>
                     )}
+                    {d.context?.quiet && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>{d.context.quiet.ready ? "Ready: the machine is quiet" : "Making room on the machine"}</p>
+                        <p style={{ fontSize: 14 }}>
+                          {d.context.quiet.ready ? "You can apply the update now." : `Not yet: ${d.context.quiet.why.join("; ")}.`} {d.context.quiet.runs} runs going, {d.context.quiet.checks} merge checks running
+                          {d.context.quiet.freeMb != null && d.context.quiet.needMb != null ? `, ${(d.context.quiet.freeMb / 1024).toFixed(1)} GB of memory free (the update needs ${(d.context.quiet.needMb / 1024).toFixed(1)} GB)` : ""}.
+                        </p>
+                        <p className="muted" style={{ fontSize: 12 }}>Checked {when(d.context.quiet.at)}</p>
+                      </div>
+                    )}
                     {d.context?.lastFailure && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>

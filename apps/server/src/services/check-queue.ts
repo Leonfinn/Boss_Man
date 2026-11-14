@@ -12,6 +12,7 @@ import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -245,6 +246,8 @@ export function checkQueue(db: Db) {
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
   async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
+    // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
+    if ((await softHold(db, now)).on) return [];
     const limit = await slots();
     const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
