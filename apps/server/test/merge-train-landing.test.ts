@@ -58,7 +58,7 @@ function fakeGit() {
       const has = [...new Set([...g.has(on), ticket])];
       const commit = hex(n++);
       commits.set(commit, { base: on, has });
-      return { status: "prepared", commit, tree: g.treeOf(has), targetSha: on };
+      return { status: "prepared", commit, tree: g.treeOf(has), targetSha: on, branchSha: DIFF.head };
     },
     finish(ticket: string, commit: string, tree: string, expectBase?: string) {
       if (expectBase && g.main !== expectBase) return { status: "main_moved" };
