@@ -64,17 +64,22 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   // a worker that comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
   const graceTimers = new Map<string, NodeJS.Timeout>();
 
-  // BOS-1436, all in memory (lost on a restart, when every running job is re-queued anyway):
-  // what each worker last said it holds, per project (the next bundle's base);
+  // BOS-1436, all in memory: a restart re-queues every running job anyway, and the bundle folder is cleared at start-up.
+  // shortcut: what each worker last said it holds, per project (the next bundle's base); lost on restart, harmless because
+  // a worker sends its repos again in its hello.
   const haves = new Map<string, Map<string, string[]>>();
-  // the job a runner may upload a bundle for right now, and which runner (the upload route asks);
+  // shortcut: the job a runner may upload a bundle for right now, and which runner (the upload route asks); lost on restart,
+  // harmless because the pack request dies with the process and the job is re-queued.
   const uploading = new Map<string, string>();
-  // each worker job getting its code: the worker, and whether the full history was already sent;
+  // shortcut: each worker job getting its code, and whether the full history was already sent; lost on restart, harmless
+  // because the job is re-queued and starts over.
   const fetching = new Map<string, { job: CheckJob; worker: Eligible; list: string | null | undefined; full: boolean }>();
-  // workers that couldn't get a job's code, so the job goes elsewhere instead of looping back to them.
+  // shortcut: workers that couldn't get a job's code, so the job goes elsewhere instead of looping back to them; lost on restart,
+  // harmless because at worst the job is offered to that worker once more and fails over again.
   const noCodeOn = new Map<string, Set<string>>();
 
-  // Code being packed for a worker right now (not awaited by pump); settled() waits for them, for tests and shutdown.
+  // shortcut: code being packed for a worker right now (not awaited by pump); settled() waits for them, for tests and shutdown.
+  // Lost on restart, harmless because the promises die with the process.
   const inFlight = new Set<Promise<unknown>>();
   const track = (p: Promise<unknown>) => {
     const t = p.catch(() => {}).finally(() => inFlight.delete(t));
