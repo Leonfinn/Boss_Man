@@ -72,9 +72,12 @@ describe("isRefusalAnswer", () => {
 });
 
 describe("ownerApprovedFiles", () => {
-  it("names check-all.sh only", () => {
+  it("names the merge gate, the scripts it runs to decide pass or fail, and CLAUDE.md (BOS-1100)", () => {
     expect(ownerApprovedFiles(["a.ts", "scripts/check-all.sh"])).toEqual(["scripts/check-all.sh"]);
     expect(ownerApprovedFiles(["scripts/check-quick.sh"])).toEqual([]);
+    for (const p of ["scripts/check-shell.sh", "scripts/test-shell.sh", "scripts/check-threads.mjs", "scripts/check-in-memory-state.mjs", "scripts/lint-migrations.mjs", "scripts/check-mem-guard.mjs", "scripts/check-no-skips.mjs", "CLAUDE.md"]) {
+      expect(ownerApprovedFiles([p])).toEqual([p]);
+    }
   });
 });
 
