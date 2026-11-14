@@ -19,6 +19,45 @@ export const scenes = [
     },
   },
   {
+    id: "02-agents",
+    caption: "Meet the team: a CEO, developers, a designer, QA and a writer. Each agent has a role and a job.",
+    async run(d) {
+      const { page } = d;
+      await d.goto("agents", "text=Iris - Developer");
+      await d.hold(1500);
+      await d.moveTo(page.getByText("Working on").first());
+      await d.hold(1200);
+      await d.smoothScroll(500, 1800);
+      await d.hold(1500);
+    },
+  },
+  {
+    id: "03-runs",
+    caption: "Every agent run is listed: who, what for, which model, what it cost. Open one to read along.",
+    async run(d) {
+      const { page } = d;
+      await d.goto("runs", "text=Running now");
+      await d.hold(1800);
+      await d.moveTo(page.getByText("Fix the sign-up form on phones").first());
+      await d.hold(1200);
+      await d.moveTo(page.getByText("Add a pricing page").first());
+      await d.hold(2000);
+    },
+  },
+  {
+    id: "04-merge-queue",
+    caption: "Approved work is checked and merged in order, on its own. Nothing lands until it passes.",
+    async run(d) {
+      const { page } = d;
+      await d.goto("merge-queue", "text=Waiting to merge");
+      await d.hold(1800);
+      await d.moveTo(page.getByText("Keyboard focus on the menu").first());
+      await d.hold(1500);
+      await d.moveTo(page.getByText("Favicon and app icon").first());
+      await d.hold(2200);
+    },
+  },
+  {
     id: "05-decisions-phone",
     phone: true,
     caption: "When an agent needs you, it asks with a recommended answer. Approve from your phone.",

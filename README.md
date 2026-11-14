@@ -6,6 +6,16 @@ It is for people who want AI agents doing real project work (code, docs, design)
 
 > **Status: alpha.** Boss Man works, and its own agents build it, but expect rough edges and breaking changes. Read [docs/23-updating.md](docs/23-updating.md) before each update.
 
+## See it working
+
+![The Boss Man board showing a team of AI agents working on a made-up website project](docs/promo/poster.jpg)
+
+<!-- Promo video (BOS-1433): after the owner uploads boss-man-promo.mp4 through GitHub's README editor, put the
+     github.com/user-attachments/assets/... link GitHub inserts on its own line here, under the picture.
+     How the video is made: docs/promo/README.md -->
+
+A one-minute tour, recorded from the real app with made-up data: the board, the agents, their runs, the merge queue, a decision answered from a phone, and the roadmap.
+
 ## Install
 
 You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested working with OpenRouter, Ollama, Synthetic so far). The alpha install builds the containers on your server, for the beta release pre-built docker images will be available.

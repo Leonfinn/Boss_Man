@@ -23,6 +23,10 @@ All commands from the repo root. Use a short `TMPDIR` or Chromium will not start
 5. Assemble: `FFMPEG=<ffmpeg with libx264> OUT=<same folder> node docs/promo/build.mjs`
    Writes `boss-man-promo.mp4` (1920x1080, 30 fps, H.264, under GitHub's 10 MB limit) in `OUT`.
 
+6. Poster (`poster.jpg`, shown in the main README): one frame from the board scene, e.g.
+   `ffmpeg -ss 9 -i boss-man-promo.mp4 -frames:v 1 docs/promo/poster.jpg`.
+   The MP4 itself is uploaded by the owner through GitHub's README editor (see the research page BOS-1432).
+
 ## Files
 
 - `scenes.mjs`: the storyboard; one entry per scene with its caption and the clicks.
