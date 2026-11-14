@@ -13,7 +13,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { signedInOwner } from "./helpers/owner-session.js";
 import { sharedDatabase } from "./helpers/shared-server.js";
-import { checkJobs, settings, tickets } from "../src/db/schema.js";
+import { checkJobs, reviewRequests, settings, tickets } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let shared: Awaited<ReturnType<typeof sharedDatabase>>;
@@ -35,8 +35,8 @@ const DIFF: WorkspaceDiff = { baseCommit: "a".repeat(40), head: REVIEWED, commit
 const prepared = (branchSha: string | undefined, n: number) => ({ status: "prepared", commit: String(n).repeat(40), tree: String(n + 1).repeat(40), targetSha: "1".repeat(40), ...(branchSha ? { branchSha } : {}) });
 
 // oldRunner: no "merge-pin" feature, ignores the pin, names no branch commit. noBranchSha: announces the feature but omits branchSha.
-// diffHeads: the head each workspace.diff answer reports in turn (the last one repeats); the first is what the approval stamps.
-async function setup(o: { covers?: boolean | null; oldRunner?: boolean; noBranchSha?: boolean; diffHeads?: string[] } = {}) {
+// lateHead: the head every workspace.diff answer reports once the approval has stamped REVIEWED.
+async function setup(o: { covers?: boolean | null; oldRunner?: boolean; noBranchSha?: boolean; lateHead?: string } = {}) {
   await shared.reset();
   const { db } = shared;
   const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" }));
@@ -48,13 +48,17 @@ async function setup(o: { covers?: boolean | null; oldRunner?: boolean; noBranch
   await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", verifyCommand: "pnpm test" });
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   // The branch tip on the runner, moved by the tests. Prepares and finishes pin to what the server asked for.
-  const state = { branch: REVIEWED, merged: null as string | null, pins: [] as Array<string | undefined>, prepares: 0, diffs: 0 };
+  const state = { branch: REVIEWED, merged: null as string | null, pins: [] as Array<string | undefined>, prepares: 0, diffs: 0, ticketId: "" };
   built.runners.connect(reg.runnerId, (c: RunnerCommand) => {
     const reply = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") {
-      const heads = o.diffHeads ?? [REVIEWED];
-      const head = heads[Math.min(state.diffs++, heads.length - 1)]!;
-      reply({ ...DIFF, head, commits: [{ sha: head, subject: "Work" }] });
+      // Reports REVIEWED until the approval has stamped its head on the review row, LATE after: the approval stamps what it
+      // reads, and every later read (the landing, a retry) sees the commit the author made since. No call counting.
+      void db.select({ head: reviewRequests.head }).from(reviewRequests).where(eq(reviewRequests.ticketId, state.ticketId)).then((rows) => {
+        state.diffs++;
+        const head = o.lateHead && rows.some((r) => r.head) ? o.lateHead : REVIEWED;
+        reply({ ...DIFF, head, commits: [{ sha: head, subject: "Work" }] });
+      });
     }
     if (c.type === "workspace.verify") reply({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 });
     if (c.type === "workspace.carried") reply({ carried: [] });
@@ -78,6 +82,7 @@ async function setup(o: { covers?: boolean | null; oldRunner?: boolean; noBranch
     return true;
   }, o.oldRunner ? ["carried-check", "signoff-covers"] : ["carried-check", "signoff-covers", "merge-pin"]);
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
+  state.ticketId = t.id;
   await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
   await db.insert(settings).values({ key: "check_queue_mode", value: "server" });
   const jobOf = async () => {
@@ -181,7 +186,7 @@ describe("a merge is pinned to the reviewed head (BOS-1413)", () => {
 
   it("(h) a medium-risk ticket whose branch moved after the approval is pinned to the approved head, not the head read now", async () => {
     // The approval stamps REVIEWED (first diff); the landing then reads LATE, as a retry after a lock wait or a restart would.
-    const c = await setup({ diffHeads: [REVIEWED, LATE] });
+    const c = await setup({ lateHead: LATE });
     await c.db.update(tickets).set({ risk: "medium" }).where(eq(tickets.id, c.ticket.id));
     c.state.branch = LATE;
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "branch_changed" });
@@ -191,7 +196,7 @@ describe("a merge is pinned to the reviewed head (BOS-1413)", () => {
   });
 
   it("(h2) the same, but main was only merged in cleanly: the approved head's pin is carried to the new head and it merges", async () => {
-    const c = await setup({ covers: true, diffHeads: [REVIEWED, LATE] });
+    const c = await setup({ covers: true, lateHead: LATE });
     await c.db.update(tickets).set({ risk: "medium" }).where(eq(tickets.id, c.ticket.id));
     c.state.branch = LATE;
     const res = approveAndWait(c.req, c.ticket.id);
