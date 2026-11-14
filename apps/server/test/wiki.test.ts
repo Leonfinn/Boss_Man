@@ -313,6 +313,21 @@ describe("wiki shrink guard (BOS-430)", () => {
     const [ceo] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.role, "ceo")));
     await expect(c.wiki.write(c.company.id, { slug: "owner-page", title: "Owner page", body: "gone", replace: true, isCeo: true, agentId: ceo!.id, runId: null })).resolves.toMatchObject({ created: false });
   });
+
+  it("a page over 40,000 characters needs replace plus confirmReplace naming it, even from its own creator (BOS-1280)", async () => {
+    const c = (ctx = await setup());
+    const big = ["## Releases", ...Array.from({ length: 450 }, (_, i) => `- v${i}: ${"x".repeat(100)}`)].join("\n");
+    expect(big.length).toBeGreaterThan(40_000);
+    await c.wiki.write(c.company.id, { slug: "big-log", title: "Big log", body: big, agentId: c.worker.id, runId: null });
+    const wipe = { slug: "big-log", title: "Big log", body: "## Releases\n\n- only this", agentId: c.worker.id, runId: null };
+    // Without replace the quarter rule refuses; with replace alone the long-page rule does.
+    await expect(c.wiki.write(c.company.id, wipe)).rejects.toThrow(/would replace a page of/);
+    await expect(c.wiki.write(c.company.id, { ...wipe, replace: true })).rejects.toThrow(/confirmReplace: "big-log"/);
+    await expect(c.wiki.write(c.company.id, { ...wipe, replace: true, confirmReplace: "other" })).rejects.toThrow(/confirmReplace/);
+    // A growing write (what an append does) is never held up, and the owner's editor (no agent) is exempt.
+    await expect(c.wiki.write(c.company.id, { slug: "big-log", title: "Big log", body: `${big}\n- more`, agentId: c.worker.id, runId: null })).resolves.toMatchObject({ created: false });
+    await expect(c.wiki.write(c.company.id, { ...wipe, replace: true, confirmReplace: "big-log" })).resolves.toMatchObject({ created: false });
+  });
 });
 
 describe("wiki append, history and restore (BOS-430)", () => {

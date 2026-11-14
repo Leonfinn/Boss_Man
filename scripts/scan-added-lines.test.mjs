@@ -50,6 +50,15 @@ test('a listed IP is blocked, an unlisted one and a longer neighbour are not', (
   assert.ok(!out.includes(listedIp))
 })
 
+test('a listed hit names no file, line or kind, so an agent cannot probe the list with it (BOS-1390)', () => {
+  const denylist = parseDenylist(`ip\t${listedIp}\nhost\tnas-box\n`)
+  const out = format(run([`ssh root@${listedIp}`, 'ping nas-box'], { denylist }))
+  assert.match(out, /a listed private detail was found in this change/)
+  assert.ok(!out.includes(listedIp) && !out.includes('nas-box'))
+  assert.ok(!out.includes('listed-private'))
+  assert.ok(!out.includes('src/a.ts') && !out.includes(':1') && !out.includes(':2'))
+})
+
 test('listed host, path, email (case-insensitive), CIDR and prefix entries', () => {
   const denylist = parseDenylist('host\tnas-box\npath\t/mnt/tank1\nemail\tme@personal.test\nip\t198.51.100.0/24\nip\t203.0.113.\n# comment\n')
   for (const l of ['ping NAS-BOX', 'cd /mnt/tank1/apps', 'mail Me@Personal.test', 'ip 198.51.100.200', 'ip 203.0.113.9']) {
@@ -150,4 +159,53 @@ test('e2e: a text file named yarn.lock or x.png is scanned when new', () => {
 test('e2e: a clean branch passes and says the list was not applied', () => {
   const r = repoRun([{ 'b.txt': 'host is myserver.example.com\n' }])
   assert.equal(r.code, 0); assert.match(r.out, /list was not applied/)
+})
+
+// BOS-1043 (Jane, round 3): nothing is skipped by its name.
+test('e2e: a lockfile added with a key and deleted in the next commit is blocked', () => {
+  const r = repoRun([{ 'yarn.lock': `token = ${fakeGithub}\n` }, { 'yarn.lock': 'clean\n' }])
+  assert.equal(r.code, 1); assert.ok(!r.out.includes(fakeGithub))
+})
+
+test('e2e: a key appended to an existing lockfile is blocked, an integrity hash is not', () => {
+  const hash = 'sha512-' + 'q8Zr3kLm0pXw7TnB9vYc2HdF6sJg1UaE5oIiKt4Nb8QyPxCz3VfRgWh0MlSj6DaEu7TyOnBvXk1QpLw=='
+  const ok = repoRun([{ 'pnpm-lock.yaml': `a:\n  resolution: {integrity: ${hash}}\n` }])
+  assert.equal(ok.code, 0, ok.out)
+  const r = repoRun([{ 'pnpm-lock.yaml': 'a: 1\n' }, { 'pnpm-lock.yaml': `a: 1\nb: ${fakeGithub}\n` }])
+  assert.equal(r.code, 1)
+})
+
+test('e2e: a key beside a NUL byte or U+FFFD in an image-named file is blocked', () => {
+  assert.equal(repoRun([{ 'x.png': `\0${fakeGithub}\0\n` }]).code, 1)
+  assert.equal(repoRun([{ 'x.woff': `�${fakeGithub}�\n` }]).code, 1)
+})
+
+test('e2e: a key a merge commit adds in its own resolution is blocked even if the next commit removes it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-merge-'))
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' } })
+  const scanIt = () => { try { return { code: 0, out: execFileSync('node', [scanner, 'main'], { cwd: dir, encoding: 'utf8' }) } } catch (e) { return { code: e.status, out: String(e.stdout) } } }
+  try {
+    g('init', '-q', '-b', 'main'); writeFileSync(join(dir, 'a.txt'), 'one\n'); g('add', '.'); g('commit', '-qm', 'base')
+    g('checkout', '-qb', 'side'); writeFileSync(join(dir, 'a.txt'), 'side\n'); g('commit', '-qam', 'side')
+    g('checkout', '-q', 'main'); g('checkout', '-qb', 'work'); writeFileSync(join(dir, 'a.txt'), 'work\n'); g('commit', '-qam', 'work')
+    try { g('merge', '--no-edit', 'side') } catch { /* conflict expected */ }
+    writeFileSync(join(dir, 'a.txt'), `resolved ${fakeGithub}\n`); g('add', '.'); g('commit', '-qm', 'merge')
+    writeFileSync(join(dir, 'a.txt'), 'clean\n'); g('commit', '-qam', 'tidy')
+    // origin/main stands in as "main" here; the merged-in "side" commit is not on main, so only the resolution has the key.
+    const r = scanIt()
+    assert.equal(r.code, 1, r.out); assert.ok(!r.out.includes(fakeGithub))
+    assert.match(r.out, /github-token at a\.txt:1/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('e2e: the list can come on stdin (--list-stdin)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-stdin-'))
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' } })
+  try {
+    g('init', '-q', '-b', 'main'); writeFileSync(join(dir, 'a.txt'), 'x\n'); g('add', '.'); g('commit', '-qm', 'base')
+    g('checkout', '-qb', 'work'); writeFileSync(join(dir, 'b.txt'), `host ${listedIp}\n`); g('add', '.'); g('commit', '-qm', 'w')
+    let code = 0, out = ''
+    try { out = execFileSync('node', [scanner, 'main', '--list-stdin'], { cwd: dir, encoding: 'utf8', input: `ip\t${listedIp}\n` }) } catch (e) { code = e.status; out = String(e.stdout) }
+    assert.equal(code, 1); assert.match(out, /BLOCKED a listed private detail was found in this change/); assert.ok(!out.includes(listedIp)); assert.ok(!out.includes('b.txt'))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

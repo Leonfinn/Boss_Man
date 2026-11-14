@@ -30,6 +30,8 @@ export const OWNER_CONTROLS = {
     "Reload",
     // The banner shown while Settings → Server and runner → Stop all work is on (BOS-836).
     "Resume",
+    // Every page intro's fold (P7, BOS-1278): Agents, Server and runner, Notifications and Features show it.
+    "More about this",
   ],
   "Log in": ["Create owner account", "Log in"],
   Setup: [
@@ -48,14 +50,17 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
-  Chat: ["Ask the CEO", "Send"],
+  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
+  Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
-    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
+    "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
     "Show all done tasks", "Run now", "Discard draft",
+    // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
+    // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
+    "Filter", "Clear all", "Clear filters",
   ],
   Ticket: [
     "Save criteria", "Done", "Add a line", "Edit criteria", "Send it back", "Cancel", "Approve",
@@ -66,6 +71,8 @@ export const OWNER_CONTROLS = {
     "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
     // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
     "Reload the latest",
+    // A Details row's own request failed: fetch it again (BOS-1195).
+    "Try again",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
     // The Scrum Master's log of this ticket.
@@ -88,6 +95,8 @@ export const OWNER_CONTROLS = {
     // "What's holding work up" (BOS-745): its heading folds the section away and opens it again (the label carries
     // the count), and below a long list "Show all …" (with the count) and "Show fewer" open and shorten it.
     "What's holding work up …", "Show all …", "Show fewer",
+    // BOS-1306: the labelled Hide / Show button at the right end of that heading.
+    "Hide", "Show",
   ],
   Wiki: [
     "Show older versions",
@@ -96,7 +105,7 @@ export const OWNER_CONTROLS = {
   ],
   Features: [
     "Remove", "Add", "Add feature", "Criteria and areas", "Create task", "Save", "Cancel", "Edit title and description",
-    "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all",
+    "Save summary", "Delete feature", "Discard draft", "Expand all", "Collapse all", "Save reason",
     "Tasks", "Less", "How the portal works",
   ],
   Feedback: [
@@ -123,6 +132,8 @@ export const OWNER_CONTROLS = {
   "Server and runner": [
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
+    // The update wait (BOS-420): the same button reads by phase.
+    "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
     // Ask every running agent to stop cleanly before an update (BOS-929).
@@ -135,6 +146,8 @@ export const OWNER_CONTROLS = {
     "Reported facts",
     // Your devices (BOS-641): measure this browser and keep or drop its screen profile.
     "Measuring", "Record this device", "Rename", "Forget",
+    // Outgoing email (BOS-1387).
+    "Turn off", "Send test email",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -215,7 +228,7 @@ export const OWNER_FIELDS = {
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
-    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Public title (optional)", "Public summary", "Show publicly",
+    "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Show publicly",
   ],
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
@@ -243,8 +256,12 @@ export const OWNER_FIELDS = {
     "Tickets in progress, whole company (leave empty for no limit)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
+    // Settings → Checks: the merge train switch (BOS-1366).
+    "Land approved merges in order (merge train)",
     // Workspace disk.
     "Disk cap (GB)",
+    // Settings → Server and runner → Outgoing email (BOS-1387).
+    "Server", "Port", "Security", "Username", "Password or token", "From address", "From name (optional)", "Send a test email to",
   ],
   // Tool servers and deploy targets.
   "Tools and deploys": [

@@ -81,6 +81,8 @@ describe("wake classes: the table", () => {
     "runner_cannot_fence",
     // The status reason written on a wake the WIP limit refused (BOS-1180), not a wake reason.
     "held by the WIP limit",
+    // The status reason on a wake the maintenance hold stopped holding (BOS-1414), not a wake reason.
+    "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it",
   ]);
 
   it("classifies every reason the server uses to wake an agent", () => {
@@ -356,7 +358,7 @@ describe("wake classes: callers of wake() and notify()", () => {
       .filter((f) => /\b(scheduler|deps|self|this)\.(wake|notify)\(|\bwake\(\{|\.setWakeHook\(|\bnotify: \(agentId/.test(readFileSync(f, "utf8")))
       .map((f) => path.relative(SRC, f))
       // These call a notes notifier of the same name, which tells the owner and wakes nobody.
-      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/merge-jam.ts");
+      .filter((f) => f !== "services/maintenance.ts" && f !== "services/self-deploy.ts" && f !== "services/runner-watch.ts" && f !== "services/deploy-wait.ts" && f !== "services/merge-jam.ts");
     const unlisted = callers.filter((f) => !(f in CALLERS));
     expect(unlisted).toEqual([]);
   });

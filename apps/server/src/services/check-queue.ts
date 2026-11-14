@@ -12,8 +12,11 @@ import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
+/** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
+export const MERGE_TRAIN_KEY = "merge_train";
 export const CHECK_QUEUE_MODE_KEY = "check_queue_mode";
 export const DEFAULT_CHECK_SLOTS = 1;
 /** Why a queued job was cancelled when a newer request of the same ticket replaced it: not a failure, the newer job is the live one. */
@@ -95,6 +98,24 @@ export function checkQueue(db: Db) {
     });
   }
 
+  /**
+   * BOS-1328: a ticket's place in the merge line: the earliest queue time of its merge jobs still live or ended in the last
+   * PLACE_KEEP_MS (failed or stuck ones never count, so a fixed branch queues as new), plus its "move to front" (BOS-1384).
+   * The merge train (BOS-1366) seats tickets by the same place.
+   */
+  async function mergePlace(db: Db, ticketId: string): Promise<{ at: Date | null; front: { at: Date; by: string | null } | null }> {
+    const since = Date.now() - PLACE_KEEP_MS;
+    const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
+      // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
+      (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
+    );
+    let at: Date | null = null;
+    let front: { at: Date; by: string | null } | null = null;
+    for (const j of earlier) if (!at || j.queuedAt < at) at = j.queuedAt;
+    for (const j of earlier) if (j.frontAt && (!front || j.frontAt > front.at)) front = { at: j.frontAt, by: j.frontBy };
+    return { at, front };
+  }
+
   async function enqueueIn(db: Db, input: EnqueueInput): Promise<EnqueueResult> {
     const scope = input.scope ?? "full";
     // A pass on the same tree with an equal or wider scope answers the request, whatever kind asked for it.
@@ -105,17 +126,33 @@ export function checkQueue(db: Db) {
       .orderBy(asc(checkJobs.queuedAt));
     // The same command must have passed: a quick script, or the first of several merge commands, never stands in for another.
     const wide = (j: CheckJob) => (SCOPE_RANK[j.scope] ?? 0) >= SCOPE_RANK[scope]! && (j.command ?? null) === (input.command ?? null);
-    const passed = sameTree.find((j) => j.state === "passed" && wide(j));
+    // BOS-1043: only merge jobs are dispatched with the owner's private-details list, so a merge request is answered only by a
+    // merge-kind job. A pass or running job of another kind was scanned without the list and must not stand in for the gate.
+    // (A queued job lifted to merge below is dispatched as merge, so it does get the list.)
+    const listScanned = (j: CheckJob) => input.kind !== "merge" || j.kind === "merge";
+    const passed = sameTree.find((j) => j.state === "passed" && wide(j) && listScanned(j));
     if (passed) return { job: passed, reused: "passed" };
-    // The same ticket already has a live job on this tree that is wide enough: it is the answer.
-    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j));
+    // The same ticket already has a live job on this tree that can answer: it is the answer (BOS-1412). Asking again
+    // for code that is already waiting must never cancel or re-queue it: the agent re-reading its own position used to
+    // send the job to the back of a long line. It must be wide enough and, for a merge request, list-scanned unless it is
+    // still queued (it gets lifted to merge below, so it does get the list).
+    const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j) && (listScanned(j) || j.state === "queued"));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
+      // BOS-1390: the lift is guarded on state = 'queued' too. A pump holds a different lock (check_jobs_claim), so it can claim
+      // the job between the read above and this UPDATE; without the guard that running job would become a merge-kind job the
+      // merge reuses as "live", never having been scanned with the owner's list. No row means it was claimed: fall through and
+      // queue a fresh merge job, which the gate dispatches with the list.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
-        const [lifted] = await db.update(checkJobs).set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain }).where(eq(checkJobs.id, live.id)).returning();
-        return { job: lifted ?? live, reused: "live" };
+        const [lifted] = await db
+          .update(checkJobs)
+          .set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain })
+          .where(and(eq(checkJobs.id, live.id), eq(checkJobs.state, "queued")))
+          .returning();
+        if (lifted) return { job: lifted, reused: "live" };
+      } else {
+        return { job: live, reused: "live" };
       }
-      return { job: live, reused: "live" };
     }
     // A newer commit of the same ticket replaces its queued job of the same command whose scope is no wider than the new one
     // (never a running one: that one is the runner's to finish or fail). A queued full check is never dropped by a later quick
@@ -128,16 +165,7 @@ export function checkQueue(db: Db) {
     // count, and failed or stuck ones never do, so a fixed branch queues as new.
     let inheritedAt: Date | null = null;
     let inheritedFront: { at: Date; by: string | null } | null = null;
-    if (input.kind === "merge") {
-      const since = Date.now() - PLACE_KEEP_MS;
-      const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, input.ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
-        // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
-        (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
-      );
-      for (const j of earlier) if (!inheritedAt || j.queuedAt < inheritedAt) inheritedAt = j.queuedAt;
-      // BOS-1384: a "move to front" goes with the place in line.
-      for (const j of earlier) if (j.frontAt && (!inheritedFront || j.frontAt > inheritedFront.at)) inheritedFront = { at: j.frontAt, by: j.frontBy };
-    }
+    if (input.kind === "merge") ({ at: inheritedAt, front: inheritedFront } = await mergePlace(db, input.ticketId));
     if (stale.length)
       await db
         .update(checkJobs)
@@ -218,6 +246,8 @@ export function checkQueue(db: Db) {
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
   async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
+    // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
+    if ((await softHold(db, now)).on) return [];
     const limit = await slots();
     const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
@@ -413,5 +443,17 @@ export function checkQueue(db: Db) {
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
   }
 
-  return { list, mode, slots, setMode, setSlots, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  /** The owner's merge train switch (BOS-1366, DR-059): off unless set to true. */
+  async function train(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_TRAIN_KEY));
+    return row?.value === true || row?.value === "true";
+  }
+
+  async function setTrain(on: boolean): Promise<void> {
+    await db.insert(settings).values({ key: MERGE_TRAIN_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+  }
+
+  const place = (ticketId: string) => mergePlace(db, ticketId);
+
+  return { list, mode, slots, setMode, setSlots, train, setTrain, place, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
 }

@@ -428,10 +428,15 @@ export function alertLadder(
       const items = [...(ctx.items ?? []), { question: input.question, at: now().toISOString(), ...(input.cause?.agents?.length ? { agents: input.cause.agents.filter((x): x is string => !!x) } : {}) }];
       // The cause carries every agent named so far, so the heading says how many, not just the last one.
       const agents = [...new Set(items.flatMap((i) => i.agents ?? []))];
-      const question = heading ? heading({ ...input.cause, agents }, items.length) : open.question;
+      // A resetsAt is a fact as of the raise that reported it (BOS-1425): the folded card names the latest, not
+      // the one on its first raise. Other cause facts (the account, the window) stay as the card was raised.
+      const cause = input.cause
+        ? { ...input.cause, ...(input.cause.account && "resetsAt" in input.cause.account ? { account: { ...input.cause.account, resetsAt: input.cause.account.resetsAt ?? null } } : {}) }
+        : undefined;
+      const question = heading && cause ? heading({ ...cause, agents }, items.length) : open.question;
       await db
         .update(decisions)
-        .set({ question, context: mergeContext({ items, lastAppendedAt: now().toISOString() }) })
+        .set({ question, context: mergeContext({ items, lastAppendedAt: now().toISOString(), ...(cause ? { cause } : {}) }) })
         .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")));
     },
 
@@ -527,7 +532,11 @@ export function alertLadder(
         // A permission card whose CEO handover ran out still reaches the owner, but it says so, and the
         // CEO is woken again to add the advice (BOS-233 item 2). The card marks the event itself.
         const ranOut = ladder.rung === "ceo" && d.kind === "permission" && !(d.context as { advice?: { state?: string } }).advice?.state;
-        const to = await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`, ranOut ? { handoverRanOut: true } : {});
+        // BOS-1318: a team question that waited out its time with the CEO says so, keeping what the asking agent tried.
+        const ctx = d.context as { type?: string; triedFirst?: string };
+        const teamQuestion = ladder.rung === "ceo" && d.kind === "question" && ctx.type === "question" && ladder.hops.length === 1 && ladder.hops[0]!.why === "a team question goes to the CEO first";
+        const extra: Record<string, unknown> = ranOut ? { handoverRanOut: true } : teamQuestion ? { triedFirst: `${ctx.triedFirst ? `${ctx.triedFirst} ` : ""}Tried by the CEO first: it didn't settle this within ${minutes} minutes.` } : {};
+        const to = await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`, extra);
         if (!to) continue;
         moved++;
         if (ranOut && to === "owner") {

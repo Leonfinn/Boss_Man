@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, companies, projects, settings, tickets } from "../src/db/schema.js";
 import { CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
+import { DEPLOY_WAIT_KEY } from "../src/services/deploy-wait-hold.js";
 import { FULL_LOG_MAX } from "@boss-man/shared";
 const OTHER_RUNNER = "00000000-0000-4000-8000-000000000001";
 
@@ -31,6 +32,17 @@ async function setup() {
 const T = (n: number) => new Date(Date.UTC(2026, 10, 4, 12, n));
 
 describe("check queue", () => {
+  it("gives out no slot while a server update waits for a quiet machine (BOS-420); queued jobs wait, they don't fail", async () => {
+    const s = await setup();
+    const m1 = (await s.req({ tree: "held" })).job;
+    await s.db.insert(settings).values({ key: DEPLOY_WAIT_KEY, value: { phase: "window", approvedAt: T(0).toISOString() } });
+    expect(await s.q.claimNext(null, T(1))).toEqual([]);
+    const [still] = await s.db.select().from(checkJobs).where(eq(checkJobs.id, m1.id));
+    expect(still!.state).toBe("queued");
+    await s.db.delete(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
+    expect((await s.q.claimNext(null, T(2)))[0]!.id).toBe(m1.id);
+  });
+
   it("serves merge jobs first, then fixes of main, urgent, oldest; one slot by default", async () => {
     const s = await setup();
     const pre = (await s.req({ tree: "a", kind: "pre_review", scope: "quick" })).job;
@@ -139,14 +151,16 @@ describe("check queue", () => {
     const a = (await s.req({ tree: "t1", kind: "pre_review", scope: "full" })).job;
     await s.q.claimNext(null);
     await s.q.complete(a.id, { commit: a.commit, exitCode: 0, logTail: "", runnerId: null });
-    const merge = await s.req({ tree: "t1" });
-    expect(merge.reused).toBe("passed");
-    expect(merge.job.id).toBe(a.id);
+    expect((await s.req({ tree: "t1", kind: "pre_review", scope: "quick" })).reused).toBe("passed");
     const q2 = (await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).job;
     await s.q.claimNext(null);
     await s.q.complete(q2.id, { commit: q2.commit, exitCode: 0, logTail: "", runnerId: null });
-    expect((await s.req({ tree: "t2", scope: "full" })).reused).toBeNull();
+    expect((await s.req({ tree: "t2", kind: "pre_review", scope: "full" })).reused).toBeNull();
     expect((await s.req({ tree: "t2", kind: "pre_review", scope: "quick" })).reused).toBe("passed");
+    // BOS-1043: a pre-review pass ran without the owner's list, so it never answers a merge request.
+    const merge = await s.req({ tree: "t1" });
+    expect(merge.reused).toBeNull();
+    expect(merge.job.id).not.toBe(a.id);
     await s.close();
   });
 
@@ -158,6 +172,95 @@ describe("check queue", () => {
     expect(b.reused).toBe("live");
     expect(b.job.id).toBe(a.job.id);
     expect(b.job.kind).toBe("merge");
+    await s.close();
+  });
+
+  it("a pre-review job claimed between the read and the lift is not turned into a merge job; the merge gets a fresh one (BOS-1390)", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const a = (await s.req({ ticketId, tree: "r", kind: "pre_review" })).job;
+    expect(a.state).toBe("queued");
+    // Reproduce the race: a pump holds check_jobs_claim (a different lock from enqueue's), so it can claim the queued job and
+    // dispatch it as pre-review between enqueue's read and the lift's UPDATE. enqueue runs inside db.transaction, so wrap the
+    // tx it hands the callback: the first checkJobs UPDATE of a row (the lift) first marks the row running the way a pump does
+    // (pglite is one connection, so a real claimNext would open a nested transaction and block), so the row is queued at the
+    // read and running by the time the lift's WHERE is evaluated.
+    const real = s.db as unknown as {
+      transaction: (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+    };
+    type Chain = { set: (v: unknown) => { where: (w: unknown) => Promise<unknown> } };
+    let fired = false;
+    const wrapTx = (tx: unknown) => {
+      const t = tx as { update: (x: unknown) => Chain; execute: (q: unknown) => Promise<unknown> };
+      return new Proxy(tx as object, {
+        get(target, prop, recv) {
+          if (prop !== "update") return Reflect.get(target, prop, recv);
+          return (table: unknown) => {
+            const upd = t.update(table);
+            if (table !== checkJobs) return upd;
+            return {
+              set: (v: unknown) => {
+                const after = upd.set(v);
+                return {
+                  where: (w: unknown) => {
+                    const q = after.where(w) as unknown as { then: (a: (v: unknown) => unknown, b?: (e: unknown) => unknown) => Promise<unknown>; returning?: () => Promise<unknown> };
+                    if (fired) return q;
+                    fired = true;
+                    // The pump claims the still-queued job first (state running, no owner's list in its dispatch), then the
+                    // lift's own WHERE runs against the claimed row: the queued guard sees "running", so no row comes back.
+                    const claim = () => (t.update(checkJobs) as Chain).set({ state: "running", startedAt: new Date() } as never).where(eq(checkJobs.id, a.id));
+                    return {
+                      then: (a: (v: unknown) => unknown, b?: (e: unknown) => unknown) => claim().then(() => q.then(a, b)),
+                      returning: () => claim().then(() => (q.returning ? q.returning() : q as unknown as Promise<unknown>)),
+                    };
+                  },
+                };
+              },
+            };
+          };
+        },
+      });
+    };
+    const wrapped = new Proxy(s.db as object, {
+      get(target, prop, recv) {
+        if (prop !== "transaction") return Reflect.get(target, prop, recv);
+        return (fn: (tx: unknown) => Promise<unknown>) => real.transaction((tx) => fn(wrapTx(tx)));
+      },
+    });
+    const q = checkQueue(wrapped as never);
+    const m = await q.enqueue({ companyId: s.companyId, projectId: s.projectId, ticketId, kind: "merge", commit: "c-r", tree: "r", requestedBy: null });
+    expect(fired).toBe(true); // the lift's UPDATE ran (after the claim)
+    // The claimed job was NOT turned into a merge job: it is still a running pre-review job.
+    const after = (await s.db.select().from(checkJobs).where(eq(checkJobs.id, a.id)))[0]!;
+    expect(after.state).toBe("running");
+    expect(after.kind).toBe("pre_review");
+    // The merge request got a fresh merge job instead of reusing the claimed one as "live".
+    expect(m.reused).toBeNull();
+    expect(m.job.id).not.toBe(a.id);
+    expect(m.job.kind).toBe("merge");
+    await s.close();
+  });
+
+  it("a merge request is never answered by a running pre-review job, which ran without the owner's list (BOS-1043)", async () => {
+    const s = await setup();
+    const ticketId = await s.ticket();
+    const a = await s.req({ ticketId, tree: "r1", kind: "pre_review", scope: "full" });
+    await s.q.claimNext(null);
+    const b = await s.req({ ticketId, tree: "r1", kind: "merge" });
+    expect(b.reused).toBeNull();
+    expect(b.job.id).not.toBe(a.job.id);
+    expect(b.job.kind).toBe("merge");
+    await s.close();
+  });
+
+  it("a merge pass answers a later merge request on the same tree (BOS-1043)", async () => {
+    const s = await setup();
+    const m = (await s.req({ tree: "m1", kind: "merge" })).job;
+    await s.q.claimNext(null);
+    await s.q.complete(m.id, { commit: m.commit, exitCode: 0, logTail: "", runnerId: null });
+    const again = await s.req({ tree: "m1", kind: "merge" });
+    expect(again.reused).toBe("passed");
+    expect(again.job.id).toBe(m.id);
     await s.close();
   });
 

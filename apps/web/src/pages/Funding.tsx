@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, usd, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { usePoll } from "../hooks";
-import { windowLabel } from "@boss-man/shared";
+import { windowHasReset, windowLabel } from "@boss-man/shared";
 import { ageLabel } from "../age";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
@@ -185,7 +185,7 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
                 <span>
                   Can trigger the hold: {windowLabel(w).name} <span className="mono">({w})</span>
                 </span>
-                {latest && <span className="mono muted pct">{pct(latest.utilization)}</span>}
+                {latest && <span className="mono muted pct">{pct(windowHasReset(latest.resetsAt ? new Date(latest.resetsAt) : null, new Date()) ? 0 : latest.utilization)}</span>}
               </label>
             );
           })}
@@ -308,16 +308,20 @@ function SourceCard({ s }: { s: FundingStatus }) {
       ) : s.quota.length ? (
         s.quota.map((q) => {
           const label = windowLabel(q.window);
+          // A reading whose window has already reset says nothing about the window now (BOS-1409):
+          // every limit reads as empty, the same rule the hold uses, so Fable and This week never show last week's figure.
+          const beforeReset = windowHasReset(q.resetsAt ? new Date(q.resetsAt) : null, new Date());
+          const utilization = beforeReset ? 0 : q.utilization;
           return (
           <div key={q.window} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
               <span>{label.name}</span>
-              <span className="mono" style={{ color: q.utilization >= 0.9 ? "var(--amber-ink)" : undefined }}>
-                {pct(q.utilization)}
+              <span className="mono" style={{ color: utilization >= 0.9 ? "var(--amber-ink)" : undefined }}>
+                {pct(utilization)}
               </span>
             </div>
-            <div className={`bar${q.utilization >= 0.9 ? " warn" : ""}`} aria-hidden="true">
-              <span style={{ width: pct(Math.min(1, q.utilization)) }} />
+            <div className={`bar${utilization >= 0.9 ? " warn" : ""}`} aria-hidden="true">
+              <span style={{ width: pct(Math.min(1, utilization)) }} />
             </div>
             {label.note && (
               <span className="muted" style={{ fontSize: 12 }}>
@@ -326,7 +330,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
             )}
             {q.resetsAt && (
               <span className="muted" style={{ fontSize: 12 }}>
-                {new Date(q.resetsAt).getTime() < Date.now() ? "Last reading was before its reset; updates on the next run" : `Resets ${when(q.resetsAt)}`}
+                {beforeReset ? "No reading since its reset; updates on the next run" : `Resets ${when(q.resetsAt)}`}
                 {q.overageInUse ? " · using usage credits" : ""}
               </span>
             )}

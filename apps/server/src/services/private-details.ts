@@ -77,5 +77,10 @@ export function privateDetailsService(db: Db, master: MasterKey) {
       const s = await read();
       return s ? decryptSecret(master, s) : null;
     },
+
+    /** Whether a list is saved at all, without decrypting it (BOS-1093): tells a read failure from an empty list. */
+    async isSet(): Promise<boolean> {
+      return (await read()) !== null;
+    },
   };
 }

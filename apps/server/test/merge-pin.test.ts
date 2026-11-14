@@ -83,7 +83,7 @@ async function setup(o: { covers?: boolean | null; oldRunner?: boolean } = {}) {
     throw new Error("no job queued");
   };
   const passJob = (id: string) => db.update(checkJobs).set({ state: "passed", exitCode: 0, startedAt: new Date(), endedAt: new Date() }).where(eq(checkJobs.id, id));
-  const stateOf = async () => (await db.select({ s: tickets.state }).from(tickets).where(eq(tickets.id, t.id)))[0]!.s;
+  const stateOf = async () => (await db.select({ s: tickets.systemState }).from(tickets).where(eq(tickets.id, t.id)))[0]!.s;
   return { db, req, ticket: t, state, jobOf, passJob, stateOf };
 }
 

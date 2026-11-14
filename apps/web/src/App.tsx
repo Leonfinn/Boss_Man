@@ -97,7 +97,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -109,6 +109,20 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
       </p>
     );
   const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
+  if (m.kind === "settings")
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        {m.blocking === false
+          ? `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update, and new runs are not held while it waits for your answer in Settings → Server and runner.`
+          : `Applying a runner setting change (for example Check slots): ${waiting}. This is not a runner update: the runner image stays the same. Nothing new starts until it is done.`}
+      </p>
+    );
+  if (m.blocking === false)
+    return (
+      <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+        Update pending: {waiting}. It is past its deadline and waits for your answer in Settings → Server and runner. New runs are not held for it.
+      </p>
+    );
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
       Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
