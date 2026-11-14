@@ -194,7 +194,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
       return {
         ...base,
         more: `They were asked to wrap up ${oldest} minutes ago and the wait is over.`,
-        next: `Still running: ${runsSentence(list)}. Stopping ends them where they got to, and anything they haven't saved is lost. The tickets wake again after the update.${stuck ? ` ${stuck}` : ""}`,
+        next: `Still running: ${runsSentence(list)}. Stopping ends them where they got to, and anything they haven't saved is lost. They aren't woken again afterwards: their tickets wait where they stopped.${stuck ? ` ${stuck}` : ""}`,
         primary: { id: "stop-stragglers", label: `Stop ${list.length} and carry on with the update`, blue: true, runIds: list.map((r) => r.runId) },
         normal: [{ id: "cancel-update", label: `Cancel the ${what}` }],
       };

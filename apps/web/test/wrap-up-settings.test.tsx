@@ -97,7 +97,7 @@ describe("Ask agents to wrap up in the Updates card", () => {
     expect(screen.getByRole("button", { name: "Stop this run" })).toBeTruthy();
     const note = screen.getByTestId("wrapup-note").textContent ?? "";
     expect(note).toContain("anything it hasn't saved yet is lost");
-    expect(note).toContain("wakes again after the update");
+    expect(note).toContain("its ticket waits where it stopped");
   });
 
   it("says a run in a long step will stop when the step ends, and one that has the message is finishing up, with a Stop on every run (BOS-1379)", async () => {

@@ -171,7 +171,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     });
   const stopThem = (runIds: string[]) =>
     act.run(async () => {
-      if (!window.confirm(`Stop ${runIds.length} run${runIds.length === 1 ? "" : "s"} and carry on with the update? They stop mid-step, so anything they have not saved is lost. Their tickets wake again after the update.`)) return;
+      if (!window.confirm(`Stop ${runIds.length} run${runIds.length === 1 ? "" : "s"} and carry on with the update? They stop mid-step, so anything they have not saved is lost. They are not woken again afterwards: their tickets wait where they stopped.`)) return;
       const r = await api<{ stopped: number; skipped: number }>("/api/maintenance/stop-stragglers", { method: "POST", body: { runIds } });
       maint.reload();
       return `Stopped ${r.stopped}${r.skipped ? `; ${r.skipped} had already ended` : ""}. The update goes ahead once no run is left.`;
@@ -375,7 +375,7 @@ export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean
         })}
       </ul>
       <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
-        Stopping ends that agent where it got to, so anything it hasn't saved yet is lost. Its ticket wakes again after the update.
+        Stopping ends that agent where it got to, so anything it hasn't saved yet is lost. It isn't woken again afterwards: its ticket waits where it stopped.
       </p>
     </div>
   );
