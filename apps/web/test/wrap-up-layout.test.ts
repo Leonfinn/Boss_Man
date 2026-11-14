@@ -134,7 +134,7 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
     const browser = await launch();
     if (!browser) return; // no browser here: skipped, not passed
     try {
-      for (const vp of [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }]) {
+      for (const vp of [{ name: "desktop", width: 1280, height: 800, touch: false, dsf: 1 }, { name: "brave1667", width: 1667, height: 724, touch: true, dsf: 1 }, { name: "phone380", width: 380, height: 800, touch: true, dsf: 2 }, { name: "foldable", width: fp.width, height: fp.height, touch: fp.coarsePointer, dsf: 1 }]) {
         for (const m of ["waiting", "asked", "late", "none"]) {
           mode = m;
           const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: vp.dsf, hasTouch: vp.touch });
@@ -157,6 +157,16 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
           // The separate bottom "Ask agents to wrap up" panel and the Runner update box are gone.
           expect(await page.locator("section.card:has(h2:has-text('Runner update'))").count(), `${vp.name}/${m}: no Runner update box`).toBe(0);
           const main = await page.locator(`${sec} [data-testid='update-main']`).count();
+          if (main) {
+            const mb = await page.locator(`${sec} [data-testid='update-main']`).boundingBox();
+            // The owner's 1667x724 screen: status box and main button end above the fold; a phone: a tap-sized, full-width button.
+            if (vp.name === "brave1667") expect(mb!.y + mb!.height, `${m}: main button above 724`).toBeLessThanOrEqual(724);
+            if (vp.name === "phone380") {
+              expect(mb!.height, `${m}: tap size`).toBeGreaterThanOrEqual(44);
+              const sb = await page.locator(`${sec} [data-testid='update-status']`).boundingBox();
+              expect(mb!.width, `${m}: full width`).toBeGreaterThanOrEqual(sb!.width - 2);
+            }
+          }
           if (m === "none") {
             expect(await page.locator(`${sec} [data-testid='wrapup-box']`).count(), `${vp.name}/${m}: no runs list`).toBe(0);
             expect(await page.locator(`${sec} [data-testid='update-tag']`).innerText()).toBe("Up to date");

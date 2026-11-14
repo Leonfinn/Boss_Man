@@ -1556,5 +1556,5 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .upd-cols { grid-template-columns: minmax(0, 1fr); }
   .upd-status { flex-direction: column; gap: 8px; }
   .upd-main .btn, .upd-other .btn { min-height: 44px; }
-  .upd-main .btn.primary { width: 100%; }
+  .upd-main .btn.primary, .upd-main .btn[data-testid="update-main"] { width: 100%; }
 }
