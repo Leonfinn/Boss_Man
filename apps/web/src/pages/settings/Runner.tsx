@@ -5,7 +5,7 @@ import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
-import { UpdateHistory, type UpdateRow } from "./updates";
+import type { UpdateRow } from "./updates";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen" } | null; error?: string } | null;
@@ -150,11 +150,6 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           )}
         </dl>
         {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
-        {s?.report?.last && (
-          <div data-testid="company-update-history">
-            <UpdateHistory r={s.report.last} />
-          </div>
-        )}
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -214,11 +209,6 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
-      )}
-      {s?.registered && s.report?.last && (
-        <div data-testid="company-update-history">
-          <UpdateHistory r={s.report.last} />
-        </div>
       )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

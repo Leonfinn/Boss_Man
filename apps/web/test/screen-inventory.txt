@@ -229,11 +229,12 @@ sections:
   - Extra lines from your.env
   - Facts only you can give
   - Network guard
-  - Now
+  - Now running
+  - Other actions
   - Outgoing email
   - Private details to block
+  - Recent updates
   - Runner
-  - Runner update
   - Server
   - Stop all work
   - This host
@@ -255,6 +256,7 @@ reads:
   - /api/run-limits
   - /api/runner-report
   - /api/self-deploy
+  - /api/self-deploy/history
   - /api/self-deploy/wait
   - /api/settings/check-queue
   - /api/settings/email

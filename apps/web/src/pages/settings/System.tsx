@@ -79,7 +79,7 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
   if (!changes.length) return null;
   const shown = changes.slice(0, 5);
   return (
-    <div style={{ fontSize: 14 }}>
+    <div style={{ fontSize: 14 }} data-testid="waiting-changes">
       <p style={{ margin: 0 }}>{changes.length === 1 ? "1 change waiting:" : `${changes.length} changes waiting:`}</p>
       <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
         {shown.map((c, i) => (
@@ -394,9 +394,9 @@ function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | 
             <strong>Server</strong> <span className="muted">updated {server}</span>
           </li>
         )}
-        {report?.live.map((l) => <LiveState key={l.slug} r={l} />)}
+        {report?.live?.map((l) => <LiveState key={l.slug} r={l} />)}
       </ul>
-      {report && !report.live.length && <p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>}
+      {report?.live && !report.live.length &&<p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>}
     </div>
   );
 }

@@ -302,27 +302,6 @@ export function historyTag(r: HistoryRow): { tag: string; tone: StatusTone } {
 }
 export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.changes ? `Server, ${plural(r.changes, "change", "changes")}` : "Server");
 
-/** The last update as history: grey and "Resolved" once the runner has come back on its image, red only for something wrong now (BOS-465). */
-export function UpdateHistory({ r }: { r: UpdateRow }) {
-  if (r.state === "ok")
-    return (
-      <p style={{ fontSize: 14 }} data-testid="update-history">
-        <span className="tag">OK</span> Last update {when(r.at)}: {r.title}. {r.body}
-      </p>
-    );
-  if (r.state === "resolved")
-    return (
-      <p style={{ fontSize: 14 }} data-testid="update-history">
-        <span className="tag grey">Resolved</span> Last update {when(r.at)}: it finished with problems ({r.body}), but the runner has since reconnected on the new image.
-      </p>
-    );
-  return (
-    <p style={{ fontSize: 14 }} data-testid="update-history">
-      <span className="tag red">PROBLEM</span> Last update {when(r.at)}: {r.title}. {r.body} <strong>{r.todo}</strong>
-    </p>
-  );
-}
-
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
 export function LiveState({ r }: { r: LiveRow }) {
   const connected = r.registered && r.connected;
