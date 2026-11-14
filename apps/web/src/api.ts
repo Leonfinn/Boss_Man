@@ -299,7 +299,7 @@ export type FundingSource = { id: string; name: string; kind: string; provider: 
 export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
-  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
+  quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean; observedAt: string }>;
   /** Every window name the adapter has reported for this source, for the hold switches. */
   windowsSeen: string[];
   /** Whether new runs are going to this account right now (the owner's ranked Claude accounts, BOS-383). */
