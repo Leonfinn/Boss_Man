@@ -248,9 +248,7 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
             const out = [...document.querySelectorAll("body *")].map((el) => ({ el, r: el.getBoundingClientRect().right })).sort((a, b) => b.r - a.r)[0];
             return out ? `${out.el.tagName}.${String(out.el.getAttribute("class"))} right edge ${Math.round(out.r)}px: ${(out.el.textContent ?? "").slice(0, 60)}` : "unknown";
           });
-          // Agents at phone width already scrolls sideways on main: the "What waits for you from the CEO" select
-          // (not touched here) sticks out to 445px. Left out of this check, not fixed in a polish ticket; see the follow-up.
-          if (!(route === "agents" && w < 500)) expect(wide, `${route} at ${w}px scrolls sideways`).toBe("");
+          expect(wide, `${route} at ${w}px scrolls sideways`).toBe("");
           if (dir) {
             mkdirSync(dir, { recursive: true });
             // The phone shot is the whole page, so Recent activity (below the charts) is in view.

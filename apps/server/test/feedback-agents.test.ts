@@ -340,3 +340,49 @@ describe("QA: the portal security guard on update_feature (BOS-991)", () => {
     await ceo.close();
   });
 });
+
+describe("a product manager runs features, roadmap and portal (BOS-1359)", () => {
+  it("creates and links features, attaches any ticket to one, runs the roadmap, logs each change, and stays out of everything else", async () => {
+    const c = await setup();
+    const pmAgent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Florence", template: "product-manager" })).json() as { id: string };
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Grow" })).json();
+    const note = (await c.req("POST", `/api/companies/${c.company.id}/feedback`, { text: "Please add CSV export." })).json();
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Someone else's task" })).json();
+    const pm = await c.mcp(pmAgent.id);
+    const call = async (name: string, args: Record<string, unknown>) => textOf(await pm.callTool({ name, arguments: args }));
+
+    // Create, link and mark: a reason is required and is kept in the activity log.
+    expect(await call("feedback", { action: "create_feature", title: "CSV export" })).toMatch(/Say why/);
+    const created = await call("feedback", { action: "create_feature", title: "CSV export", reason: "Backfill from the review." });
+    const featureId = /Created feature (\S+?)\./.exec(created)![1]!;
+    expect(await call("feedback", { action: "link", noteId: note.id, featureId, reason: "Asked for it." })).toBe("Linked.");
+    expect(await call("feedback", { action: "mark", noteId: note.id, state: "processed", reason: "Triaged." })).toBe("Marked processed.");
+    const logged = await c.db.select().from(activity).where(eq(activity.kind, "feedback_triaged"));
+    expect(logged).toHaveLength(3);
+    expect(logged.map((l) => l.summary).join("\n")).toContain("Florence created the feature \"CSV export\": Backfill from the review.");
+
+    // The roadmap tool.
+    expect(await call("roadmap", { action: "list" })).toContain(goal.id);
+    expect(await call("roadmap", { action: "add_objective", title: "Reach", priority: 2, reason: "Planning." })).toMatch(/Added the objective/);
+
+    // Attach a task to a feature: featureId alone, on a ticket that isn't theirs.
+    expect(await call("update_ticket", { ticketId: t.id, featureId, reason: "It delivers the feature." })).toMatch(/updated/);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.featureId).toBe(featureId);
+    expect(await call("update_ticket", { ticketId: t.id, featureId: null, reason: "Detach." })).toMatch(/updated/);
+    // Nothing else on others' tickets.
+    expect(await call("update_ticket", { ticketId: t.id, featureId, title: "Renamed", reason: "x" })).toMatch(/Only your company's CEO or a manager/);
+    expect(await call("update_ticket", { ticketId: t.id, assignee: "Engineer", reason: "x" })).toMatch(/Only your company's CEO or a manager/);
+
+    // The portal: a normal feature can be published, a security one cannot.
+    expect(await call("feedback", { action: "update_feature", featureId, publicSummary: "Export your data as CSV.", showPublicly: true, portalVisible: true, reason: "Ready to show." })).toContain("put it on the feedback portal");
+    const sec = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Fix security vulnerability in login" })).json();
+    expect(await call("feedback", { action: "update_feature", featureId: sec.id, publicSummary: "Safer sign-in.", portalVisible: true, reason: "x" })).toMatch(/reads as security work/);
+    await pm.close();
+
+    // A plain worker still can't.
+    const worker = await c.mcp(c.worker.id);
+    expect(textOf(await worker.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Nope", reason: "x" } }))).toMatch(/Only your company's CEO or a product manager/);
+    expect(textOf(await worker.callTool({ name: "roadmap", arguments: { action: "list" } }))).toMatch(/Only your company's CEO, a manager or a product manager/);
+    await worker.close();
+  });
+});

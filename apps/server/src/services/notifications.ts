@@ -131,12 +131,44 @@ export const urgentPushOf = (context: unknown): UrgentPush | null => {
   const u = (context as { urgentPush?: UrgentPush } | null)?.urgentPush;
   return u && typeof u.why === "string" ? u : null;
 };
+/** "fetch failed" plus the underlying code and message, and the host (no path, query or token) the push went to. */
+export function describeFetchError(err: unknown, input: Parameters<typeof fetch>[0]): string {
+  const e = err as { name?: string; message?: string; code?: string; cause?: unknown };
+  const parts: string[] = [];
+  let cur: unknown = e;
+  // Walk the cause chain (an AggregateError holds one per address tried).
+  for (let i = 0; i < 4 && cur && typeof cur === "object"; i++) {
+    const c = cur as { code?: string; message?: string; errors?: Array<{ code?: string }>; cause?: unknown };
+    if (c.code) parts.push(c.code);
+    else if (c.errors?.length) parts.push(...c.errors.map((x) => x.code).filter((x): x is string => !!x));
+    if (c.message && i > 0 && c.message !== "fetch failed") parts.push(c.message);
+    cur = c.cause;
+  }
+  let host = "";
+  try {
+    host = new URL(typeof input === "string" || input instanceof URL ? input : input.url).host;
+  } catch {
+    /* no host to show */
+  }
+  const timedOut = e.name === "TimeoutError" || e.name === "AbortError";
+  const why = timedOut ? "timed out after 10 s" : [...new Set(parts)].join(": ");
+  return `${timedOut ? "ntfy request" : (e.message ?? "fetch failed")}${host ? ` to ${host}` : ""}${why ? ` (${why})` : ""}`;
+}
 /** ntfy answers these when the server has no clear endpoint (before 2.14): 404/405, or 400 for the sequence id form. */
 const CLEAR_UNSUPPORTED = /^ntfy answered (400|404|405|501)$/;
 
 export function notificationsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
-  const doFetch = deps.fetch ?? fetch;
+  const rawFetch = deps.fetch ?? fetch;
+  // Node's fetch throws a bare "fetch failed" and keeps the real reason (ENOTFOUND, ECONNREFUSED, a TLS
+  // error, a timeout) on `cause`. Say it, with the host tried, so the add-on state explains itself (BOS-1290).
+  const doFetch: typeof fetch = async (input, init) => {
+    try {
+      return await rawFetch(input, init);
+    } catch (err) {
+      throw new Error(describeFetchError(err, input), { cause: err });
+    }
+  };
   let approveHook: ApproveHook | null = null;
 
   async function getSettings(): Promise<NotifySettings> {
@@ -426,6 +458,24 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       // The read path only reads (BOS-413): a settled card's notification was marked read when it settled.
       const [row] = await db.select({ n: count() }).from(notifications).where(isNull(notifications.readAt));
       return Number(row?.n ?? 0);
+    },
+
+    /** Unread notices by level and by company ("none" for no company), across everything (BOS-1277). */
+    async unreadCounts() {
+      const rows = await db
+        .select({ level: notifications.level, companyId: notifications.companyId, n: count() })
+        .from(notifications)
+        .where(isNull(notifications.readAt))
+        .groupBy(notifications.level, notifications.companyId);
+      const level: Record<string, number> = {};
+      const company: Record<string, number> = {};
+      for (const r of rows) {
+        const n = Number(r.n);
+        level[r.level] = (level[r.level] ?? 0) + n;
+        const key = r.companyId ?? "none";
+        company[key] = (company[key] ?? 0) + n;
+      }
+      return { level, company };
     },
 
     /** A read never writes (BOS-413). This is the once-a-minute sweep that catches cards closed outside the decisions service. */

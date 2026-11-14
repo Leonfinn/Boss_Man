@@ -5,7 +5,7 @@ import { brotliCompressSync, gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { feedbackNotes, insights } from "../src/db/schema.js";
-import { buildPortalApp } from "../src/portal.js";
+import { buildPortalApp, WINDOW_COUNTER_MAX_KEYS, windowCounter } from "../src/portal.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -238,6 +238,33 @@ describe("feedback portal", () => {
         await portal.close();
       }
     });
+  });
+
+  it("keeps the per-portal write cap when a flood of new addresses fills the counters (BOS-1407)", async () => {
+    t = await makeApp({ portalLimits: { writesPerPortalPerHour: 2, readsPerIpPerMinute: 1 } });
+    const { cookie } = await signIn(t);
+    const req = (method: "POST" | "PATCH", url: string, payload?: unknown) => t!.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+    const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json();
+    const { portalToken } = (await req("PATCH", `/api/companies/${company.id}/portal`, { enabled: true })).json();
+    const v = visitor(t.app, portalToken);
+    expect((await v("POST", "/api/portal/ideas", { title: "One", text: "1" }, "198.51.100.1")).statusCode).toBe(201);
+    expect((await v("POST", "/api/portal/ideas", { title: "Two", text: "2" }, "198.51.100.2")).statusCode).toBe(201);
+    // 20,001 reads, each from its own address: one more key than the counter keeps. They carry no
+    // token, so each is counted and then answered 404 without touching the database.
+    for (let i = 0; i < 20_001; i++) {
+      const ip = `2001:db8::${i.toString(16)}`;
+      const res = await t.app.inject({ method: "GET", url: "/api/portal", remoteAddress: ip });
+      if (res.statusCode !== 404) expect(res.statusCode, ip).toBe(404);
+    }
+    expect((await v("POST", "/api/portal/ideas", { title: "Three", text: "3" }, "198.51.100.3")).statusCode).toBe(429);
+  }, 120_000);
+
+  it("keeps the rate-limit counter's memory bounded however many addresses call (BOS-1407)", () => {
+    const counter = windowCounter(() => 1_000);
+    for (let i = 0; i < WINDOW_COUNTER_MAX_KEYS + 5_000; i++) counter.take(`ip:2001:db8::${i.toString(16)}`, 1, 60_000);
+    expect(counter.size).toBe(WINDOW_COUNTER_MAX_KEYS);
+    // The newest key survives the eviction and is still counted.
+    expect(counter.take(`ip:2001:db8::${(WINDOW_COUNTER_MAX_KEYS + 4_999).toString(16)}`, 1, 60_000)).toBe(false);
   });
 
   it("can run on its own listener that serves nothing but the portal", async () => {
