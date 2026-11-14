@@ -405,7 +405,8 @@ describe("idle agents with startable Ready work (BOS-1180)", () => {
     await c.sweeps.run();
     const [ask] = await c.wakesOf(IDLE_AGENTS_REASON);
     expect(ask!.note).toContain("- Ann (worker)");
-    expect(ask!.note).toContain("held behind the assignee's cap for over 30 minutes");
+    expect(ask!.note).toContain("held by a WIP limit for over 30 minutes");
+    expect(ask!.note).toContain("held behind Zippy's own limit");
     expect(ask!.note).toContain("Held behind Zippy");
     expect(ask!.note).not.toContain("Only just held");
     const [h] = await c.db.select().from(tickets).where(eq(tickets.id, held));
