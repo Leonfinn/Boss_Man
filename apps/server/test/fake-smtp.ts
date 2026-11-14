@@ -30,6 +30,8 @@ export type FakeSmtpOptions = {
   rejectRcpt?: string;
   /** Refuse the login with this reply, echoing whatever it was given (to prove the client hides secrets). */
   authFailReply?: (given: string) => string;
+  /** Extra plaintext written in the same packet as the STARTTLS 220 (BOS-1410: a response-injection attempt). */
+  starttlsInjected?: string;
 };
 
 export type Received = { from: string; to: string[]; data: string; authed: string | null; encrypted: boolean };
@@ -77,7 +79,7 @@ export async function startFakeSmtp(opts: FakeSmtpOptions = {}) {
           if (opts.auth && (encrypted || !opts.starttls)) say("250-AUTH PLAIN LOGIN");
           return say("250 8BITMIME");
         case "STARTTLS": {
-          say("220 2.0.0 go ahead");
+          s.write(`220 2.0.0 go ahead\r\n${opts.starttlsInjected ?? ""}`);
           sock.removeAllListeners("data");
           const secure = new tls.TLSSocket(s, { isServer: true, key: opts.cert!.key, cert: opts.cert!.cert });
           secure.on("data", (d) => feed(d.toString()));
