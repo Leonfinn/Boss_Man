@@ -13,6 +13,11 @@ import { SessionManager } from "../src/session-manager.js";
 import { RepoLockTimeout, isClone, Workspaces } from "../src/workspace.js";
 import { LONG_STEP_MARKER, WRAP_UP_MARKER, startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 import { startMcpServer, type McpCall } from "./mcp-server.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
+
+/** The real Claude ACP adapter now lives in the Claude pack (DR-050, BOS-972), not the runner's node_modules:
+ * these suites drive it against the stub model, so they run only where a pack is pointed at, and skip otherwise. */
+const claude = claudeAdapterBin();
 
 let stub: Awaited<ReturnType<typeof startStubAnthropic>>;
 let mcp: Awaited<ReturnType<typeof startMcpServer>>;
@@ -54,6 +59,7 @@ function harness(model: string | null, opts: { prompt?: string; expectError?: bo
     lockRetryDelayMs: 5,
     skillsRoot: opts.skillsRoot,
     mcpUrl: mcp.url,
+    ...(claude ? { adapterBins: { claude } } : {}),
     baseEnv: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude"), NO_PROXY: "127.0.0.1,localhost" },
     // Stands in for the company's granted secrets.
     resolveEnv: async () => ({ ANTHROPIC_BASE_URL: stub.url, ANTHROPIC_API_KEY: "sk-ant-stub-not-a-real-key", NO_PROXY: "127.0.0.1,localhost" }),
@@ -112,7 +118,7 @@ const waitFor = (ok: () => boolean, ms: number) =>
     }, 20);
   });
 
-describe("SessionManager with Claude Code over ACP (stub model)", () => {
+describe.skipIf(!claude)("SessionManager with Claude Code over ACP (stub model)", () => {
   it("delivers a steering message as a second turn in the same session (R37)", async () => {
     const h = harness(null);
     // Send the message as soon as the session exists; it waits for the current turn.
@@ -268,7 +274,7 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
   }, 120_000);
 });
 
-describe("runs in a git workspace (R38)", () => {
+describe.skipIf(!claude)("runs in a git workspace (R38)", () => {
   it("prepares the ticket's worktree, reports its branch, and the agent works inside it", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
     const g = (...args: string[]) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });

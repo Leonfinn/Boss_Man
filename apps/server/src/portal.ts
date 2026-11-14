@@ -14,6 +14,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { assetPathOf, IMPORTANCE, PRECOMPRESSED_SUFFIX_LIST } from "@boss-man/shared";
+import { parseClientHeader, parseTrustedProxies, portalClientAddress } from "./portal-ip.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 
 export const PORTAL_CSP = "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
@@ -55,8 +56,10 @@ export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: strin
 
 type Feedback = ReturnType<typeof feedbackService>;
 
-export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number }) {
+export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number; clientAddress?: (req: FastifyRequest) => string }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
+  /** The address the per-visitor limits count against (the proxy-aware one when the portal listener sets it). */
+  const addressOf = (req: FastifyRequest) => (deps.clientAddress ? deps.clientAddress(req) : req.ip);
   const counter = windowCounter(deps.now ?? (() => Date.now()));
   // BOS-1407: the per-portal caps live apart from the per-address ones. In one shared Map a flood of
   // reads from new addresses evicted the oldest key, usually `portal:<id>`, and reset the portal's
@@ -84,7 +87,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     return voter;
   }
   function allowWrite(req: FastifyRequest, reply: FastifyReply, companyId: string) {
-    if (counter.take(`ip:${req.ip}`, limits.writesPerIpPerHour, 3_600_000) && portalCounter.take(`portal:${companyId}`, limits.writesPerPortalPerHour, 3_600_000)) return true;
+    if (counter.take(`ip:${addressOf(req)}`, limits.writesPerIpPerHour, 3_600_000) && portalCounter.take(`portal:${companyId}`, limits.writesPerPortalPerHour, 3_600_000)) return true;
     reply.code(429).send({ error: "too_many", message: "That's a lot of feedback in a short time. Please try again later." });
     return false;
   }
@@ -95,7 +98,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
   };
 
   app.get("/api/portal", async (req, reply) => {
-    if (!counter.take(`read:${req.ip}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
+    if (!counter.take(`read:${addressOf(req)}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
     const p = await portalOf(req, reply);
     if (!p) return;
     const voter = voterOf(req, reply);
@@ -114,7 +117,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
   });
 
   app.get("/api/portal/logo", async (req, reply) => {
-    if (!counter.take(`read:${req.ip}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
+    if (!counter.take(`read:${addressOf(req)}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
     const p = await portalOf(req, reply);
     const logo = p && p.hasLogo ? await deps.feedback.portalLogo(p.companyId) : null;
     if (!p) return;
@@ -161,10 +164,18 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
 }
 
 /** A listener with only the portal: its page, its assets and its API. Nothing else answers. */
-export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean }) {
+export async function buildPortalApp(opts: { feedback: Feedback; webDir?: string; secureCookies: boolean; logger?: boolean; trustedProxies?: string[]; clientHeader?: string; limits?: Partial<PortalLimits> }) {
   const app = Fastify({ logger: opts.logger ?? false, trustProxy: false });
   await app.register(cookie);
-  await portalRoutes(app, { feedback: opts.feedback, secureCookies: opts.secureCookies });
+  // BOSSMAN_PORTAL_TRUSTED_PROXY: empty means the connecting address is the visitor, as before.
+  const { matcher } = parseTrustedProxies(opts.trustedProxies);
+  const { header } = parseClientHeader(opts.clientHeader);
+  await portalRoutes(app, {
+    feedback: opts.feedback,
+    secureCookies: opts.secureCookies,
+    limits: opts.limits,
+    clientAddress: matcher.size ? (req) => portalClientAddress(req.socket.remoteAddress ?? req.ip, req.headers, matcher, header) : undefined,
+  });
   if (opts.webDir) {
     await app.register(fastifyStatic, {
       root: opts.webDir,

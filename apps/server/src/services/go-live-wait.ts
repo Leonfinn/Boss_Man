@@ -5,7 +5,7 @@
 import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
 import type { GoLiveWait } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { settings, tickets } from "../db/schema.js";
+import { companies, settings, tickets } from "../db/schema.js";
 import { imageContains, runnerImageCommit } from "./runner-image.js";
 
 const SEEN_PREFIX = "live_release:";
@@ -42,18 +42,36 @@ export function serverContains(live: string | null, merge: string, order: string
   return at >= 0 && run >= 0 && at <= run;
 }
 
+/** The go-live facts of a merged ticket that every reader needs (liveMarkedAt is required so no caller can forget it). */
+export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null };
+
+/**
+ * BOS-1345: whether Boss Man's own server (its deploy and its runner image) is how this company's merges go live.
+ * Only for the home company: Boss Man belongs to no company and its own work is filed under the oldest one
+ * (self-deploy.ts homeCompany). Not a deploy_targets row: the home company has none, its target is the
+ * self-deploy. Every other company works in its own repository and puts its work live itself, so our server's
+ * commit (which self-deploy records for every company) says nothing about its merges.
+ */
+export async function serverIsGoLive(db: Db, companyId: string): Promise<boolean> {
+  const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
+  return home?.id === companyId;
+}
+
 /**
  * What a merged ticket's after-merge checks still wait for, or null when the change is live. A merge with no
  * commit (nothing in the repository) has nothing to deploy. Runner code is only waited for when the merge is
  * known to have touched it (touchesRunner true). At merge an unknown file list is stored as true (wait for both);
- * a null is only a ticket merged before this wait existed, which waits for the server alone.
+ * a null is only a ticket merged before this wait existed, which waits for the server alone. A company that puts
+ * its own work live waits for its CEO to mark the ticket live ("own"), never for our server (BOS-1345).
  */
-export async function goLiveWaitOf(db: Db, t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null }): Promise<GoLiveWait | null> {
+export async function goLiveWaitOf(db: Db, t: GoLiveTicket): Promise<GoLiveWait | null> {
   if (!t.mergeCommit) return null;
   const merge = t.mergeCommit.toLowerCase();
   const [live, order] = [await liveServerCommit(db, t.companyId), await allMergeOrder(db, t.companyId)];
   // Nothing recorded about what runs (a fresh install, a runner that never said its image commit) means there
   // is nothing to wait for: that is the behaviour from before this wait existed, and it can't hang forever.
+  // The same holds for a company that puts its own work live: no record means Boss Man keeps no go-live facts here.
+  if (!(await serverIsGoLive(db, t.companyId))) return live === null || t.liveMarkedAt ? null : "own";
   const server = live !== null && !serverContains(live, merge, order);
   const image = await runnerImageCommit(db, t.companyId);
   const runner = t.touchesRunner === true && image !== null && !imageContains(image, merge, order);
@@ -80,7 +98,12 @@ export async function goLiveFacts(
 const yesNo = (b: boolean | undefined): string => (b === undefined ? "unknown (nothing reported yet)" : b ? "yes" : "no");
 
 /** One line for `tickets read` on a merged ticket (BOS-1024); null for a ticket with no merge commit. */
-export async function goLiveLine(db: Db, t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null }): Promise<string | null> {
+export async function goLiveLine(db: Db, t: GoLiveTicket): Promise<string | null> {
+  if (t.mergeCommit && !(await serverIsGoLive(db, t.companyId)) && (t.liveMarkedAt || (await liveServerCommit(db, t.companyId)) !== null)) {
+    return t.liveMarkedAt
+      ? `Go-live: this company puts its own work live; the CEO marked this merge live at ${t.liveMarkedAt.toISOString().slice(0, 16).replace("T", " ")} UTC (evidence: ${t.liveEvidence ?? "none recorded"}).`
+      : `Go-live: this company puts its own work live; not marked live yet. Once it is live, the CEO marks it with update_ticket markLive (a commit sha or a short note). Say "is live" or "is deployed" only after that.`;
+  }
   const f = await goLiveFacts(db, t);
   if (!f) return null;
   const server = `live on the server: ${yesNo(f.server)}${f.live ? ` (the server runs commit ${f.live.slice(0, 8)})` : ""}`;
@@ -90,10 +113,10 @@ export async function goLiveLine(db: Db, t: { companyId: string; mergeCommit: st
 const LIVE_CLAIM = /\b(is|are|now|been|went|gone)\s+(live|deployed|released|rolled out)\b|\b(it|this|that|change|fix)'s\s+(live|deployed)\b|\bgone live\b|\bhas shipped\b/i;
 
 /** A note for the agent when a reply says the work is live but the merge isn't (BOS-1024); the reply still posts. */
-export async function liveClaimWarning(db: Db, t: { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null }, body: string): Promise<string | null> {
+export async function liveClaimWarning(db: Db, t: GoLiveTicket, body: string): Promise<string | null> {
   if (!LIVE_CLAIM.test(body)) return null;
   const wait = await goLiveWaitOf(db, t);
   if (!wait) return null;
-  const awaited = wait === "both" ? "the server update and the runner rebuild" : wait === "runner" ? "the runner rebuild" : "the server update";
+  const awaited = wait === "own" ? "the CEO to mark it live" : wait === "both" ? "the server update and the runner rebuild" : wait === "runner" ? "the runner rebuild" : "the server update";
   return `Heads up (BOS-1024): your reply says the work is live, but this ticket's merge is not live yet: still waiting for ${awaited}. The reply was posted. Check "tickets read" (Go-live line), then correct yourself on the ticket.`;
 }

@@ -127,6 +127,17 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     await expect((ws as unknown as { git(a: string[], o: object): Promise<string> }).git(["status"], { cwd: dir })).rejects.toThrow(/can't be fenced|only runs in one of its own repos/);
   });
 
+  // BOS-1470: a failed fenced git used to surface only as "Command failed: perl .../landlock.pl --ro ...", with no reason.
+  it("says why a fenced git failed (its stderr and exit code), not only the fence command line", async () => {
+    const { ws, dir, repo } = await ticket(true);
+    const err = await (ws as unknown as { git(a: string[], o: object): Promise<string> })
+      .git(["rev-parse", "--verify", "refs/heads/no-such-branch-1470"], { cwd: dir, repo })
+      .then(() => null, (e: Error) => e);
+    expect(err).not.toBeNull();
+    expect(err!.message).toMatch(/^fenced git rev-parse failed \(exit \d+\): .*no-such-branch-1470|^fenced git rev-parse failed \(exit \d+\): fatal/);
+    expect(err!.message).not.toMatch(/landlock\.pl/);
+  });
+
   it("gives an agent fenced in a clone no write to the shared repo, where a worktree's agent may write objects", async () => {
     const { dir, repo } = await ticket(false);
     const home = mkdtempSync(path.join(tmpdir(), "bm-home-"));

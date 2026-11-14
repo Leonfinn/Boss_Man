@@ -162,6 +162,84 @@ describe("feedback portal", () => {
     expect((await v("POST", "/api/portal/ideas", { title: "Elsewhere", text: "4" }, "198.51.100.9")).statusCode).toBe(201);
   });
 
+  // BOS-1386: behind a reverse proxy every visitor arrives from the proxy's address.
+  describe("BOSSMAN_PORTAL_TRUSTED_PROXY", () => {
+    const proxy = "203.0.113.10";
+    async function portalBehind(trustedProxies: string[], clientHeader?: string) {
+      const c = await setup();
+      const { portalToken } = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true })).json();
+      const portal = await buildPortalApp({ feedback: t!.feedback, secureCookies: true, trustedProxies, clientHeader, limits: { readsPerIpPerMinute: 2, writesPerIpPerHour: 1 } });
+      const hit = (from: string, headers: Record<string, string> = {}) => portal.inject({ method: "GET", url: "/api/portal", remoteAddress: from, headers });
+      const write = (from: string, headers: Record<string, string> = {}) => portal.inject({ method: "POST", url: "/api/portal/ideas", remoteAddress: from, headers: { "x-portal-token": portalToken, ...headers }, payload: { title: "T", text: "t" } });
+      return { portal, hit, write };
+    }
+    // A read past the limit is a 429; before it the unknown link answers 404.
+    const codes = async (hit: (h: Record<string, string>) => Promise<{ statusCode: number }>, headers: Record<string, string>, n = 3) => {
+      const out: number[] = [];
+      for (let i = 0; i < n; i++) out.push((await hit(headers)).statusCode);
+      return out;
+    };
+
+    it("gives each visitor behind a trusted proxy their own read limit", async () => {
+      const { portal, hit } = await portalBehind([proxy]);
+      try {
+        expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "198.51.100.1" })).toEqual([404, 404, 429]);
+        expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "198.51.100.2" })).toEqual([404, 404, 429]);
+        // The same visitor, however the header arrives, is still one visitor.
+        expect(await codes((h) => hit(proxy, h), { "x-forwarded-for": "6.6.6.6, 198.51.100.1" }, 1)).toEqual([429]);
+      } finally {
+        await portal.close();
+      }
+    });
+
+    it("cannot be dodged with a CF-Connecting-IP a non-Cloudflare proxy passed through, unless that header is chosen", async () => {
+      const { portal, hit } = await portalBehind([proxy]);
+      const cf = await portalBehind([proxy], "cf-connecting-ip");
+      try {
+        const forged: number[] = [];
+        for (let i = 0; i < 4; i++) forged.push((await hit(proxy, { "cf-connecting-ip": `192.0.2.${i}` })).statusCode);
+        expect(forged).toEqual([404, 404, 429, 429]);
+        expect(await codes((h) => cf.hit(proxy, h), { "cf-connecting-ip": "198.51.100.3" })).toEqual([404, 404, 429]);
+        expect(await codes((h) => cf.hit(proxy, h), { "cf-connecting-ip": "198.51.100.4" })).toEqual([404, 404, 429]);
+      } finally {
+        await portal.close();
+        await cf.portal.close();
+      }
+    });
+
+    it("gives each visitor behind a trusted proxy their own write limit", async () => {
+      const { portal, write } = await portalBehind([proxy]);
+      try {
+        expect(await codes((h) => write(proxy, h), { "x-forwarded-for": "198.51.100.1" }, 2)).toEqual([201, 429]);
+        expect(await codes((h) => write(proxy, h), { "x-forwarded-for": "198.51.100.2" }, 2)).toEqual([201, 429]);
+      } finally {
+        await portal.close();
+      }
+    });
+
+    it("cannot be dodged with a forged header from an address that is not the proxy", async () => {
+      const { portal, hit } = await portalBehind([proxy]);
+      try {
+        const out: number[] = [];
+        for (let i = 0; i < 4; i++) out.push((await hit("198.51.100.99", { "x-forwarded-for": `192.0.2.${i}`, "cf-connecting-ip": `192.0.2.${i + 50}` })).statusCode);
+        expect(out).toEqual([404, 404, 429, 429]);
+      } finally {
+        await portal.close();
+      }
+    });
+
+    it("counts everyone as the proxy when the setting is empty (as before)", async () => {
+      const { portal, hit } = await portalBehind([]);
+      try {
+        const out: number[] = [];
+        for (const ip of ["198.51.100.1", "198.51.100.2", "198.51.100.3"]) out.push((await hit(proxy, { "x-forwarded-for": ip })).statusCode);
+        expect(out).toEqual([404, 404, 429]);
+      } finally {
+        await portal.close();
+      }
+    });
+  });
+
   it("keeps the per-portal write cap when a flood of new addresses fills the counters (BOS-1407)", async () => {
     t = await makeApp({ portalLimits: { writesPerPortalPerHour: 2, readsPerIpPerMinute: 1 } });
     const { cookie } = await signIn(t);
