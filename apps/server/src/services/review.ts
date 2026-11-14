@@ -19,6 +19,7 @@ import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, clearCarriedCards, clearMerge
 import { derivedSignoff, openSignoffCard, priorSignoff, raiseSignoffCard, restoreSignoffCard, signoffState, type SignoffCover } from "./signoff.js";
 import { checkGate, ticketCheckPriority } from "./check-gate.js";
 import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
+import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
@@ -258,8 +259,10 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
     /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
     isLeader?: () => boolean;
-    /** The owner's private-details list for the merge-line scan (BOS-979). */
+    /** The owner's private-details list for the merge-line scan (BOS-979). A read failure is said once (BOS-1093); pass it through scanListWarning. */
     scanList?: () => Promise<string | null>;
+    /** Where a set list that can't be read says so: one warning and one owner notification per failure streak (BOS-1093). */
+    scanListWarning?: ScanListWarning;
     /** A ticket's merge commit is on main: frees the tickets that wait on it "until merged" (BOS-989). */
     onMerged?: (ticketId: string) => Promise<unknown>;
     /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
@@ -272,6 +275,8 @@ export function reviewService(
   // At most N merge checks at once, quick or full (BOS-446); the rest wait in order, urgent and arch fixes first.
   const gate = checkGate(db);
   const queue = checkQueue(db);
+  // A set list that can't be read says so; an unset one reads as null, silently.
+  const scanListWarning = scanListReader({ read: deps.scanList ?? (async () => null), ...deps.scanListWarning });
   // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
   // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
   // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
@@ -1849,7 +1854,7 @@ export function reviewService(
             return timedCheck(named(command), "gate", (w) => gate.run(checkPrio, alone, w), checkVerdict, () => {
               phases.set(ticketId, "checking");
               return (async () => {
-                const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
+                const scanList = await scanListWarning.forScan();
                 return ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command, ...(scanList ? { scanList } : {}) }), VERIFY_ASK_TIMEOUT_MS);
               })().catch((err: Error): VerifyResult & { noAnswer: true } => {
                 // The runner went away mid-check: land() runs the merge again once it is back, without using the check retries.
