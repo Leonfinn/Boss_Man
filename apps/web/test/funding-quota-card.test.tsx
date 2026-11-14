@@ -12,13 +12,14 @@ afterEach(() => {
 const soon = new Date(Date.now() + 36 * 3_600_000).toISOString();
 const later = new Date(Date.now() + 96 * 3_600_000).toISOString();
 
-function stubApi(forecast: Record<string, unknown>, overageInUse = false) {
+function stubApi(forecast: Record<string, unknown>, overageInUse = false, reading?: { resetsAt: string; observedAt: string }) {
+  const resetsAt = reading?.resetsAt ?? later;
   const status = {
     source: { id: "s1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
     credit: null,
-    quota: [{ window: "seven_day_overage_included", utilization: 0.33, resetsAt: later, status: null, overageInUse }],
+    quota: [{ window: "seven_day_overage_included", utilization: 0.33, resetsAt, status: null, overageInUse, observedAt: reading?.observedAt ?? new Date().toISOString() }],
     windowsSeen: ["seven_day_overage_included"],
-    forecasts: { seven_day_overage_included: { utilization: 0.33, resetsAt: later, perHour: 0.02, ...forecast } },
+    forecasts: { seven_day_overage_included: { utilization: 0.33, resetsAt, perHour: 0.02, ...forecast } },
     daily: [],
     totalSpentMicros: 0,
     coverage: "all",
@@ -72,11 +73,25 @@ describe("quota card wording", () => {
   });
 
   it("names each window by its raw adapter name with its latest percentage, and says when credits are in use", async () => {
+    // A window still running (its reset is ahead), so the reading is current and shows its real percentage.
     stubApi({ runsOutAt: later, beforeReset: false }, true);
     render(<FundingCards />);
     expect(await screen.findByText(/seven_day_overage_included/)).toBeTruthy();
     expect(screen.getAllByText("33%").length).toBeGreaterThan(0);
     expect(screen.getByText(/using usage credits/)).toBeTruthy();
+  });
+
+  // BOS-1409: the owner's Fable (and This week) bar kept last week's 33% after its reset; a reading whose
+  // window has already reset reads as 0% until a fresh one arrives, the same rule the hold uses. The
+  // forecast is worked out by the server, which already zeroes it after the reset, so it is left out here.
+  it("shows 0% instead of last week's figure once the reading's window has reset", async () => {
+    const reset = new Date(Date.now() - 3_600_000).toISOString();
+    stubApi({ perHour: null }, false, { resetsAt: reset, observedAt: new Date(Date.now() - 3 * 86_400_000).toISOString() });
+    render(<FundingCards />);
+    expect(await screen.findByText("Fable (this week)")).toBeTruthy();
+    expect(screen.getAllByText("0%").length).toBeGreaterThan(0);
+    expect(screen.queryByText("33%")).toBeNull();
+    expect(screen.getByText(/No reading since its reset; updates on the next run/)).toBeTruthy();
   });
 
   it("gives an unknown limit a readable fallback name", () => {
