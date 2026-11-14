@@ -8,7 +8,7 @@ import path from "node:path";
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
-import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.js";
+import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 
@@ -127,6 +127,8 @@ export type MaintenanceDeps = {
   /** Resolves when no scheduling pass is mid-flight, so a count of runs taken after it cannot be outdated by a launch. */
   settled: () => Promise<unknown>;
   tick: () => Promise<unknown>;
+  /** The per-run Stop (runs.ts cancel): BOS-1377's "Stop these and carry on" and BOS-1238's button stop runs through it. */
+  cancelRun?: (runId: string) => Promise<unknown>;
   notify: (n: NotifyInput) => Promise<unknown>;
   /** Sends a message into every run still going, so agents wrap up instead of looking for more work. */
   tellRunning?: (text: string) => Promise<unknown>;
@@ -305,17 +307,22 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   async function askAtDeadline(h: Hold, n: number, inCompanies: number) {
     const [home] = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.createdAt)).limit(1);
     if (!home) return;
-    const options = [STOP_AND_UPDATE, KEEP_WAITING_MORE(h.minutes), CANCEL_UPDATE];
+    // BOS-1377: the runs this card shows are the ones told at wrap-up that are still going; "Stop these" touches only them.
+    const told = { ...h.startTold, ...h.wrapTold };
+    const shown = (await liveWorkRuns(db, h.wrapSince ?? h.since, told)).filter((r) => told[r.runId]);
+    const options = shown.length ? [STOP_THESE_CARRY_ON, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : [WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
+    const names = shown.map((r) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})`).join(", ");
+    const stopText = shown.length ? ` "Stop these and carry on" stops ${names}: anything they haven't saved is lost, and their tickets wake again after the update. No other run is touched.` : "";
     await db
       .insert(decisions)
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Until you answer, new runs are not held for this update, so the runs going keep working; it goes ahead by itself once a company has no run left.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}.${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the runs carry on). Until you answer, new runs are not held for this update; it goes ahead by itself once a company has no run left.`,
         options,
-        recommendedOption: options[1]!,
+        recommendedOption: WAIT_TEN_MORE,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
-        context: { type: "maintenance", since: h.since },
+        context: { type: "maintenance", since: h.since, runIds: shown.map((r) => r.runId) },
       })
       .onConflictDoNothing();
   }
@@ -459,15 +466,50 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       return true;
     },
 
-    /** The owner's answer to the deadline question. */
-    async answered(answer: string) {
+    /**
+     * Stops exactly these runs through the per-run Stop (BOS-1377; BOS-1238's button calls this too): only ids the hold
+     * told at wrap-up that are still going are stopped, so a run that ended since is skipped and a run that started later
+     * is never touched. No lane pause, no ticket moves, no dropped wakes: the stopped tickets wake after the hold lifts.
+     * Answers which runs it stopped and which it skipped. // leader-only
+     */
+    async stopRuns(runIds: string[]) {
+      const h = await getHold(db);
+      const told = new Set([...Object.keys(h?.startTold ?? {}), ...Object.keys(h?.wrapTold ?? {})]);
+      const stopped: string[] = [];
+      const skipped: string[] = [];
+      const going = new Set(await liveWorkRunIds());
+      for (const id of new Set(runIds)) {
+        if (!told.has(id) || !going.has(id) || !deps.cancelRun) {
+          skipped.push(id);
+          continue;
+        }
+        try {
+          await deps.cancelRun(id);
+          stopped.push(id);
+        } catch (err) {
+          skipped.push(id); // it ended just now, or could not be stopped: the rest are still tried
+          deps.log?.(`wrap-up stop: run ${id} was not stopped: ${(err as Error).message}`);
+        }
+      }
+      return { stopped, skipped };
+    },
+
+    /** The owner's answer to the deadline question. `ctx.runIds` are the runs the card listed (BOS-1377). */
+    async answered(answer: string, ctx: { runIds?: string[] } = {}) {
       const h = await getHold(db);
       if (!h) return;
       // A wrap-up never asks the deadline question, so its answers are for an old card: nothing to do.
       if (h.kind === "wrapup") return;
-      if (answer === STOP_AND_UPDATE) await save({ ...h, force: true });
-      else if (answer === CANCEL_UPDATE) await self.cancel();
-      else await save({ ...h, deadline: new Date(now().getTime() + h.minutes * 60_000).toISOString() });
+      const later = (minutes: number) => new Date(now().getTime() + minutes * 60_000).toISOString();
+      if (answer === STOP_THESE_CARRY_ON) {
+        await self.stopRuns(ctx.runIds ?? []);
+        // Give the stops time to land; the hold keeps new runs out meanwhile and asks again if some are still going.
+        await save({ ...(await getHold(db) ?? h), deadline: later(DEADLINE_WAIT_MINUTES) });
+      } else if (answer === WAIT_TEN_MORE) await save({ ...h, deadline: later(DEADLINE_WAIT_MINUTES) });
+      else if (answer === CANCEL_RUNNER_UPDATE || answer === CANCEL_UPDATE) await self.cancel();
+      // Cards raised before BOS-1377 keep their old meanings.
+      else if (answer === STOP_AND_UPDATE) await save({ ...h, force: true });
+      else await save({ ...h, deadline: later(h.minutes) });
     },
 
     /**
