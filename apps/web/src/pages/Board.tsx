@@ -1,4 +1,5 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { FilterPanel, useIsPhone } from "../components/FilterPanel";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
@@ -706,6 +707,37 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // A saved feature that is not in this company's list (other company, deleted) counts as any.
   const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
+  // The Filter button and its panel (BOS-1194).
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterBtn = useRef<HTMLButtonElement>(null);
+  const phone = useIsPhone();
+  const closeFilter = useCallback(() => setFilterOpen(false), []);
+  // A popover that crosses into phone width closes, keeping its filters.
+  useEffect(() => {
+    if (phone) setFilterOpen(false);
+  }, [phone]);
+  const filterCompany = companies.find((c) => c.id === current?.companyId);
+  const filterCount = (view !== "all" ? 1 : 0) + (assignee !== "anyone" ? 1 : 0) + (featureFilter !== "any" ? 1 : 0) + (filters.working ? 1 : 0);
+  const clearFilters = () => {
+    setView("all");
+    setAssignee("anyone");
+    setFilter({ feature: "any", working: false });
+  };
+  const assigneeName = assignee === "owner" ? "You" : (filterCompany?.agents.find((a) => a.id === assignee)?.name ?? "Unknown");
+  const featureName = featureFilter === "none" ? "none" : (featureList.find((f) => f.id === featureFilter)?.title ?? "");
+  const chips: Array<{ key: string; label: string; remove: string; clear: () => void }> = [
+    ...(view !== "all" ? [{ key: "view", label: `Showing: ${view === "tasks" ? "Tasks" : "Features"}`, remove: `showing ${view}`, clear: () => setView("all") }] : []),
+    ...(assignee !== "anyone" ? [{ key: "assignee", label: `Assigned: ${assigneeName}`, remove: `assigned to ${assigneeName}`, clear: () => setAssignee("anyone") }] : []),
+    ...(featureFilter !== "any" ? [{ key: "feature", label: `Feature: ${featureName}`, remove: `feature ${featureName}`, clear: () => setFilter({ feature: "any" }) }] : []),
+    ...(filters.working ? [{ key: "working", label: "Working now", remove: "working now", clear: () => setFilter({ working: false }) }] : []),
+  ];
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  // Every word must appear in the ticket's reference, title, feature or description.
+  const passes = (t: BoardData["columns"][number]["tickets"][number]) =>
+    (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) &&
+    (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) &&
+    (!filters.working || !!t.working?.length) &&
+    (!words.length || words.every((w) => [t.number ? ticketRef(filterCompany?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w)));
   // The review column is three lanes (BOS-667): still with its reviewers, approved by all of them and
   // only merging, and every ticket, from any column, whose next step is the owner's. Approved work used
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
@@ -723,6 +755,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       { col, tickets: waiting, mine: true },
     ];
   });
+  const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
@@ -903,47 +936,58 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               Add task
             </button>
           )}
-          <div className="segmented" role="group" aria-label="Show">
-            {(["all", "features", "tasks"] as const).map((v) => (
-              <button key={v} type="button" className="chip" aria-pressed={view === v} onClick={() => setView(v)}>
-                {v === "all" ? "All" : v === "features" ? "Features" : "Tasks"}
+          <span className="search-field">
+            <svg width="16" height="16" {...iconProps}><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+            <input type="search" className="board-search" aria-label="Search tasks" placeholder={`Search: ${company?.ticketPrefix || "HOL"}-12, title, words…`} value={query} onChange={(e) => setQuery(e.target.value)} />
+          </span>
+          <span className="filter-wrap">
+          <button
+            type="button"
+            ref={filterBtn}
+            className="btn filter-btn"
+            aria-haspopup="dialog"
+            aria-expanded={filterOpen}
+            aria-controls="filter-panel"
+            aria-label={filterCount ? `Filter, ${filterCount} on` : "Filter"}
+            onClick={() => setFilterOpen((o) => !o)}
+          >
+            <svg width="16" height="16" {...iconProps}><path d="M4 7h16M7 12h10M10 17h4" /></svg>
+            Filter
+            {filterCount > 0 && <span className="filter-count" aria-hidden="true">{filterCount}</span>}
+          </button>
+          {filterOpen && (
+            <FilterPanel
+              view={view}
+              onView={setView}
+              assignee={assignee}
+              onAssignee={setAssignee}
+              feature={featureFilter}
+              onFeature={(v) => setFilter({ feature: v })}
+              working={filters.working}
+              onWorking={(v) => setFilter({ working: v })}
+              agents={company?.agents ?? []}
+              features={featureList}
+              workingCount={board.data?.workingAgents}
+              shownCount={board.data ? shownTotal : undefined}
+              anyOn={filterCount > 0}
+              onClear={clearFilters}
+              onClose={closeFilter}
+              phone={phone}
+              triggerRef={filterBtn}
+            />
+          )}
+          </span>
+          {!phone && chips.map((c) => (
+            <span key={c.key} className="filter-chip" title={c.label}>
+              <span>{c.label}</span>
+              <button type="button" aria-label={`Remove filter: ${c.remove}`} onClick={c.clear}>
+                <span aria-hidden="true">×</span>
               </button>
-            ))}
-          </div>
-          {view !== "features" && (
-            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} />
-          )}
-          {view !== "features" && (
-            <label>
-              Assigned to
-              <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-                <option value="anyone">Anyone</option>
-                <option value="owner">You</option>
-                {company?.agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {view !== "features" && (
-            <label>
-              Feature
-              <select value={featureFilter} onChange={(e) => setFilter({ feature: e.target.value })}>
-                <option value="any">Any feature</option>
-                <option value="none">No feature</option>
-                {featureList.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {view !== "features" && (
-            <button type="button" className="chip" aria-pressed={filters.working} onClick={() => setFilter({ working: !filters.working })}>
-              Working now{board.data ? ` (${board.data.workingAgents})` : ""}
+            </span>
+          ))}
+          {!phone && filterCount > 0 && (
+            <button type="button" className="linkish" onClick={clearFilters}>
+              Clear all
             </button>
           )}
         </div>
@@ -970,10 +1014,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
             const full = col.wipLimit != null && counted >= col.wipLimit;
-            const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-            // Every word must appear in the ticket's reference, title, feature or description.
-            const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
-            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) && (!filters.working || !!t.working?.length) && hit(t));
+            const shown = tickets.filter(passes);
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
@@ -1028,7 +1069,16 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
-                {shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>}
+                {shown.length === 0 && tickets.length > 0 && filterCount > 0 ? (
+                  <p className="lane-empty">
+                    No tasks match your filters.{" "}
+                    <button type="button" className="linkish" onClick={clearFilters}>
+                      Clear filters
+                    </button>
+                  </p>
+                ) : (
+                  shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                )}
                 {done ? (
                   <>
                     <ul className="done-list">

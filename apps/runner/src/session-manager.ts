@@ -30,13 +30,13 @@ export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge"
     case undefined:
       return null;
     case "prepare":
-      return { phase: "prepare" };
+      return { phase: "prepare", ...(c.base ? { base: c.base } : {}) };
     case "unpublish":
       return { phase: "unpublish" };
     case "publish":
       return c.commit ? { phase: "publish", commit: c.commit } : "invalid";
     case "finish":
-      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree } : "invalid";
+      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}) } : "invalid";
   }
 }
 

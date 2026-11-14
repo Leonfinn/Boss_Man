@@ -29,6 +29,7 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Filter tasks
   - Most expensive tasks
   - Passed, held
   - Project brief
@@ -344,6 +345,7 @@ reads:
   - /api/runs/:id/transcript
   - /api/tickets/:id
   - /api/tickets/:id/artifacts
+  - /api/tickets/:id/ci
   - /api/tickets/:id/diff
   - /api/tickets/:id/images
   - /api/tickets/:id/landing

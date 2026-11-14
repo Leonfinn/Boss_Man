@@ -17,4 +17,10 @@ describe("mergePhaseOf", () => {
     expect(of({ phase: "finish", commit: "c".repeat(40) })).toBe("invalid");
     expect(of({ phase: "publish" })).toBe("invalid");
   });
+
+  it("passes the merge train's base and expectBase through (BOS-1366)", () => {
+    const sha = "a".repeat(40);
+    expect(of({ phase: "prepare", base: sha })).toEqual({ phase: "prepare", base: sha });
+    expect(of({ phase: "finish", commit: "c".repeat(40), tree: "t".repeat(40), expectBase: sha })).toEqual({ phase: "finish", commit: "c".repeat(40), tree: "t".repeat(40), expectBase: sha });
+  });
 });

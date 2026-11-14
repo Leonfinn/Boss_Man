@@ -397,7 +397,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -489,13 +489,13 @@ export function PrivateDetails() {
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train };
   const n = Number(v.slots);
   const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
-  const changed = v.mode !== d.mode || n !== d.slots;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train;
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -538,6 +538,18 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
+        <span>
+          <strong>Land approved merges in order (merge train).</strong>{" "}
+          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
+        </span>
+      </label>
+      {v.train && (d.runnersTooOldForTrain ?? []).length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="merge-train-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
@@ -548,7 +560,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
@@ -749,7 +761,7 @@ export function RunnerUpdate() {
         {m.on
           ? m.kind === "wrapup"
             ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
-            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
+            : `${m.kind === "settings" ? "Applying a runner setting change (for example Check slots). This is not a runner update: the image stays the same" : "Update pending"}: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. ${m.blocking === false ? "It is past its deadline, so new runs are no longer held for it." : "Nothing new starts until it is done."} To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>

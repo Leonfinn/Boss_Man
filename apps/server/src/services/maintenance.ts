@@ -98,6 +98,20 @@ export async function getHold(db: Db): Promise<Hold | null> {
  */
 export const runnerCardHold = (hold: Hold | null): Hold | null => (hold && hold.kind !== "wrapup" ? hold : null);
 
+/**
+ * Whether the hold keeps new runs from starting right now (BOS-1414). Only while a drain is really under way: before
+ * its deadline, or once the owner chose "Stop the remaining runs and update now". Past the deadline the owner has been
+ * asked what to do; until they answer (Keep waiting gives a new deadline), the drain is stalled, not under way, and
+ * background agents must keep working overnight. A wrap-up the owner asked for holds until they cancel it.
+ */
+export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
+  if (!hold) return false;
+  if (hold.kind === "wrapup" || hold.wrapSince || hold.force) return true;
+  return at < new Date(hold.deadline);
+};
+/** What a wake released from a stalled drain shows in place of "update pending". */
+export const HOLD_RELEASED_REASON = "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it";
+
 export type FleetRunner = { slug: string; companyId: string | null; current: boolean | undefined };
 
 export type MaintenanceDeps = {
@@ -297,7 +311,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Nothing new starts anywhere until you answer.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Until you answer, new runs are not held for this update, so the runs going keep working; it goes ahead by itself once a company has no run left.`,
         options,
         recommendedOption: options[1]!,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
@@ -404,7 +418,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const active = await activeByCompany(true);
       const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows

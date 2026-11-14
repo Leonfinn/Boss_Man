@@ -316,6 +316,20 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       expect((await res).json()).toMatchObject({ outcome: "merged" });
       expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
     });
+
+    it("with the merge train on too, the merge skips the train and still waits for CI (BOS-1366)", async () => {
+      const c = (ctx = await setup({ features: ["carried-check", "ci-publish", "check-jobs", "merge-base"] }));
+      await serverMode(c);
+      await c.db.insert(settings).values({ key: "merge_train", value: true });
+      const res = approveAndWait(c.req, c.ticket.id);
+      await finishJob(c, { state: "passed", exitCode: 0 });
+      expect((await res).json()).toMatchObject({ outcome: "merged" });
+      // Published and read like any CI-gated merge; no train base was sent, since CI only ever runs on a merge with main.
+      expect(c.merges()).toEqual(["prepare", "publish", "finish", "unpublish"]);
+      expect(c.gh.reads.get(MERGE)).toBeGreaterThan(0);
+      const merges = c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge");
+      expect(merges.some((m) => m.base || m.expectBase)).toBe(false);
+    });
   });
 
   it("a runner too old to publish merges as before and says why", async () => {
