@@ -26,6 +26,8 @@ export type ConnectionOptions = {
   restart?: { previousExit?: "stopped" | "crashed" | null; hostBootAt?: string | null };
   /** Check jobs running now (BOS-316), listed in hello. */
   runningChecks?: () => string[];
+  /** How many checks this runner runs at once (BOS-1471), listed in hello so the server never starts more here. */
+  checkSlots?: number;
   /** Called after the server’s welcome: resend check results it may not have. */
   onWelcome?: () => void;
   /** Ids of the runs the runner has now; the server closes any other open run (BOS-583). */
@@ -124,7 +126,7 @@ export class RunnerConnection {
   private helloAsRunner() {
     const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
     const liveRuns = this.opts.liveRuns?.();
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
   }
 
   private listen(ws: WebSocket) {

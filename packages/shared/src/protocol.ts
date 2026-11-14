@@ -307,7 +307,7 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
     /** Check jobs this runner is running now (BOS-316): the server puts back in line any it thinks run here but are not listed. */
     checkJobs: z.array(Uuid).max(100).optional(),
-    /** BOS-1435: how many checks this machine runs at once (BOSSMAN_CHECK_SLOTS); read only from a check worker. */
+    /** How many checks this machine runs at once (its own BOSSMAN_CHECK_SLOTS): the server never starts more here (BOS-1471 for the company runner, BOS-1435 for a check worker). Absent from an older runner: no cap. */
     checkSlots: z.number().int().min(1).max(64).optional(),
   }),
 

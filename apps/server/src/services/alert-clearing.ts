@@ -12,6 +12,7 @@ import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
+import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -64,7 +65,9 @@ export type ClearWhen =
    * The owner's held-off-portal card (BOS-1358): the feature's portal place is settled some other way —
    * someone ticked it on, or marked it keep-off by hand — so asking is no longer needed.
    */
-  | { kind: "featurePortalSettled"; featureId: string };
+  | { kind: "featurePortalSettled"; featureId: string }
+  /** A repeated-merge-failure card (BOS-1461): no failed attempt of that reason for 30 minutes. */
+  | { kind: "mergeFailuresCalm"; companyId: string; reason: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -124,6 +127,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
         break;
       case "featurePortalSettled":
         if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
+        break;
+      case "mergeFailuresCalm":
+        if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
         break;
       default:
         break;
@@ -282,6 +288,12 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "mergeFailuresCalm": {
+        // Calm for the whole window, and the card itself is at least that old.
+        const since = new Date(now().getTime() - FAILURE_WINDOW_MS);
+        if (card.createdAt > since) return null;
+        return (await failedSince(db, c.companyId, c.reason, since)) ? null : "no merge has failed for that reason in the last 30 minutes";
+      }
       case "featurePortalSettled": {
         // The card asks whether a held-off feature should go on the portal. It is settled once someone
         // ticks it on (a publish by hand or by the CEO/PM), or the feature goes from record. The keep-off

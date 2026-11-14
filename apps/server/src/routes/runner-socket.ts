@@ -99,7 +99,7 @@ export async function runnerSocketRoutes(
               // The runs the runner really has: any other open run of this runner is closed after a short wait (BOS-583).
               if (msg.liveRuns) runners.reconcileLater(runner, msg.liveRuns);
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
-              await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
+              await opts.checks?.onHello(runner.id, msg.checkJobs, msg.checkSlots).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });
             return;
           case "event":
