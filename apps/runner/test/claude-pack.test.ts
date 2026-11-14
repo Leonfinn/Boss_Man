@@ -1,7 +1,7 @@
 // The Claude pack (DR-050, BOS-972): content-addressed folders, the READY marker written only after
 // every check passed, a runner that never starts on a not-ready pack and never crashes without one,
 // and the installer's fixed order (copy, npm ci, version, canary, then READY).
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -156,6 +156,52 @@ describe("installPack runs the fixed order: copy, npm ci, version, canary, then 
     const again = await installPack({ root: r, hash: HASH, version: "2.1.316", steps: steps(order) });
     expect(again.installed).toBe(false);
     expect(order).toEqual([]);
+  });
+});
+
+describe("two installers for the same pack don't wipe each other (BOS-1282)", () => {
+  it("both succeed when the second starts while the first is part-way through npm ci", async () => {
+    const r = root();
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((res) => (releaseA = res));
+    let reachedA!: () => void;
+    const aIsMidInstall = new Promise<void>((res) => (reachedA = res));
+    const mk = (slow: boolean) => ({
+      copySource: (dir: string) => writeFileSync(path.join(dir, "package.json"), "{}"),
+      npmCi: async (dir: string) => {
+        mkdirSync(path.dirname(packPaths(dir).claudeBin), { recursive: true });
+        writeFileSync(packPaths(dir).claudeBin, "#!/bin/sh\n");
+        writeFileSync(packPaths(dir).adapterBin, "#!/bin/sh\n");
+        writeFileSync(path.join(dir, "partial"), "half-done npm ci");
+        if (slow) {
+          reachedA();
+          await gateA; // A waits here, mid-install, until B has finished
+        }
+      },
+      claudeVersion: async () => "2.1.316 (Claude Code)",
+      // The canary needs this installer's own half-done files: they vanish if another installer wipes the folder.
+      canary: async (dir: string) => existsSync(path.join(dir, "partial")) && existsSync(packPaths(dir).claudeBin),
+    });
+    const a = installPack({ root: r, hash: HASH, version: "2.1.316", steps: mk(true) });
+    await aIsMidInstall;
+    const b = await installPack({ root: r, hash: HASH, version: "2.1.316", steps: mk(false) });
+    releaseA();
+    const aOut = await a;
+    expect([aOut.installed, b.installed].filter(Boolean)).toHaveLength(1); // one installed, the other found it ready
+    expect(readPack(r, HASH)).toMatchObject({ ready: true, version: "2.1.316" });
+    expect(readdirSync(r)).toEqual([HASH]); // no temp folder left behind
+  });
+
+  it("cleanStalePacks removes an old leftover temp folder but not a young one", () => {
+    const r = root();
+    const oldTmp = path.join(r, `${HASH}.tmp-1-aaaa`);
+    const youngTmp = path.join(r, `${HASH}.tmp-2-bbbb`);
+    mkdirSync(oldTmp);
+    mkdirSync(youngTmp);
+    const t = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(oldTmp, t, t);
+    expect(cleanStalePacks(r, path.join(r, HASH))).toEqual([oldTmp]);
+    expect(existsSync(youngTmp)).toBe(true);
   });
 });
 
