@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BUILT_IN_RULES } from "../src/built-in-rules.js";
 
 // BOS-754 / QA BOS-821. The server tests check that a run's prompt contains these lines, but
-// `toContain(rules.join("\n"))` also passes when the list is empty, so the three rules are pinned here.
+// `toContain(rules.join("\n"))` also passes when the list is empty, so the rules are pinned here.
 describe("built-in rules", () => {
   const text = BUILT_IN_RULES.join("\n");
 
