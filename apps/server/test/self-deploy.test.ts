@@ -355,7 +355,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
-    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader (or single on a server that runs one copy)") });
+    // No fixed claim about the watchdog (a per-company setting an update never changes) or a vague Reviews look.
+    expect((todo!.context as { check: string }).check).not.toMatch(/watchdog|look as expected/i);
     expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
   });
 
