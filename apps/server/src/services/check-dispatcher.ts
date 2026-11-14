@@ -37,7 +37,7 @@ const verdict = (j: CheckJob) =>
 export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
   /** Checks at once each connected runner said it runs (hello, BOS-1471). A runner that said nothing has no entry: no cap. */
-  const runnerSlots = new Map<string, number>();
+  const runnerSlots = new Map<string, number>(); // lost on restart, harmless because each runner says its count again when it reconnects.
   const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
 
   async function ended(job: CheckJob) {
