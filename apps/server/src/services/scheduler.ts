@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel,parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { fenceHold } from "./fence-default.js";
@@ -322,11 +322,11 @@ export function schedulerService(
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
   }
 
-  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). */
+  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). A reading taken before its reset is empty, so it never holds (BOS-1409). */
   function holdingWindows(source: typeof fundingSources.$inferSelect, samples: (typeof quotaSamples.$inferSelect)[], t: Date) {
     const off = new Set(source.quotaDisabledWindows ?? []);
     const threshold = source.quotaHoldAt ?? limits.quotaHoldAt;
-    return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
+    return samples.filter((s) => !off.has(s.window) && !windowHasReset(s.resetsAt, t) && s.utilization >= threshold);
   }
 
   /**
