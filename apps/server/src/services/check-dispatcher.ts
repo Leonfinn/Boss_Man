@@ -3,7 +3,7 @@
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 // BOS-1435 (DR-060): check workers on other machines take jobs the company runner has no free slot for. The runner is
 // always filled first; each ready worker then claims with its own limit. With no ready worker every path is as before.
-import { and, eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { fullLogPointer, HEARTBEAT_MS, type CheckLimits, type RunnerCommand, type WorkerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
@@ -160,12 +160,21 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
      * A worker said hello with the jobs it is running. Jobs it was given but doesn't list go back in line (it restarted);
      * jobs it lists that the server didn't give it (re-queued while it was away, or given elsewhere) are stopped on it,
      * so a late duplicate can't run on.
+     * `helloAt` is when the hello arrived, taken before the worker was marked connected: a pump in between may already have
+     * sent it a job its hello couldn't list, and that job (started at or after `helloAt`) must not be re-queued.
      */
-    async onWorkerHello(workerId: string, running: string[] | undefined) {
+    async onWorkerHello(workerId: string, running: string[] | undefined, helloAt = new Date()) {
       const t = graceTimers.get(workerId);
       if (t) clearTimeout(t);
       graceTimers.delete(workerId);
-      const mine = new Set((await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId)))).map((r) => r.id));
+      const mine = new Set(
+        (
+          await db
+            .select({ id: checkJobs.id })
+            .from(checkJobs)
+            .where(and(eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId), lt(checkJobs.startedAt, helloAt)))
+        ).map((r) => r.id),
+      );
       const alive = new Set(running ?? []);
       for (const id of mine) if (!alive.has(id)) await queue.requeue(id, "The check worker restarted or lost this check, so it was put back in line.");
       for (const id of alive) if (!mine.has(id)) deps.workers?.send(workerId, { type: "check.cancel", jobId: id });

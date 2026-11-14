@@ -21,6 +21,8 @@ export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
 /** The feature a worker announces once it can fetch a job's code itself (BOS-1436). Until then it never gets a job. */
 export const BUNDLE_FEATURE = "check-bundle";
+/** Close code for a worker socket replaced by a newer one with the same token (two machines sharing a token). */
+export const WORKER_REPLACED_CLOSE = 4009;
 /** Bounds for the per-check caps the owner sets per worker; the same as the protocol's CheckLimits. */
 export const THREADS_MAX = 256;
 export const MEMORY_MB_MIN = 256;
@@ -133,7 +135,11 @@ export function checkWorkersService(db: Db) {
 
     connect(id: string, send: WorkerSender, close: (code: number, why: string) => void, feats: string[] = []) {
       const entry = { send, close };
+      // Two machines sharing one token: the newer socket wins and the older one is closed, so it can't run on unseen.
+      // Its jobs are re-synced by the newer machine's hello; if it redials, each hello cancels the other's leftovers.
+      const prev = connected.get(id);
       connected.set(id, entry);
+      if (prev) prev.close(WORKER_REPLACED_CLOSE, "replaced by a newer connection");
       features.set(id, feats);
       return () => {
         if (connected.get(id) === entry) {

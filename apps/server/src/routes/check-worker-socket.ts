@@ -10,6 +10,8 @@ import type { CheckWorker, CheckWorkersService } from "../services/check-workers
 
 /** Close code for a worker the owner turned off (or removed): it keeps redialling, and is refused until turned on. */
 export const WORKER_OFF_CLOSE = 4003;
+/** Close code for a socket that connected but never said hello within three heartbeats. */
+export const WORKER_NO_HELLO_CLOSE = 4008;
 
 type Checks = Pick<ReturnType<typeof checkDispatcher>, "onWorkerHello" | "onWorkerDone" | "onWorkerProgress" | "onWorkerGone">;
 
@@ -35,7 +37,8 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
       const send = (m: unknown) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m));
       };
-      let lastHeard = Date.now();
+      const opened = Date.now();
+      let lastHeard = opened;
       let release: (() => void) | null = null;
       // Handle strictly in arrival order, so a result never overtakes the hello before it.
       let queue = Promise.resolve();
@@ -43,6 +46,11 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
       const timer = setInterval(() => {
         if (Date.now() - lastHeard > heartbeatMs * 3) {
           socket.terminate();
+          return;
+        }
+        // A socket that never says hello gets no jobs; don't keep it open on pings alone.
+        if (!release && Date.now() - opened > heartbeatMs * 3) {
+          socket.close(WORKER_NO_HELLO_CLOSE, "no hello");
           return;
         }
         send({ type: "ping" });
@@ -67,6 +75,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             }
             queue = queue
               .then(async () => {
+                const helloAt = new Date();
                 const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, features: msg.features });
                 // Turned off or removed since the upgrade: close, and the redial is refused in preValidation.
                 if (!row?.enabled) {
@@ -86,7 +95,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
                 );
                 // lastSeq 0: a worker keeps no journal, so there is nothing to replay; the welcome only says "live".
                 send({ type: "welcome", lastSeq: 0 });
-                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs);
+                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs, helloAt);
               })
               .catch((err) => app.log.error({ err, workerId: worker.id }, "check worker hello failed"));
             return;

@@ -6,7 +6,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, checkJobs, checkWorkers, companies, projects, runners, settings, tickets } from "../src/db/schema.js";
 import { CHECK_QUEUE_MODE_KEY, CHECK_SLOTS_KEY, checkQueue } from "../src/services/check-queue.js";
 import { checkDispatcher } from "../src/services/check-dispatcher.js";
-import { BUNDLE_FEATURE, checkWorkersService } from "../src/services/check-workers.js";
+import { BUNDLE_FEATURE, WORKER_REPLACED_CLOSE, checkWorkersService } from "../src/services/check-workers.js";
 import { hashToken } from "../src/auth.js";
 
 const shared = openPglite();
@@ -226,10 +226,34 @@ describe("check workers: scheduling (BOS-1435)", () => {
     await s.d.pump();
     const stray = "00000000-0000-4000-8000-000000000001";
     s.toWorker.length = 0;
-    await s.d.onWorkerHello(w.id, [stray]);
+    await s.d.onWorkerHello(w.id, [stray], new Date(Date.now() + 1000));
     expect(s.toWorker.find((x) => x.command.type === "check.cancel")?.command.jobId).toBe(stray);
     // a was re-queued, then claimed again by the pump at the end of hello.
     expect(s.toWorker.filter((x) => x.command.type === "check.run").map((x) => x.command.jobId)).toEqual([a.id]);
+  });
+
+  it("on hello, keeps a job sent after the hello arrived (a pump between connect and the re-sync), so it doesn't run twice", async () => {
+    const s = await setup({ runnerSlots: 1 });
+    s.setRunnerUp(false);
+    const helloAt = new Date(Date.now() - 1000); // the hello came in before the pump below sent the job
+    const w = await s.worker();
+    const a = await s.req(s.co);
+    await s.d.pump();
+    expect(ran(s.toWorker)).toEqual([a.id]);
+    await s.d.onWorkerHello(w.id, [], helloAt);
+    expect(await s.job(a.id)).toMatchObject({ state: "running", workerId: w.id });
+    expect(ran(s.toWorker)).toEqual([a.id]);
+  });
+
+  it("a second connection with the same worker token closes the first, and the first going doesn't drop the second", async () => {
+    const s = await setup();
+    const w = await s.worker();
+    const second = s.workers.connect(w.id, () => true, () => {}, ["check-jobs", BUNDLE_FEATURE]);
+    expect(s.closed).toEqual([{ workerId: w.id, code: WORKER_REPLACED_CLOSE }]);
+    w.release(); // the first socket's close handler
+    expect(s.workers.isConnected(w.id)).toBe(true);
+    second();
+    expect(s.workers.isConnected(w.id)).toBe(false);
   });
 
   it("turning a worker off puts its jobs back in line at once and stops them on it", async () => {
