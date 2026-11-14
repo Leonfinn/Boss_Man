@@ -6,8 +6,8 @@ import { BUILT_IN_RULES } from "../src/built-in-rules.js";
 describe("built-in rules", () => {
   const text = BUILT_IN_RULES.join("\n");
 
-  it("has a heading and the three rules", () => {
-    expect(BUILT_IN_RULES).toHaveLength(4);
+  it("has a heading and the four rules", () => {
+    expect(BUILT_IN_RULES).toHaveLength(5);
     expect(BUILT_IN_RULES[0]).toMatch(/built-in rules/i);
     expect(BUILT_IN_RULES.slice(1).every((l) => l.startsWith("- "))).toBe(true);
   });
@@ -26,8 +26,12 @@ describe("built-in rules", () => {
     expect(text).toMatch(/sed -i/);
   });
 
+  it("tells the agent to run scripts by a literal path or $BOSSMAN_SCRATCH, not a variable it set", () => {
+    expect(text).toMatch(/literal path or `\$BOSSMAN_SCRATCH\/…`, never through a variable you set yourself/);
+  });
+
   it("stays short and generic: no company, host or path names", () => {
-    expect(text.length).toBeLessThan(1200);
+    expect(text.length).toBeLessThan(1500);
     expect(text).not.toMatch(/\/home\/|\/tmp\/|github\.com|192\.168/);
   });
 });
