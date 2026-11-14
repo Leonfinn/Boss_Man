@@ -8,7 +8,7 @@ A **check worker** is a small container on another Docker host that takes check 
 - It holds **no GitHub, AI or deploy credentials**. Its one secret is the worker token. It gets code as git bundles through your server, so it needs no GitHub login.
 - It **runs agent-written tests**, so give it a host you trust with your source code, as you trust the main runner host.
 - A remote host has **no Boss Man network guard**. While a check runs, the worker can reach the **npm registry** (pnpm installs), **your Boss Man server**, and whatever else that host's network allows. If that matters, put the host on a network that allows only those two.
-- Jobs run behind the same **Landlock** file fence as on the runner, where the host kernel has it (Linux 5.13 or newer; the worker's log says whether it is active). Without it jobs run unfenced inside the container: only use such a host if you accept that.
+- Jobs run behind the same **Landlock** file fence as on the runner, where the host kernel has it (Linux 5.13 or newer; the worker's `agent fence:` log line says whether it is active). Without it jobs run unfenced inside the container: only use such a host if you accept that.
 - Image commit match: a worker takes jobs only when its image is built from the same commit as your runner. After "Build and update runners" an old worker sits **idle** and the Checks panel says so. Update it (below).
 
 ## Add a worker (any Docker host)
@@ -16,7 +16,7 @@ A **check worker** is a small container on another Docker host that takes check 
 You need Docker with the compose plugin on the second host, and the repository's `deploy/check-worker.yml` there.
 
 1. In Boss Man: Settings → Server and runner → Checks → Add a check worker. Give it a name and the number of checks at once. Copy the token: it is shown once.
-2. On the worker host, save the token alone in a file (for example `worker-token`, permission 600, outside any repository). The worker reads it from a file and refuses a token placed in the environment, because a check could read the environment.
+2. On the worker host, save the token alone in a file (for example `worker-token`, owned by user id 1000 with permission 600, outside any repository: Compose keeps the file's owner and mode, so a root-owned 600 file is unreadable to the worker and it exits at start). The worker reads it from a file and refuses a token placed in the environment, because a check could read the environment.
 3. Make an env file `check-worker.env` (permission 600) next to the compose file. Never commit it. It holds no secret, only the address, the token file's path and the image:
    ```
    BOSSMAN_WORKER_URL=wss://boss.example.com/api/check-worker/connect
@@ -41,7 +41,7 @@ docker build -f apps/runner/Dockerfile --build-arg WITH_HARNESS=0 --build-arg BO
 
 ## Update a worker
 
-When "Build and update runners" finishes, its card lists each worker with the steps. In short, on each worker host: pull or build the new image, set `BOSSMAN_WORKER_IMAGE` to it, and run the `up -d` command from step 3. Running checks on that worker are re-queued. Do this soon: until then the worker is idle.
+When "Build and update runners" finishes, its card lists each worker with the steps. In short, on each worker host: pull or build the new image, set `BOSSMAN_WORKER_IMAGE` to it, and run the `up -d` command from step 4. Running checks on that worker are re-queued. Do this soon: until then the worker is idle.
 
 ## Settings and example values
 
@@ -71,4 +71,4 @@ Expect each check to run about 40% slower than on the main server when the box i
 
 - **Worker not connected:** `docker compose -p boss-man-check-worker logs --tail 50`. A wrong token or address is named there. A wrong `wss://` address looks like repeated connection errors.
 - **Connected but takes no jobs:** the Checks panel says "out of date" when the image commit differs; update it. Otherwise the line may simply be short: your main runner takes jobs first.
-- **Fence not active:** the log line "landlock: off" means the kernel lacks it.
+- **Fence not active:** the worker logs `agent fence: <level>` at start; `unavailable` means the kernel lacks it.
