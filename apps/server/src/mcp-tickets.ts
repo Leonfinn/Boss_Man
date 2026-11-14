@@ -19,7 +19,7 @@ import { NOTHING_CHANGED } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
-import { addTicketDependency } from "./services/ticket-links.js";
+import { addTicketDependency, openBlockers } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, type Scope } from "./mcp-common.js";
@@ -197,7 +197,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
           throw err;
         }
       }
-      const [blocker] = waitsOn ? await db.select({ state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, waitsOn), eq(tickets.companyId, scope.companyId))) : [];
+      const [blocker] = waitsOn ? await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, waitsOn), eq(tickets.companyId, scope.companyId))) : [];
       if (waitsOn && !blocker) return fail("No task with that waitsOn id in your company.");
       // Safe to repeat (R42): a resumed run that calls this again gets the same open ticket back.
       if (scope.agentId) {
@@ -220,9 +220,10 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
       // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
-      if (blocker && blocker.state !== "done") await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn, until: waitsOnUntil ?? "merged" }, scope.agentId);
+      // Held only while something still blocks it: a blocker already merged (until merged) holds nothing (BOS-1458).
+      if (waitsOn && (await openBlockers(db, t!.id)).some((b) => b.kind === "ticket")) await systemMoveTicket(db, { ticketId: t!.id, from: ["backlog"], to: "blocked", reason: "Boss Man: created waiting on another ticket", now: new Date() });
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
@@ -469,12 +470,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         // handed it (BOS-254). The owner, the CEO and managers override.
         const [current] = await db.select({ systemState: tickets.systemState, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         if (current && current.systemState !== "in_progress") {
-          const blockers = await db
-            .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagementsTable.status })
-            .from(ticketDependencies)
-            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-            .leftJoin(engagementsTable, eq(engagementsTable.id, ticketDependencies.blockerEngagementId))
-            .where(eq(ticketDependencies.blockedTicketId, ticketId));
+          const blockers = await openBlockers(db, ticketId);
           const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
           const refusal = startRefusal(current, blockers, { agentId: scope.agentId, role: me?.role ?? null });
           if (refusal) return fail(refusal);
@@ -648,22 +644,7 @@ export async function mergedAwaitingChecks(db: Db, ticketId: string) {
 
 /** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */
 async function hasOpenBlocker(db: Db, ticketId: string) {
-  const deps = await db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId));
-  for (const d of deps) {
-    if (d.blockerEngagementId) {
-      const [x] = await db.select({ s: engagementsTable.status }).from(engagementsTable).where(eq(engagementsTable.id, d.blockerEngagementId));
-      if (x && x.s !== "signed_off") return true;
-    }
-    if (d.blockerDecisionId) {
-      const [x] = await db.select({ s: decisionsTable.status }).from(decisionsTable).where(eq(decisionsTable.id, d.blockerDecisionId));
-      if (x?.s === "open") return true;
-    }
-    if (d.blockerTicketId) {
-      const [x] = await db.select({ s: tickets.systemState }).from(tickets).where(eq(tickets.id, d.blockerTicketId));
-      if (x && x.s !== "done") return true;
-    }
-  }
-  return false;
+  return (await openBlockers(db, ticketId)).length > 0;
 }
 
 /**
