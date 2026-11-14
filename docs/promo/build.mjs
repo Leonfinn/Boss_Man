@@ -52,6 +52,8 @@ await browser.close();
 
 const run = (args) => execFileSync(ffmpeg, ["-y", "-hide_banner", "-loglevel", "error", ...args], { stdio: ["ignore", "inherit", "inherit"] });
 const FADE = 0.35;
+// Hold the last frame of each scene this long, so the caption can be read before the next scene.
+const TAIL = 1.7;
 const clips = [];
 for (const id of order) {
   const clip = join(work, `${id}.mp4`);
@@ -66,12 +68,12 @@ for (const id of order) {
     if (!existsSync(join(dir, "frames.txt"))) throw new Error(`no frames for ${id}; run capture.mjs first`);
     // Total length of the take, to place the fade-out.
     const txt = readFileSync(join(dir, "frames.txt"), "utf8");
-    const secs = [...txt.matchAll(/duration ([\d.]+)/g)].reduce((a, m) => a + Number(m[1]), 0);
+    const secs = TAIL + [...txt.matchAll(/duration ([\d.]+)/g)].reduce((a, m) => a + Number(m[1]), 0);
     const fit = s.phone
       ? `scale=-2:910:flags=lanczos,pad=1920:1080:(ow-iw)/2:16:color=${BG}`
       : `scale=1920:1080:flags=lanczos`;
     run(["-f", "concat", "-safe", "0", "-i", join(dir, "frames.txt"), "-loop", "1", "-i", join(work, `${id}-cap.png`),
-      "-filter_complex", `[0:v]fps=30,${fit},format=yuv420p[v];[1:v]format=rgba[c];[v][c]overlay=0:0:shortest=1,fade=t=in:st=0:d=${FADE},fade=t=out:st=${Math.max(0, secs - FADE).toFixed(2)}:d=${FADE},format=yuv420p`,
+      "-filter_complex", `[0:v]fps=30,${fit},tpad=stop_mode=clone:stop_duration=${TAIL},format=yuv420p[v];[1:v]format=rgba[c];[v][c]overlay=0:0:shortest=1,fade=t=in:st=0:d=${FADE},fade=t=out:st=${Math.max(0, secs - FADE).toFixed(2)}:d=${FADE},format=yuv420p`,
       "-c:v", "libx264", "-crf", "20", "-preset", "medium", clip]);
   }
   clips.push(clip);

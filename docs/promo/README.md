@@ -13,7 +13,7 @@ All commands from the repo root. Use a short `TMPDIR` or Chromium will not start
 1. Build the web app: `pnpm --filter @boss-man/web build`
 2. Seed a fresh, empty database (made-up data only), from `apps/server`:
    `DEMO_PASSWORD=<throwaway> node_modules/.bin/tsx <seed.mts> <new empty folder>`
-   (`docs/promo/seed.mts` if present, otherwise `docs/design/bos-779-website-v2/scripts/seed.mts`).
+   (the seed is `docs/design/bos-779-website-v2/scripts/seed.mts`; there is no seed in `docs/promo`).
 3. Start the real server on it, on localhost only, with no runner and no API keys (so no agent ever starts):
    `BOSSMAN_MASTER_KEY=<random> BOSSMAN_PGLITE_DIR=<that folder> BOSSMAN_WEB_DIR=apps/web/dist BOSSMAN_INSECURE_COOKIES=1 HOST=127.0.0.1 PORT=3411 node_modules/.bin/tsx src/main.ts` (from `apps/server`)
 4. Record: `DEMO_PASSWORD=<throwaway> OUT=<scratch folder> node docs/promo/capture.mjs [sceneId ...]`.

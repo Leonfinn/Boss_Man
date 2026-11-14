@@ -14,7 +14,7 @@ It is for people who want AI agents doing real project work (code, docs, design)
      github.com/user-attachments/assets/... link GitHub inserts on its own line here, under the picture.
      How the video is made: docs/promo/README.md -->
 
-A one-minute tour, recorded from the real app with made-up data: the board, the agents, their runs, the merge queue, a decision answered from a phone, and the roadmap.
+A one-minute tour (63 seconds), recorded from the real app with made-up data: the board, the agents, their runs, the merge queue, a decision answered from a phone, and the roadmap.
 
 ## Install
 
