@@ -4,7 +4,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode } from "@boss-man/shared";
 import { goLiveWaitOf } from "./go-live-wait.js";
-import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
@@ -23,6 +23,7 @@ import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
+import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { trainFor, type RestackWhy } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
@@ -883,8 +884,12 @@ export function reviewService(
       // The head this round passed on (BOS-1173): a return to review on the same code keeps the round (keptRound).
       // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
       let files: number | undefined;
-      const head = await this.diff(ticketId).then((x) => { files = x.files.length; return x.head || null; }, () => null);
-      if (head) {
+      const head = await this.diff(ticketId).then(async (x) => {
+        files = x.files.length;
+        // Keep the files where the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a review.
+        if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
+        return x.head || null;
+      }, () => null);      if (head) {
         const [latest] = await latestRows(db, ticketId);
         if (latest) await db.update(reviewRequests).set({ head }).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, latest.round), eq(reviewRequests.status, "approved"), sql`${reviewRequests.head} is null`));
       }
@@ -901,7 +906,11 @@ export function reviewService(
           await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_reused", summary: `The owner's sign-off from ${when(prior.reuse.at)} was reused: ${o.reviewer} approved the same commit ${head!.slice(0, 8)}, so it merges without asking again.` });
           return this.landApproved(ticketId, o);
         }
-        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier, files });
+        // A real conflict with a branch ahead in the merge line doesn't hold the card (BOS-1411): it adds a line
+        // saying a sign-off now will likely need signing again. A read-only probe; nothing is linked.
+        const conflicts = await this.mergeLineClashes(ticketId);
+        const conflictsBecause = conflicts.length ? conflictNote(conflicts) : undefined;
+        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier, files, ...(conflictsBecause ? { conflictsBecause } : {}) });
         await lineEvent(db, t, { event: "hold_started", hold: "sign_off", decisionId: id ?? null });
         return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
@@ -1179,6 +1188,37 @@ export function reviewService(
         return r.clashes ? (r.files ?? []) : null;
       } catch {
         return null;
+      }
+    },
+
+    /**
+     * Which approved branches ahead in the merge line really conflict with this ticket's (BOS-1411). A read-only
+     * merge-tree on the runner; [] when there is nothing to tell (the only approved work is this ticket, the runner
+     * is away or too old, or nothing clashes). A warning only: it never holds a card or changes a merge, so every
+     * answer that isn't a real conflict reads as "no warning". Refs are resolved for the note.
+     */
+    async mergeLineClashes(ticketId: string): Promise<Array<{ ticketId: string; ref: string | null; title: string; files: string[] }>> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return [];
+        const others = await mergeLineApproved(db, t.projectId, t.id);
+        if (!others.length) return [];
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "merge-conflicts")) return [];
+        const r = await deps.runners.request<MergeLineConflictsResult>(
+          runner.id,
+          (requestId) => ({ type: "workspace.mergeLine", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, branches: others.map((o) => ({ ticketId: o.id, branch: o.branch })) }),
+          60_000,
+        );
+        const byId = new Map(others.map((o) => [o.id, o]));
+        const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+        const rows = await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, (r?.conflicts ?? []).map((x) => x.ticketId)));
+        const info = new Map(rows.map((x) => [x.id, { title: x.title, ref: ticketRef(c?.prefix, x.number) }]));
+        return (r?.conflicts ?? [])
+          .filter((x) => x.clashes && byId.has(x.ticketId))
+          .map((x) => ({ ticketId: x.ticketId, ref: info.get(x.ticketId)?.ref ?? null, title: info.get(x.ticketId)?.title ?? byId.get(x.ticketId)!.branch, files: x.files.slice(0, 20) }));
+      } catch {
+        return [];
       }
     },
 
@@ -1717,6 +1757,8 @@ export function reviewService(
       // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
       // the retries fail too (BOS-1396).
       if (!changed && t.branch) throw new RunnerGone("The runner couldn't say which files the ticket changes.");
+      // Keep the files it changes, so the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a merge.
+      if (changed?.files.length) await db.update(tickets).set({ diffFiles: changed.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
       const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
       let because: string | undefined;
       if (ownerFiles.length) {
