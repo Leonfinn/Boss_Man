@@ -38,6 +38,8 @@ export const OWNER_CONTROLS = {
     // The runner, credentials, funding and project panels Setup shares with Settings and Projects.
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
+    // The safety cards under the runner (BOS-938).
+    "Keep agents stopped", "Run agents without the network guard", "Run agents without the fence",
   ],
   Decisions: [
     "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
@@ -125,6 +127,8 @@ export const OWNER_CONTROLS = {
     "Deploy latest", "Build and update runners", "Cancel queued runner update", "Save", "Cancel the update", "Update runners (finish runs first)",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
+    // The safety cards under the runner (BOS-938).
+    "Keep agents stopped", "Run agents without the network guard", "Run agents without the fence",
     // Ask every running agent to stop cleanly before an update (BOS-929).
     "Ask agents to wrap up", "Cancel wrap-up", "Stop this run",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.

@@ -92,8 +92,8 @@ export function SafetyCards({ companyId, safety, connected, onChanged }: { compa
       return run ? "Agents will run without it on this host." : "Agents stay stopped until it works.";
     });
   const cards = [
-    { feature: "guard" as const, state: safety.guard, name: "network guard", what: "keeps agents off your home network", button: "Run agents without the network guard", note: safety.guard.reason ? `The runner's own check says: ${safety.guard.reason}.` : "The runner hasn't proven its network guard yet." },
-    { feature: "fence" as const, state: safety.fence, name: "fence", what: "keeps agents out of each other's files and keys", button: "Run agents without the fence", note: "The runner's own check says it can't fence agents (its kernel has no usable Landlock, or the container blocks it)." },
+    { feature: "guard" as const, state: safety.guard, name: "network guard", what: "keeps agents off your home network", note: safety.guard.reason ? `The runner's own check says: ${safety.guard.reason}.` : "The runner hasn't proven its network guard yet." },
+    { feature: "fence" as const, state: safety.fence, name: "fence", what: "keeps agents out of each other's files and keys", note: "The runner's own check says it can't fence agents (its kernel has no usable Landlock, or the container blocks it)." },
   ].filter((f) => !f.state.proven);
   if (!connected || cards.length === 0) return null;
   return (
@@ -112,7 +112,7 @@ export function SafetyCards({ companyId, safety, connected, onChanged }: { compa
               Keep agents stopped
             </button>
             <button type="button" className={f.state.runWithout ? "btn primary" : "btn"} disabled={act.busy} onClick={() => void choose(f.feature, true)} aria-pressed={f.state.runWithout}>
-              {f.button}
+              {f.feature === "guard" ? "Run agents without the network guard" : "Run agents without the fence"}
             </button>
           </div>
         </div>
