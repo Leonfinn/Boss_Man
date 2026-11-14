@@ -110,7 +110,8 @@ describe("image names and host paths in the specs", () => {
     const s = containerSpec(cfg, "acme");
     expect(s.Image).toBe(cfg.runnerImage);
     expect(s.HostConfig.Binds).toContain("/var/lib/docker/volumes/v/_data/companies/acme/runner.token:/run/secrets/runner_token:ro");
-    expect(s.HostConfig.Binds.every((b) => b.startsWith("/var/lib/docker/volumes/v/_data/"))).toBe(true);
+    // Every bind names a host path, except the Claude pack, which is a named volume (shared, read-only).
+    expect(s.HostConfig.Binds.every((b) => b.startsWith("/var/lib/docker/volumes/v/_data/") || b === "boss-man-claude-pack:/opt/bossman-claude:ro")).toBe(true);
     const g = netguardSpec(cfg, "acme", "abc");
     expect(g.Image).toBe(cfg.netguardImage);
     expect(g.HostConfig.Binds).toEqual(["/var/lib/docker/volumes/v/_data/companies/acme/netguard:/etc/netguard:ro"]);
