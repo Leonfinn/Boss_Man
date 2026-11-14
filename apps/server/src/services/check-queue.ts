@@ -249,8 +249,9 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
-    return claimOn(runnerId, await slots(), now, companyId);
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number): Promise<CheckJob[]> {
+    // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
+    return claimOn(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId);
   }
 
   /**

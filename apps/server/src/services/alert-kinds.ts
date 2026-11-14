@@ -219,6 +219,11 @@ export const ALERT_KINDS = {
     topRung: "owner",
     clearWhen: () => [{ kind: "serverCalm", rule: "freezes" }],
   },
+  // merge-failures.ts (BOS-1461): three failed merge attempts with the same reason in 30 minutes. Stops at the CEO;
+  // closes by itself (mergeFailuresCalm) after 30 minutes without another of that reason.
+  merge_failures: {
+    topRung: "ceo",
+  },
   // A plain raise (the scheduler's add-on notice and any caller that only says where it may go).
   alert: {
     topRung: "ceo",
