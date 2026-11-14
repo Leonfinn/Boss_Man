@@ -20,11 +20,12 @@ const report = (o: { level?: SandboxReport["level"]; guard?: "on" | "absent" | n
   ...(o.guard === null ? {} : { guard: { state: o.guard ?? "on", reason: o.guard === "absent" ? "connected to the gateway" : "refused at once", errno: null, ms: 3 } }),
   ...(o.platform === null ? {} : { platform: o.platform ?? PLATFORM }),
 });
-const company = { fenceMode: "watch", fenceModeChosenAt: null, fenceOffFingerprint: null, guardOffChosenAt: null, guardOffFingerprint: null };
+type TestCompany = { fenceMode: string; fenceModeChosenAt: Date | null; fenceOffFingerprint: string | null; guardOffChosenAt: Date | null; guardOffFingerprint: string | null };
+const company: TestCompany = { fenceMode: "watch", fenceModeChosenAt: null, fenceOffFingerprint: null, guardOffChosenAt: null, guardOffFingerprint: null };
 const now = new Date("2026-11-13T12:00:00Z");
 
 describe("agentHold, the pure rule", () => {
-  const hold = (c: Partial<typeof company> & { guardOffChosenAt?: Date | null }, r: SandboxReport | null, checkedAt: Date | null = now) => agentHold({ ...company, ...c }, r, checkedAt, { requireProof: true, now });
+  const hold = (c: Partial<TestCompany>, r: SandboxReport | null, checkedAt: Date | null = now) => agentHold({ ...company, ...c }, r, checkedAt, { requireProof: true, now });
   const fp = "6.1.0-test|docker 27.0.1|linux";
 
   it("lets a run start when the fence works and the guard is on", () => {
