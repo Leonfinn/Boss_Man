@@ -129,6 +129,28 @@ describe("a real conflict on the sign-off card (BOS-1411)", () => {
   });
 });
 
+describe("approved work still waiting to merge is probed too (BOS-1411)", () => {
+  it("train members, seat-waiters and approved work blocked on a waits-on link are asked about; merged work is not", async () => {
+    const c = await setup();
+    const line = (id: string, detail: Record<string, unknown>, summary: string) => c.db.insert(activity).values({ companyId: c.company.id, ticketId: id, kind: "merge_line", summary, detail });
+    const member = await c.approvedInLine("In the train", { risk: "high" });
+    await line(member.id, { event: "check_queued", check: "x", way: "queue", train: { place: 1, ahead: 0 } }, "Merge line: check waiting for a slot");
+    const waiter = await c.approvedInLine("Waiting for a seat", { risk: "high" });
+    await line(waiter.id, { event: "hold_started", hold: "train" }, "Merge line: held, waiting for a train seat");
+    const blocked = await c.approvedInLine("Approved but blocked", { risk: "high" });
+    await c.db.update(tickets).set({ systemState: "blocked" }).where(eq(tickets.id, blocked.id));
+    const merged = await c.approvedInLine("Already merged", { risk: "high" });
+    await line(merged.id, { event: "merged", commit: null }, "Merge line: merged");
+    const mine = await c.approvedInLine("Mine", { risk: "high" });
+    for (const t of [member, waiter, blocked, merged]) c.conflictsWith.add(t.id);
+    const found = await c.review.mergeLineClashes(mine.id);
+    expect(found.map((f) => f.ticketId).sort()).toEqual([member.id, waiter.id, blocked.id].sort());
+    const asked = c.sent.filter((s) => s.type === "workspace.mergeLine").flatMap((s) => (s as unknown as { branches: Array<{ ticketId: string }> }).branches.map((b) => b.ticketId));
+    expect(asked).not.toContain(merged.id);
+    expect(asked).not.toContain(mine.id);
+  });
+});
+
 describe("different parts of one file: no warning (BOS-1411)", () => {
   it("the runner says the branches merge cleanly, so the card carries no conflict line and the CEO's brief has none", async () => {
     const c = await setup();

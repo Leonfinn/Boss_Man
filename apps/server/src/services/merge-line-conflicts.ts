@@ -138,12 +138,17 @@ export async function inMergeLine(db: Db, ticketId: string): Promise<{ inLine: b
   return { inLine, approvedAt: approved?.at ?? null };
 }
 
-/** Every ticket of the project that is approved and in the merge line right now, oldest approval first. */
+/**
+ * Every ticket of the project that is approved and in the merge line right now, oldest approval first. That is all
+ * approved work still waiting to land, not only what is already on main: members of the merge train, tickets
+ * waiting for a train seat, ones held for the owner's sign-off, and approved work blocked on a waits-on link
+ * (in review or blocked; the line's own last row says whether it is still in).
+ */
 export async function mergeLineApproved(db: Db, projectId: string, excludeId: string): Promise<Array<{ id: string; branch: string; number: number | null }>> {
   const rows = await db
     .select({ id: tickets.id, branch: tickets.branch, number: tickets.number, state: tickets.systemState })
     .from(tickets)
-    .where(and(eq(tickets.projectId, projectId), ne(tickets.id, excludeId), eq(tickets.systemState, "review"), isNotNull(tickets.branch)));
+    .where(and(eq(tickets.projectId, projectId), ne(tickets.id, excludeId), inArray(tickets.systemState, ["review", "blocked"]), isNotNull(tickets.branch)));
   const out: Array<{ id: string; branch: string; number: number | null; at: Date }> = [];
   for (const r of rows) {
     if (!r.branch) continue;

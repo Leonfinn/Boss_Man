@@ -914,7 +914,8 @@ export function reviewService(
         // Keep the files where the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a review.
         if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
         return x.head || null;
-      }, () => null);      if (head) {
+      }, () => null);
+      if (head) {
         const [latest] = await latestRows(db, ticketId);
         if (latest) await db.update(reviewRequests).set({ head }).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, latest.round), eq(reviewRequests.status, "approved"), sql`${reviewRequests.head} is null`));
       }
