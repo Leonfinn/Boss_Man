@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { launch, openApp, startVite } from "./real-page";
+import { API, stubApi } from "./real-page";
 
 // Real-browser proof shots and behaviour checks for the Board's Filter button (BOS-1194, design
 // design/board-filter-button-bos-1190). The bar must show only Add task, search and Filter; on a
@@ -161,6 +162,78 @@ describe.skipIf(!can)("Board Filter button (BOS-1194)", () => {
       const panel = await page.locator("#filter-panel").boundingBox();
       expect(panel, "the panel is on screen").not.toBeNull();
       expect(panel!.y + panel!.height, "the popover's bottom is inside the 724 px viewport").toBeLessThanOrEqual(724);
+    } finally {
+      await page.close();
+    }
+  });
+
+  // A column filtered empty says so; a filter saved from the session shows as a count and chips on arrival;
+  // and only Show applies in the Features view. Saved shots of each, at a wide and a phone size.
+  const features = [{ id: "f1", title: "Calmer status tags", status: "planned", companyId: "c1", tickets: { total: 2, done: 1 } }];
+  const seeded = async (size: (typeof SIZES)[number], saved: Record<string, unknown>, api?: Record<string, unknown>) => {
+    const page = (await browser!.newPage({ viewport: { width: size.width, height: size.height }, hasTouch: size.touch, isMobile: size.touch })) as any;
+    await stubApi(page, { ...API, "/api/companies/c1/features": { features, criteria: [] }, ...api });
+    await page.addInitScript((s: string) => {
+      try {
+        sessionStorage.setItem("board-filters", s);
+      } catch {
+        // storage blocked: the board just starts unfiltered
+      }
+    }, JSON.stringify(saved));
+    await page.goto(`${server!.resolvedUrls.local[0]}#board/p1`, { waitUntil: "networkidle" });
+    await page.waitForSelector(".board-bar", { timeout: 15_000 });
+    await page.waitForTimeout(300);
+    return page;
+  };
+
+  // A board where the in-progress cards are being worked on, so the "Working now" filter leaves them
+  // (a populated board with the count and chip), unlike the default fixture which has none working.
+  const baseBoard = API["/api/projects/p1/board"] as {
+    columns: Array<{ systemState: string; tickets: Array<Record<string, unknown>> }>;
+  };
+  const workingBoard = {
+    ...baseBoard,
+    columns: baseBoard.columns.map((c) =>
+      c.systemState === "in_progress" ? { ...c, tickets: c.tickets.map((t) => ({ ...t, working: ["a1"] })) } : c,
+    ),
+  };
+
+  for (const size of [SIZES[1], SIZES[0]]) {
+    it(`says a column is empty because of filters at ${size.name}`, async () => {
+      const page = await seeded(size, { feature: "any", working: true });
+      try {
+        // Every card is a non-working one in the fixture, so the columns empty and say why.
+        expect(await page.getByText("No tasks match your filters.").count()).toBeGreaterThan(0);
+        expect(await page.getByRole("button", { name: "Clear filters" }).count()).toBeGreaterThan(0);
+        await saveShot(`bos1194-${size.name}-nomatch.png`, page);
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+
+    it(`shows a filter saved from the session on arrival at ${size.name}`, async () => {
+      const page = await seeded(size, { feature: "any", working: true }, { "/api/projects/p1/board": workingBoard });
+      try {
+        // The count and chips are already there when the board first paints, and the in-progress cards stay.
+        expect(await page.locator(".filter-count").innerText()).toBe("1");
+        expect(await page.locator(".filter-chip").count()).toBe(size.width <= 640 ? 0 : 1);
+        expect(await page.locator(".lane .ticket").count()).toBeGreaterThan(0);
+        await saveShot(`bos1194-${size.name}-saved.png`, page);
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+  }
+
+  it("keeps Show working in the Features view, with the task filters disabled", async () => {
+    const page = await open(SIZES[1]);
+    try {
+      await page.getByRole("button", { name: /^Filter/ }).click();
+      await page.getByRole("button", { name: "Features", exact: true }).click();
+      // The Features view shows feature cards, and the panel's other groups are disabled with the note.
+      expect(await page.getByText("These filter tasks. Switch Show to All or Tasks to use them.").count()).toBe(1);
+      expect(await page.locator("#filter-panel select").first().isDisabled()).toBe(true);
+      await saveShot("bos1194-safari-1550-features.png", page);
     } finally {
       await page.close();
     }
