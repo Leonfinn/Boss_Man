@@ -57,7 +57,7 @@ async function setup(kind: Kind, opts: { token?: boolean } = {}) {
 const ghRun = (name: string, status: string, conclusion: string | null, n: number) => ({ name, status, conclusion, html_url: `https://example.com/runs/${n}` });
 const giteaStatus = (context: string, status: string, n: number) => ({ context, status, target_url: `https://example.com/ci/${n}` });
 
-type Case = { label: string; github: unknown; gitea: unknown; ci: Record<string, unknown>; line: string };
+type Case = { label: string; github: unknown; gitea: unknown; ci: Record<string, unknown> | null; line: string };
 const at = SHA.slice(0, 8);
 const CASES: Case[] = [
   {
@@ -85,7 +85,8 @@ const CASES: Case[] = [
     label: "no result",
     github: { check_runs: [] },
     gitea: { statuses: [] },
-    ci: { state: "none", failing: [], total: 0, url: null },
+    // The page shows nothing for a host that reported no checks (criterion 2); the tickets tool keeps its line.
+    ci: null,
     line: `CI on branch head ${at}: no checks reported (yet).`,
   },
 ];
@@ -97,8 +98,11 @@ describe.each(["github", "gitea"] as const)("build result on %s", (kind) => {
       x.host.state.checks.body = c[kind];
       const res = await x.req("GET", `/api/tickets/${x.ticketId}/ci`);
       expect(res.statusCode).toBe(200);
-      expect(res.json().ci).toMatchObject({ ...c.ci, sha: SHA });
-      if (c.label !== "no result") expect(res.json().ci.url).toMatch(/^https:\/\/example\.com\//);
+      if (c.ci === null) expect(res.json()).toEqual({ ci: null });
+      else {
+        expect(res.json().ci).toMatchObject({ ...c.ci, sha: SHA });
+        expect(res.json().ci.url).toMatch(/^https:\/\/example\.com\//);
+      }
       expect(await x.review.branchChecksLine(x.ticketId, x.companyId)).toBe(c.line);
     });
   }

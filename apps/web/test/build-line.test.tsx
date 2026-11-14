@@ -31,17 +31,20 @@ describe("BuildLine", () => {
     expect(screen.getByTestId("build-result").textContent).toContain("running");
     expect(screen.queryByRole("link")).toBeNull();
   });
-  it("says no checks reported yet for none, and only links ordinary web addresses", () => {
-    const { rerender } = render(<BuildLine ci={{ ...base, state: "none", url: null }} />);
-    expect(screen.getByTestId("build-result").textContent).toContain("no checks reported yet");
+  it("says nothing when the host reported no checks, and only links ordinary web addresses", () => {
+    const { container, rerender } = render(<BuildLine ci={{ ...base, state: "none", url: null }} />);
+    expect(container.innerHTML).toBe("");
     rerender(<BuildLine ci={{ ...base, url: "javascript:alert(1)" }} />);
+    expect(screen.getByTestId("build-result").textContent).toContain("passed");
     expect(screen.queryByRole("link")).toBeNull();
   });
 });
 
 // Layout check (BOS-1418, CEO condition 5): the real "Changes" fold with the build line, measured and
-// photographed in a headless browser at a desktop window and at 380px phone width. Skipped, not failed,
-// where no browser is installed. Screenshots are written to BOSSMAN_SCRATCH only, never the repo.
+// photographed in a headless browser at a desktop window and at 380px phone width. The merge gate and
+// CI's web-browser job both supply a browser (scripts/check-no-skips.mjs fails the gate on any skip, and
+// CI installs Chromium), so this runs there rather than skipping. It skips only in a bare local run with
+// no browser, where the jsdom tests above still cover every state. Screenshots go to BOSSMAN_SCRATCH only.
 const css = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 
 type Page = {

@@ -2129,7 +2129,8 @@ export async function buildApp(opts: AppOptions) {
       const hit = ciCache.get(id);
       if (hit && Date.now() - hit.at < 30_000) return { ci: hit.value };
       const r = await review.branchChecks(id);
-      const value = r ? { state: r.state, failing: r.failing, total: r.total ?? null, url: r.url ?? null, sha: r.sha } : null;
+      // A host that reported no checks ("none") has nothing to show either: the page renders nothing for null (BOS-1418).
+      const value = r && r.state !== "none" ? { state: r.state, failing: r.failing, total: r.total ?? null, url: r.url ?? null, sha: r.sha } : null;
       ciCache.delete(id);
       ciCache.set(id, { at: Date.now(), value });
       // Bounded: past 200 tickets the oldest answer goes (Map keeps insertion order).

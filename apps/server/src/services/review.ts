@@ -1094,11 +1094,6 @@ export function reviewService(
       return `merge ${word} (since ${at(l.startedAt)})`;
     },
 
-    /**
-     * One line for `tickets read` (DR-024 #2): the host's checks on the head of the ticket's branch.
-     * Null when there's nothing to say (no branch, already merged, no known host or token). A host
-     * that refuses the token is said plainly, never shown as "no checks".
-     */
     /** The host's checks on the ticket's branch head as data, for the ticket page (BOS-1418). Null whenever there's nothing to show, including any host error. */
     async branchChecks(ticketId: string, companyId?: string): Promise<(CommitChecks & { sha: string }) | null> {
       try {
@@ -1119,6 +1114,11 @@ export function reviewService(
       return { ...(await deps.gitHosts.checks(cfg, token, sha)), sha };
     },
 
+    /**
+     * One line for `tickets read` (DR-024 #2): the host's checks on the head of the ticket's branch.
+     * Null when there's nothing to say (no branch, already merged, no known host or token). A host
+     * that refuses the token is said plainly, never shown as "no checks".
+     */
     async branchChecksLine(ticketId: string, companyId?: string): Promise<string | null> {
       try {
         const r = await this.branchChecksOrThrow(ticketId, companyId);

@@ -273,16 +273,19 @@ function OwnerSetupEdit({ draftKey, initial, save, busy }: { draftKey: string; i
 }
 
 export type BuildResult = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total: number | null; url: string | null; sha: string };
-const BUILD_WORDS = { passed: "passed", failed: "failed", pending: "running", none: "no checks reported yet" } as const;
+const BUILD_WORDS = { passed: "passed", failed: "failed", pending: "running" } as const;
 /** Only ordinary web addresses are clickable; a host could otherwise hand us a javascript: link (BOS-1418). */
 const webLink = (url: string | null | undefined) => (url && /^https?:\/\//i.test(url) ? url : null);
+/** The one word for the build state, or null when there's no build to show: none reported (BOS-1418). */
+const buildWord = (ci: BuildResult | null) => (ci && ci.state !== "none" ? BUILD_WORDS[ci.state] : null);
 /** One line on the host's build result, or nothing when the host reported none (BOS-1418). */
 export function BuildLine({ ci }: { ci: BuildResult | null }) {
-  if (!ci) return null;
+  const word = buildWord(ci);
+  if (!ci || !word) return null;
   const href = webLink(ci.url);
   return (
     <p className="muted" data-testid="build-result" style={{ overflowWrap: "anywhere" }}>
-      Build on {ci.sha.slice(0, 7)}: <strong>{BUILD_WORDS[ci.state]}</strong>
+      Build on {ci.sha.slice(0, 7)}: <strong>{word}</strong>
       {ci.state === "failed" && ci.failing.length ? ` (${ci.failing.join(", ")})` : ""}
       {href && (
         <>
@@ -916,7 +919,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </DetailRow>
 
             {t.repoUrl && (
-              <DetailRow title="Changes" count={ci ? BUILD_WORDS[ci.state] : t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : ""}>
+              <DetailRow title="Changes" count={buildWord(ci) ?? (t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : "")}>
                 <BuildLine ci={ci} />
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
                   <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
