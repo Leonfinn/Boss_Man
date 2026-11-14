@@ -53,8 +53,9 @@ export async function recordFailedAttempt(db: Db, deps: MergeFailureDeps, t: { i
       clearWhen: [{ kind: "mergeFailuresCalm", companyId: t.companyId, reason }],
       context: { type: "question", mergeFailures: { reason, count: n } },
     });
-  } catch {
-    // Recording must never stop the merge line.
+  } catch (err) {
+    // Recording must never stop the merge line; say so in the server log so a broken alert doesn't vanish silently.
+    console.warn(`merge failure record failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
