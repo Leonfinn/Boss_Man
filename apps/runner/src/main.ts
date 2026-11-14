@@ -17,6 +17,15 @@ import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
+// BOS-1435 (DR-060): the same image started with BOSSMAN_ROLE=check-worker is a check worker (check-worker.ts) and none
+// of the runner below may start: no sessions, no secrets fetch, no journal. Its socket and timers keep the process alive;
+// the pending promise only stops this module from going on to the runner's start-up.
+if (process.env.BOSSMAN_ROLE === "check-worker") {
+  const { startCheckWorker } = await import("./check-worker.js");
+  await startCheckWorker();
+  await new Promise<never>(() => {});
+}
+
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
