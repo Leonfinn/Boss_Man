@@ -194,6 +194,7 @@ sections:
   - Advice on permission cards
   - Agent fence
   - Built-in defaults
+  - Cleaning up temp files
   - Decision rules
   - Second opinion from a model (optional)
   - Try a command
