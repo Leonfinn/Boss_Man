@@ -33,6 +33,7 @@ import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { failuresForStatus } from "./services/merge-failures.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
@@ -534,6 +535,7 @@ export async function buildApp(opts: AppOptions) {
     memory,
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
+    mergeFailures: (id) => failuresForStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -920,6 +922,7 @@ export async function buildApp(opts: AppOptions) {
     scanListWarning,
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);

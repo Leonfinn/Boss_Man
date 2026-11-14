@@ -22,7 +22,8 @@ import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
-import { lineEvent, type CheckWay, type HoldReason } from "./merge-line.js";
+import { lineEvent, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
+import { recordFailedAttempt } from "./merge-failures.js";
 import { trainFor, type RestackWhy } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
@@ -268,6 +269,8 @@ export function reviewService(
     onMerged?: (ticketId: string) => Promise<unknown>;
     /** Ends a check job with a reason and stops it on the runner if it runs (the check dispatcher's cancel). Used to drop a merge check left over from before a restart. */
     cancelCheck?: (jobId: string, reason: string) => Promise<unknown>;
+    /** The alert ladder's raise: three failed merges with one reason in 30 minutes raise one CEO alert (BOS-1461). */
+    alert?: (input: Record<string, unknown>) => Promise<unknown>;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -1381,6 +1384,12 @@ export function reviewService(
       const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
       if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
+      // BOS-1461: a merge attempt that does not land leaves an attempt_failed row with its reason.
+      const failed = async (reason: FailReason, detail?: unknown, note?: string) => {
+        if (!lineRow) return;
+        const jobId = (detail as { keptLog?: { jobId?: unknown } } | null | undefined)?.keptLog?.jobId;
+        await recordFailedAttempt(db, { alert: deps.alert }, lineRow, reason, typeof jobId === "string" ? jobId : undefined, note);
+      };
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -1397,6 +1406,7 @@ export function reviewService(
             // The runner restarted or went away under the merge (DR-014): the work is fine. Try again by itself, keeping the place in line.
             const { t } = await ticketWithRepo(ticketId);
             const message = (r.detail as { message: string }).message;
+            if (!deps.isLeader || deps.isLeader()) await failed("restart", undefined, message);
             // A copy that is no longer in charge stops quietly (DR-026): the server now in charge starts this merge again, so no retries and no card here.
             if (deps.isLeader && !deps.isLeader()) {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: "The merge was cut off by the hand-over; the server now in charge starts it again. Nothing to do." });
@@ -1429,6 +1439,14 @@ export function reviewService(
             // Approved work held on this ticket goes on once it is live too (BOS-1173); the sweep catches a later go-live.
             void this.releaseHolds().catch(() => undefined);
           }
+          if (r.outcome === "verify_failed") await failed("check_failed", r.detail);
+          else if (r.outcome === "conflicts") await failed("conflict");
+          else if (r.outcome === "uncommitted" || r.outcome === "migration_journal") await failed("landing_refused", r.detail, r.outcome);
+          // A stuck check is a gate fault; the quiet stops (left review, handed over) carry a `note` and are not failures.
+          else if (r.outcome === "check_stuck" && !(r.detail as { note?: unknown } | undefined)?.note) await failed("gate_fault", r.detail);
+          // A lock wait is retried by itself and is no failure until it gives up; a main that moved is one each time.
+          else if (r.outcome === "lock_wait" && (r.detail as { status?: string } | undefined)?.status === "main_moved") await failed("main_moved");
+          else if (r.outcome === "lock_wait" && attempt >= LOCK_RETRY_ATTEMPTS) await failed("lock_timeout");
           if (r.outcome !== "lock_wait") return r;
           const { t } = await ticketWithRepo(ticketId);
           const d = r.detail as { command: string; output: string };
@@ -1468,6 +1486,7 @@ export function reviewService(
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `The merge was cut off when the server handed over (${err.message}); the server now in charge will try again.` });
           throw err;
         }
+        await failed("gate_fault", undefined, err.message);
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
         await raiseMergeStuck(db, t, err.message);
         // Whoever approved still hears why, as before.
