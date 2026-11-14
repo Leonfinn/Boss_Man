@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
-import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
+import { RiskLevels, useRiskTiers } from "../components/RiskHelp";
+import { FieldHelp } from "../components/FieldHelp";
 import { Markdown } from "../components/Markdown";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
-import { TicketLinks } from "../components/TicketLinks";
+import { TicketLinks, useTicketLinks } from "../components/TicketLinks";
 import { TicketOpenCards } from "../components/TicketOpenCards";
 import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
@@ -73,12 +74,26 @@ function Fold({ title, hint, open, className, children }: { title: string; hint?
   );
 }
 
+/** One row of the Details card (BOS-1195): a `<details>` with a CSS chevron, its title and a muted count on the right. */
+function DetailRow({ title, count, tone, open, children }: { title: string; count?: string; tone?: "amber"; open?: boolean; children: React.ReactNode }) {
+  return (
+    <details className="detail-row" open={open || undefined}>
+      <summary>
+        <span className="detail-title">{title}</span>
+        {count && <span className={`detail-count${tone === "amber" ? " amber" : ""}`}>{count}</span>}
+      </summary>
+      <div className="detail-body">{children}</div>
+    </details>
+  );
+}
+
 /** The ticket's acceptance criteria with how the author reported each, plus the owner's editor. */
 function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (field: "body" | "acceptanceCriteria", body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
+  const open = t.systemState === "review" && criteria.length > 0;
   return (
-    <Fold title="Done when" hint={criteria.length ? `${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}` : undefined}>
+    <DetailRow title="Done when" count={criteriaCount(criteria, rows)} open={open}>
       {rows.length > 0 && (
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
           {rows.map((r, i) => (
@@ -89,6 +104,7 @@ function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (fie
           ))}
         </ul>
       )}
+      {!criteria.length && <p className="muted" style={{ margin: 0 }}>No criteria yet. Add what has to be true for this to count as finished.</p>}
       {t.systemState === "review" && criteria.some((c) => !isAfterMerge(c)) && rows.some((r, i) => !isAfterMerge(criteria[i]!) && !r.verdict) && (
         <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion to check before merge has the author's pass or fail; the reviewer has been told that. The "on a real host" ones are checked after merge and don't hold up the review.</p>
       )}
@@ -102,8 +118,26 @@ function DoneWhen({ t, patchLoaded, busy }: { t: TicketDetail; patchLoaded: (fie
           void patchLoaded("acceptanceCriteria", { acceptanceCriteria: next }).then((ok) => ok && clearDraft(`ticket-criteria/${t.id}`));
         }}
       />
-    </Fold>
+    </DetailRow>
   );
+}
+
+/** The Done when row's count (BOS-1195): how many passed, or how many there are before any report. */
+function criteriaCount(criteria: Criterion[], rows: Array<{ verdict?: string | null }>): string {
+  if (!criteria.length) return "none yet";
+  const reported = rows.filter((r) => r.verdict === "pass" || r.verdict === "fail").length;
+  if (!reported) return `${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}`;
+  return `${rows.filter((r) => r.verdict === "pass").length} of ${criteria.length} passed`;
+}
+
+/** The What it produced row's count (BOS-1195): blank while its request is out, then items, code or nothing yet. */
+function producedCount(items: Artifact[] | null, t: TicketDetail, failed: string | null): string {
+  if (failed) return failed;
+  if (!items) return "";
+  if (items.length) return `${items.length} item${items.length === 1 ? "" : "s"}`;
+  if (t.mergeCommit) return `code merged as ${t.mergeCommit.slice(0, 7)}`;
+  if (t.branch && !t.noCode) return "code on its branch";
+  return "nothing yet";
 }
 
 /** One non-empty line per criterion; saving nothing clears them. The typing is kept in this browser (DR-045). */
@@ -182,10 +216,11 @@ function CriteriaEdit({ draftKey, initial, save, busy }: { draftKey: string; ini
 /** The owner's setup steps (DR-011): what they do once this change is live, written by whoever built it. */
 function OwnerSetup({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const steps = (t.ownerSetup ?? "").trim();
+  const n = steps.split("\n").filter(Boolean).length;
   return (
-    <Fold title="After it goes live, you'll need to" hint={steps ? steps.split("\n").filter(Boolean).length + " step" + (steps.split("\n").filter(Boolean).length === 1 ? "" : "s") : undefined}>
+    <DetailRow title="After it goes live" count={n ? `${n} step${n === 1 ? "" : "s"} for you` : "nothing for you"} tone={n ? "amber" : undefined}>
       <OwnerSetupEdit draftKey={`ticket-owner-setup/${t.id}`} key={steps} initial={steps} busy={busy} save={(v) => patch({ ownerSetup: v }).then((ok) => ok ?? false)} />
-    </Fold>
+    </DetailRow>
   );
 }
 
@@ -334,6 +369,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
+  // Fetched here so the Details card's Roadmap row can count what it waits on (BOS-1195).
+  const links = useTicketLinks(id);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
   // Every link on this screen is built the same way: page names open in this company, ticket references
@@ -588,7 +625,6 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     : t.landing === "pull_request"
       ? `Approving opens a pull request from ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`
       : `Approving runs ${t.verifyCommand ? `\`${t.verifyCommand}\`` : "the project's check"} and, if it passes, merges ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`;
-  const notStarted = t.systemState === "backlog" || t.systemState === "ready";
   // One hold notice, computed once, so the headline and detail always agree.
   const hold = holdBanner(t);
   // A reviewer's hold on the merge (BOS-808): the owner can let it go on (the normal approval and merge follow) or withdraw the reviewer's pass.
@@ -776,75 +812,89 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </span>
           </label>
 
-          <DoneWhen t={t} patchLoaded={patchLoaded} busy={busy} />
-          {t.fixesLive?.trim() && (
-            // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
-            <p className="fixes-live" style={{ margin: 0 }}>
-              <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
-            </p>
-          )}
-          <OwnerSetup t={t} patch={patch} busy={busy} />
+          {/* Done when to Changes are rows of one Details card (BOS-1195), each with a count on the right;
+              Review, the description and the conversation stay their own cards, and so does the live-fix note. */}
+          <section className="card details-card" aria-label="Details">
+            <DoneWhen t={t} patchLoaded={patchLoaded} busy={busy} />
+            {t.fixesLive?.trim() && (
+              // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
+              <p className="fixes-live" style={{ margin: 0 }}>
+                <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
+              </p>
+            )}
+            <OwnerSetup t={t} patch={patch} busy={busy} />
 
-          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
-            <TicketOutputs items={made} companyId={t.companyId} ticketId={t.id} prefix={t.ref?.replace(/-\d+$/, "") ?? null} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch && !t.noCode ? { branch: t.branch } : null} />
-          </Fold>
-
-          {(images.data?.length ?? 0) > 0 && (
-            <Fold title="Images" hint={`${images.data!.length} attached`}>
-              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
-                {images.data!.map((img) => (
-                  <figure key={img.id} style={{ margin: 0 }}>
-                    <a href={`/api/ticket-images/${img.id}`} target="_blank" rel="noreferrer">
-                      <img src={`/api/ticket-images/${img.id}`} alt={img.caption ?? img.name} loading="lazy" style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
-                    </a>
-                    <figcaption className="muted" style={{ fontSize: 13 }}>
-                      {img.caption ?? img.name} · {when(img.createdAt)}
-                    </figcaption>
-                  </figure>
-                ))}
-              </div>
-            </Fold>
-          )}
-
-          {t.plan && (
-            <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
-              <Markdown text={t.plan} linkContext={ticketLinks} />
-              {!t.planApprovedAt && (
-                <p className="muted" style={{ fontSize: 14 }}>
-                  Approve or send it back from <a href="#/decisions">Decisions</a>.
+            <DetailRow title="What it produced" count={producedCount(outputs.data, t, outputs.error ? "couldn't load" : null)}>
+              {outputs.error ? (
+                <p className="error" role="alert" style={{ margin: 0 }}>
+                  {outputs.error.message}{" "}
+                  <button type="button" className="link" style={{ padding: 0 }} onClick={outputs.reload}>
+                    Try again
+                  </button>
                 </p>
+              ) : (
+                <TicketOutputs items={made} companyId={t.companyId} ticketId={t.id} prefix={t.ref?.replace(/-\d+$/, "") ?? null} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch && !t.noCode ? { branch: t.branch } : null} />
               )}
-            </Fold>
-          )}
+            </DetailRow>
 
-          <Fold title="Roadmap, feature and dependencies">
-            <TicketLinks t={t} onChanged={ticket.reload} bare />
-          </Fold>
+            {(images.data?.length ?? 0) > 0 && (
+              <DetailRow title="Images" count={`${images.data!.length}`}>
+                <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+                  {images.data!.map((img) => (
+                    <figure key={img.id} style={{ margin: 0 }}>
+                      <a href={`/api/ticket-images/${img.id}`} target="_blank" rel="noreferrer">
+                        <img src={`/api/ticket-images/${img.id}`} alt={img.caption ?? img.name} loading="lazy" style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+                      </a>
+                      <figcaption className="muted" style={{ fontSize: 13 }}>
+                        {img.caption ?? img.name} · {when(img.createdAt)}
+                      </figcaption>
+                    </figure>
+                  ))}
+                </div>
+              </DetailRow>
+            )}
 
-          {t.repoUrl && (
-            <Fold title="Changes" hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}` : undefined}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
-                <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
-                  {diff && range === "base" ? "Refresh all changes" : "All changes"}
-                </button>
-                <button type="button" className="btn" aria-pressed={!!diff && range === "last_turn"} onClick={() => void loadDiff("last_turn")}>
-                  {diff && range === "last_turn" ? "Refresh the last turn" : "The last turn"}
-                </button>
-              </div>
-              {diff && range === "last_turn" && diff.turn && <p className="muted" style={{ fontSize: 14 }}>What the agent's last turn that changed anything did: checkpoint {diff.turn.number}, {when(diff.turn.at)}.</p>}
-              {diff && <DiffView diff={diff} />}
-              {diffError && (
-                <p className="error" role="alert">
-                  {diffError}
-                </p>
-              )}
-              {t.mergeCommit && (
-                <p className="muted">
-                  Merged into {t.defaultBranch} as <span className="mono">{t.mergeCommit.slice(0, 7)}</span>.
-                </p>
-              )}
-            </Fold>
-          )}
+            {t.plan && (
+              // Open while it waits for the owner's approval: that's the row they act on.
+              <DetailRow title="Plan" count={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"} tone={t.planApprovedAt ? undefined : "amber"} open={!t.planApprovedAt}>
+                <Markdown text={t.plan} linkContext={ticketLinks} />
+                {!t.planApprovedAt && (
+                  <p className="muted" style={{ fontSize: 14 }}>
+                    Approve or send it back from <a href="#/decisions">Decisions</a>.
+                  </p>
+                )}
+              </DetailRow>
+            )}
+
+            <DetailRow title="Roadmap and dependencies" count={links.data?.waitsOn.length ? `waits on ${links.data.waitsOn.length}` : links.error ? "couldn't load" : links.data ? "none" : ""}>
+              <TicketLinks t={t} onChanged={ticket.reload} bare links={links} />
+            </DetailRow>
+
+            {t.repoUrl && (
+              <DetailRow title="Changes" count={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "on its branch" : ""}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
+                  <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
+                    {diff && range === "base" ? "Refresh all changes" : "All changes"}
+                  </button>
+                  <button type="button" className="btn" aria-pressed={!!diff && range === "last_turn"} onClick={() => void loadDiff("last_turn")}>
+                    {diff && range === "last_turn" ? "Refresh the last turn" : "The last turn"}
+                  </button>
+                </div>
+                {diff && range === "last_turn" && diff.turn && <p className="muted" style={{ fontSize: 14 }}>What the agent's last turn that changed anything did: checkpoint {diff.turn.number}, {when(diff.turn.at)}.</p>}
+                {diff && <DiffView diff={diff} />}
+                {diffError && (
+                  <p className="error" role="alert">
+                    {diffError}
+                  </p>
+                )}
+                {t.mergeCommit && (
+                  <p className="muted">
+                    Merged into {t.defaultBranch} as <span className="mono">{t.mergeCommit.slice(0, 7)}</span>.
+                  </p>
+                )}
+              </DetailRow>
+            )}
+          </section>
 
           {landing && (
             <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
@@ -984,7 +1034,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </div>
           <div id="ticket-props-body" hidden={propsCollapsed}>
           <dl>
-            <dt>Status</dt>
+            <dt>
+              Status
+              <FieldHelp label="Status">Done closes it without merging. In review asks the reviewers. Ready and In progress wake the assignee.</FieldHelp>
+            </dt>
             <dd>
               <span className={`tag ${t.systemState === "review" && (t.signoff === "waiting" || t.signoff === "missing") ? "amber" : (STATE_TONE[t.systemState] ?? "")}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
               <select aria-label="Change status" value="" onChange={(e) => e.target.value && void moveTo(e.target.value)}>
@@ -1008,10 +1061,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               {t.systemState === "blocked" && t.blockedUntil && (
                 <small className="muted" style={{ display: "block" }}>Blocked until {new Date(t.blockedUntil).toLocaleString()}{t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.</small>
               )}
-              <small className="muted" style={{ display: "block" }}>Done closes it without merging. In review asks the reviewers; Ready and In progress wake the assignee.</small>
             </dd>
             <dt>
               <label htmlFor="t-assignee">{t.systemState === "review" ? "Written by" : "Assigned to"}</label>
+              <FieldHelp label="Assigned to">Assigning an agent starts it straight away. In review this shows who wrote the work.</FieldHelp>
             </dt>
             <dd>
               <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
@@ -1023,11 +1076,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
-              {open.length > 0 && t.systemState === "review" && <small className="muted" style={{ display: "block" }}>Being reviewed by {who}.</small>}
-              {notStarted && <small className="muted">Assigning an agent starts it straight away.</small>}
+              {open.length > 0 && t.systemState === "review" && <small className="muted" style={{ display: "block" }}>Reviewed by {who}.</small>}
             </dd>
             <dt>
               <label htmlFor="t-risk">Risk</label>
+              <FieldHelp label="Risk">
+                <RiskLevels tiers={tiers} current={t.risk} />
+              </FieldHelp>
             </dt>
             <dd>
               <select id="t-risk" value={t.risk ?? ""} onChange={(e) => e.target.value && void patch({ risk: e.target.value as Risk })}>
@@ -1038,11 +1093,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
-              {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).</small>}
-              <RiskHelp tiers={tiers} current={t.risk} />
+              {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet (counts as medium).</small>}
             </dd>
             <dt>
               <label htmlFor="t-size">Size</label>
+              <FieldHelp label="Size">
+                How big this task is compared with others: 1, 2, 3, 5 or 8. Whoever creates a task sets it. The Workflow page shows what each size really takes. <a href="#/workflow">What each size really takes, on the Workflow page</a>
+              </FieldHelp>
             </dt>
             <dd>
               <select id="t-size" value={t.size ?? ""} onChange={(e) => void patch({ size: e.target.value ? Number(e.target.value) : null })}>
@@ -1053,10 +1110,14 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
-              <small className="muted" style={{ display: "block" }}>How big this task is compared with others: 1, 2, 3, 5 or 8. Whoever creates a task sets it. The Workflow page shows what each size really takes.</small>
             </dd>
             <dt>
               <label htmlFor="t-watcher">Watcher</label>
+              <FieldHelp label="Watcher">
+                <p>An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</p>
+                <p>The watcher reports on this task and its sub-tasks, and steps in when all of them have stalled.</p>
+                <p>Updates appear in Activity and your notifications.</p>
+              </FieldHelp>
             </dt>
             <dd>
               <select id="t-watcher" value={t.watcherAgentId ?? ""} onChange={(e) => void watch(e.target.value || null, t.watchEveryMinutes ?? 30)}>
@@ -1067,7 +1128,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
-              {t.watcherAgentId ? (
+              {t.watcherAgentId && (
                 <>
                   <select aria-label="How often the watcher reports" value={t.watchEveryMinutes ?? 30} onChange={(e) => void watch(t.watcherAgentId, Number(e.target.value))} style={{ marginTop: 6 }}>
                     {WATCH_EVERY.map(([m, label]) => (
@@ -1076,12 +1137,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                       </option>
                     ))}
                   </select>
-                  <small className="muted">{t.watchedAt ? `Last asked for a report ${when(t.watchedAt)}.` : "A first report is on its way."} Updates appear in Activity and your notifications.</small>
+                  <small className="muted">{t.watchedAt ? `Last report ${when(t.watchedAt)}.` : "A first report is on its way."}</small>
                 </>
-              ) : (
-                <small className="muted">An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</small>
               )}
-              <small className="muted" style={{ display: "block" }}>The watcher reports on this task and its sub-tasks, and steps in when all of them have stalled.</small>
             </dd>
             <dt>Check again</dt>
             <dd>
