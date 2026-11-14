@@ -570,12 +570,14 @@ host_extra_facts() {
   # found; names of networks never leave this function.
   if [[ -n $ncont ]]; then
     local sids="" sid snets nnets reach=false n svcname
+    # shellcheck disable=SC2016 # the braces are a Go template for docker, not shell expansion
     nnets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$ncont")" || nnets=""
     for svcname in server server-blue server-green; do # label filters are ANDed, so one call each
       sids+="$(dk ps --filter "label=com.docker.compose.service=$svcname" --format '{{.ID}}' || true) "
     done
     if [[ -n $nnets && -n $sids ]]; then
       for sid in $sids; do
+        # shellcheck disable=SC2016 # Go template for docker
         snets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$sid")" || snets=""
         for n in $snets; do
           [[ " $nnets " == *" $n "* ]] && reach=true
