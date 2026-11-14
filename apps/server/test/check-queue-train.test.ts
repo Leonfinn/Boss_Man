@@ -123,6 +123,52 @@ describe("check queue follows the merge train (BOS-1504)", () => {
     expect(await s.waiting()).toEqual([fixer, member, other]);
   });
 
+  // BOS-1511 row 12 (14 Nov, 21:08 onward, no restart): seated members' merge jobs are queued when they are seated, so quick
+  // checks that had already waited past QUICK_AGE_MS sorted ahead of them by queue time and about 20 of them went first.
+  it("serves seated members before older aged quick checks while slow checks hold the slots, with no restart", async () => {
+    const s = await setup({ slots: 3 });
+    const head = await s.merge({ minutesAgo: 30 });
+    const quicks: string[] = [];
+    for (const minutesAgo of [40, 35, 25, 20]) {
+      const t = await s.ticket();
+      await s.job(t, { kind: "pre_review", scope: "quick", minutesAgo });
+      quicks.push(t);
+    }
+    const slow = await s.ticket();
+    await s.job(slow, { kind: "pre_review", scope: "quick", minutesAgo: 45 });
+    const m2 = await s.merge({ lane: true, minutesAgo: 2 });
+    const m3 = await s.merge({ minutesAgo: 1 });
+    const tr = s.train();
+    tr.join(head, { priority: 1, place: 1 });
+    tr.join(m2, { priority: 2, place: 2 });
+    tr.join(m3, { priority: 1, place: 3 });
+    expect(tr.seated(m2)).toBe(true);
+    // Admission puts the background-lane ticket last (BOS-1403); its seat then counts as the head's tier.
+    expect(tr.seatedIds()).toEqual([head, m3, m2]);
+    // The head's merge check and a slow quick check hold two of the three slots.
+    const startedAt = new Date(Date.now() - 30 * 60_000);
+    for (const id of [head, slow]) await s.db.update(checkJobs).set({ state: "running", startedAt, lastOutputAt: new Date() }).where(eq(checkJobs.ticketId, id));
+    expect(await s.waiting()).toEqual([m3, m2, ...quicks]);
+    // One slot free, and one long-job slot left under the slots−1 reserve: the next member takes it, not the oldest quick check.
+    expect((await s.q.claimNext(null, new Date(), s.co.id)).map((j) => j.ticketId)).toEqual([m3]);
+    // The reserve still holds: when the next slot frees, the last member can't take it while quick checks wait.
+    await s.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.ticketId, slow));
+    expect((await s.q.claimNext(null, new Date(), s.co.id)).map((j) => j.ticketId)).toEqual([quicks[0]]);
+    expect(await s.state(m2)).toBe("queued");
+  });
+
+  it("keeps the DR-056 order on a one-slot machine, so the train can't take the only slot from aged quick checks", async () => {
+    const s = await setup({ slots: 1 });
+    const old = await s.ticket();
+    await s.job(old, { kind: "pre_review", scope: "quick", minutesAgo: 20 });
+    const member = await s.merge({ minutesAgo: 2 });
+    const tr = s.train();
+    tr.join(member, { priority: 1, place: 1 });
+    expect(tr.seated(member)).toBe(true);
+    expect(await s.waiting()).toEqual([old, member]);
+    expect((await s.q.claimNext(null, new Date(), s.co.id)).map((j) => j.ticketId)).toEqual([old]);
+  });
+
   it("changes nothing with the switch off, or with no train in this process", async () => {
     const s = await setup({ train: false });
     const member = await s.merge({ minutesAgo: 30 });

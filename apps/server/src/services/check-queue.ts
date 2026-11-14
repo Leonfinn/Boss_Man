@@ -220,15 +220,15 @@ export function checkQueue(db: Db) {
   }
 
   /** The queued jobs in serving order, leaving out those a red main holds back. */
-  async function servable(now = new Date()): Promise<CheckJob[]> {
-    return (await serving(now)).order;
+  async function servable(now = new Date(), trainFirst = true): Promise<CheckJob[]> {
+    return (await serving(now, trainFirst)).order;
   }
 
   /** Why a queued job of a ticket waiting for its train seat is not in the serving order (BOS-1504). */
   const TRAIN_HELD = "waiting for a seat in the merge train";
 
   /** The serving order, and the queued jobs the merge train holds back (BOS-1504); the rest left out are a red main's. */
-  async function serving(now = new Date()): Promise<{ order: CheckJob[]; trainHeld: Set<string> }> {
+  async function serving(now = new Date(), trainFirst = true): Promise<{ order: CheckJob[]; trainHeld: Set<string> }> {
     const queued = await db.select().from(checkJobs).where(eq(checkJobs.state, "queued"));
     const red = new Set((await db.select({ id: projects.id }).from(projects).where(eq(projects.mainState, "red"))).map((p) => p.id));
     // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
@@ -240,6 +240,11 @@ export function checkQueue(db: Db) {
     // running already). So a seated background-lane ticket no longer stalls the train. fixesMain jobs keep their own place
     // above everything. With no train in this process (a standby, or no landing since a restart), nothing changes; an old job
     // may then be claimed, and its landing cancels it as a leftover when it re-enqueues.
+    // BOS-1511 (no restart needed): a member's job is queued when it is seated, so quick checks that had already aged past
+    // QUICK_AGE_MS sorted ahead of it by queue time and the train waited behind a long line of them. With `trainFirst` the
+    // seated members rank above the aged-quick group. Quick checks still get a slot: claimOn passes trainFirst only for a
+    // machine with two or more slots, where the slots−1 long-job reserve keeps one for them. On a one-slot machine the
+    // train would otherwise take the only slot for as long as it has members, so there the DR-056 order stands.
     const views = new Map<string, ReturnType<typeof trainView>>();
     if (queued.some((j) => j.kind === "merge" && !j.fixesMain) && (await train())) for (const j of queued) if (j.kind === "merge" && !views.has(j.projectId)) views.set(j.projectId, trainView(j.projectId));
     const marks = await tiers([...new Set([...queued.map((j) => j.ticketId), ...[...views.values()].flatMap((v) => v?.seated ?? [])])]);
@@ -282,6 +287,7 @@ export function checkQueue(db: Db) {
         const kb = keys.get(b.id)!;
         return (
           Number(b.fixesMain) - Number(a.fixesMain) ||
+          (trainFirst ? Number(seatOf.has(b.id)) - Number(seatOf.has(a.id)) : 0) ||
           Number(withMerges(b)) - Number(withMerges(a)) ||
           kb.front - ka.front ||
           ka.tier - kb.tier ||
@@ -339,7 +345,7 @@ export function checkQueue(db: Db) {
     // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
     if ((await softHold(db, now)).on) return [];
     const worker = isWorker(machine) ? machine.workerId : null;
-    const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
+    const candidates = (await servable(now, limit >= 2)).filter((j) => !companyId || j.companyId === companyId);
     const onMachine = worker ? eq(checkJobs.workerId, worker) : and(isNull(checkJobs.workerId), companyId ? eq(checkJobs.companyId, companyId) : undefined);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
@@ -481,7 +487,7 @@ export function checkQueue(db: Db) {
   async function status(companyId: string, now = new Date()) {
     const rows = await db.select().from(checkJobs).where(eq(checkJobs.companyId, companyId)).orderBy(asc(checkJobs.queuedAt));
     const running = rows.filter((j) => j.state === "running").map((j) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, scope: j.scope, ageMinutes: j.startedAt ? Math.round((now.getTime() - j.startedAt.getTime()) / 60_000) : 0 }));
-    const served = await serving();
+    const served = await serving(now, (await slots()) >= 2);
     const order = served.order.filter((j) => j.companyId === companyId);
     const queued = order.map((j, i) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, scope: j.scope, place: i + 1, fixesMain: j.fixesMain }));
     const held = rows.filter((j) => j.state === "queued" && !order.some((o) => o.id === j.id)).map((j) => ({ id: j.id, ticketId: j.ticketId, kind: j.kind, heldBy: served.trainHeld.has(j.id) ? TRAIN_HELD : "main is red" }));
@@ -513,7 +519,7 @@ export function checkQueue(db: Db) {
     const minutes = (d: Date | null) => (d ? Math.max(0, Math.floor((now.getTime() - d.getTime()) / 60_000)) : 0);
     const runningJobs = live.filter((r) => r.job.state === "running").sort((a, b) => (a.job.startedAt?.getTime() ?? 0) - (b.job.startedAt?.getTime() ?? 0));
     // A check queued after the live read above is not in `info`: leave it out (it shows on the next refresh) instead of throwing in row().
-    const served = await serving();
+    const served = await serving(now, limit >= 2);
     const order = served.order.filter((j) => j.companyId === companyId && info.has(j.id));
     const orderIds = new Set(order.map((j) => j.id));
     const held = live.filter((r) => r.job.state === "queued" && !orderIds.has(r.job.id)).map((r) => r.job);
