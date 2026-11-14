@@ -148,6 +148,8 @@ export const OWNER_CONTROLS = {
     "Measuring", "Record this device", "Rename", "Forget",
     // Outgoing email (BOS-1387).
     "Turn off", "Send test email",
+    // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
+    "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -258,6 +260,8 @@ export const OWNER_FIELDS = {
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Merge approved work in the order it was approved",
+    // Settings → Checks → Check workers (BOS-1435): one machine's form.
+    "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Workspace disk.
     "Most disk to use (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).

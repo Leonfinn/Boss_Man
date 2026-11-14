@@ -2,17 +2,17 @@
 # Boss Man runner: one per company. Build from the repository root:
 #   docker build -f apps/runner/Dockerfile -t boss-man-runner .
 #
-# Ships the official, unmodified Claude Code from Anthropic's npm package, which installs
-# the same native binary as the standalone installer
-# (https://code.claude.com/docs/en/setup#install-with-npm). The Claude ACP adapter is
-# pointed at it with CLAUDE_CODE_EXECUTABLE (R6). Codex comes with the codex-acp adapter.
+# This image holds NO Anthropic code (DR-050): it can be published as it is. Claude Code and its
+# ACP adapter are installed on a runner's first start from apps/runner/claude-pack (pinned, with
+# a committed lockfile) into a content-addressed folder on the bossman-claude named volume; the
+# launcher's installer container (or the compose claude-pack service) runs it before a runner
+# starts, and the runner mounts that volume read-only. Without a ready pack the runner reports
+# Claude Code absent and Claude agents aren't routed to it; Codex (codex-acp) and OpenCode keep
+# working. See apps/runner/claude-pack/README.md and apps/runner/src/claude-pack.ts.
 # OpenCode (MIT) is the official opencode-ai npm package, unmodified, run as `opencode acp`.
 # Updates inside the container are off: new versions arrive by rebuilding (R9), e.g. weekly,
 # with scripts/update-runner.sh, which promotes a build only once its canary passes (R52):
 #   docker run --rm --network none boss-man-runner:candidate node_modules/.bin/tsx src/canary-main.ts
-#
-# Licence note: Claude Code is "© Anthropic PBC. All rights reserved." Build this image
-# yourself; don't publish images that contain it.
 #
 # Optional build secret "extra_ca": a CA bundle for networks with a TLS-inspecting proxy.
 FROM node:22-bookworm-slim
@@ -84,6 +84,10 @@ RUN --mount=type=secret,id=extra_ca,required=false \
       playwright --version; \
       echo "webkit@${PLAYWRIGHT_VERSION}" >> /etc/bossman-addons;; \
     esac
+# The Claude pack volume's mount point (DR-050, BOS-972): created here, owned by node, BEFORE `USER node`.
+# Docker copies a path's ownership into a fresh named volume only when the path exists in the image, so
+# without this a new volume mounts root-owned and the installer (uid 1000) can't create its folder in it.
+RUN mkdir -p /opt/bossman-claude && chown node:node /opt/bossman-claude
 # The container is the sandbox (agents already run shell commands in it); Chromium's own sandbox
 # needs privileges the runner doesn't have. Both are ignored when the add-on isn't installed.
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
@@ -95,7 +99,7 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
 # behaviour. To update: check the new version (npm view <package> version), change the
 # number here, rebuild with Settings > Server and runner > Updates > Build and update runners,
 # and confirm it in server_status (runners show their harness versions).
-ARG CLAUDE_CODE_VERSION=2.1.316
+# Claude Code's version lives in apps/runner/claude-pack/package.json, not here (DR-050).
 ARG OPENCODE_VERSION=1.19.3
 USER node
 ENV HOME=/home/node \
@@ -103,13 +107,12 @@ ENV HOME=/home/node \
     PATH=/home/node/.npm-global/bin:$PATH
 RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
- && npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm install -g --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
- && claude --version && opencode --version
+ && opencode --version
 # Claude Code keeps its session transcripts here; it's a volume so a recovery run can reopen
-# an interrupted session after the container is recreated (R42).
-ENV CLAUDE_CODE_EXECUTABLE=/home/node/.npm-global/bin/claude \
-    CLAUDE_CONFIG_DIR=/home/node/.claude \
+# an interrupted session after the container is recreated (R42). CLAUDE_CODE_EXECUTABLE is NOT
+# set here: the runner points it at the ready pack at start (DR-050).
+ENV CLAUDE_CONFIG_DIR=/home/node/.claude \
     DISABLE_UPDATES=1 \
     DISABLE_AUTOUPDATER=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1
@@ -124,6 +127,10 @@ RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
  && pnpm install --frozen-lockfile --package-import-method=hardlink --prod --filter "@boss-man/runner..."
 COPY --chown=node packages/shared/src packages/shared/src
 COPY --chown=node apps/runner/src apps/runner/src
+# The Claude pack (DR-050): the pinned package.json and its lockfile, the only input to the
+# first-start installer (src/claude-pack-main.ts). Root-owned and read-only to the runner user,
+# so no session can change what gets installed (npm ci checks each package's integrity hash).
+COPY --chown=root:root apps/runner/claude-pack /opt/bossman-claude-pack
 # The check line's one copy of the queue rules (BOS-614): agents' checks and the merge gate wait for a check slot through
 # this file, not through the copy in the branch being checked. Root-owned, so no session can change it; a new copy goes
 # live with "Build and update runners".

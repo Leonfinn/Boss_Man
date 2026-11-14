@@ -120,10 +120,12 @@ for a in "$@"; do
     --now) NOW=1 ;;
     --rollback) ROLLBACK=1 ;;
     --settings) SETTINGS=1 ;;
-    -*) echo "Usage: $0 [--now] [--settings | --rollback | CLAUDE_CODE_VERSION]" >&2; exit 2 ;;
+    -*) echo "Usage: $0 [--now] [--settings | --rollback]" >&2; exit 2 ;;
     *) version="$a" ;;
   esac
 done
+# Claude Code's version is pinned in apps/runner/claude-pack/package.json now, not a build arg (DR-050, BOS-972).
+if [[ -n $version ]]; then echo "The runner image no longer takes a Claude Code version: it is pinned in apps/runner/claude-pack/package.json (DR-050)." >&2; exit 2; fi
 
 if ((SETTINGS)); then
   if ((NOW)); then
@@ -174,15 +176,14 @@ NETGUARD_PREV="$(docker image inspect --format '{{.Id}}' boss-man-netguard:curre
 if [[ -n "$NETGUARD_PREV" ]]; then docker tag "$NETGUARD_PREV" boss-man-netguard:pending-previous || NETGUARD_PREV=; fi
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
-echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
+echo "Building $IMAGE:candidate (no Anthropic code; Claude Code comes from the pack on first start)${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
-  ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
   --build-arg BOSSMAN_IMAGE_COMMIT="$commit" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 
-echo "Running the canary (no network): a Claude session, then each add-on..."
+echo "Running the canary (no network): Codex, OpenCode and each add-on. Claude is proven by its pack installer, not here (DR-050)..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
   echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2
