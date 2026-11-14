@@ -111,6 +111,47 @@ describe("the CEO builds the team (R62)", () => {
     await client.close();
   });
 
+  it("model_options can be narrowed by agent, funding source or section, so a 30-agent answer fits a chat (BOS-1402)", async () => {
+    const c = (ctx = await setup());
+    const second = (await c.req("POST", "/api/funding-sources", { name: "Claude Max 2", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    for (let i = 0; i < 32; i++) {
+      const a = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: `Dev ${i}`, template: "engineer" })).json() as { id: string };
+      await c.db.update(agents).set({ fundingSourceId: i % 2 ? second.id : c.funding.id, model: "claude-opus-4-5" }).where(eq(agents.id, a.id));
+    }
+    const models = Array.from({ length: 400 }, (_, i) => ({ value: `ollama/model-${i}-with-a-long-name`, name: `Model number ${i} with a long display name` }));
+    await c.db.insert(settings).values({ key: `models:${c.company.id}:opencode`, value: { models, observedAt: new Date().toISOString() } });
+    const client = await c.mcp(c.ceo.id);
+    const call = async (args: Record<string, unknown>) => textOf(await client.callTool({ name: "model_options", arguments: args }));
+
+    const whole = await call({});
+    expect(JSON.parse(whole).current.length).toBeGreaterThan(30);
+    expect(whole.length).toBeGreaterThan(40_000); // the unfiltered answer is the big one
+
+    const one = await call({ agent: "dev 3" });
+    expect(one.length).toBeLessThan(whole.length / 2);
+    expect(JSON.parse(one).current).toEqual([expect.objectContaining({ name: "Dev 3", fundingSourceName: "Claude Max 2", harness: "claude" })]);
+    expect(JSON.parse(one).models.runner).not.toHaveProperty("opencode");
+
+    const paid = JSON.parse(await call({ paidFrom: second.id, section: "current" }));
+    expect(Object.keys(paid)).toEqual(["current"]);
+    expect(paid.current).toHaveLength(16);
+    expect(paid.current.every((a: { fundingSourceId: string }) => a.fundingSourceId === second.id)).toBe(true);
+    expect(JSON.parse(await call({ paidFrom: second.id })).fundingSources).toEqual([expect.objectContaining({ id: second.id })]);
+
+    const section = await call({ section: "fundingSources" });
+    expect(Object.keys(JSON.parse(section))).toEqual(["fundingSources"]);
+    expect(section.length).toBeLessThan(2_000);
+    // Current for 34 agents stays far under the chat limit (ticket asks for under 10,000).
+    const currentAll = await call({ section: "current" });
+    const count = JSON.parse(currentAll).current.length as number;
+    expect((currentAll.length / count) * 30).toBeLessThan(10_000); // 30 agents' worth
+    expect((await call({ paidFrom: second.id, section: "current" })).length).toBeLessThan(10_000);
+
+    expect(await client.callTool({ name: "model_options", arguments: { agent: "Nobody" } })).toMatchObject({ isError: true });
+    expect(await client.callTool({ name: "model_options", arguments: { paidFrom: "nope" } })).toMatchObject({ isError: true });
+    await client.close();
+  });
+
   it("proposes a model change for an existing agent and applies it only on the owner's say-so", async () => {
     const c = (ctx = await setup());
     const client = await c.mcp(c.ceo.id);
