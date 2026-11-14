@@ -6,6 +6,7 @@ import { fullLogPointer, type RunnerCommand } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
+import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
 export type CheckDispatcherDeps = {
   send: (runnerId: string, command: RunnerCommand) => boolean;
@@ -21,6 +22,10 @@ export type CheckDispatcherDeps = {
   timeoutMs?: number;
   /** The owner's private-details list for the merge-line scan (BOS-979); null or absent when none is set. Never logged. */
   scanList?: () => Promise<string | null>;
+  /** Says so when a set list can't be read (BOS-1093): one warning and one owner notification per failure streak. */
+  scanListWarning?: ScanListWarning;
+  /** A runner drain (image update or setting change) is under way (BOS-1471): no new job goes to any runner until it ends. Running ones finish; queued ones wait. */
+  drainPending?: () => Promise<boolean>;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -31,6 +36,9 @@ const verdict = (j: CheckJob) =>
 
 export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
+  /** Checks at once each connected runner said it runs (hello, BOS-1471). A runner that said nothing has no entry: no cap. */
+  const runnerSlots = new Map<string, number>(); // lost on restart, harmless because each runner says its count again when it reconnects.
+  const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
 
   async function ended(job: CheckJob) {
     if (job.requestedBy && deps.wake) {
@@ -45,16 +53,17 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */
   async function pump(): Promise<void> {
     if ((await queue.mode()) !== "server") return;
+    if (await deps.drainPending?.()) return; // the runner is about to be swapped: a job started now would be killed by it
     const queuedCompanies = await db.selectDistinct({ companyId: checkJobs.companyId }).from(checkJobs).where(eq(checkJobs.state, "queued"));
     for (const { companyId } of queuedCompanies) {
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       if (!runner || !deps.isConnected(runner.id) || !deps.can(runner.id)) continue;
-      // A list that can't be read must not stop the line: the scan then runs its secret rules only.
-      const scanList = (await deps.scanList?.().catch(() => null)) ?? undefined;
-      for (const job of await queue.claimNext(runner.id, new Date(), companyId)) {
+      // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
+      const list = await scanList?.forScan();
+      for (const job of await queue.claimNext(runner.id, new Date(), companyId, runnerSlots.get(runner.id))) {
         // BOS-1043: only the merge gate's job carries the list. An agent-requested check reports its scan result back to the
         // agent, so a listed value named by file and line would let it test guesses against the owner's list.
-        const sendList = scanList && job.kind === "merge";
+        const sendList = !!list && job.kind === "merge";
         const sent = deps.send(runner.id, {
           type: "check.run",
           jobId: job.id,
@@ -63,7 +72,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
           commit: job.commit,
           command: job.command ?? deps.defaultCommand?.(job) ?? (job.scope === "full" ? "scripts/check-all.sh" : "scripts/check-quick.sh"),
           timeoutMs: deps.timeoutMs ?? (job.scope === "full" ? FULL_TIMEOUT : DEFAULT_TIMEOUT),
-          ...(sendList ? { scanList } : {}),
+          ...(sendList ? { scanList: list } : {}),
         });
         if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
       }
@@ -86,7 +95,12 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     },
 
     /** A runner said hello with the jobs it is running: any this runner was given but does not list are gone (it restarted). */
-    async onHello(runnerId: string, running: string[] | undefined) {
+    /** The checks at once this runner reported in hello, or undefined (older runner, or none said yet). Settings → Checks shows the smaller of this and check_slots. */
+    runnerSlots: (runnerId: string): number | undefined => runnerSlots.get(runnerId),
+
+    async onHello(runnerId: string, running: string[] | undefined, slots?: number) {
+      if (slots) runnerSlots.set(runnerId, slots);
+      else runnerSlots.delete(runnerId);
       const mine = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), eq(checkJobs.runnerId, runnerId)));
       const alive = new Set(running ?? []);
       for (const { id } of mine) if (!alive.has(id)) await queue.requeue(id, "The runner restarted or lost this check, so it was put back in line.");

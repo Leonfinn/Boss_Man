@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, FENCE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type Criterion, type WatchdogSettings, type DeviceMeasures, type TraceBody } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -345,9 +345,12 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
-    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
+    /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
+    liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -1319,6 +1322,27 @@ export const ownerChatMessages = pgTable(
 );
 
 /**
+ * The Thinking trace shown above one agent reply (BOS-1368): the steps it took, in order, and the
+ * header numbers. Set once when the reply is saved, so a stored trace never grows; a reply with no
+ * steps has no row. Only the owner's chat reads it, and text was redacted and clipped before it was
+ * kept here.
+ */
+export const ownerChatTraces = pgTable(
+  "owner_chat_traces",
+  {
+    messageId: uuid("message_id")
+      .primaryKey()
+      .references(() => ownerChatMessages.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    trace: jsonb("trace").$type<TraceBody>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("owner_chat_traces_created").on(t.createdAt)],
+);
+
+/**
  * An agent's lasting notes (BOS-85): corrections and preferences the owner gave in chat, shown
  * in every later chat and run. Kept apart from the owner's standing instructions. Only the CEO
  * writes them for now; keyed by agent so others can later.
@@ -1516,6 +1540,8 @@ export const features = pgTable(
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),
+    /** Why someone chose to keep the feature off the portal, in their own words; null when nobody said why. */
+    keepOffReason: text("keep_off_reason"),
     /** A plain-language summary for readers outside the team; null until written. */
     publicSummary: text("public_summary"),
     /** The title visitors see on the feedback portal; null falls back to the summary's first line (BOS-991). */

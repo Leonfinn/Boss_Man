@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
+import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
@@ -63,6 +64,29 @@ type SelfDeployView = {
   /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
   queueCancelled?: { at: string; why: string } | null;
 };
+
+/** A server update waiting for a quiet machine (BOS-420). */
+type DeployWaitView =
+  | { on: false }
+  | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
+
+const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+
+/** The plain-words line for a waiting update: what it waits for, and what is held back meanwhile. */
+function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
+  const q = w.quiet;
+  const mem = q?.freeMb != null && q.needMb != null ? ` ${gbOf(q.freeMb)} free of the ${gbOf(q.needMb)} it needs.` : "";
+  const held = " Meanwhile new merge checks wait and fewer runs start.";
+  if (w.phase === "waiting")
+    return w.origin === "hand"
+      ? q?.ready
+        ? `Ready: the machine is quiet. Apply the update to ${w.commit.slice(0, 8)} by hand now.${mem}${held}`
+        : `Making room before you apply the update to ${w.commit.slice(0, 8)} by hand: ${q?.why.join("; ") || "checking"}.${mem}${held}`
+      : `The update to ${w.commit.slice(0, 8)} is waiting for a quiet machine: ${q?.why.join("; ") || "checking"}.${mem} You'll be asked at ${when(w.deadline)} if it is still waiting.${held}`;
+  if (w.phase === "sent") return `The update to ${w.commit.slice(0, 8)} has gone to the machine.${held}`;
+  if (w.phase === "window") return `The update is live; its standby window runs until ${when(w.windowUntil ?? w.deadline)}.${held}`;
+  return `The update is live; waiting for the runner update to start.${held}`;
+}
 
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
 function atTime(iso: string): string {
@@ -174,11 +198,13 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
+  const w = wait.data?.on ? wait.data : null;
   if (!v?.enabled) return null;
   const s = v.status;
   // Right after a deploy the host's offer still names the old commit for a few minutes.
@@ -195,6 +221,28 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       </p>
       <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
+      {w && (
+        <p style={{ fontSize: 14 }}>
+          {waitLine(w)}{" "}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+              })
+            }
+          >
+            {w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now"}
+          </button>
+        </p>
+      )}
       <div>
         <button
           type="button"
@@ -396,7 +444,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -408,9 +456,11 @@ export function StopAllWork() {
   const paused = hold.data?.paused;
   return (
     <Section id="stop-all-h" title="Stop all work">
-      <p className="muted" style={{ fontSize: 14 }}>
-        Stops new work in every company at once: while it is on, Boss Man starts no new agent runs. Wake-ups and messages wait in line and start when you resume. Runs already going are not cut off; they finish by themselves. To end them now, use the Runs page. Press Resume on the banner at the top of any page to start work again.
-      </p>
+      <MoreAbout lead="Stops every company from starting new agent runs until you press Resume.">
+        <li>Runs already going are not cut off. They finish by themselves. To end one now, use the Runs page.</li>
+        <li>Wake-ups and messages wait in line, and start when you resume.</li>
+        <li>While work is stopped, every page shows a banner at the top. Press Resume on it to start work again.</li>
+      </MoreAbout>
       {paused === true ? (
         <p style={{ fontSize: 14 }} data-testid="stop-all-on">
           <span className="tag red">On</span> All work is stopped.
@@ -486,13 +536,13 @@ export function PrivateDetails() {
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots) };
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train };
   const n = Number(v.slots);
   const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
-  const changed = v.mode !== d.mode || n !== d.slots;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train;
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -516,6 +566,12 @@ export function CheckQueueSetting() {
         <p className="muted" style={{ fontSize: 14 }}>
           How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {d.effectiveSlots !== undefined && d.mode === "server" && (
+          <p style={{ fontSize: 14 }} data-testid="check-effective-slots">
+            Checks running at once right now: <strong>{d.effectiveSlots}</strong>.
+            {d.runnerSlotsReported !== null && d.runnerSlotsReported !== undefined && d.runnerSlotsReported < d.slots ? <> The runner says it runs {d.runnerSlotsReported} at once, so Boss Man starts no more than that until the runner is restarted with the new setting.</> : null}
+          </p>
+        )}
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
             Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check). That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
@@ -535,6 +591,18 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOld.join(", ")} is too old to run queued checks; their checks would wait until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
+        <span>
+          <strong>Land approved merges in order (merge train).</strong>{" "}
+          <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
+        </span>
+      </label>
+      {v.train && (d.runnersTooOldForTrain ?? []).length > 0 && (
+        <p style={{ fontSize: 14 }} data-testid="merge-train-old-runner">
+          <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
+        </p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
@@ -545,7 +613,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
@@ -711,7 +779,7 @@ export function RunnerUpdate() {
         {m.on
           ? m.kind === "wrapup"
             ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
-            : `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
+            : `${m.kind === "settings" ? "Applying a runner setting change (for example Check slots). This is not a runner update: the image stays the same" : "Update pending"}: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. ${m.blocking === false ? "It is past its deadline, so new runs are no longer held for it." : "Nothing new starts until it is done."} To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <div>

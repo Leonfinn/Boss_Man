@@ -15,8 +15,9 @@ import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck,
 import type { AlertInput } from "./alert-ladder.js";
 import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
+import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
-import { canStartNow, cantMoveFor, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { agentWipHold, canStartNow, cantMoveFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
@@ -1283,6 +1284,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function askCeoForWork(t: Date, busy: Set<string | null>, roomIn: (companyId: string) => Promise<number>) {
     const mine = alias(tickets, "mine");
+    // A Ready ticket the COMPANY limit refuses (held, and its agent has room under its own cap) is no work the agent can do: the agent counts as idle (BOS-1479).
+    const agentLimit = (await readWipLimits(db)).agent;
+    const heldByCompany = agentLimit == null
+      ? sql`(mine.system_state = 'ready' and mine.wip_held_at is not null)`
+      : sql`(mine.system_state = 'ready' and mine.wip_held_at is not null and (select count(*) from tickets own where own.assignee_agent_id = mine.assignee_agent_id and own.system_state = 'in_progress' and not ${cantMoveFor(alias(tickets, "own"))}) < ${agentLimit})`;
     const idle = await db
       .select({ id: agents.id, companyId: agents.companyId, name: agents.name, title: agents.title, role: agents.role })
       .from(agents)
@@ -1294,7 +1300,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           isNull(agents.retiredAt),
           eq(companies.paused, false),
           // Work that can't move (waiting on an unmerged fix, a plan, a go-live check) doesn't make an agent busy (BOS-1172's rule, BOS-1180).
-          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not ${cantMoveFor(mine)})`,
+          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not ${cantMoveFor(mine)} and not ${heldByCompany})`,
           sql`not exists (select 1 from review_requests owed join tickets reviewed on reviewed.id = owed.ticket_id where owed.reviewer_agent_id = ${agents.id} and owed.status = 'pending' and reviewed.system_state = 'review')`,
         ),
       )
@@ -1354,14 +1360,19 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         top.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (${marks})`);
       }
       if (!top.length && !heldRows.length) continue;
-      const heldLines = heldRows.map(({ ticket, prefix, owner }) => `- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, held behind ${owner}'s cap${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
+      const heldLines: string[] = [];
+      for (const { ticket, prefix, owner } of heldRows) {
+        const scope = (await agentWipHold(db, ticket)).hold?.scope;
+        const why = scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
+      }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
       const body = [
         `Idle agents (no live run, no ready or in-progress ticket they can move, no review owed):`,
         ...people.map((p) => `- ${p.name} (${p.title ?? p.role})`),
         ``,
         ...(top.length ? [`Unassigned tickets, most important first${lineLong ? ` (no-code first: ${waiting} tickets wait to merge)` : ""}:`, ...top, ``] : []),
-        ...(heldLines.length ? [`Assigned, but held behind the assignee's cap for over 30 minutes (Boss Man doesn't move these; move one to an idle agent with assign_ticket if it fits: check its plan, branch and risk first):`, ...heldLines, ``] : []),
+        ...(heldLines.length ? [`Assigned, but held by a WIP limit for over 30 minutes (each line names the limit; Boss Man doesn't move these; move one to an idle agent with assign_ticket if it fits: check its plan, branch and risk first):`, ...heldLines, ``] : []),
         `Give an idle agent its next ticket with assign_ticket and move it to ready; Boss Man then starts it in a free slot. Match the role, keep plan-first and risky work for agents who can carry it, and leave an agent idle if nothing fits. You are asked again only when this list changes.`,
       ].join("\n");
       if (lastAsks[0]?.note?.endsWith(`\n${body}`)) continue;
@@ -1415,6 +1426,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .where(and(eq(wakes.agentId, run.agentId!), eq(wakes.ticketId, ticket.id), inArray(wakes.status, ["queued", "deferred"])))
         .limit(1);
       if (queued) continue;
+      // Waiting on a queued or running check: its result wakes the agent (BOS-1479), so a resume now only finds a check still in line.
+      const [liveCheck] = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.ticketId, ticket.id), eq(checkJobs.kind, "pre_review"), inArray(checkJobs.state, ["queued", "running"]))).limit(1);
+      if (liveCheck) continue;
       if (ticket.monitorAt) await db.update(tickets).set({ monitorAt: null, monitorNote: null }).where(and(eq(tickets.id, ticket.id), eq(tickets.monitorNote, CARRY_ON_NOTE)));
       await opts.wake({
         agentId: run.agentId!,
@@ -1431,7 +1445,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // A whole company with work waiting and nothing finishing (BOS-593). Its cause test asks whether a live run waits in the check line.
   const noProgress = noProgressSweep(db, { alert: opts.alert, isConnected: opts.isConnected, inCheckLine: async (runId) => !!(await busyInCommand(runId))?.checkScript });
   // `run` is a property so a test can stand in for one sweep step and watch the pass around it (BOS-611).
-  type Pass = { holdWakes: number; goalChecks: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
+  type Pass = { holdWakes: number; goalChecks: { raised: number }; portalHolds: { raised: number }; closedCards: number | undefined; featuresWithoutTickets: number; staleBlockers: Awaited<ReturnType<typeof staleBlockers>>; stalledRuns: Awaited<ReturnType<typeof stalledRuns>>; urgentIdle: { woken: number }; missedWork: { woken: number; gaveUp: number }; releasedUnblocked: { released: number; parked: number }; idleSlots: { woken: number }; stalledReviews: { woken: number; gaveUp: number }; neverStartedRuns: number; lostRuns: number; unmergedApprovals: number; signoffCards: Awaited<ReturnType<typeof sweepMissingSignoffs>>; longTicketlessRuns: { raised: number }; ownerReplies: { rewoken: number; standIns: number }; noProgress: { raised: number }; progress: { steered: number; flagged: number; reviewsMoved: number; unproven: number }; mergeJam: { alerted: number; reminded: number; cleared: number }; phoneApprove: Awaited<ReturnType<typeof sweepPhoneApprove>> };
 
   return {
     limits,
@@ -1499,7 +1513,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A feature the roadmap commits to with nothing working on it (BOS-595): the CEO is asked to give
       // it a ticket. Raised after the closer, so a feature whose ticket was linked in the same pass gets none.
       const featuresWithoutTickets = (await opts.featuresWithoutTickets?.().catch(() => 0)) ?? 0;
-      return { holdWakes, noProgress: noProgressResult, goalChecks, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
+      // A feature held off the portal (the security guess or a keep-off mark) is put to the owner once (BOS-1358).
+      // After the closer, so a feature already settled is not asked about.
+      const portalHolds = await raiseHeldPortalCards(db, t).catch(() => ({ raised: 0 }));
+      return { holdWakes, noProgress: noProgressResult, goalChecks, portalHolds, closedCards, featuresWithoutTickets, staleBlockers: staleB, stalledRuns: stalled, urgentIdle: urgentIdleResult, missedWork: missed, releasedUnblocked: releasedResult, idleSlots: idleSlotsResult, stalledReviews: reviews, neverStartedRuns: neverStarted, lostRuns: lost, unmergedApprovals: unmerged, signoffCards, longTicketlessRuns: ticketless, ownerReplies: unanswered, progress, mergeJam: jam, phoneApprove };
     },
   };
 }

@@ -335,7 +335,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // The approval clears, and an owner to-do takes its place on the queue.
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("answered");
     const [todo] = await c.todos();
-    expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Done, it's applied", "A step failed"], recommendedOption: "Done, it's applied" });
+    // A server update offers to quiet the machine first (BOS-420).
+    expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Quiet the machine first", "Done, it's applied", "A step failed"], recommendedOption: "Quiet the machine first" });
     expect(todo!.context).toMatchObject({ type: "owner_todo", ofDecisionId: d!.id, target: "server", commit: B, fromCommit: A });
     const steps = (todo!.context as { steps: string[] }).steps;
     expect(steps.length).toBeGreaterThan(1);
@@ -1249,6 +1250,66 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       // Unknown blue/green layout: the ready check falls back to words.
       expect(seen[3]!.join("\n")).toContain("can't tell which server copy is live");
     });
+  });
+});
+
+// BOS-420: the Deploy button and the hand-apply to-do go through the quiet-machine wait (deploy-wait.ts).
+describe("self-deploy waits for a quiet machine (BOS-420)", () => {
+  const headroom = (c: Awaited<ReturnType<typeof setup>>, availableMb: number) =>
+    writeFile(path.join(c.dir, "outbox", "headroom.json"), JSON.stringify({ version: 1, writtenAt: new Date().toISOString(), availableMb, needMb: 4096 }));
+  const waitRow = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(settings).where(eq(settings.key, "deploy_wait")))[0]?.value as { phase: string; origin: string; decisionId: string } | undefined;
+
+  it("Deploy on a machine short of memory writes no request; the wait sends it once memory is free", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    expect(await waitRow(c)).toMatchObject({ phase: "waiting", origin: "approve", decisionId: d!.id });
+    expect((await c.req("GET", "/api/self-deploy/wait")).json()).toMatchObject({ on: true, phase: "waiting", quiet: { ready: false } });
+
+    await headroom(c, 8192);
+    await c.deployWait.step();
+    // The request, plus the checked-merges list BOS-753 writes beside every server request.
+    expect((await readdir(path.join(c.dir, "inbox"))).sort()).toEqual(["checked", "request.json"]);
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ id: d!.id, commit: B });
+    expect((await waitRow(c))?.phase).toBe("sent");
+  });
+
+  it("the owner can cancel a waiting update from Settings; nothing reaches the host", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    expect((await c.req("POST", "/api/self-deploy/wait/cancel")).json()).toEqual({ cancelled: true });
+    expect(await waitRow(c)).toBeUndefined();
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+  });
+
+  it("Quiet the machine first on a hand-apply to-do starts a hand wait, keeps the to-do open and shows how quiet it is", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...LAYOUT });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    expect((await c.req("POST", `/api/decisions/${todo!.id}/answer`, { answer: "Quiet the machine first" })).statusCode).toBe(200);
+    expect(await waitRow(c)).toMatchObject({ phase: "waiting", origin: "hand", decisionId: d!.id });
+    const [still] = await c.todos();
+    expect(still!.id).toBe(todo!.id);
+    expect((still!.context as { quiet?: { ready: boolean; freeMb: number } }).quiet).toMatchObject({ ready: false, freeMb: 1024 });
+    // Nothing is ever sent for a hand-applied update.
+    await headroom(c, 8192);
+    await c.deployWait.step();
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    const [ready] = await c.todos();
+    expect((ready!.context as { quiet?: { ready: boolean } }).quiet?.ready).toBe(true);
+    expect((await c.db.select().from(notifications)).some((n) => n.title === "Ready: the machine is quiet")).toBe(true);
   });
 });
 

@@ -4,10 +4,15 @@ import { usePoll } from "../hooks";
 
 type Tree = Array<{ id: string; title: string; status: string; milestones: Array<{ id: string; title: string; targetDate: string | null }> }>;
 type OpenTicket = { id: string; title: string; state: string; project: string };
+type Log = { data: Links | null; error: { message: string } | null; reload: () => void };
+
+/** The ticket's dependencies, fetched once by the page so its Details row can count them and this panel can show them (BOS-1195). */
+export const useTicketLinks = (ticketId: string) => usePoll((signal) => api<Links>(`/api/tickets/${ticketId}/links`, { signal }), 30_000, `links-${ticketId}`);
 
 /** A ticket's milestone, what it waits on and what waits on it. */
-export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; onChanged: () => void; bare?: boolean }) {
-  const links = usePoll((signal) => api<Links>(`/api/tickets/${t.id}/links`, { signal }), 30_000, `links-${t.id}`);
+export function TicketLinks({ t, onChanged, bare = false, links: given }: { t: TicketDetail; onChanged: () => void; bare?: boolean; /** The page's own request, when it has one (BOS-1195). */ links?: Log }) {
+  const own = usePoll((signal) => api<Links>(`/api/tickets/${t.id}/links`, { signal }), 30_000, `links-${t.id}`);
+  const links = given ?? own;
   const feats = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${t.companyId}/features`, { signal }), 120_000, `feats-${t.companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${t.companyId}/objectives`, { signal }), 120_000, `tree-${t.companyId}`);
   const [candidates, setCandidates] = useState<OpenTicket[] | null>(null);
@@ -30,7 +35,7 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
   const objectives = (tree.data ?? []).filter((o) => o.milestones.length);
 
   return (
-    <section className={bare ? undefined : "card"} aria-labelledby={bare ? undefined : "links-h"} aria-label={bare ? "Roadmap, feature and dependencies" : undefined} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <section className={bare ? undefined : "card"} aria-labelledby={bare ? undefined : "links-h"} aria-label={bare ? "Roadmap and dependencies" : undefined} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {!bare && (
         <h2 id="links-h" style={{ fontSize: 17, fontWeight: 600 }}>
           Roadmap, feature and dependencies

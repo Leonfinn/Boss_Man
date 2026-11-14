@@ -50,6 +50,15 @@ test('a listed IP is blocked, an unlisted one and a longer neighbour are not', (
   assert.ok(!out.includes(listedIp))
 })
 
+test('a listed hit names no file, line or kind, so an agent cannot probe the list with it (BOS-1390)', () => {
+  const denylist = parseDenylist(`ip\t${listedIp}\nhost\tnas-box\n`)
+  const out = format(run([`ssh root@${listedIp}`, 'ping nas-box'], { denylist }))
+  assert.match(out, /a listed private detail was found in this change/)
+  assert.ok(!out.includes(listedIp) && !out.includes('nas-box'))
+  assert.ok(!out.includes('listed-private'))
+  assert.ok(!out.includes('src/a.ts') && !out.includes(':1') && !out.includes(':2'))
+})
+
 test('listed host, path, email (case-insensitive), CIDR and prefix entries', () => {
   const denylist = parseDenylist('host\tnas-box\npath\t/mnt/tank1\nemail\tme@personal.test\nip\t198.51.100.0/24\nip\t203.0.113.\n# comment\n')
   for (const l of ['ping NAS-BOX', 'cd /mnt/tank1/apps', 'mail Me@Personal.test', 'ip 198.51.100.200', 'ip 203.0.113.9']) {
@@ -197,6 +206,6 @@ test('e2e: the list can come on stdin (--list-stdin)', () => {
     g('checkout', '-qb', 'work'); writeFileSync(join(dir, 'b.txt'), `host ${listedIp}\n`); g('add', '.'); g('commit', '-qm', 'w')
     let code = 0, out = ''
     try { out = execFileSync('node', [scanner, 'main', '--list-stdin'], { cwd: dir, encoding: 'utf8', input: `ip\t${listedIp}\n` }) } catch (e) { code = e.status; out = String(e.stdout) }
-    assert.equal(code, 1); assert.match(out, /listed-private-ip at b\.txt:1/); assert.ok(!out.includes(listedIp))
+    assert.equal(code, 1); assert.match(out, /BLOCKED a listed private detail was found in this change/); assert.ok(!out.includes(listedIp)); assert.ok(!out.includes('b.txt'))
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

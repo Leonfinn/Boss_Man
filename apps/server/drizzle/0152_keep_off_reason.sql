@@ -1,0 +1,1 @@
+ALTER TABLE "features" ADD COLUMN "keep_off_reason" text;

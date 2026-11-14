@@ -91,6 +91,10 @@ has() { grep -Eq "$1" <<<"$changed"; }
 #   "<package dir> <test file under that package> <path prefix> [<path prefix>...]"
 path_reads=(
   "apps/server test/owner-control-list.test.ts apps/web/src/pages/ apps/web/src/components/ packages/shared/src/owner-controls.ts"
+  # DR-050/BOS-972: the image-holds-no-Anthropic test reads the Dockerfile and package.json by path; the pack
+  # test reads apps/runner/claude-pack by path. Either changing must re-run its test.
+  "apps/runner test/no-anthropic-code.test.ts apps/runner/Dockerfile apps/runner/package.json"
+  "apps/runner test/claude-pack.test.ts apps/runner/claude-pack/"
 )
 path_read_tests() { # path_read_tests <package dir>: the path-reading tests of that package whose paths the branch changed
   local d=$1 f p hit

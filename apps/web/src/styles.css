@@ -265,6 +265,55 @@ p { margin: 0; }
 .segmented .chip { min-height: 34px; padding: 0 14px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
 .segmented .chip[aria-pressed="true"] { background: var(--raise); color: var(--head); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
 .state-filter { flex-wrap: wrap; align-self: flex-start; }
+/* The Filter button, its chips and its panel (BOS-1194). */
+.search-field { position: relative; display: inline-flex; align-items: center; width: 280px; max-width: 100%; }
+.search-field > svg { position: absolute; left: 10px; color: var(--muted); pointer-events: none; }
+.board-bar input.board-search { width: 100%; padding-left: 34px; }
+.filter-wrap { position: relative; display: inline-flex; max-width: 100%; }
+.filter-btn { display: inline-flex; align-items: center; gap: 8px; background: transparent; }
+.filter-count { min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 12px; line-height: 20px; text-align: center; }
+.filter-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; min-height: 32px; padding: 0 4px 0 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 13px; }
+.filter-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.filter-chip button { width: 24px; height: 24px; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.filter-chip button:hover { background: rgba(255, 255, 255, 0.12); }
+.filter-panel { position: absolute; top: calc(100% + 8px); left: 0; z-index: 30; width: 340px; max-width: calc(100vw - 24px); max-height: calc(100vh - 120px); overflow-y: auto; box-sizing: border-box; padding: 16px; border-radius: 12px; border: 1px solid var(--line-strong); background: var(--card); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 14px; }
+.filter-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.filter-head h2 { margin: 0; font-size: 15px; }
+.filter-body { display: flex; flex-direction: column; gap: 14px; }
+/* A filter group is a column with its label flush left, even though it may be a <label>, which the bar's own rule
+   lays out as a centred row (BOS-1194). */
+.board-bar label.filter-group, .filter-group { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; flex-wrap: nowrap; min-width: 0; max-width: 100%; }
+.filter-group select { align-self: stretch; width: 100%; max-width: 100%; min-height: 40px; text-overflow: ellipsis; }
+.filter-group .segmented { align-self: flex-start; }
+.filter-label { font-size: 13px; color: var(--muted); text-align: left; }
+.filter-note { margin: 0; font-size: 13px; }
+.filter-foot { font-size: 12px; }
+.switch { position: relative; width: 44px; height: 26px; padding: 0; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--field); cursor: pointer; }
+.switch .switch-knob { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: var(--muted); transition: transform 0.15s; }
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch.on .switch-knob { transform: translateX(18px); background: #fff; }
+.switch:disabled { opacity: 0.5; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { .switch .switch-knob { transition: none; } }
+.filter-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.55); }
+@media (max-width: 640px) {
+  .board-bar > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; width: 100%; }
+  .board-bar .search-field { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+  .board-bar input.board-search { width: 100%; min-height: 44px; font-size: 16px; }
+  .board-bar > div > .btn { min-height: 44px; }
+  .filter-wrap { display: block; }
+  .filter-btn { min-height: 44px; }
+  .filter-panel.sheet { position: fixed; z-index: 50; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-width: none; max-height: 85vh; border-radius: 16px 16px 0 0; border-bottom: 0; }
+  .filter-handle { align-self: center; width: 40px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+  .filter-panel select, .filter-panel .segmented .chip { min-height: 44px; }
+  /* The switch is a 44 px tap target on a phone, and keeps its 44×26 look by centring the track inside it. */
+  .filter-panel .switch { height: 44px; width: 64px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; }
+  .filter-panel .switch::before { content: ""; position: absolute; width: 44px; height: 26px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--field); }
+  .filter-panel .switch.on::before { background: var(--accent); border-color: var(--accent); }
+  .filter-panel .switch .switch-knob { left: 12px; z-index: 1; }
+  .filter-panel .switch.on .switch-knob { transform: translateX(18px); }
+  .filter-foot { position: sticky; bottom: -16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px 0 4px; background: var(--card); }
+  .filter-foot .btn { min-height: 44px; }
+}
 .strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border-radius: 10px; background: var(--amber-soft); border: 1px solid var(--amber-line); color: var(--amber-ink); text-decoration: none; }
 .strip:hover { color: var(--amber-ink); }
 .strip > span { display: flex; align-items: center; gap: 12px; }
@@ -512,6 +561,60 @@ details > summary { cursor: pointer; font-size: 14px; }
   .chat-log { padding: 14px; }
   .chat-form { padding: 0 14px 14px; }
 }
+
+/* Thinking trace (BOS-1368, design BOS-1367): the collapsible steps above an agent reply. */
+.chat-msg.assistant.has-trace, .chat-msg.assistant.live { width: min(640px, 90%); }
+/* The bubble rule (.chat-msg.assistant p) must not reach text inside the trace. */
+.chat-msg .trace p { background: none; padding: 0; border-radius: 0; }
+.chat-msg.live { align-self: flex-start; }
+.trace { display: flex; flex-direction: column; gap: 2px; margin-bottom: 2px; }
+.trace-head { display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; max-width: 100%; min-height: 32px; margin-left: -6px; padding: 4px 8px 4px 6px; border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: 13px; line-height: 1.35; text-align: left; }
+.trace-head:hover { background: var(--raise); color: var(--ink); }
+.trace-head .lead { flex: none; width: 16px; height: 16px; color: #6b7787; }
+.trace-head .lead.spin { color: var(--link); animation: pulse 1.6s ease-in-out infinite; }
+.trace-head .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-head .words .now { color: var(--ink); }
+.trace-head .chev { flex: none; width: 14px; height: 14px; transition: transform 120ms ease-out; }
+.trace-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.trace-head.stopped { color: var(--amber-ink); }
+.trace-steps { list-style: none; margin: 2px 0 6px 2px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line-strong); display: flex; flex-direction: column; gap: 1px; }
+.step-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto 14px; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--ink); font-size: 14px; line-height: 1.35; text-align: left; }
+.step-row:hover, .step-row[aria-expanded="true"] { background: var(--raise); }
+.step-row .ico { width: 16px; height: 16px; }
+.step-row .sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-row .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* On the raised row, --muted is only 3.9:1; --grey-ink is 5.5:1. */
+.step-row:hover .time, .step-row[aria-expanded="true"] .time { color: var(--grey-ink); }
+.step-row .chev { width: 14px; height: 14px; color: var(--muted); transition: transform 120ms ease-out; }
+.step-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.step-row.plain { cursor: default; } .step-row.plain:hover { background: none; }
+.k-think .ico { color: var(--purple-ink); }
+.k-look .ico { color: var(--type-ink); }
+.k-do .ico { color: var(--green-ink); }
+.k-run .ico { color: var(--amber-ink); }
+.k-live .ico { color: var(--link); animation: pulse 1.6s ease-in-out infinite; }
+.k-fail .ico { color: var(--red-ink); }
+.step-flag { white-space: nowrap; font-size: 12px; font-weight: 500; padding: 1px 6px; border-radius: 6px; background: var(--red-soft); color: var(--red-ink); }
+.step-flag.no { background: var(--amber-soft); color: var(--amber-ink); }
+.step-detail { margin: 2px 0 8px 34px; padding: 10px 12px; border-radius: 8px; background: var(--field); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.step-detail .label { display: block; margin-bottom: 4px; }
+.step-detail pre { margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.step-detail .reason { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.step-detail .clip { max-height: 9em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.step-detail .reason.clip { max-height: 7.75em; }
+.step-detail .cut { font-size: 12px; color: var(--muted); }
+.trace .more { align-self: flex-start; display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; background: none; border: 0; color: var(--link); padding: 0; }
+.trace-steps > li > .more { margin-left: 34px; }
+.trace .gone { font-size: 13px; color: var(--muted); padding: 6px 8px; }
+@media (pointer: coarse) { .trace-head, .step-row, .trace .more { min-height: 44px; } }
+@media (max-width: 760px) {
+  .chat-msg.assistant.has-trace, .chat-msg.assistant.live { width: 100%; max-width: 100%; }
+  .step-row { grid-template-columns: 16px minmax(0, 1fr) auto 14px; gap: 8px; padding: 4px 6px; }
+  .step-row .time { display: none; }
+  .step-detail { margin-left: 4px; }
+  .trace-steps > li > .more { margin-left: 4px; }
+}
+@media (prefers-reduced-motion: reduce) { .trace-head .chev, .step-row .chev, .trace-head .lead.spin, .k-live .ico { transition: none; animation: none; } }
 
 /* ---------- Tabs ---------- */
 /* Horizontal only, for the same reason as `.board-scroll` (BOS-554): the wheel over the tabs
@@ -955,7 +1058,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .ticket-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .ticket-props { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; }
 .ticket-props .section-label { margin: 6px 0 0; }
-.ticket-props dl { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 10px; margin: 0; align-items: start; font-size: 14px; }
+.ticket-props dl { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px 10px; margin: 0; align-items: start; font-size: 14px; }
 .ticket-props dt { color: var(--muted); padding-top: 6px; }
 .ticket-props dd { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding-top: 4px; }
 .ticket-props dd select { align-self: stretch; }
@@ -993,6 +1096,55 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .fold[open] > summary::before { content: "▾"; }
 .fold-title { font-size: 16px; font-weight: 600; }
 .fold-body { padding: 0 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+
+/* ---------- Ticket page: field help behind "?" (BOS-1195) ---------- */
+/* A 22px circle after the label; on touch and a phone its tap area is 44px without the circle growing. */
+.ticket-props dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.field-help { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: none; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1; cursor: pointer; }
+.field-help:hover { color: var(--ink); border-color: var(--muted); }
+.field-help[aria-expanded="true"] { color: var(--ink); border-color: var(--link); }
+.field-help::after { content: ""; position: absolute; inset: 0; }
+@media (pointer: coarse), (max-width: 640px) {
+  .field-help::after { inset: -11px; }
+}
+/* The pop-over opens under the field's row, right-aligned to the panel, and spills left over the main column
+   so a wide help (Risk's levels) has room. On a phone it spans the panel. */
+.help-pop { position: absolute; right: 0; z-index: 20; width: min(380px, 100vw - 40px); margin-top: 6px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raise, var(--card)); color: var(--ink); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); font-size: 13px; line-height: 1.5; text-align: left; }
+.ticket-props dd { position: relative; }
+.help-pop.above { margin-top: 0; margin-bottom: 6px; }
+.help-pop-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.help-pop-title { font-weight: 600; color: var(--head, var(--ink)); }
+.help-pop-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.help-pop-close:hover { color: var(--ink); }
+.help-pop-body p { margin: 0 0 6px; }
+.help-pop-body p:last-child { margin-bottom: 0; }
+.help-pop-body a { display: inline-block; }
+.risk-levels dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.risk-levels dt { font-weight: 600; }
+.risk-levels dd { margin: 0; }
+@media (pointer: coarse), (max-width: 640px) {
+  .help-pop-close { width: 44px; height: 44px; }
+}
+
+/* ---------- Ticket page: one Details card (BOS-1195) ---------- */
+.details-card { padding: 0; overflow: hidden; }
+.detail-row + .detail-row { border-top: 1px solid var(--line); }
+.detail-row > summary { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 18px; cursor: pointer; list-style: none; }
+.detail-row > summary::-webkit-details-marker { display: none; }
+/* A CSS chevron rather than ▸, so it looks the same in every browser (P12), and turns when open. */
+.detail-row > summary::before { content: ""; flex: none; width: 7px; height: 7px; margin-right: 2px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 0.15s; }
+.detail-row[open] > summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { .detail-row > summary::before { transition: none; } }
+.detail-title { font-size: 16px; font-weight: 600; }
+.detail-count { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.detail-count.amber { color: var(--amber-ink); }
+.detail-body { padding: 0 18px 16px 40px; display: flex; flex-direction: column; gap: 12px; }
+.details-card .fixes-live { margin: 0; padding: 10px 18px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  /* A thumb needs 44px; the body lines up under the title with less indent. */
+  .detail-row > summary { min-height: 44px; }
+  .detail-body { padding-left: 18px; }
+}
 .activity { padding: 0; display: flex; flex-direction: column; }
 .activity > h2 { font-size: 17px; font-weight: 600; padding: 16px 18px 0; }
 .activity-feed { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; max-height: 70vh; overflow-y: auto; }
@@ -1265,6 +1417,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
 
+/* ---------- Page intros: one lead line and a "More about this" fold (P7, BOS-1278) ---------- */
+/* The fold draws its own chevron (P12) rather than the browser's ▸/▾, which some phones did not show. */
+.more-about { display: flex; flex-direction: column; gap: 4px; }
+.more-about-lead { margin: 0; font-size: 14px; }
+.more-about-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; min-height: 32px; padding: 2px 4px; margin: 0 -4px; background: none; border: 0; border-radius: 6px; font: inherit; font-size: 14px; color: var(--link); text-align: left; }
+.more-about-toggle:hover { text-decoration: underline; }
+.more-about-chevron { width: 6px; height: 6px; flex: none; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 0.15s; }
+.more-about-toggle[aria-expanded="true"] .more-about-chevron { transform: rotate(45deg); }
+.more-about-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+@media (pointer: coarse) {
+  .more-about-toggle { min-height: 44px; }
+}
 /* Shared loading mark (BOS-1276). Three columns rise in turn; still under reduced motion. */
 .loader { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; animation: loader-in 0.2s ease-out; }
 .loader.sm { gap: 6px; font-size: 13px; }

@@ -861,7 +861,8 @@ describe("server-owned check queue (BOS-316)", () => {
       await approve(c);
       if (i < 2) await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
     }
-    const notes = (await c.db.select().from(wakes)).map((w) => w.note ?? "");
+    // The third failure also wakes the CEO about repeated merge failures (BOS-1461): this is about the author's wakes.
+    const notes = (await c.db.select().from(wakes)).filter((w) => w.agentId !== c.ceo.id).map((w) => w.note ?? "");
     expect(notes.filter((n) => n.includes("take a different approach"))).toHaveLength(1);
     expect(notes.at(-1)).toContain("This is the 3rd time the same failure has come back.");
   });
