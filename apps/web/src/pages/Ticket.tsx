@@ -856,7 +856,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
             <span>
-              Urgent <span className="muted">(always runs through the subscription quota hold)</span>
+              Urgent<span className="muted">: runs even when the subscription is close to its limit</span> <code className="mono">quota hold</code>
             </span>
           </label>
 

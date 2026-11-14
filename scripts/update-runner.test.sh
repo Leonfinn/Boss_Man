@@ -54,7 +54,7 @@ logged "exec launcher-1 node dist/main.js recreate-all" || fail "--now did not r
 # No deployer folder (manual run): tells the owner where to start the drain, recreates nothing.
 saved="$BOSSMAN_DEPLOYER"; unset BOSSMAN_DEPLOYER
 run
-grep -q "Settings > Server and runner > Updates > Runner update" "$T/out" || fail "no manual instructions"
+grep -q "Settings > Server and runner > Updates > Update the runners" "$T/out" || fail "no manual instructions"
 logged "recreate-all" && fail "manual run recreated the runners"
 # ...unless .env names the deployer folder, which is how a hand run finds it.
 echo "BOSSMAN_DEPLOYER=$saved" >.env
