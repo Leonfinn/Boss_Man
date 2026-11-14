@@ -11,7 +11,9 @@
 //   check_queued   a merge check started waiting for a slot (check, way: gate | merged | queue, jobId)
 //   check_started  it got a slot and started running
 //   check_ended    it ended: passed true/false, or null when it never finished (killed, runner gone, stuck)
-//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked, with carried/note/decisionId
+//   restacked      merge train (BOS-1366): prepared again on a new base (why: ahead_left | ahead_changed | main_moved)
+//   rerun          merge train: a failed check that stood ran once more on the same tree (passed: true is a flaky pass)
+//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked | waits_on | train (waiting for a seat), with carried/note/decisionId
 //   hold_ended     the hold ended (hold, since, heldMs); written by the next event that moves the line (a check,
 //                  a merge, leaving, another hold), so a hold always closes. A retry ("attempt") or a repeat
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
@@ -32,13 +34,17 @@ import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
 
-export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on";
+export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train";
 export type CheckWay = "gate" | "merged" | "queue";
 
 export type MergeLineEvent =
   | { event: "approved"; by: string; reviewerAgentId?: string | null }
   | { event: "attempt"; by: string }
-  | { event: "check_queued"; check: string; way: CheckWay; jobId?: string; reused?: boolean }
+  | { event: "check_queued"; check: string; way: CheckWay; jobId?: string; reused?: boolean; train?: { place: number; ahead: number } }
+  /** Merge train (BOS-1366): prepared again on a new base. ahead_left / ahead_changed / main_moved. */
+  | { event: "restacked"; why: "ahead_left" | "ahead_changed" | "main_moved" | "cap"; restacks: number }
+  /** Merge train: a failed check that stood got its one re-run on the same tree; `passed` says how the re-run went (a flaky pass). */
+  | { event: "rerun"; check: string; passed: boolean | null; failedJobId?: string }
   | { event: "check_started"; check: string; way: CheckWay; jobId?: string }
   | { event: "check_ended"; check: string; way: CheckWay; jobId?: string; passed: boolean | null; why?: string }
   | { event: "hold_started"; hold: HoldReason; note?: string; carried?: Array<{ ticketId: string; title: string }>; decisionId?: string | null }
@@ -49,7 +55,12 @@ export type MergeLineEvent =
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {
   approved: (e) => `Merge line: approved by ${e.by}`,
   attempt: (e) => `Merge line: merge attempt started (${e.by})`,
-  check_queued: (e) => `Merge line: check waiting for a slot${e.reused ? " (reused an earlier result)" : ""}`,
+  check_queued: (e) => `Merge line: check waiting for a slot${e.reused ? " (reused an earlier result)" : ""}${e.train ? ` (merge train, place ${e.train.place})` : ""}`,
+  restacked: (e) =>
+    e.why === "cap"
+      ? `Merge line: left the merge train after ${e.restacks} restacks; it tries again later`
+      : `Merge line: merge train restacked (${e.why === "main_moved" ? "main moved outside the train" : e.why === "ahead_left" ? "a ticket ahead left the train" : "a ticket ahead was prepared again"})`,
+  rerun: (e) => `Merge line: failed check run once more${e.passed === true ? ": passed (a flaky failure)" : e.passed === false ? ": failed again" : ""}`,
   check_started: () => "Merge line: check started",
   check_ended: (e) => `Merge line: check ${e.passed === true ? "passed" : e.passed === false ? "failed" : "did not finish"}`,
   hold_started: (e) => `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`,

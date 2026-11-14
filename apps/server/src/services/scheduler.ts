@@ -4,9 +4,10 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
+import { fenceHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
@@ -23,7 +24,7 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -121,7 +122,8 @@ const LOOP_EXCHANGES = 4;
 
 /** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
 export const CARRY_ON_MS = 15 * 60_000;
-export const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
+export { CARRY_ON_NOTE } from "./check-wording.js";
+import { CARRY_ON_NOTE } from "./check-wording.js";
 
 /**
  * True while the agent has its own check job queued or running on the ticket (request_check, DR-003).
@@ -320,11 +322,11 @@ export function schedulerService(
       .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
   }
 
-  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). */
+  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). A reading taken before its reset is empty, so it never holds (BOS-1409). */
   function holdingWindows(source: typeof fundingSources.$inferSelect, samples: (typeof quotaSamples.$inferSelect)[], t: Date) {
     const off = new Set(source.quotaDisabledWindows ?? []);
     const threshold = source.quotaHoldAt ?? limits.quotaHoldAt;
-    return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
+    return samples.filter((s) => !off.has(s.window) && !windowHasReset(s.resetsAt, t) && s.utilization >= threshold);
   }
 
   /**
@@ -736,7 +738,8 @@ export function schedulerService(
 
   /** The company's tool servers this agent will actually get: the runner drops a server whose token secret isn't granted to it. */
   async function toolServersFor(agent: typeof agents.$inferSelect) {
-    const servers = await db.select({ name: mcpServers.name, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, agent.companyId)).orderBy(mcpServers.name);
+    // A server whose secret is the git login is never sent (BOS-373).
+    const servers = (await db.select({ name: mcpServers.name, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, agent.companyId)).orderBy(mcpServers.name)).filter((s) => !s.secretEnv || !isDaemonOnlySecret(s.secretEnv));
     if (!servers.some((s) => s.secretEnv)) return servers.map((s) => s.name);
     const grants = await db.select({ id: secretGrants.id, envName: secretGrants.envName }).from(secretGrants).where(and(eq(secretGrants.companyId, agent.companyId), isNull(secretGrants.deployTargetId)));
     const limits = grants.length ? await db.select().from(secretGrantAgents).where(inArray(secretGrantAgents.grantId, grants.map((g) => g.id))) : [];
@@ -1085,7 +1088,8 @@ export function schedulerService(
           ticketId: w.ticketId,
         });
     }
-    const toolServers = !withTools ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
+    // A tool server saved with the git login as its secret (before BOS-373 refused it) is left out: the token would reach the agent's harness.
+    const toolServers = !withTools ? [] : (await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId))).filter((s) => !s.secretEnv || !isDaemonOnlySecret(s.secretEnv));
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
@@ -1113,7 +1117,8 @@ export function schedulerService(
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
       ...(skillSet.length ? { skills: skillSet } : {}),
       ...(toolServers.length ? { mcpServers: toolServers } : {}),
-      // The company's fence setting (BOS-325); a runner that can't fence is not asked, and its run goes on unfenced.
+      // The company's fence setting (BOS-325). A runner that can't fence only gets here for an owner-chosen Off or a
+      // board-tools-only run (the fence hold in tickOnce, BOS-373), so it is not asked.
       ...(company.fenceMode !== "off" && deps.runners.can(runner.id, "fence") ? { fence: true } : {}),
     });
     if (!sent) {
@@ -1678,7 +1683,12 @@ export function schedulerService(
       // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
       // may swap at any moment, so chats are held too, exactly as before.
       let pass = queue;
-      if (await getHold(db)) {
+      const hold = await getHold(db);
+      if (hold && !holdBlocksStarts(hold, t)) {
+        // BOS-1414: the drain is past its deadline and waits on the owner's answer. That is not a swap under way, so
+        // nothing is held for it; wakes it held earlier are released here with the reason shown, and launch below.
+        await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), eq(wakes.statusReason, HOLD_REASON)));
+      } else if (hold) {
         const work = await liveWorkRuns(db);
         // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
         const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];
@@ -1729,6 +1739,28 @@ export function schedulerService(
       }
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
       const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
+      // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
+      // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
+      const fenceRows = await db
+        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, runnerId: runners.id, level: sql<string | null>`${runners.sandbox}->>'level'` })
+        .from(companies)
+        .innerJoin(runners, eq(runners.companyId, companies.id));
+      const fenceHeld = new Map<string, string>();
+      for (const r of fenceRows) {
+        if (!deps.runners.isConnected(r.runnerId)) continue;
+        const why = fenceHold(r, r.level);
+        if (why) fenceHeld.set(r.companyId, why);
+      }
+      // A board-tools-only run (the CEO's or Scrum Master's chat, the PA) has no file or shell tools, so the fence hold
+      // doesn't apply to it. Decided by the same runCapabilities() table launch() uses, so a worker's chat (full tools
+      // since BOS-1300) is held like its ticket work.
+      const heldAgents = fenceHeld.size
+        ? new Map((await db.select({ id: agents.id, role: agents.role, duty: agents.duty }).from(agents).where(inArray(agents.companyId, [...fenceHeld.keys()]))).map((a) => [a.id, a]))
+        : new Map<string, { id: string; role: string; duty: string | null }>();
+      const boardToolsOnly = (w: (typeof pass)[number]) => {
+        const a = heldAgents.get(w.agentId);
+        return !!a && runCapabilities(a, w.reason === CHAT_REASON && !!deps.chat).boardToolsOnly;
+      };
 
       // Fair share (BOS-582, DR-032): a company with no work run going has its best wake looked at
       // first, so a busy company's steady stream of wakes can't hold it off the server for ever.
@@ -1753,6 +1785,11 @@ export function schedulerService(
         }
         if (pausedAgents.has(w.agentId)) {
           await wait("agent paused");
+          continue;
+        }
+        const fenceWhy = fenceHeld.get(w.companyId);
+        if (fenceWhy && !boardToolsOnly(w)) {
+          await wait(fenceWhy);
           continue;
         }
         // A wake that outlived its ticket is a replay of an old note or nudge, and starting it wakes its

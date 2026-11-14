@@ -11,6 +11,7 @@
   "nav": [
     { "key": "guides", "label": "Guides", "href": "/guides/" },
     { "key": "roadmap", "label": "Roadmap", "href": "{{portal}}", "portal": true },
+    { "key": "about", "label": "About", "href": "/about" },
     { "key": "faq", "label": "FAQ", "href": "/faq" },
     { "key": "github", "label": "GitHub", "href": "{{repo}}" }
   ]

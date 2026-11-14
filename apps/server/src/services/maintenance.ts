@@ -13,6 +13,16 @@ import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
 
 export const MAINTENANCE_KEY = "maintenance";
+
+/**
+ * The words a failed swap's note carries (BOS-382), shared with runner-report.ts, which reads them back to pick the
+ * panel's wording. Reword them here and both sides move together.
+ */
+export const SWAP_PUT_BACK = "put back on the previous runner image";
+export const SWAP_PUT_BACK_RUNNING = `${SWAP_PUT_BACK} and is running that`;
+export const SWAP_PUT_BACK_FAILED = "going back to the previous runner image failed";
+/** How long a recreated runner has to dial in (the drain's reconnect wait), and how long it still counts as mid-swap. */
+export const SWAP_WINDOW_MS = 5 * 60_000;
 /** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
 export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
 /** The same, for a runner restart that applies new runner settings (BOS-594). */
@@ -88,6 +98,20 @@ export async function getHold(db: Db): Promise<Hold | null> {
  */
 export const runnerCardHold = (hold: Hold | null): Hold | null => (hold && hold.kind !== "wrapup" ? hold : null);
 
+/**
+ * Whether the hold keeps new runs from starting right now (BOS-1414). Only while a drain is really under way: before
+ * its deadline, or once the owner chose "Stop the remaining runs and update now". Past the deadline the owner has been
+ * asked what to do; until they answer (Keep waiting gives a new deadline), the drain is stalled, not under way, and
+ * background agents must keep working overnight. A wrap-up the owner asked for holds until they cancel it.
+ */
+export const holdBlocksStarts = (hold: Hold | null, at: Date): boolean => {
+  if (!hold) return false;
+  if (hold.kind === "wrapup" || hold.wrapSince || hold.force) return true;
+  return at < new Date(hold.deadline);
+};
+/** What a wake released from a stalled drain shows in place of "update pending". */
+export const HOLD_RELEASED_REASON = "released: the runner update waited past its deadline and is waiting for the owner's answer; new runs are not held for it";
+
 export type FleetRunner = { slug: string; companyId: string | null; current: boolean | undefined };
 
 export type MaintenanceDeps = {
@@ -121,7 +145,7 @@ export type MaintenanceDeps = {
 
 export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   const now = deps.now ?? (() => new Date());
-  const reconnectMs = deps.reconnectMs ?? 5 * 60_000;
+  const reconnectMs = deps.reconnectMs ?? SWAP_WINDOW_MS;
   const swapTries = Math.max(1, deps.swapTries ?? 3);
   const swapRetryMs = deps.swapRetryMs ?? 30_000;
 
@@ -132,9 +156,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     try {
       await deps.rollback(slug); // leader-only
       deps.log?.(`drain: ${slug} is back on the previous runner image`);
-      return `${tried}, so it was put back on the previous runner image and is running that`;
+      return `${tried}, so it was ${SWAP_PUT_BACK_RUNNING}`;
     } catch (err) {
-      return `${tried}, and going back to the previous runner image failed too (${(err as Error).message}). Press Start runner in Settings > Runner`;
+      return `${tried}, and ${SWAP_PUT_BACK_FAILED} too (${(err as Error).message}). Press Start runner in Settings > Runner`;
     }
   }
   const trigger = deps.dir && path.join(deps.dir, "inbox", "drain.json");
@@ -287,7 +311,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Nothing new starts anywhere until you answer.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n} run${n === 1 ? " is" : "s are"} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}. Stop them and update now (crash recovery restarts them on the new runner, which can repeat work), keep waiting, or cancel the update? Until you answer, new runs are not held for this update, so the runs going keep working; it goes ahead by itself once a company has no run left.`,
         options,
         recommendedOption: options[1]!,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
@@ -394,7 +418,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const active = await activeByCompany(true);
       const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, last };
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows

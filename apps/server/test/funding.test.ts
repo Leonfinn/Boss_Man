@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { windowHasReset } from "@boss-man/shared";
+import { quotaSamples } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -70,6 +73,21 @@ describe("subscription quota from the Claude adapter", () => {
     const week = status.quota.find((q: { window: string }) => q.window === "seven_day");
     expect(status.quota).toHaveLength(2);
     expect(week).toMatchObject({ utilization: 1, status: "rejected", overageInUse: true });
+  });
+
+  // BOS-1409: the card needs the reading's own time to tell whether it was taken before its reset. The
+  // status keeps reporting the stored figure; the shared rule (windowHasReset) reads it as empty.
+  it("reports each window's reading time, so a reading from a window that has reset reads as empty", async () => {
+    const sub = (await post("/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json();
+    // A week whose reset has already passed, with the last reading taken before it: the owner's case
+    // after a weekly reset (BOS-1409). The stored figure stays; the shared rule reads it as empty.
+    const resets = Math.floor(Date.now() / 1000) - 3600;
+    await post("/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day_overage_included: { utilization: 0.33, resetsAt: resets } } } } });
+    await t.db.update(quotaSamples).set({ observedAt: new Date(Date.now() - 3 * 86_400_000) }).where(eq(quotaSamples.fundingSourceId, sub.id));
+    const status = (await get(`/api/funding-sources/${sub.id}/status`)).json();
+    const fable = status.quota.find((q: { window: string }) => q.window === "seven_day_overage_included");
+    expect(fable.utilization).toBeCloseTo(0.33);
+    expect(windowHasReset(new Date(fable.resetsAt), new Date())).toBe(true);
   });
 
   it("keeps the hold threshold, extra-usage choice and window switches per source", async () => {

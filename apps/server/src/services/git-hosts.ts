@@ -8,7 +8,7 @@ import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
-export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number };
+export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number; /** A page for the run: the first failing one, else the first reported (BOS-1418). */ url?: string };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
@@ -128,11 +128,11 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const body = res.json && !Array.isArray(res.json) ? res.json : null;
       const rows = ((gh ? body?.check_runs : body?.statuses) ?? null) as Array<Record<string, unknown>> | null;
       if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the checks on ${sha.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
-      const failing = rows
-        .filter((r) => (gh ? ["failure", "timed_out", "cancelled", "startup_failure"].includes(String(r.conclusion)) : ["failure", "error"].includes(String(r.status))))
-        .map((r) => String(gh ? r.name : r.context));
+      const failingRows = rows.filter((r) => (gh ? ["failure", "timed_out", "cancelled", "startup_failure"].includes(String(r.conclusion)) : ["failure", "error"].includes(String(r.status))));
+      const failing = failingRows.map((r) => String(gh ? r.name : r.context));
       const waiting = rows.some((r) => (gh ? r.status !== "completed" : r.status === "pending"));
-      return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing, total: rows.length };
+      const link = [...failingRows, ...rows].map((r) => (gh ? r.html_url : r.target_url)).find((u): u is string => typeof u === "string" && /^https?:\/\//.test(u));
+      return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing, total: rows.length, ...(link ? { url: link } : {}) };
     },
 
     /** The commit a branch points at: GitHub calls it commit.sha, Gitea commit.id. */

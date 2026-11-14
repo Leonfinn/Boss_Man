@@ -109,15 +109,20 @@ export function settingsLimitsRoutes(
       defaultSlots: DEFAULT_CHECK_SLOTS,
       // Connected runners on an image too old to run queued checks: their companies' jobs would wait until the runners are updated.
       runnersTooOld: live.filter((r) => !runners.can(r.id, "check-jobs")).map((r) => r.company),
+      // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
+      train: await checkQueueSvc.train(),
+      runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
     };
   };
   owner.get("/api/settings/check-queue", async () => checkQueueView());
   owner.put("/api/settings/check-queue", async (req) => {
-    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS) }).parse(req.body);
+    // `train` is optional, so an older page that doesn't send it leaves the switch as it was.
+    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional() }).parse(req.body);
     const was = await checkQueueSvc.mode();
     const slotsWere = await checkQueueSvc.slots();
     await checkQueueSvc.setSlots(b.slots);
     await checkQueueSvc.setMode(b.mode);
+    if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
     // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
     let applying = false;

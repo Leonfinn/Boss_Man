@@ -34,6 +34,12 @@ describe("board filter row fits a narrow window", () => {
     expect(decls(".board-bar select")).toMatch(/max-width:\s*100%/);
   });
 
+  it("keeps the Filter panel inside the window: it never exceeds the window's width (BOS-1194)", () => {
+    expect(decls(".filter-panel")).toMatch(/max-width:\s*calc\(100vw\s*-\s*24px\)/);
+    expect(decls(".filter-group select")).toMatch(/max-width:\s*100%/);
+    expect(decls(".filter-chip > span")).toMatch(/text-overflow:\s*ellipsis/);
+  });
+
   it("gives the search box a width it can give up, not a hard minimum", () => {
     expect(decls('.board-bar input[type="search"]')).toMatch(/max-width:\s*100%/);
     expect(board).not.toMatch(/type="search"[^>]*minWidth/);

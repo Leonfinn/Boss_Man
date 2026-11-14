@@ -199,7 +199,7 @@ describe("dependencies (R25)", () => {
 
     const board = (await req("GET", `/api/projects/${p.id}/board`)).json();
     const ship = board.columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
-    expect(ship.blockedBy).toEqual([{ ticketId: t2.id, until: "done", ticketTitle: "Domain", engagementId: null, decisionId: null }]);
+    expect(ship.blockedBy).toEqual([{ ticketId: t2.id, until: "done", ticketTitle: "Domain", ticketNumber: t2.number ?? null, engagementId: null, decisionId: null }]);
     expect(ship.working).toEqual([]);
 
     // A blocker that's done no longer shows; an agent running on the ticket does, but not a chat run.

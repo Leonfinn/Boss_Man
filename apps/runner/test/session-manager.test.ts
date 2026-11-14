@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { SessionManager } from "../src/session-manager.js";
-import { RepoLockTimeout, Workspaces } from "../src/workspace.js";
+import { RepoLockTimeout, isClone, Workspaces } from "../src/workspace.js";
 import { LONG_STEP_MARKER, WRAP_UP_MARKER, startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 import { startMcpServer, type McpCall } from "./mcp-server.js";
 
@@ -306,6 +306,37 @@ describe("runs in a git workspace (R38)", () => {
     const shared = path.join(h.home, ".claude", "projects", slug(workspaces.repoDir(projectId)), "memory");
     const mine = path.join(h.home, ".claude", "projects", slug(workspaces.ticketDir(ticketId)), "memory");
     // Claude Code keys a clone's memory by the clone, and is told that folder; it leads to the shared one.
+    expect(stubLog.some((l) => l.raw?.includes(mine))).toBe(true);
+    expect(readlinkSync(mine)).toBe(shared);
+    expect(existsSync(shared)).toBe(true);
+  }, 90_000);
+
+  it("converts a worktree to a clone on a run with no copies env set, keeping the shared Claude memory (BOS-343)", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    const g = (...args: string[]) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g("init", "-q", "-b", "main");
+    writeFileSync(path.join(repo, "README.md"), "app\n");
+    g("add", ".");
+    g("commit", "-qm", "init");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ticketId = randomUUID();
+    const projectId = randomUUID();
+    const workspace = { projectId, ticketId, repoUrl: repo, baseRef: "main" };
+    // Start from a worktree, as a runner rolled back to a pre-clone image would have left it.
+    const old = new Workspaces(root, { ...process.env, BOSSMAN_TICKET_COPIES: "worktree" });
+    const first = await old.ensure(workspace);
+    writeFileSync(path.join(first.path, "kept.txt"), "kept\n");
+    // A runner that sets nothing: the new default, so the run converts it in place.
+    const { BOSSMAN_TICKET_COPIES: _unused, ...noCopiesEnv } = process.env;
+    const workspaces = new Workspaces(root, noCopiesEnv);
+    const h = harness(null, { workspaces, workspace });
+    await h.ended;
+    expect(isClone(first.path)).toBe(true);
+    expect(readFileSync(path.join(first.path, "kept.txt"), "utf8")).toBe("kept\n");
+    const slug = (p: string) => p.replace(/[^a-zA-Z0-9]/g, "-");
+    const shared = path.join(h.home, ".claude", "projects", slug(workspaces.repoDir(projectId)), "memory");
+    const mine = path.join(h.home, ".claude", "projects", slug(workspaces.ticketDir(ticketId)), "memory");
+    // The converted clone's memory is still the project's shared folder.
     expect(stubLog.some((l) => l.raw?.includes(mine))).toBe(true);
     expect(readlinkSync(mine)).toBe(shared);
     expect(existsSync(shared)).toBe(true);

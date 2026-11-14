@@ -164,8 +164,9 @@ export const RunnerCommand = z.discriminatedUnion("type", [
       .max(100)
       .optional(),
     /**
-     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence runs it as before
-     * and says so (run.started's fenced); one without the "fence" feature ignores it.
+     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence refuses the run with
+     * FENCE_UNAVAILABLE_ERROR (BOS-373), except a boardToolsOnly run, which starts unfenced and says so
+     * (run.started's fenced); one without the "fence" feature ignores it.
      */
     fence: z.boolean().optional(),
   }),
@@ -196,7 +197,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional() }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(),
+    /** Merge train (BOS-1366, runner feature "merge-base"): prepare on this commit (main's tip or a train member ahead) instead of main's tip. */
+    base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
+    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -296,8 +301,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -448,6 +453,12 @@ export const FENCE_MODES = ["off", "watch", "enforce"] as const;
 export type FenceMode = (typeof FENCE_MODES)[number];
 /** What Off means, in BOS-373's words, said wherever the owner chooses Off (BOS-940): Settings and the fence card. */
 export const FENCE_OFF_CONSEQUENCE = "With the fence Off, agents can read the runner's key and this company's git login.";
+/**
+ * Why a runner ends a run asked to be fenced that it can't fence (BOS-373, DR-047), instead of starting it unfenced.
+ * The server holds such a company's work as soon as it sees the runner's report, so this covers the gap before that.
+ */
+export const FENCE_UNAVAILABLE_ERROR =
+  "This run was asked to run inside the agent fence, but this runner can't fence agents, so it didn't start: unfenced, an agent could read the runner's key and this company's git login. It runs again once the host can fence, or after the owner chooses Off (Settings → Permissions → Agent fence).";
 /** Flip once BOS-323 is merged and its test shows the git gap closed. */
 export const FENCE_ENFORCE_AVAILABLE = false;
 /** Tool output a fenced agent gets when the kernel refuses it (Landlock gives EACCES or EPERM, nothing else). */

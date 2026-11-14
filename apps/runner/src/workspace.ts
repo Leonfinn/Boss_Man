@@ -12,8 +12,10 @@
 // branches, config and hooks to itself, so one ticket can't plant code the runner later runs for
 // another, or delete another ticket's branch. Its branch is fetched back into the shared repo
 // (syncBranch), where merges, pushes and other tickets read it. Every operation handles both
-// kinds; BOSSMAN_TICKET_COPIES=clone makes new copies clones. Worktrees stay the default until
-// every runner image in use understands clones, so rolling an image back can't lose one.
+// kinds; a new copy is a clone by default (BOS-343), turning a ticket's existing worktree into one
+// in place at its next run. An image at or after BOS-323 keeps clones; rolling back to one older than
+// BOS-323 deletes them (and their uncommitted work) at housekeeping, so roll back no further than that.
+// BOSSMAN_TICKET_COPIES=worktree keeps the old kind for that rollback; =clone says it outright.
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
@@ -105,6 +107,8 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
+/** A server-queued merge's phase (BOS-316); `base` / `expectBase` are the merge train's (BOS-1366). */
+export type MergePhase = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
 
 /**
  * Git credentials from the run's granted secrets, passed through the environment only.
@@ -145,6 +149,15 @@ const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr 
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
+
+/**
+ * What a new copy is made as (BOS-343): clones by default. An image at or after BOS-323 keeps clones;
+ * rolling back past it deletes them and their uncommitted work, so `BOSSMAN_TICKET_COPIES=worktree`
+ * keeps the old kind only for that rollback (never to an older image); `=clone` says it outright.
+ * Anything else, or unset, is a clone. The value is trimmed and lowercased so `Worktree` or a stray
+ * space still rolls back as intended instead of silently giving clones.
+ */
+export const copiesAreClones = (env: NodeJS.ProcessEnv = process.env) => env.BOSSMAN_TICKET_COPIES?.trim().toLowerCase() !== "worktree";
 
 /** The project a copy belongs to, if its link to the shared repo still holds: a worktree's admin folder, or a clone's borrowed objects. */
 function copyProject(dir: string): string | null {
@@ -589,7 +602,7 @@ export class Workspaces {
   }
 
   /** What a new copy is made as (see the top of this file). */
-  private newCopiesAreClones = () => this.baseEnv.BOSSMAN_TICKET_COPIES === "clone";
+  private newCopiesAreClones = () => copiesAreClones(this.baseEnv);
 
   /**
    * An empty clone of the shared repo at tmp, with nothing checked out: it borrows the shared
@@ -1254,8 +1267,8 @@ export class Workspaces {
   /**
    * The check line's secrets and private-details scan (BOS-979), run by the runner's OWN installed copy of the scanner
    * (BOSSMAN_SCAN_SCRIPT, set by the runner image; root-owned like check-slot.sh) before any of the branch's code runs.
-   * The branch's scripts can't remove or weaken it, and the owner's list (scanList) goes into a 0600 file outside the
-   * copy that only this scanner reads, then is deleted: it is never in the check command's environment or its tree.
+   * The branch's scripts can't remove or weaken it, and the owner's list (scanList) goes to the scanner on its stdin
+   * (BOS-1043): never a file, never in the check command's environment or its tree.
    * A runner without the scanner installed skips it (nothing to run). Returns the scanner's output when it blocks the change.
    */
   private async scanBeforeCheck(dir: string, projectId: string, scanList?: string): Promise<string | null> {
@@ -1268,25 +1281,20 @@ export class Workspaces {
       if (base) break;
     }
     if (!base) return "scan: couldn't find the base branch (origin/main) to compare with, so the change was not scanned";
-    const scratch = mkdtempSync(path.join(tmpdir(), "bm-scan-"));
-    try {
-      const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
-      if (scanList) {
-        const file = path.join(scratch, "list");
-        writeFileSync(file, scanList.endsWith("\n") ? scanList : `${scanList}\n`, { mode: 0o600 });
-        env.BOSSMAN_SCAN_DENYLIST_FILE = file;
-      }
-      const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
-        execFile(process.execPath, [script, base], { cwd: dir, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null) : 0;
-          resolve({ code, out: `${stdout}${stderr}`.trim() });
-        });
+    // BOS-1043: the list goes to the scanner on its stdin, never into a file: the runner and the agent sessions share /tmp
+    // and a user, so a 0600 file there could still be read by an agent that polled for it.
+    const env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME };
+    const args = [script, base, ...(scanList ? ["--list-stdin"] : [])];
+    const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const child = execFile(process.execPath, args, { cwd: dir, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : null) : 0;
+        resolve({ code, out: `${stdout}${stderr}`.trim() });
       });
-      if (r.code === 0) return null;
-      return r.out || "scan: the secrets and private-details scan failed to run, so the change was not scanned";
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(scanList ? (scanList.endsWith("\n") ? scanList : `${scanList}\n`) : undefined);
+    });
+    if (r.code === 0) return null;
+    return r.out || "scan: the secrets and private-details scan failed to run, so the change was not scanned";
   }
 
   private async runCheck(
@@ -1599,7 +1607,7 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string } | null = null): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
     if (phase) return this.mergePhase(spec, target, message, secrets, phase);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
@@ -1635,8 +1643,10 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string }): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
+    // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
+    const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
     const keep = `refs/bossman/merge/${spec.ticketId}`;
@@ -1648,7 +1658,9 @@ export class Workspaces {
         // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
         if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
-      const tried = await this.tryMerge(repo, branch, target, auth);
+      // finish with expectBase: tryMerge's own fetch tells whether main is still at that base; anything else is main_moved
+      // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
+      const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
@@ -1765,10 +1777,24 @@ export class Workspaces {
     });
   }
 
-  /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
-  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
+  /**
+   * Fetches, then tries the ticket's branch on top of origin's target with merge-tree. `on` (merge train, BOS-1366): try it on
+   * `on.base` instead, a commit that must be the target's tip or built on it (a train member ahead's prepared merge); with
+   * `on.exact` the target's tip must be that very commit. Otherwise main_moved: the train restacks on the real main.
+   */
+  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>, on?: { base: string; exact: boolean }) {
     await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
-    const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    let targetSha = tip;
+    if (on && on.base !== tip) {
+      if (on.exact) return { status: "main_moved" as const };
+      // The base must be here (a member ahead re-prepared and its old commit may be gone) and descend from main's tip.
+      const known = await this.gitCode(["rev-parse", "--verify", "--quiet", `${on.base}^{commit}`], { cwd: repo });
+      if (known.code !== 0) return { status: "main_moved" as const };
+      const onMain = await this.gitCode(["merge-base", "--is-ancestor", tip, on.base], { cwd: repo });
+      if (onMain.code !== 0) return { status: "main_moved" as const };
+      targetSha = on.base;
+    }
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
     if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
@@ -1801,7 +1827,8 @@ export class Workspaces {
 
   /**
    * Whether the ticket's branch still merges into the target (BOS-426): the same merge-tree try as a
-   * merge, but nothing is built or pushed. A branch that is gone here, or a failed git call, throws:
+   * merge, but nothing is built or pushed. A clone's branch is synced first (BOS-832), so it reads the
+   * ticket's real head, not a stale one. A branch that is gone here, or a failed git call, throws:
    * the caller must not read "couldn't tell" as "clean".
    */
   async clash(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<{ clashes: boolean; files: string[] }> {
@@ -1971,6 +1998,7 @@ export class Workspaces {
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
+      if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
@@ -2016,7 +2044,8 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       await this.cloneIfMissing(spec, auth);
-      await this.git(["fetch", "--quiet", "--tags", "--force", "origin"], { cwd: repo, env: auth });
+      // The recorded address with forced tags (BOS-373), never `origin` from config: an agent may have repointed it to take the login.
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs, true);
       const branches = await this.remoteBranches(repo);
       if (!DEPLOY_REF.test(spec.ref) || !DEPLOY_REF.test(spec.baseRef)) return { commit: null, onBase: false, branches, error: "That ref isn't a git branch, tag or commit." };
       const candidates = [`refs/remotes/origin/${spec.ref}`, `refs/tags/${spec.ref}`, spec.ref];
@@ -2070,14 +2099,17 @@ export class Workspaces {
       await this.cloneIfMissing(spec, auth);
       const format = await this.gitCode(["check-ref-format", ref], { cwd: repo });
       if (format.code !== 0) return refuse(`git refuses ${spec.name} as a tag name.`);
-      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
-      const heads = await this.gitCode(["ls-remote", "--heads", "origin"], { cwd: repo, env: auth });
+      // Every call that carries the login goes to the recorded address (BOS-373), never `origin` from config. cloneIfMissing
+      // has just recorded the server's repoUrl. The lease below names its expected value, so it works the same with a URL.
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const url = await this.remoteUrl(repo);
+      const heads = await this.gitCode(["ls-remote", "--heads", url], { cwd: repo, env: auth });
       if (heads.code !== 0) return { result: "failed", from: null, to: spec.commit, error: `Couldn't list the remote's branches: ${heads.stderr.slice(0, 500)}` };
       const branchNames = heads.stdout.split("\n").map((l) => l.split("\t")[1]?.replace(/^refs\/heads\//, "")).filter(Boolean);
       if (branchNames.includes(spec.name)) return refuse(`${spec.name} is also a branch on the remote, so it can't be used as the deploy tag.`);
       if (!(await this.onBase(repo, spec.commit, spec.baseRef))) return refuse(`${spec.commit.slice(0, 7)} isn't on ${spec.baseRef}, so the tag stays where it is.`);
       const read = async (): Promise<string | null | Error> => {
-        const r = await this.gitCode(["ls-remote", "origin", ref], { cwd: repo, env: auth });
+        const r = await this.gitCode(["ls-remote", url, ref], { cwd: repo, env: auth });
         if (r.code !== 0) return new Error(r.stderr.slice(0, 500));
         const line = r.stdout.split("\n").find((l) => l.split("\t")[1] === ref);
         return line ? line.split("\t")[0]! : null;
@@ -2085,7 +2117,7 @@ export class Workspaces {
       const before = await read();
       if (before instanceof Error) return { result: "failed", from: null, to: spec.commit, error: `Couldn't read the tag from the remote: ${before.message}` };
       if (before === spec.commit) return { result: "unchanged", from: before, to: spec.commit };
-      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, "origin", `${spec.commit}:${ref}`], { cwd: repo, env: auth });
+      const pushed = await this.gitCode(["push", "--quiet", "--no-verify", `--force-with-lease=${ref}:${before ?? ""}`, url, `${spec.commit}:${ref}`], { cwd: repo, env: auth });
       if (pushed.code === 0) return { result: "moved", from: before, to: spec.commit };
       const after = await read();
       if (after === spec.commit) return { result: "unchanged", from: before, to: spec.commit };

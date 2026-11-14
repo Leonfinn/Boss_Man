@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, toDate, windowLabel } from "../src/quota.js";
+import { normaliseUtilization, parseClaudeRateLimit, parseCodexRateLimits, windowHasReset, toDate, windowLabel } from "../src/quota.js";
+
+describe("windowHasReset (BOS-1409)", () => {
+  const reset = new Date("2026-11-12T10:00:00.000Z");
+  it("is true once the window's reset time has passed, at the moment of reset too", () => {
+    expect(windowHasReset(reset, new Date("2026-11-12T10:00:00.000Z"))).toBe(true);
+    expect(windowHasReset(reset, new Date("2026-11-12T10:00:01.000Z"))).toBe(true);
+  });
+
+  it("is false while the window is still running, and for a window with no reset time", () => {
+    expect(windowHasReset(reset, new Date("2026-11-12T09:59:59.000Z"))).toBe(false);
+    expect(windowHasReset(reset, new Date("2026-11-11T09:00:00.000Z"))).toBe(false);
+    expect(windowHasReset(null, new Date("2026-11-12T10:00:01.000Z"))).toBe(false);
+  });
+});
 
 describe("toDate", () => {
   it("reads unix seconds and unix milliseconds as the same instant", () => {
