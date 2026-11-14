@@ -24,7 +24,8 @@ import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
-import { getHold, HOLD_REASON } from "./maintenance.js";
+import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
+import { softHold } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -1167,11 +1168,20 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
-  /** The all-companies, per-company and background run limits: the owner's Settings when saved (settings.run_limits), else the defaults. */
+  /**
+   * The all-companies, per-company and background run limits: the owner's Settings when saved (settings.run_limits), else the defaults.
+   * While a server update waits for a quiet machine, and through its standby window, the all-companies limit is capped
+   * (BOS-420's soft hold): fewer runs start, so memory frees up. Runs already going are never cut off. No new
+   * background (Infinite mode, BOS-279) run starts during the hold either: those runs use the machine's memory too,
+   * and the quiet test counts every open run, so leaving their slots open could keep the machine from ever being quiet.
+   */
   async function limitsNow() {
     const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
     const stored = lrow?.value as { instance?: number; company?: number; background?: number } | undefined;
-    return { maxTotal: stored?.instance ?? limits.instance, maxCompany: stored?.company ?? limits.company, maxBackground: stored?.background ?? limits.background };
+    const maxTotal = stored?.instance ?? limits.instance;
+    const maxBackground = stored?.background ?? limits.background;
+    const soft = await softHold(db, now());
+    return { maxTotal: soft.on ? Math.min(maxTotal, soft.maxRuns) : maxTotal, maxCompany: stored?.company ?? limits.company, maxBackground: soft.on ? 0 : maxBackground };
   }
 
   const self = {
@@ -1685,7 +1695,12 @@ export function schedulerService(
       // going, the update cannot apply anyway, so chatting costs no delay. Once no work run is left the update
       // may swap at any moment, so chats are held too, exactly as before.
       let pass = queue;
-      if (await getHold(db)) {
+      const hold = await getHold(db);
+      if (hold && !holdBlocksStarts(hold, t)) {
+        // BOS-1414: the drain is past its deadline and waits on the owner's answer. That is not a swap under way, so
+        // nothing is held for it; wakes it held earlier are released here with the reason shown, and launch below.
+        await db.update(wakes).set({ statusReason: HOLD_RELEASED_REASON }).where(and(eq(wakes.status, "queued"), eq(wakes.statusReason, HOLD_REASON)));
+      } else if (hold) {
         const work = await liveWorkRuns(db);
         // While work runs are still going, only chat and reply wakes go on to launch; every other wake is held.
         const through = work > 0 ? queue.filter((w) => w.reason === CHAT_REASON || w.reason === CEO_REPLY_REASON) : [];

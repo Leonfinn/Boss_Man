@@ -11,11 +11,16 @@
 //   check_queued   a merge check started waiting for a slot (check, way: gate | merged | queue, jobId)
 //   check_started  it got a slot and started running
 //   check_ended    it ended: passed true/false, or null when it never finished (killed, runner gone, stuck)
-//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked, with carried/note/decisionId
+//   restacked      merge train (BOS-1366): prepared again on a new base (why: ahead_left | ahead_changed | main_moved)
+//   rerun          merge train: a failed check that stood ran once more on the same tree (passed: true is a flaky pass)
+//   hold_started   the line held it: hold carried | sign_off | card | host | unchecked | waits_on | train (waiting for a seat), with carried/note/decisionId
 //   hold_ended     the hold ended (hold, since, heldMs); written by the next event that moves the line (a check,
 //                  a merge, leaving, another hold), so a hold always closes. A retry ("attempt") or a repeat
 //                  approval that is held again doesn't end it, so one jam reads as one hold, not many short ones.
 //   merged         it merged (commit; null when there was nothing to merge)
+//   attempt_failed a merge attempt did not land (reason: check_failed | landing_refused | main_moved | conflict |
+//                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
+//                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
 //   left           it left review without merging (to: the state it moved to)
 //
 // The hold's reason is in `hold`, not `reason`: wake-classes.test reads every `reason: "..."` in the source
@@ -32,29 +37,54 @@ import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
 
-export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on";
+export type HoldReason = "carried" | "sign_off" | "card" | "host" | "unchecked" | "waits_on" | "train";
 export type CheckWay = "gate" | "merged" | "queue";
 
 export type MergeLineEvent =
   | { event: "approved"; by: string; reviewerAgentId?: string | null }
   | { event: "attempt"; by: string }
-  | { event: "check_queued"; check: string; way: CheckWay; jobId?: string; reused?: boolean }
+  | { event: "check_queued"; check: string; way: CheckWay; jobId?: string; reused?: boolean; train?: { place: number; ahead: number } }
+  /** Merge train (BOS-1366): prepared again on a new base. ahead_left / ahead_changed / main_moved. */
+  | { event: "restacked"; why: "ahead_left" | "ahead_changed" | "main_moved" | "cap"; restacks: number }
+  /** Merge train: a failed check that stood got its one re-run on the same tree; `passed` says how the re-run went (a flaky pass). */
+  | { event: "rerun"; check: string; passed: boolean | null; failedJobId?: string }
   | { event: "check_started"; check: string; way: CheckWay; jobId?: string }
   | { event: "check_ended"; check: string; way: CheckWay; jobId?: string; passed: boolean | null; why?: string }
   | { event: "hold_started"; hold: HoldReason; note?: string; carried?: Array<{ ticketId: string; title: string }>; decisionId?: string | null }
   | { event: "hold_ended"; hold: HoldReason; since: string; heldMs: number }
   | { event: "merged"; commit: string | null }
+  /** BOS-1461: a merge attempt that did not land, with why (`reason`) and the check job it was about, when there is one. */
+  | { event: "attempt_failed"; reason: FailReason; jobId?: string; note?: string }
   | { event: "left"; to: string };
+
+/** Why a merge attempt did not land (BOS-1461). */
+export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
+export type FailReason = (typeof FAIL_REASONS)[number];
+export const FAIL_REASON_TEXT: Record<FailReason, string> = {
+  check_failed: "the merge check failed",
+  landing_refused: "landing was refused (uncommitted work or a migration problem)",
+  main_moved: "main moved while the merge ran",
+  conflict: "the branch conflicts with main",
+  lock_timeout: "the merge check gave up waiting for a check slot",
+  restart: "the runner restarted or went away under the merge",
+  gate_fault: "the merge gate itself failed (check stuck or an error)",
+};
 
 const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { event: K }>) => string } = {
   approved: (e) => `Merge line: approved by ${e.by}`,
   attempt: (e) => `Merge line: merge attempt started (${e.by})`,
-  check_queued: (e) => `Merge line: check waiting for a slot${e.reused ? " (reused an earlier result)" : ""}`,
+  check_queued: (e) => `Merge line: check waiting for a slot${e.reused ? " (reused an earlier result)" : ""}${e.train ? ` (merge train, place ${e.train.place})` : ""}`,
+  restacked: (e) =>
+    e.why === "cap"
+      ? `Merge line: left the merge train after ${e.restacks} restacks; it tries again later`
+      : `Merge line: merge train restacked (${e.why === "main_moved" ? "main moved outside the train" : e.why === "ahead_left" ? "a ticket ahead left the train" : "a ticket ahead was prepared again"})`,
+  rerun: (e) => `Merge line: failed check run once more${e.passed === true ? ": passed (a flaky failure)" : e.passed === false ? ": failed again" : ""}`,
   check_started: () => "Merge line: check started",
   check_ended: (e) => `Merge line: check ${e.passed === true ? "passed" : e.passed === false ? "failed" : "did not finish"}`,
   hold_started: (e) => `Merge line: held (${e.hold})${e.note ? `: ${e.note}` : ""}`,
   hold_ended: (e) => `Merge line: hold (${e.hold}) ended after ${Math.round(e.heldMs / 60_000)} min`,
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
+  attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
 };
 

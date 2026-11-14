@@ -156,6 +156,54 @@ describe("features land on the roadmap and the portal (BOS-1358)", () => {
     expect(card!.question).not.toContain("public summary");
   });
 
+  it("judges a public summary written on a feature already on the portal, and saves nothing (BOS-1420)", async () => {
+    // An ordinary feature is on the portal by default, so this call leaves portalVisible out entirely.
+    const live = await ctx.feature({ title: "Dark mode", description: "A dark theme.", publicSummary: "A dark theme you can switch on." });
+    expect(live).toMatchObject({ portalVisible: true, keepOffPortal: false });
+    const pm = await agentAs(ctx.pm.id);
+    const r = await pm.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: live.id, publicSummary: "Tweak the api key in config.json on 10.0.0.5.", reason: "A portal note asked for more detail." } });
+    expect(textOf(r)).toMatch(/security work/i);
+    // The stored text is untouched: the hostile summary was never saved.
+    const row = (await ctx.req("GET", `/api/features/${live.id}`)).json().feature as { publicSummary: string; portalVisible: boolean };
+    expect(row.publicSummary).toBe("A dark theme you can switch on.");
+    expect(row.portalVisible).toBe(true);
+  });
+
+  it("judges a public title written on a feature already on the portal, and saves nothing (BOS-1420)", async () => {
+    const live = await ctx.feature({ title: "Dark mode", description: "A dark theme." });
+    const pm = await agentAs(ctx.pm.id);
+    const r = await pm.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: live.id, publicTitle: "Rotate the deploy token", publicSummary: "A tidy weekly routine.", reason: "A portal note asked for this." } });
+    expect(textOf(r)).toMatch(/security work/i);
+    const row = (await ctx.req("GET", `/api/features/${live.id}`)).json().feature as { publicTitle: string | null; publicSummary: string | null };
+    expect(row.publicTitle).toBeNull();
+    expect(row.publicSummary).toBeNull();
+  });
+
+  it("still writes a clean summary on a portal feature, and any edit on a feature off the portal (BOS-1420)", async () => {
+    const live = await ctx.feature({ title: "Dark mode", description: "A dark theme." });
+    const off = await ctx.feature({ title: "Internal pilot", description: "Trial with one team.", keepOffPortal: true });
+    const pm = await agentAs(ctx.pm.id);
+    // A clean summary on a live feature saves.
+    expect(textOf(await pm.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: live.id, publicSummary: "A dark theme you can switch on.", reason: "Write its public summary." } }))).toBe('Updated "Dark mode": wrote its public summary.');
+    expect((await ctx.req("GET", `/api/features/${live.id}`)).json().feature.publicSummary).toBe("A dark theme you can switch on.");
+    // Security-worded public text on a feature off the portal saves as it always did (the guard is about visitors).
+    expect((await pm.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: off.id, publicSummary: "Rotate the api key weekly.", reason: "Internal notes." } })).isError).not.toBe(true);
+  });
+
+  it("never shows public text the portal rule calls security work, even when it was stored (BOS-1420)", async () => {
+    const on = (await ctx.req("PATCH", `/api/companies/${ctx.company.id}/portal`, { enabled: true, title: "What's next" })).json() as { portalToken: string };
+    const shown = await ctx.feature({ title: "Dark mode", description: "A dark theme.", status: "considering", publicSummary: "A dark theme you can switch on." });
+    // The owner's app route takes any text, so the hostile summary is stored on a feature that is already ticked on;
+    // the second wall drops it from what visitors see.
+    const leaky = await ctx.feature({ title: "Weekly routine", description: "Rotate it.", status: "considering", publicSummary: "A weekly routine." });
+    expect(leaky.portalVisible).toBe(true);
+    await ctx.req("PATCH", `/api/features/${leaky.id}`, { publicSummary: "Rotate the api key every Monday." });
+    const page = await ctx.app.inject({ method: "GET", url: "/api/portal", headers: { "x-portal-token": on.portalToken } });
+    const ids = ((page.json() as { features: Array<{ id: string }> }).features ?? []).map((f) => f.id);
+    expect(ids).toContain(shown.id);
+    expect(ids).not.toContain(leaky.id);
+  });
+
   it("still refuses an agent that tries to publish security work (BOS-991)", async () => {
     const held = await ctx.feature({ title: "Rotate API keys", description: "Rotate the secret every week." });
     const pm = await agentAs(ctx.pm.id);

@@ -17,7 +17,7 @@ import type { TraceBody } from "@boss-man/shared";
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string; trace?: TraceBody };
 type Chat = { agentId: string; items: Message[]; state: string; live?: TraceBody | null };
 /** The runner-update hold, from App's /api/maintenance poll (BOS-349). */
-type Maintenance = { on: false } | { on: true; runs: number; chatOpen: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; runs: number; chatOpen: boolean };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links made clickable (BOS-358): one shared builder, see links.ts. */
@@ -72,6 +72,14 @@ function busyText(state: string, name: string) {
 /** One plain line while a runner update waits (BOS-349): chat stays open while agents work, then holds briefly for the swap. */
 export function UpdateNote({ m }: { m: Maintenance | null }) {
   if (!m?.on) return null;
+  if (m.kind === "settings")
+    return (
+      <p className="banner" role="status">
+        {m.chatOpen
+          ? `Applying a runner setting change (not an update): waiting for ${m.runs} agent${m.runs === 1 ? "" : "s"} to finish. Chat stays open until then.`
+          : "Applying a runner setting change (not an update), back in a moment. New messages are saved and answered when it is done."}
+      </p>
+    );
   return (
     <p className="banner" role="status">
       {m.chatOpen

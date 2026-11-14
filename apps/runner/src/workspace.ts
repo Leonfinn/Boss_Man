@@ -107,6 +107,8 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
+/** A server-queued merge's phase (BOS-316); `base` / `expectBase` are the merge train's (BOS-1366). */
+export type MergePhase = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
 
 /**
  * Git credentials from the run's granted secrets, passed through the environment only.
@@ -556,8 +558,22 @@ export class Workspaces {
       const readWrite = [tmp, ...(extra.GIT_INDEX_FILE ? [path.dirname(extra.GIT_INDEX_FILE)] : [])];
       const cmd = fencedCommand(fenceProfile({ cwd: dir, home: tmp, tmp, readOnly: [repo, ...reads], readWrite }), "git", args);
       const env = { PATH: this.baseEnv.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: "/dev/null", ...safeGitEnv(extra) };
-      const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
-      return stdout.trim();
+      try {
+        const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+        return stdout.trim();
+      } catch (err) {
+        // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
+        // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
+        const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
+        const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
+        const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
+        // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
+        throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
+          code: e.code,
+          stdout: e.stdout,
+          stderr: e.stderr,
+        });
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -1132,7 +1148,11 @@ export class Workspaces {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
       await this.git(["add", "-A"], { cwd: dir, env, repo });
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
-      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
+      // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
+      // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
+      // and edit it in one commit) and merge without the owner's sign-off. With renames off, a move is a
+      // delete of the old path plus an add of the new one, so both sides are named. Same rule as `--no-ext-diff`.
+      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
@@ -1605,7 +1625,7 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string } | null = null): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
     if (phase) return this.mergePhase(spec, target, message, secrets, phase);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
@@ -1641,8 +1661,10 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: { phase: "prepare" } | { phase: "finish"; commit: string; tree: string }): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
+    // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
+    const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
     const keep = `refs/bossman/merge/${spec.ticketId}`;
@@ -1654,7 +1676,9 @@ export class Workspaces {
         // Both phases sync, like mergeChecked: finish then sees a commit made since prepare as a changed tree (main_moved).
         if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
       }
-      const tried = await this.tryMerge(repo, branch, target, auth);
+      // finish with expectBase: tryMerge's own fetch tells whether main is still at that base; anything else is main_moved
+      // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
+      const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
@@ -1771,10 +1795,24 @@ export class Workspaces {
     });
   }
 
-  /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
-  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
+  /**
+   * Fetches, then tries the ticket's branch on top of origin's target with merge-tree. `on` (merge train, BOS-1366): try it on
+   * `on.base` instead, a commit that must be the target's tip or built on it (a train member ahead's prepared merge); with
+   * `on.exact` the target's tip must be that very commit. Otherwise main_moved: the train restacks on the real main.
+   */
+  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>, on?: { base: string; exact: boolean }) {
     await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
-    const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    const tip = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    let targetSha = tip;
+    if (on && on.base !== tip) {
+      if (on.exact) return { status: "main_moved" as const };
+      // The base must be here (a member ahead re-prepared and its old commit may be gone) and descend from main's tip.
+      const known = await this.gitCode(["rev-parse", "--verify", "--quiet", `${on.base}^{commit}`], { cwd: repo });
+      if (known.code !== 0) return { status: "main_moved" as const };
+      const onMain = await this.gitCode(["merge-base", "--is-ancestor", tip, on.base], { cwd: repo });
+      if (onMain.code !== 0) return { status: "main_moved" as const };
+      targetSha = on.base;
+    }
     const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
     const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
     if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
@@ -1978,6 +2016,7 @@ export class Workspaces {
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
+      if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
