@@ -115,11 +115,20 @@ export function checkQueue(db: Db) {
     const live = sameTree.find((j) => j.ticketId === input.ticketId && j.state !== "passed" && wide(j) && (listScanned(j) || j.state === "queued"));
     if (live) {
       // A merge request lifts a live pre-review job on the same tree to merge, so the gate's wait is not spent behind quick checks.
+      // BOS-1390: the lift is guarded on state = 'queued' too. A pump holds a different lock (check_jobs_claim), so it can claim
+      // the job between the read above and this UPDATE; without the guard that running job would become a merge-kind job the
+      // merge reuses as "live", never having been scanned with the owner's list. No row means it was claimed: fall through and
+      // queue a fresh merge job, which the gate dispatches with the list.
       if (input.kind === "merge" && live.kind !== "merge" && live.state === "queued") {
-        const [lifted] = await db.update(checkJobs).set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain }).where(eq(checkJobs.id, live.id)).returning();
-        return { job: lifted ?? live, reused: "live" };
+        const [lifted] = await db
+          .update(checkJobs)
+          .set({ kind: "merge", fixesMain: live.fixesMain || !!input.fixesMain })
+          .where(and(eq(checkJobs.id, live.id), eq(checkJobs.state, "queued")))
+          .returning();
+        if (lifted) return { job: lifted, reused: "live" };
+      } else {
+        return { job: live, reused: "live" };
       }
-      return { job: live, reused: "live" };
     }
     // A newer commit of the same ticket replaces its queued job of the same command whose scope is no wider than the new one
     // (never a running one: that one is the runner's to finish or fail). A queued full check is never dropped by a later quick

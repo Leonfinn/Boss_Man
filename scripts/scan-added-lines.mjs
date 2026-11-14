@@ -9,10 +9,13 @@
 // of ip, host, path, email, other (a bare line counts as other; an ip may be a CIDR such as 192.0.2.0/24 or a prefix ending
 // in a dot). The list is never in the repo. With no list the secret rules still run.
 //
-// Output never contains a matched value: only kind, file:line and the value's length. A secret finding also prints a short
-// fingerprint (first 12 hex of the value's SHA-256) so a reviewer can put a genuine false positive in scripts/scan-allow.txt:
+// Output never contains a matched value: a secret finding prints its kind, file:line and the value's length. A secret finding
+// also prints a short fingerprint (first 12 hex of the value's SHA-256) so a reviewer can put a genuine false positive in
+// scripts/scan-allow.txt:
 //   <path><TAB><rule><TAB><fingerprint><TAB><reason>
-// Listed (denylist) findings print no fingerprint, since a short value such as an IP could be guessed back from one.
+// Listed (denylist) findings print no fingerprint, since a short value such as an IP could be guessed back from one. Nor do
+// they print the file, line or kind (BOS-1390): the merge output goes back to the ticket's agent, so naming where a listed
+// value sits would let an agent test one guess per merge attempt after approval. The owner can see the location elsewhere.
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -190,7 +193,7 @@ export function scan({ items, extra = [], newFiles = [], denylist = [], allow = 
 export function format({ blocked, warnings }) {
   const lines = []
   for (const b of blocked) {
-    if (b.listed) lines.push(`BLOCKED ${b.kind} at ${b.where}: the line holds a private detail from the owner's list (value not shown). Replace it with a made-up example such as 192.168.1.50, example.com or myserver.`)
+    if (b.listed) lines.push(`BLOCKED a listed private detail was found in this change. Replace every real value with a made-up example such as 192.168.1.50, example.com or myserver. (The file, line and kind are not shown, so this output can't be used to work out which value matched.)`)
     else if (b.fingerprint) lines.push(`BLOCKED ${b.kind} at ${b.where}: looks like a real secret, ${b.length} characters (value not shown). Remove it and use an environment variable or the Secrets store. A genuine false positive goes in scripts/scan-allow.txt (needs review) with fingerprint ${b.fingerprint}.`)
     else lines.push(`BLOCKED ${b.kind} at ${b.where}: ${b.note} (not shown).`)
   }
