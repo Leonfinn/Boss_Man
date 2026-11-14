@@ -135,13 +135,17 @@ describe("re-waking runs a restart cut off (BOS-574)", () => {
 
     await c.maintenance.cancel();
     const resumes = await c.wakesOf("resume");
-    expect(resumes.map((w) => w.ticketId).sort()).toEqual([annT, danT].sort());
+    // Bob booked a check, and still gets woken (BOS-1480): a restart no longer brings his booking forward.
+    expect(resumes.map((w) => w.ticketId).sort()).toEqual([annT, bobT, danT].sort());
+    // Dan has exactly one resume: the one recovery.onInterrupted queued, not a second from the sweep.
+    expect(resumes.filter((w) => w.ticketId === danT)).toHaveLength(1);
     const annWake = resumes.find((w) => w.ticketId === annT)!;
     expect(annWake).toMatchObject({ agentId: ann.id, resumeRunId: null });
     expect(annWake.note).toMatch(/runner update asked every agent to stop/);
     // Ann's carry-on is replaced by the wake; Bob keeps the check he booked.
     expect((await c.db.select().from(tickets).where(eq(tickets.id, annT)))[0]!.monitorAt).toBeNull();
     expect((await c.db.select().from(tickets).where(eq(tickets.id, bobT)))[0]!.monitorNote).toBe("quick check in the queue");
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, bobT)))[0]!.monitorAt).not.toBeNull();
   });
 });
 

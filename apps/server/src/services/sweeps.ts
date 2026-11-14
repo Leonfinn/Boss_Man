@@ -1376,8 +1376,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * An update's hold has lifted (BOS-574). Every agent was told to end its turn and that it would be
    * woken once the update was done (WRAP_UP); this keeps that promise. Each in-progress ticket whose
    * assignee's run ended by itself after the hold began is woken on that ticket, with why. A ticket
-   * with a check its agent booked keeps it (a runner restart brings it forward already); Boss Man's own
-   * 15-minute carry-on is replaced by this wake. Blocked tickets, and tickets with a run or a wake
+   * with a check its agent booked is woken too and keeps the booking (BOS-1075 stopped a restart
+   * bringing it forward, so skipping these left them waiting for the booked time: BOS-1480); Boss Man's
+   * own 15-minute carry-on is replaced by this wake. Blocked tickets, and tickets with a run or a wake
    * already, are left alone. Runs cut off by the update already have their resume wake.
    */
   async function resumeAfterUpdate(since: Date) {
@@ -1406,7 +1407,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (seen.has(ticket.id)) continue;
       seen.add(ticket.id);
       if (!endedByItself(run.outcome)) continue;
-      if (ticket.monitorAt && ticket.monitorNote !== CARRY_ON_NOTE) continue;
       if (await isBlocked(ticket.id)) continue;
       const [live] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.ticketId, ticket.id), isNull(runs.endedAt))).limit(1);
       if (live) continue;
