@@ -8,10 +8,11 @@
 //  - a job never leaves the queue without a recorded reason (stuck / cancelled / re-queued all carry one).
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, checkJobLogs, checkJobs, companies, projects, settings, tickets } from "../db/schema.js";
+import { agents, checkJobLogs, checkJobs, checkWorkers, companies, projects, settings, tickets } from "../db/schema.js";
 import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
+import { softHold } from "./deploy-wait-hold.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -59,6 +60,10 @@ export type EnqueueInput = {
 };
 
 export type EnqueueResult = { job: CheckJob; reused: "passed" | "live" | null };
+
+/** BOS-1435: the machine a job runs on. A runner id (or null, as before), or a check worker. */
+export type Machine = string | null | { workerId: string };
+const isWorker = (m: Machine): m is { workerId: string } => typeof m === "object" && m !== null;
 
 export function checkQueue(db: Db) {
   async function mode(): Promise<CheckQueueMode> {
@@ -244,19 +249,33 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string): Promise<CheckJob[]> {
-    const limit = await slots();
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number): Promise<CheckJob[]> {
+    // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
+    return claimOn(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId);
+  }
+
+  /**
+   * BOS-1435: claim for one machine with its own slot limit. A company runner's running jobs are counted per company (worker
+   * jobs left out), exactly as before; a check worker's are counted across every company, since its slots are shared.
+   */
+  async function claimOn(machine: Machine, limit: number, now = new Date(), companyId?: string): Promise<CheckJob[]> {
+    // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
+    // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
+    if ((await softHold(db, now)).on) return [];
+    const worker = isWorker(machine) ? machine.workerId : null;
     const candidates = (await servable(now)).filter((j) => !companyId || j.companyId === companyId);
+    const onMachine = worker ? eq(checkJobs.workerId, worker) : and(isNull(checkJobs.workerId), companyId ? eq(checkJobs.companyId, companyId) : undefined);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"check_jobs_claim"}))`);
-    const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(companyId ? and(eq(checkJobs.state, "running"), eq(checkJobs.companyId, companyId)) : eq(checkJobs.state, "running"))) as [{ n: number }];
+    const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), onMachine))) as [{ n: number }];
     const free = limit - n;
     if (free <= 0) return [];
     // BOS-1264: with two or more slots, merge checks (15 minutes) may not take the last slot while a quick pre-review check
     // (2 to 5 minutes) waits, or a full line of merges keeps every developer waiting 30 to 60 minutes. Merges that fix main are exempt.
     // DR-056: long jobs (merge or full scope) count against the reserve; only a quick-scope job may use the reserved slot.
-    const [{ m }] = (await tx.select({ m: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), or(eq(checkJobs.kind, "merge"), eq(checkJobs.scope, "full")), companyId ? eq(checkJobs.companyId, companyId) : undefined))) as [{ m: number }];
+    // BOS-1435: the reserve is per machine, with that machine's own limit.
+    const [{ m }] = (await tx.select({ m: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), or(eq(checkJobs.kind, "merge"), eq(checkJobs.scope, "full")), onMachine))) as [{ m: number }];
     let longRoom = limit >= 2 && candidates.some((j) => !isLong(j)) ? Math.max(0, limit - 1 - m) : Infinity;
     const claimed: CheckJob[] = [];
     for (const j of candidates) {
@@ -268,7 +287,7 @@ export function checkQueue(db: Db) {
       // Guarded on state so two callers can't both start the same job.
       const [row] = await tx
         .update(checkJobs)
-        .set({ state: "running", runnerId, startedAt: now, lastOutputAt: now, reason: null })
+        .set({ state: "running", runnerId: worker ? null : (machine as string | null), workerId: worker, startedAt: now, lastOutputAt: now, reason: null })
         .where(and(eq(checkJobs.id, j.id), eq(checkJobs.state, "queued")))
         .returning();
       if (row) claimed.push(row);
@@ -278,18 +297,21 @@ export function checkQueue(db: Db) {
   }
 
   /** Note output from a running job (for the no-output limit) and keep its log tail. */
-  async function progress(jobId: string, runnerId: string | null, logTail: string, now = new Date()): Promise<void> {
+  async function progress(jobId: string, runnerId: Machine, logTail: string, now = new Date()): Promise<void> {
     await db.update(checkJobs).set({ lastOutputAt: now, logTail: logTail.slice(-8192) }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), sentTo(runnerId)));
   }
 
-  /** Only the runner a job was sent to may answer for it (a job claimed with no runner id matches null). */
-  const sentTo = (runnerId: string | null) => (runnerId === null ? isNull(checkJobs.runnerId) : eq(checkJobs.runnerId, runnerId));
+  /**
+   * Only the machine a job was sent to may answer for it (a job claimed with no runner id matches null). BOS-1435: a runner
+   * never answers for a worker's job (worker_id must be null), nor a worker for a runner's.
+   */
+  const sentTo = (m: Machine) => (isWorker(m) ? eq(checkJobs.workerId, m.workerId) : and(isNull(checkJobs.workerId), m === null ? isNull(checkJobs.runnerId) : eq(checkJobs.runnerId, m)));
 
   /**
    * The runner's answer. Accepted only for a job that is still running and only for the commit that was checked,
    * so a late answer for a job that was re-queued or replaced is ignored. Returns the finished job, or null if ignored.
    */
-  async function complete(jobId: string, result: { runnerId: string | null; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean; fullLog?: string }, now = new Date()): Promise<CheckJob | null> {
+  async function complete(jobId: string, result: { runnerId: Machine; commit: string; exitCode: number | null; logTail: string; timedOut?: boolean; fullLog?: string }, now = new Date()): Promise<CheckJob | null> {
     const ok = result.exitCode === 0 && !result.timedOut;
     const facts = ok ? "" : checkFailureFacts(result.logTail);
     const [row] = await db
@@ -347,12 +369,17 @@ export function checkQueue(db: Db) {
   /** A runner went away (or the server restarted): its running jobs go back in line, with the reason recorded. */
   async function requeueRunning(runnerId: string | null, why: string): Promise<CheckJob[]> {
     const cond = runnerId ? and(eq(checkJobs.state, "running"), eq(checkJobs.runnerId, runnerId)) : eq(checkJobs.state, "running");
-    return db.update(checkJobs).set({ state: "queued", runnerId: null, startedAt: null, reason: why }).where(cond).returning();
+    return db.update(checkJobs).set({ state: "queued", runnerId: null, workerId: null, startedAt: null, reason: why }).where(cond).returning();
+  }
+
+  /** BOS-1435: a check worker went away (or was turned off or removed): its running jobs go back in line. */
+  async function requeueWorker(workerId: string, why: string): Promise<CheckJob[]> {
+    return db.update(checkJobs).set({ state: "queued", runnerId: null, workerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId))).returning();
   }
 
   /** One running job goes back in line, with the reason recorded. */
   async function requeue(jobId: string, why: string): Promise<CheckJob | null> {
-    const [row] = await db.update(checkJobs).set({ state: "queued", runnerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"))).returning();
+    const [row] = await db.update(checkJobs).set({ state: "queued", runnerId: null, workerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"))).returning();
     return row ?? null;
   }
 
@@ -394,14 +421,16 @@ export function checkQueue(db: Db) {
    * Every live check of a company for the Merge queue's "Queued checks" tab (BOS-1174): running first, then waiting in
    * serving order, then those a red main holds back. Read-only. `position` counts the waiting ones only.
    */
-  async function list(companyId: string, now = new Date()) {
-    const limit = await slots();
+  async function list(companyId: string, now = new Date(), capacity?: number) {
+    // BOS-1435: with check workers the caller passes the company's whole capacity (runner plus ready workers).
+    const limit = capacity ?? (await slots());
     const prefix = (await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId)))[0]?.p ?? null;
     const live = await db
-      .select({ job: checkJobs, number: tickets.number, title: tickets.title, urgent: tickets.urgent, requester: agents.name })
+      .select({ job: checkJobs, number: tickets.number, title: tickets.title, urgent: tickets.urgent, requester: agents.name, worker: checkWorkers.name })
       .from(checkJobs)
       .innerJoin(tickets, eq(tickets.id, checkJobs.ticketId))
       .leftJoin(agents, eq(agents.id, checkJobs.requestedBy))
+      .leftJoin(checkWorkers, eq(checkWorkers.id, checkJobs.workerId))
       .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, [...LIVE])));
     const info = new Map(live.map((r) => [r.job.id, r]));
     const minutes = (d: Date | null) => (d ? Math.max(0, Math.floor((now.getTime() - d.getTime()) / 60_000)) : 0);
@@ -430,6 +459,8 @@ export function checkQueue(db: Db) {
         heldBy,
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
+        // BOS-1435: where a running check runs: the company's runner, or a check worker by name.
+        ranOn: j.state !== "running" ? null : j.workerId ? (r.worker ?? "a check worker") : "company runner",
       };
     };
     const rows = [
@@ -452,5 +483,5 @@ export function checkQueue(db: Db) {
 
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, train, setTrain, place, queuedIds, enqueue, retarget, moveToFront, claimNext, progress, complete, readLog, logChars, pruneLogs,cancel, markStuck, requeue, requeueRunning, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, train, setTrain, place, queuedIds, enqueue, retarget, moveToFront, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }

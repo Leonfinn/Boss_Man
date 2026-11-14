@@ -6,6 +6,7 @@ import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
+import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
@@ -64,6 +65,29 @@ type SelfDeployView = {
   /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
   queueCancelled?: { at: string; why: string } | null;
 };
+
+/** A server update waiting for a quiet machine (BOS-420). */
+type DeployWaitView =
+  | { on: false }
+  | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
+
+const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
+
+/** The plain-words line for a waiting update: what it waits for, and what is held back meanwhile. */
+function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
+  const q = w.quiet;
+  const mem = q?.freeMb != null && q.needMb != null ? ` ${gbOf(q.freeMb)} free of the ${gbOf(q.needMb)} it needs.` : "";
+  const held = " Meanwhile new merge checks wait and fewer runs start.";
+  if (w.phase === "waiting")
+    return w.origin === "hand"
+      ? q?.ready
+        ? `Ready: the machine is quiet. Apply the update to ${w.commit.slice(0, 8)} by hand now.${mem}${held}`
+        : `Making room before you apply the update to ${w.commit.slice(0, 8)} by hand: ${q?.why.join("; ") || "checking"}.${mem}${held}`
+      : `The update to ${w.commit.slice(0, 8)} is waiting for a quiet machine: ${q?.why.join("; ") || "checking"}.${mem} You'll be asked at ${when(w.deadline)} if it is still waiting.${held}`;
+  if (w.phase === "sent") return `The update to ${w.commit.slice(0, 8)} has gone to the machine.${held}`;
+  if (w.phase === "window") return `The update is live; its standby window runs until ${when(w.windowUntil ?? w.deadline)}.${held}`;
+  return `The update is live; waiting for the runner update to start.${held}`;
+}
 
 /** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
 function atTime(iso: string): string {
@@ -175,11 +199,13 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
 /** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
 export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
+  const w = wait.data?.on ? wait.data : null;
   if (!v?.enabled) return null;
   const s = v.status;
   // Right after a deploy the host's offer still names the old commit for a few minutes.
@@ -196,6 +222,28 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       </p>
       <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
       {waiting && <WaitingChanges commits={v.available?.commits} />}
+      {w && (
+        <p style={{ fontSize: 14 }}>
+          {waitLine(w)}{" "}
+          <button
+            type="button"
+            className="btn"
+            disabled={act.busy}
+            onClick={() =>
+              act.run(async () => {
+                try {
+                  await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
+                } catch (err) {
+                  if (err instanceof ApiError && err.status === 409) return err.message;
+                  throw err;
+                }
+              })
+            }
+          >
+            {w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now"}
+          </button>
+        </p>
+      )}
       <div>
         <button
           type="button"
@@ -397,7 +445,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null; workers?: CheckWorkerView[] };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -519,6 +567,12 @@ export function CheckQueueSetting() {
         <p className="muted" style={{ fontSize: 14 }}>
           How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {d.effectiveSlots !== undefined && d.mode === "server" && (
+          <p style={{ fontSize: 14 }} data-testid="check-effective-slots">
+            Checks running at once right now: <strong>{d.effectiveSlots}</strong>.
+            {d.runnerSlotsReported !== null && d.runnerSlotsReported !== undefined && d.runnerSlotsReported < d.slots ? <> The runner says it runs {d.runnerSlotsReported} at once, so Boss Man starts no more than that until the runner is restarted with the new setting.</> : null}
+          </p>
+        )}
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
             Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check). That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
@@ -550,6 +604,7 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>

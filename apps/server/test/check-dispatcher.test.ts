@@ -29,7 +29,9 @@ async function setup(
   const sent: Array<{ runnerId: string; command: any }> = [];
   const woken: Array<{ agentId: string; note: string }> = [];
   let connected = true;
+  let drain = false;
   const d = checkDispatcher(db, {
+    drainPending: async () => drain,
     send: (runnerId, command) => (connected ? (sent.push({ runnerId, command }), true) : false),
     isConnected: () => connected,
     can: () => true,
@@ -40,10 +42,40 @@ async function setup(
   const q = checkQueue(db);
   const req = async (tree: string, extra: Record<string, unknown> = {}) =>
     (await q.enqueue({ companyId: co!.id, projectId: p!.id, ticketId: await ticket(), kind: "pre_review", scope: "quick", commit: `c-${tree}`, tree, requestedBy: a!.id, ...extra } as never)).job;
-  return { db, d, q, req, sent, woken, runner: r!, setConnected: (v: boolean) => (connected = v) };
+  return { db, d, q, req, sent, woken, runner: r!, setConnected: (v: boolean) => (connected = v), setDrain: (v: boolean) => (drain = v) };
 }
 
 describe("check dispatcher", () => {
+  it("hands no new check to a runner while a drain is pending, and starts it once the drain ends (BOS-1471)", async () => {
+    const s = await setup();
+    await s.req("dr1");
+    s.setDrain(true);
+    await s.d.pump();
+    expect(s.sent).toHaveLength(0);
+    expect((await s.q.list(s.runner.companyId)).rows.some((r) => r.state === "waiting")).toBe(true);
+    s.setDrain(false);
+    await s.d.pump();
+    expect(s.sent).toHaveLength(1);
+  });
+
+  it("starts at most min(check_slots, the runner's reported slots) checks (BOS-1471)", async () => {
+    const s = await setup();
+    await s.db.insert(settings).values({ key: "check_slots", value: 3 });
+    await s.d.onHello(s.runner.id, [], 1); // the runner runs one at a time, the setting says three
+    await s.req("sl-a");
+    await s.req("sl-b");
+    await s.req("sl-c");
+    await s.d.pump();
+    expect(s.sent).toHaveLength(1);
+    expect(s.d.runnerSlots(s.runner.id)).toBe(1);
+    // After the runner is recreated and says 3, the other two start.
+    await s.d.onHello(s.runner.id, [s.sent[0]!.command.jobId], 3);
+    expect(s.sent).toHaveLength(3);
+    // A runner that reports nothing (older image) is not capped.
+    await s.d.onHello(s.runner.id, s.sent.map((x) => x.command.jobId));
+    expect(s.d.runnerSlots(s.runner.id)).toBeUndefined();
+  });
+
   it("does nothing in legacy mode", async () => {
     const s = await setup("legacy");
     await s.req("t1");

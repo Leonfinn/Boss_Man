@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
+import { ownerApprovedFiles, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS } from "@boss-man/shared";
 import { branchFor, copiesAreClones, gitAuthEnv, isClone, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
@@ -214,6 +214,46 @@ describe("git workspaces (R38)", () => {
     // The agent's own staging area is exactly as it was.
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
+
+  // BOS-1100: git's rename detection would fold a move into one `old => new` line, and the owner-approval
+  // check matches exact paths, so a moved gate script slipped past it. The file list must name both sides.
+  it("names both sides of a rename in the diff, so a moved check-all.sh is still held (BOS-1100)", async () => {
+    const r = remote();
+    // The gate script is on main already, so the branch's move is a rename git could detect.
+    mkdirSync(path.join(r.dir, "scripts"), { recursive: true });
+    writeFileSync(path.join(r.dir, "scripts", "check-all.sh"), "#!/bin/sh\necho check\n");
+    git(r.dir, "add", "scripts/check-all.sh");
+    git(r.dir, "commit", "-qm", "Add the gate script");
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    git(w.path, "mv", "scripts/check-all.sh", "scripts/x.sh");
+    git(w.path, "commit", "-qm", "Move the gate script");
+
+    const d = await ws.diff(spec, undefined, "main");
+    // The old path is in the list: an exact-path match on it finds the move.
+    expect(d.files.map((f) => f.path).sort()).toEqual(["scripts/check-all.sh", "scripts/x.sh"]);
+  });
+
+  it("names the old path when a file is edited and moved in one commit (BOS-1100)", async () => {
+    const r = remote();
+    mkdirSync(path.join(r.dir, "scripts"), { recursive: true });
+    writeFileSync(path.join(r.dir, "scripts", "check-all.sh"), "#!/bin/sh\necho check\n");
+    git(r.dir, "add", "scripts/check-all.sh");
+    git(r.dir, "commit", "-qm", "Add the gate script");
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    // Move it and add a line in the same commit, so git has to pair them as a rename.
+    git(w.path, "mv", "scripts/check-all.sh", "scripts/x.sh");
+    writeFileSync(path.join(w.path, "scripts", "x.sh"), "#!/bin/sh\necho check\necho more\n");
+    git(w.path, "commit", "-qam", "Move and change the gate script");
+
+    const d = await ws.diff(spec, undefined, "main");
+    expect(d.files.map((f) => f.path).sort()).toEqual(["scripts/check-all.sh", "scripts/x.sh"]);
+    // And the server's exact-path check finds it, which is the point of the list.
+    expect(ownerApprovedFiles(d.files.map((f) => f.path))).toEqual(["scripts/check-all.sh"]);
   });
 
   it("measures a review diff from the merge-base with current main, so a branch that merged main shows only its own changes (BOS-694)", async () => {

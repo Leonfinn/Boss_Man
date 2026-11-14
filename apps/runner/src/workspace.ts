@@ -558,8 +558,22 @@ export class Workspaces {
       const readWrite = [tmp, ...(extra.GIT_INDEX_FILE ? [path.dirname(extra.GIT_INDEX_FILE)] : [])];
       const cmd = fencedCommand(fenceProfile({ cwd: dir, home: tmp, tmp, readOnly: [repo, ...reads], readWrite }), "git", args);
       const env = { PATH: this.baseEnv.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: "/dev/null", ...safeGitEnv(extra) };
-      const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
-      return stdout.trim();
+      try {
+        const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+        return stdout.trim();
+      } catch (err) {
+        // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
+        // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
+        const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
+        const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
+        const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
+        // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
+        throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
+          code: e.code,
+          stdout: e.stdout,
+          stderr: e.stderr,
+        });
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -1134,7 +1148,11 @@ export class Workspaces {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
       await this.git(["add", "-A"], { cwd: dir, env, repo });
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
-      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
+      // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
+      // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
+      // and edit it in one commit) and merge without the owner's sign-off. With renames off, a move is a
+      // delete of the old path plus an add of the new one, so both sides are named. Same rule as `--no-ext-diff`.
+      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
@@ -1322,7 +1340,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string; limitsEnv?: Record<string, string> } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1337,7 +1355,11 @@ export class Workspaces {
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, { projectId: spec.projectId, list: hooks.scanList });
+        // BOS-1435: the machine's per-check caps (BOSSMAN_CHECK_THREADS / _MEMORY_MB), already bounded by checkLimitsEnv. The
+        // job's environment is a whitelist built from the fence env, so they go there.
+        const fence = this.jobFenceFor(repo, dir, home);
+        Object.assign(fence.env, hooks.limitsEnv ?? {});
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence }, null, { projectId: spec.projectId, list: hooks.scanList });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
