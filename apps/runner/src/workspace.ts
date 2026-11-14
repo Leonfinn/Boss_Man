@@ -1132,7 +1132,11 @@ export class Workspaces {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
       await this.git(["add", "-A"], { cwd: dir, env, repo });
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
-      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
+      // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
+      // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
+      // and edit it in one commit) and merge without the owner's sign-off. With renames off, a move is a
+      // delete of the old path plus an add of the new one, so both sides are named. Same rule as `--no-ext-diff`.
+      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");

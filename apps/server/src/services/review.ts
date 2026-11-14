@@ -1689,8 +1689,9 @@ export function reviewService(
       }
       // The owner signs off a commit (DR-013): the one about to merge must be it. No head read means no merge.
       // A ticket with no branch has nothing to merge, so only the early check above applies to it.
-      // A diff that touches a file the owner approves (scripts/check-all.sh, CLAUDE.md) is held at high risk, so the
-      // owner's sign-off is needed even if nobody raised a card (BOS-1094). The sign-off machinery does the holding.
+      // A diff that touches a file the owner approves (OWNER_APPROVED_PATHS: the merge gate and what it runs, and
+      // CLAUDE.md) is held at high risk, so the owner's sign-off is needed even if nobody raised a card (BOS-1094,
+      // BOS-1100). The sign-off machinery does the holding.
       // A diff that could not be read has an unknown file list, so it must not merge: it might change one of those
       // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
       // the retries fail too (BOS-1396).
