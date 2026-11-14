@@ -63,7 +63,7 @@ function historyLines(body: string): Array<{ slug: string; message: string }> {
 }
 
 /** The last update, judged against what each company's runner is doing now. */
-export function judgeUpdate(last: LastUpdate | null, live: Record<string, RunnerLive>): UpdateReport | null {
+export function judgeUpdate(last: LastUpdate | null, live: Record<string, RunnerLive>, launcherOn = true): UpdateReport | null {
   if (!last) return null;
   const base = { at: last.at, title: last.title, body: last.body };
   if (last.ok) return { ...base, state: "ok", todo: null };
@@ -92,13 +92,17 @@ export function judgeUpdate(last: LastUpdate | null, live: Record<string, Runner
     return { ...base, state: "resolved", todo: null };
   }
   // Most specific first: slice C (BOS-382) quotes the launcher error inside its own words.
+  // BOS-1486: every instruction names a button that exists. Start runner, Restart and Stop are on the Runner
+  // panel only when the launcher is on; without it the runner is started on the host.
+  const where = "Settings → Server and runner → Runner";
+  const start = launcherOn ? `press Start runner in ${where}` : "start the runner on your host (without the launcher there is no Start button); it connects by itself";
   const rules: Array<[RegExp, string]> = [
-    [/reach the launcher/i, "The launcher isn't answering: start it, then try Settings → Runner again."],
-    [new RegExp(SWAP_PUT_BACK_FAILED, "i"), "The update failed and the runner couldn't be put back: press Start runner in Settings → Runner."],
+    [/reach the launcher/i, `The launcher isn't answering: start it on your host, then press Start runner in ${where}.`],
+    [new RegExp(SWAP_PUT_BACK_FAILED, "i"), `The update failed and the runner couldn't be put back: ${start}.`],
     [new RegExp(SWAP_PUT_BACK, "i"), "Nothing to do now: the runner is running its previous version, and the next runner update tries again."],
-    [/network guard/i, "The runner's network guard wouldn't start: press Restart in Settings → Runner."],
-    [/Creating the runner failed|Removing the runner failed/i, "A runner couldn't be replaced: start it again from Settings → Runner."],
-    [/still not connected/i, "A runner hasn't connected since: start it again from Settings → Runner."],
+    [/network guard/i, launcherOn ? `The runner's network guard wouldn't start: press Restart in ${where}.` : "The runner's network guard wouldn't start: restart the runner on your host."],
+    [/Creating the runner failed|Removing the runner failed/i, `A runner couldn't be replaced: ${start}.`],
+    [/still not connected/i, `A runner hasn't connected since: ${start}.`],
   ];
   const todo = rules.find(([re]) => broken.some((b) => re.test(b)))?.[1] ?? "Nothing to do: this was a one-off and runs are starting normally.";
   return { ...base, state: "problem", todo };
@@ -110,7 +114,7 @@ export function clock(iso: string): string {
 }
 
 /** The live state in one line: "Runner connected since 16:23 · image 202611040849", or red "Not connected since …". */
-export function describeLive(r: RunnerLive | null): { ok: boolean; text: string; state: LiveState } {
+export function describeLive(r: RunnerLive | null, launcherOn = true): { ok: boolean; text: string; state: LiveState } {
   if (!r || !r.registered) return { ok: false, text: "No runner is registered for this company yet.", state: "none" };
   if (r.connected) return { ok: true, text: `Runner connected${r.at ? ` since ${clock(r.at)}` : ""}${r.imageVersion ? ` · image ${r.imageVersion}` : ""}`, state: "connected" };
   // BOS-382: away because of a planned swap is not a fault, and pressing Start mid-swap would race it.
@@ -122,11 +126,12 @@ export function describeLive(r: RunnerLive | null): { ok: boolean; text: string;
   if (r.swapFailed && new RegExp(SWAP_PUT_BACK_RUNNING, "i").test(r.swapFailed)) {
     return { ok: true, text: "The update failed, so the runner was put back on its previous version and is starting by itself. No need to press anything.", state: "updating" };
   }
-  if (r.swapFailed) return { ok: false, text: `Update failed: ${r.swapFailed}. Press Start runner below.`, state: "failed" };
-  if (r.guard) return { ok: false, text: `Paused: the network guard isn't working (${r.guard.reason}). Boss Man keeps retrying it and the runner carries on by itself once it works. If this lasts, press Restart below.`, state: "paused" };
+  if (r.swapFailed) return { ok: false, text: `Update failed: ${r.swapFailed}.${launcherOn ? " Press Start runner below." : " Start the runner on your host."}`, state: "failed" };
+  if (r.guard) return { ok: false, text: `Paused: the network guard isn't working (${r.guard.reason}). Boss Man keeps retrying it and the runner carries on by itself once it works. If this lasts, ${launcherOn ? "press Restart below" : "restart the runner on your host"}.`, state: "paused" };
   // A runner that is down always says what to do, whether or not an update problem is also recorded.
   const when = r.at ? ` since ${clock(r.at)}` : "";
-  return { ok: false, text: `Not connected${when} — start it again from Settings → Runner.`, state: "offline" };
+  const todo = launcherOn ? "press Start runner in Settings → Server and runner → Runner" : "start the runner on your host (without the launcher there is no Start button); it connects by itself";
+  return { ok: false, text: `Not connected${when} — ${todo}.`, state: "offline" };
 }
 
 /**
@@ -156,6 +161,8 @@ export type RunnerReportDeps = {
   connectedSince: (runnerId: string) => Date | null;
   /** The launcher's view of a company's container; absent or null when the launcher is off (launcherService.status). */
   launcher?: (companyId: string) => Promise<{ slug: string; container: { state: string; status: string; image: string; guardReason?: string; guardSince?: string } | null; error?: string } | null>;
+  /** BOS-1486: whether the launcher is on. Start runner, Restart and Stop exist only then; absent counts as on. */
+  launcherOn?: () => boolean;
 };
 
 const SLUG_KEY = "runner-slug:";
@@ -208,7 +215,7 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
         } else now.push({ slug: c.name, name: c.name, ...l });
       }
       const { last } = await maintenance.status();
-      return { live: now, update: judgeUpdate(last ?? null, live) };
+      return { live: now, update: judgeUpdate(last ?? null, live, deps.launcherOn?.() ?? true) };
     },
 
     /** One company's Settings → Runner: the same live-first state, and the same rule for a past problem. */
@@ -221,7 +228,8 @@ export function runnerReportService(db: Db, maintenance: MaintenanceLike, deps: 
       const { last } = await maintenance.status();
       // A company a problem's lines don't name gets no blame for it; a named one is judged by what its runner is doing now.
       const named = !!last && !last.ok && !reportNames(last, slug) && !!slug;
-      return { live: describeLive(live), last: last && !named ? judgeUpdate(last, slug ? { [slug]: live } : {}) : null };
+      const launcherOn = deps.launcherOn?.() ?? true;
+      return { live: describeLive(live, launcherOn), last: last && !named ? judgeUpdate(last, slug ? { [slug]: live } : {}, launcherOn) : null };
     },
   };
 }

@@ -749,6 +749,9 @@ export function EmailSetting() {
 export function RunnerUpdate() {
   const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
   const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
+  // BOS-1486: the Build and update runners button lives in the Updates card, which is hidden when there is no host deployer.
+  const deploy = usePoll((signal) => api<{ enabled?: boolean }>("/api/self-deploy", { signal }), 30_000, "self-deploy-runner-update");
+  const deployerOff = deploy.data?.enabled === false;
   const act = useAction();
   const m = view.data;
   if (!m) return null;
@@ -774,7 +777,16 @@ export function RunnerUpdate() {
           ? m.kind === "wrapup"
             ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
             : `${m.kind === "settings" ? "Applying a runner setting change (for example Check slots). This is not a runner update: the image stays the same" : "Update pending"}: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. ${m.blocking === false ? "It is past its deadline, so new runs are no longer held for it." : "Nothing new starts until it is done."} To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
-          : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
+          : <>
+              {"Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. "}
+              {deployerOff ? (
+                <>
+                  Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use this button. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+                </>
+              ) : (
+                "Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."
+              )}
+            </>}
       </p>
       <div>
         {r?.update ? (

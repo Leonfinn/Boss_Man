@@ -22,7 +22,7 @@ type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
 
-const PHASE: Record<Phase, string> = { queued: "waiting for a check slot", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
+const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
 
 /** "4 waiting to merge" for the side menu's badge, or null when nothing waits. */
