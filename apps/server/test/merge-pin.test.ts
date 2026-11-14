@@ -34,7 +34,9 @@ const LATE = "c".repeat(40);
 const DIFF: WorkspaceDiff = { baseCommit: "a".repeat(40), head: REVIEWED, commits: [{ sha: REVIEWED, subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "diff --git a/src/a.ts b/src/a.ts", truncated: false };
 const prepared = (branchSha: string | undefined, n: number) => ({ status: "prepared", commit: String(n).repeat(40), tree: String(n + 1).repeat(40), targetSha: "1".repeat(40), ...(branchSha ? { branchSha } : {}) });
 
-async function setup(o: { covers?: boolean | null; oldRunner?: boolean } = {}) {
+// oldRunner: no "merge-pin" feature, ignores the pin, names no branch commit. noBranchSha: announces the feature but omits branchSha.
+// diffHeads: the head each workspace.diff answer reports in turn (the last one repeats); the first is what the approval stamps.
+async function setup(o: { covers?: boolean | null; oldRunner?: boolean; noBranchSha?: boolean; diffHeads?: string[] } = {}) {
   await shared.reset();
   const { db } = shared;
   const built = await (app ??= buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" }));
@@ -46,10 +48,14 @@ async function setup(o: { covers?: boolean | null; oldRunner?: boolean } = {}) {
   await req("PATCH", `/api/projects/${project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", verifyCommand: "pnpm test" });
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   // The branch tip on the runner, moved by the tests. Prepares and finishes pin to what the server asked for.
-  const state = { branch: REVIEWED, merged: null as string | null, pins: [] as Array<string | undefined>, prepares: 0 };
+  const state = { branch: REVIEWED, merged: null as string | null, pins: [] as Array<string | undefined>, prepares: 0, diffs: 0 };
   built.runners.connect(reg.runnerId, (c: RunnerCommand) => {
     const reply = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") reply(DIFF);
+    if (c.type === "workspace.diff") {
+      const heads = o.diffHeads ?? [REVIEWED];
+      const head = heads[Math.min(state.diffs++, heads.length - 1)]!;
+      reply({ ...DIFF, head, commits: [{ sha: head, subject: "Work" }] });
+    }
     if (c.type === "workspace.verify") reply({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 5 });
     if (c.type === "workspace.carried") reply({ carried: [] });
     if (c.type === "workspace.migrations") reply({ needed: false, reason: "Nothing taken." });
@@ -63,14 +69,14 @@ async function setup(o: { covers?: boolean | null; oldRunner?: boolean } = {}) {
       if (!o.oldRunner && x.pin && x.pin !== state.branch) return reply({ status: "branch_moved", head: state.branch, pinned: x.pin }), true;
       if (x.phase === "prepare") {
         state.prepares++;
-        reply(prepared(o.oldRunner ? undefined : state.branch, 7));
+        reply(prepared(o.oldRunner || o.noBranchSha ? undefined : state.branch, 7));
       } else {
         state.merged = x.commit ?? null;
         reply({ status: "merged", commit: x.commit });
       }
     }
     return true;
-  }, ["carried-check", "signoff-covers"]);
+  }, o.oldRunner ? ["carried-check", "signoff-covers"] : ["carried-check", "signoff-covers", "merge-pin"]);
   const t = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${t.id}` }).where(eq(tickets.id, t.id));
   await db.insert(settings).values({ key: "check_queue_mode", value: "server" });
@@ -157,9 +163,41 @@ describe("a merge is pinned to the reviewed head (BOS-1413)", () => {
     expect(c.state.merged).toBeNull();
   });
 
-  it("(g) a runner that ignores the pin and doesn't name the branch commit is refused, not trusted", async () => {
+  it("(g) a runner without the merge-pin feature gets no pin and merges as before, with no send-back", async () => {
     const c = await setup({ oldRunner: true });
+    const res = approveAndWait(c.req, c.ticket.id);
+    await c.passJob((await c.jobOf()).id);
+    expect((await res).json()).toMatchObject({ outcome: "merged" });
+    expect(c.state.pins.length).toBeGreaterThanOrEqual(2);
+    expect(c.state.pins.every((p) => p === undefined)).toBe(true);
+    expect(c.state.merged).not.toBeNull();
+  });
+
+  it("(g2) a runner that announces merge-pin but doesn't name the branch commit is refused, not trusted", async () => {
+    const c = await setup({ noBranchSha: true });
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "branch_changed" });
     expect(c.state.merged).toBeNull();
+  });
+
+  it("(h) a medium-risk ticket whose branch moved after the approval is pinned to the approved head, not the head read now", async () => {
+    // The approval stamps REVIEWED (first diff); the landing then reads LATE, as a retry after a lock wait or a restart would.
+    const c = await setup({ diffHeads: [REVIEWED, LATE] });
+    await c.db.update(tickets).set({ risk: "medium" }).where(eq(tickets.id, c.ticket.id));
+    c.state.branch = LATE;
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "branch_changed" });
+    expect(c.state.pins.every((p) => p === REVIEWED)).toBe(true);
+    expect(c.state.merged).toBeNull();
+    expect(await c.stateOf()).toBe("in_progress");
+  });
+
+  it("(h2) the same, but main was only merged in cleanly: the approved head's pin is carried to the new head and it merges", async () => {
+    const c = await setup({ covers: true, diffHeads: [REVIEWED, LATE] });
+    await c.db.update(tickets).set({ risk: "medium" }).where(eq(tickets.id, c.ticket.id));
+    c.state.branch = LATE;
+    const res = approveAndWait(c.req, c.ticket.id);
+    await c.passJob((await c.jobOf()).id);
+    expect((await res).json()).toMatchObject({ outcome: "merged" });
+    expect(c.state.pins[0]).toBe(REVIEWED);
+    expect(c.state.pins.at(-1)).toBe(LATE);
   });
 });

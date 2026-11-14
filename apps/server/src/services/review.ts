@@ -1738,7 +1738,14 @@ export function reviewService(
       // BOS-1413: this head is the one the reviews and sign-off were checked against. Every merge step of this landing is pinned to
       // it, so a commit made while the check or a train seat waits is never built, checked or pushed. Only clean main merges
       // (signoffCovers) move the pin.
-      let pin: string | null = changed?.head && /^[0-9a-f]{7,64}$/.test(changed.head) ? changed.head : null;
+      // The pin is the head the approvals were given on (BOS-1173 stamps it), not the head read now: a landing that starts again
+      // (lock wait, runner restart, resume, sweep) would otherwise pin whatever the author committed in the pause, and a
+      // ticket that needs no sign-off has nothing else that compares it. A different head merges only when signoffCovers
+      // says main was merged in cleanly (askMerge); otherwise it goes back for review. No stamped head (older rounds): the
+      // head read now. A runner without "merge-pin" ignores the pin, so none is sent: it merges as before.
+      const reviewedHead = changed?.head ? await this.passedHead(t, await latestRows(db, ticketId)).catch(() => null) : null;
+      const pinHead = reviewedHead ?? changed?.head;
+      let pin: string | null = pinHead && /^[0-9a-f]{7,64}$/.test(pinHead) && deps.runners.can(runner.id, "merge-pin") ? pinHead : null;
       const askMerge = async (build: (requestId: string) => Record<string, unknown>, timeoutMs: number): Promise<MergeResult> => {
         for (let again = 0; ; again++) {
           const pinned = pin;

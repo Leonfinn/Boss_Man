@@ -190,12 +190,12 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
-/** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
 /** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
 function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
   return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
 }
 
+/** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
 export class RepoLockTimeout extends Error {
   constructor(projectId: string) {
     super(`Timed out waiting for the lock on ${projectId}.`);

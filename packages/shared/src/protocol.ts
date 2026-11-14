@@ -303,8 +303,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-pin": honours workspace.merge's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-pin"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
