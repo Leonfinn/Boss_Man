@@ -1,12 +1,14 @@
 // The brief an agent gets at every wake (R84): built by code from live tables, no model call.
 // Every section is capped, and says how many more there are.
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReading, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
+import { heldReadyTickets } from "./agent-wip.js";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
+import { CHECK_REUSED_KIND } from "./check-request.js";
 import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
@@ -68,7 +70,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
           .leftJoin(agents, eq(agents.id, activity.agentId))
           .leftJoin(tickets, eq(tickets.id, activity.ticketId))
           // The merge-line timeline (BOS-769) is a record for measuring jams, not news: the "state" rows already say it moved.
-          .where(and(eq(activity.companyId, companyId), gt(activity.at, from), ne(activity.kind, MERGE_LINE_KIND), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
+          .where(and(eq(activity.companyId, companyId), gt(activity.at, from), notInArray(activity.kind, [MERGE_LINE_KIND, CHECK_REUSED_KIND]), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
           .orderBy(desc(activity.at));
 
   /** Other agents' live runs that aren't owner chat: what each is doing, in the same words the dashboard uses (BOS-118). */
@@ -114,9 +116,12 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     // A sample of what the PA told the owner, for the CEO to mark right or wrong (R87).
     const audit = await db.select().from(paAnswers).where(and(eq(paAnswers.companyId, companyId), eq(paAnswers.sampled, true), isNull(paAnswers.verdict))).orderBy(asc(paAnswers.createdAt));
     const hold = await getHold(db);
+    // Ready work the company limit is refusing, so agents sitting idle are not a mystery (BOS-1479).
+    const companyRefused = (await heldReadyTickets(db, companyId)).filter((h) => h.scope === "company").length;
     body = [
       ...(hold ? [`UPDATE PENDING: Boss Man is waiting for runs to finish so it can update the runners (${hold.reason}, since ${hold.since.slice(0, 16).replace("T", " ")} UTC). No new run starts anywhere until it is done: do not delegate new work or open new tickets for now, finish what is in flight, and leave the rest for after.`, ""] : []),
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
+      ...(companyRefused ? [`At company limit: ${companyRefused} Ready ticket${companyRefused === 1 ? "" : "s"} refused. Agents may sit idle until one in-progress ticket finishes or the owner raises the limit in Settings.`] : []),
       ...section("Needs you", capped(needLines, 8)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),
       ...section("In flight", capped(await flightLines(), 8)),

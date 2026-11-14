@@ -116,7 +116,7 @@ describe("Ask agents to wrap up in the Runner update box", () => {
     expect(note).not.toMatch(/\ba run still going is marked/i);
   });
 
-  it("says a run in a long step will stop when the step ends, and one that has the message is finishing up, with no Stop before the mark (BOS-1016)", async () => {
+  it("says a run in a long step will stop when the step ends, and one that has the message is finishing up, with a Stop on every run before the mark (BOS-1379)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({})));
     const s = {
       ...wrapOn,
@@ -129,13 +129,18 @@ describe("Ask agents to wrap up in the Runner update box", () => {
     };
     render(<WrapUpAction m={s} reload={() => {}} />);
     const items = (await screen.findByTestId("wrapup-runs")).querySelectorAll("li");
+    expect(items.length).toBe(3);
     expect(items[0]!.textContent).toContain("In a long step: it will stop when this step ends");
     expect(items[0]!.textContent).toContain("running scripts/check-all.sh for 14 min");
     expect(items[1]!.textContent).toContain("Finishing up");
     expect(items[1]!.textContent).not.toContain("In a long step");
     expect(items[2]!.textContent).toContain("Working");
-    expect(screen.queryByRole("button", { name: "Stop this run" })).toBeNull();
+    // BOS-1379: every still-running run offers a Stop, even before the 30-minute mark (the owner had no way to
+    // stop an opencode agent inside one long step, so they stopped it by hand).
+    expect(screen.getAllByRole("button", { name: "Stop this run" }).length).toBe(3);
     expect(screen.queryByText(/not responding/i)).toBeNull();
+    // The long-step label tells the owner Stop is the way to end it now.
+    expect(items[0]!.querySelector(".tag")?.getAttribute("title")).toContain("use Stop this run");
   });
 
   it("an older server without step details still shows Working", async () => {

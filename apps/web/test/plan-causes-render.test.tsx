@@ -181,14 +181,17 @@ describe.skipIf(!browser)("What's holding work up at real widths (BOS-745)", () 
             hidden: body.hidden || getComputedStyle(body).display === "none" || body.offsetHeight === 0,
             expanded: toggle.getAttribute("aria-expanded"),
             arrow: (document.querySelector(".pl-causes-toggle .pl-arrow") as HTMLElement).textContent?.trim(),
+            label: (document.querySelector(".pl-causes-action") as HTMLElement).textContent?.trim(),
             cardH: card.getBoundingClientRect().height,
             headH: toggle.getBoundingClientRect().height,
           };
         });
         expect(rolled.hidden).toBe(true);
         expect(rolled.expanded).toBe("false");
-        expect(rolled.arrow).toBe("▸");
-        expect(rolled.cardH).toBeLessThanOrEqual(rolled.headH + 40);
+        expect(rolled.arrow).toBe("▾");
+        expect(rolled.label).toContain("Show");
+        // Folded is one slim line: no panel padding beyond the 1px borders.
+        expect(rolled.cardH).toBeLessThanOrEqual(rolled.headH + 4);
       } finally {
         await page.close();
       }

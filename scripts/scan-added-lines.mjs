@@ -9,10 +9,13 @@
 // of ip, host, path, email, other (a bare line counts as other; an ip may be a CIDR such as 192.0.2.0/24 or a prefix ending
 // in a dot). The list is never in the repo. With no list the secret rules still run.
 //
-// Output never contains a matched value: only kind, file:line and the value's length. A secret finding also prints a short
-// fingerprint (first 12 hex of the value's SHA-256) so a reviewer can put a genuine false positive in scripts/scan-allow.txt:
+// Output never contains a matched value: a secret finding prints its kind, file:line and the value's length. A secret finding
+// also prints a short fingerprint (first 12 hex of the value's SHA-256) so a reviewer can put a genuine false positive in
+// scripts/scan-allow.txt:
 //   <path><TAB><rule><TAB><fingerprint><TAB><reason>
-// Listed (denylist) findings print no fingerprint, since a short value such as an IP could be guessed back from one.
+// Listed (denylist) findings print no fingerprint, since a short value such as an IP could be guessed back from one. Nor do
+// they print the file, line or kind (BOS-1390): the merge output goes back to the ticket's agent, so naming where a listed
+// value sits would let an agent test one guess per merge attempt after approval. The owner can see the location elsewhere.
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -129,15 +132,27 @@ export function addedLines(diff) {
   // File headers (---/+++) only exist between a "diff --git" line and the first "@@": inside a hunk every line starting
   // with "+" is an ADDED line, even one whose text begins "++ " (git shows it as "+++ ..."). Reading it as a header would
   // let a branch hide a token (Freddy's finding on BOS-979).
+  // A merge commit's own content (its conflict resolution) comes as a combined diff ("diff --cc", "@@@ -a -b +c @@@"):
+  // each line has one prefix column per parent, and a line with a "+" and no "-" in them is in the result (BOS-1043).
+  let parents = 1
   for (const l of diff.split('\n')) {
-    if (l.startsWith('diff --git ')) { inHeader = true; file = null; continue }
+    if (l.startsWith('diff --git ') || l.startsWith('diff --cc ') || l.startsWith('diff --combined ')) { inHeader = true; file = null; parents = 1; continue }
+    const c = /^@@@+ (?:-\S+ )+\+(\d+)(?:,\d+)? @@@+/.exec(l)
+    if (c) { inHeader = false; ln = Number(c[1]); parents = l.indexOf(' ') - 1; continue }
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l)
-    if (h) { inHeader = false; ln = Number(h[1]); continue }
+    if (h) { inHeader = false; ln = Number(h[1]); parents = 1; continue }
     if (inHeader) {
       if (l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6)
       continue
     }
-    if (file && l.startsWith('+')) { out.push({ file, line: ln, text: l.slice(1) }); ln++ }
+    if (!file) continue
+    if (parents === 1) {
+      if (l.startsWith('+')) { out.push({ file, line: ln, text: l.slice(1) }); ln++ }
+    } else {
+      const pre = l.slice(0, parents)
+      if (pre.includes('-')) continue
+      if (pre.includes('+')) { out.push({ file, line: ln, text: l.slice(parents) }); ln++ } else if (pre.trim() === '' && l.length >= parents) ln++
+    }
   }
   return out
 }
@@ -163,16 +178,13 @@ export function scan({ items, extra = [], newFiles = [], denylist = [], allow = 
     const k = matchDenylist(text, denylist)
     if (k) blocked.push({ kind: `listed-private-${k}`, where, listed: true })
   }
-  // Skipping is by what the content is, not only its name (Freddy, round 2): a lockfile is skipped only when it already
-  // existed (a NEW file called yarn.lock is scanned), and a file with an image/font/pdf name is skipped only for lines
-  // that really are binary (NUL or undecodable bytes), so a text file named x.png is scanned.
-  const fresh = new Set(newFiles)
+  // Nothing is skipped by its name (Freddy, round 2; Jane, BOS-1043): a lockfile's added lines go through the secret rules
+  // like any file (its integrity hashes match none of them), and a line of an image/font/pdf-named file has its NUL and
+  // undecodable bytes stripped and what is left scanned, so a key beside a NUL byte in x.png is still found.
   for (const it of items) {
-    if (SKIP_PATH.test(it.file)) {
-      const lock = /(pnpm-lock\.yaml|package-lock\.json|yarn\.lock)$/i.test(it.file)
-      if (lock ? !fresh.has(it.file) : /[\0�]/.test(it.text)) continue
-    }
-    check(`${it.file}:${it.line}`, it.file, it.text)
+    // NUL is stripped from every file (a UTF-16 file reads as text with NULs between the letters).
+    const text = it.text.replace(SKIP_PATH.test(it.file) ? /[\0�]/g : /\0/g, '')
+    check(`${it.file}:${it.line}`, it.file, text)
   }
   for (const e of extra) check(e.where, null, e.text)
   return { blocked, warnings }
@@ -181,7 +193,7 @@ export function scan({ items, extra = [], newFiles = [], denylist = [], allow = 
 export function format({ blocked, warnings }) {
   const lines = []
   for (const b of blocked) {
-    if (b.listed) lines.push(`BLOCKED ${b.kind} at ${b.where}: the line holds a private detail from the owner's list (value not shown). Replace it with a made-up example such as 192.168.1.50, example.com or myserver.`)
+    if (b.listed) lines.push(`BLOCKED a listed private detail was found in this change. Replace every real value with a made-up example such as 192.168.1.50, example.com or myserver. (The file, line and kind are not shown, so this output can't be used to work out which value matched.)`)
     else if (b.fingerprint) lines.push(`BLOCKED ${b.kind} at ${b.where}: looks like a real secret, ${b.length} characters (value not shown). Remove it and use an environment variable or the Secrets store. A genuine false positive goes in scripts/scan-allow.txt (needs review) with fingerprint ${b.fingerprint}.`)
     else lines.push(`BLOCKED ${b.kind} at ${b.where}: ${b.note} (not shown).`)
   }
@@ -192,7 +204,7 @@ export function format({ blocked, warnings }) {
 const git = (args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
 
 function main() {
-  const base = process.argv[2] ?? 'origin/main'
+  const base = process.argv.slice(2).find((a) => !a.startsWith('--')) ?? 'origin/main'
   const range = `${base}...HEAD`
   // --text: the branch's own .gitattributes ("* -diff") must not turn files into "Binary files differ" and hide lines.
   // T: a type change (symlink to file) is scanned too.
@@ -201,21 +213,26 @@ function main() {
   // Every commit of the branch lands in main's history, so a secret added in one commit and deleted in the next is
   // scanned too (Freddy, round 2). Bounded: past MAX_COMMITS the check fails rather than skipping.
   const MAX_COMMITS = 300
-  const nCommits = Number(git(['rev-list', '--count', '--no-merges', `${base}..HEAD`]).trim())
+  const nCommits = Number(git(['rev-list', '--count', `${base}..HEAD`]).trim())
   if (nCommits > MAX_COMMITS) {
     console.log(`BLOCKED too-many-commits at ${base}..HEAD: ${nCommits} commits is more than the ${MAX_COMMITS} the scan reads one by one. Squash the branch.`)
     process.exit(1)
   }
-  const perCommit = git(['log', '-p', '--no-merges', '--format=', ...flags, `${base}..HEAD`])
+  // --cc: a merge commit shows only its own resolution (what differs from every parent), so merging main in adds nothing.
+  const perCommit = git(['log', '-p', '--cc', '--format=', ...flags, `${base}..HEAD`])
   const newFiles = git(['diff', '--name-only', '--diff-filter=AR', range]).split('\n').filter(Boolean)
   const extra = []
-  const log = git(['log', '--no-merges', '--format=%x00%h%x01%ae%x01%ce%x01%B', `${base}..HEAD`])
+  const log = git(['log', '--format=%x00%h%x01%ae%x01%ce%x01%B', `${base}..HEAD`])
   for (const rec of log.split('\0').filter(Boolean)) {
     const [h, ae, ce, ...body] = rec.split('\x01')
     extra.push({ where: `commit ${h} message`, text: body.join('\x01') }, { where: `commit ${h} author email`, text: `${ae} ${ce}` })
   }
+  // The runner passes the list on stdin (--list-stdin): no file for another process to read. The file variable stays for
+  // a hand run of the scanner.
   const listFile = process.env.BOSSMAN_SCAN_DENYLIST_FILE
-  const denylist = listFile && existsSync(listFile) ? parseDenylist(readFileSync(listFile, 'utf8')) : []
+  const denylist = process.argv.includes('--list-stdin')
+    ? parseDenylist(readFileSync(0, 'utf8'))
+    : listFile && existsSync(listFile) ? parseDenylist(readFileSync(listFile, 'utf8')) : []
   const allowPath = fileURLToPath(new URL('./scan-allow.txt', import.meta.url))
   const allow = existsSync(allowPath) ? parseAllow(readFileSync(allowPath, 'utf8')) : new Set()
   // The commit messages are multi-line: scan line by line so a finding names its commit, not a position in a blob.

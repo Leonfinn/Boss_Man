@@ -201,6 +201,31 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   }
 
   /**
+   * The run.update payload as it is stored in runner_events (BOS-1368 security review): the Thinking
+   * trace's short input, output and reasoning are redacted here too, so a raw secret can never sit in
+   * that table even for a run whose trace is never read, and even from a runner image that predates
+   * the runner-side redaction. Every other field is left exactly as the runner sent it.
+   */
+  function storedEvent(event: RunnerEvent): RunnerEvent {
+    if (event.type !== "run.update") return event;
+    const u = event.update as Record<string, unknown>;
+    if (!u) return event;
+    const redacted: Record<string, unknown> = { ...u };
+    let changed = false;
+    for (const k of ["inputSummary", "resultSummary", "text", "title"] as const) {
+      const v = redacted[k];
+      if (typeof v === "string") {
+        const r = redact(v);
+        if (r !== v) {
+          redacted[k] = r;
+          changed = true;
+        }
+      }
+    }
+    return changed ? ({ ...event, update: redacted } as RunnerEvent) : event;
+  }
+
+  /**
    * Applies one newly stored event inside `tx`, so the event insert and its effects commit together
    * and a transient failure rolls the insert back for the runner's resend (BOS-584). Returns the work
    * that must run after the commit because it talks to the outside world (the permission hook may send
@@ -338,7 +363,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         const { inserted, afterCommit } = await db.transaction(async (tx) => {
           const rows = await tx
             .insert(runnerEvents)
-            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: storedEvent(entry.event), occurredAt: at })
             .onConflictDoNothing()
             .returning({ id: runnerEvents.id });
           if (rows.length === 0) return { inserted: false, afterCommit: [] as Array<() => Promise<unknown>> };
@@ -372,7 +397,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         await db.transaction(async (tx) => {
           await tx
             .insert(runnerEvents)
-            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: entry.event, occurredAt: at })
+            .values({ runnerId: runner.id, seq: entry.seq, type: entry.event.type, payload: storedEvent(entry.event), occurredAt: at })
             .onConflictDoNothing();
           await record(tx, {
             companyId: runner.companyId,

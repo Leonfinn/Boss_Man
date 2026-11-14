@@ -266,6 +266,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 - **A standby still serves reads** (`GET`), `/api/health`, `/api/ready`, login and logout, and the static UI. Every other write under `/api/`, all of `/api/runner/*` and `/mcp` answer `503 {"error":"standby"}`.
 - **Hand-over by host signals only.** `SIGUSR1` = demote (release the lock, stop background work, drop runner sockets, stay out of the contest). `SIGUSR2` = promote (contest the lock). No HTTP endpoint can change the role. Example: `docker kill --signal=USR1 <container>`.
 - **Separate migrate step.** `apps/server/src/migrate.ts` is shipped in the server image as `dist/migrate.js`: `docker run --rm --env DATABASE_URL=... --entrypoint node <server image> dist/migrate.js`. It takes its own advisory lock (key 5141440002), waits at most `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` (default 60000) for another migration, runs the Drizzle migrations and exits non-zero on failure.
+- **Merges in flight when a server takes charge (BOS-1371).** An approved merge whose check job is still queued or running on the runner keeps waiting on that job and lands with that job's own commit and tree; nothing is prepared or queued again. A merge with no live job restarts once. At most `BOSSMAN_RESUME_MERGES_MAX` (default 4) merges restart from scratch at the same time; the rest wait and start as slots free. The 30-minute missed-merge sweep leaves those held-back merges alone.
 - **Migrate on start stays the default.** With `BOSSMAN_MIGRATE_ON_START=0` the server skips migrating and instead refuses to start (clear error, exit 1) if the database is **older** than its own migrations. A **newer** database is accepted (expand/contract: the previous release runs on the next one's schema).
 
 **Environment variables**
@@ -364,6 +365,61 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 - An automatic switch-back during the soak.
 - The timing defaults (30 s hand-over wait, 120 s ready wait, 15 minutes) on slower hardware.
 - Whether the swap should also check each company's runner reconnected: it doesn't yet. A person can see it in Settings > Server and runner > Runner, "Connected since".
+
+## Server updates wait for a quiet machine (BOS-420, DR-008 Q3)
+
+On 3 Nov 12:47 an approved update started on a host that was already full: it built an image, ran a second server beside the live one, ran out of memory and was switched back. Since BOS-420 an approved **server** update waits for a quiet machine before Boss Man sends it. Runner updates are unchanged (they have their own drain, phase 2).
+
+### Quiet means
+
+- the host deployer reported in the last 3 minutes, and its `outbox/headroom.json` says `availableMb ≥ needMb`;
+- no merge check is running (the in-memory merge gate and the server-owned check queue both count);
+- at most `DEPLOY_QUIET_RUNS` runs are going (server environment, default 3).
+
+A quiet machine never waits: the request is written at once, as before. A host with an older deployer (no `headroom.json`) skips only the memory test. A report older than 3 minutes counts as **not quiet** ("the machine hasn't reported for N min"): the deployer's cron job has stopped, or the host is too loaded to tick.
+
+### While it waits: the soft hold
+
+The wait is one `settings` row, `deploy_wait` (no migration; not the maintenance hold, which is a full stop). While the row exists:
+
+- the scheduler starts at most `DEPLOY_QUIET_RUNS` runs at once (urgent wakes first); runs already going finish normally;
+- no new merge check starts on either path; checks already running finish. The merge queue screen shows "waiting for the server update";
+- Settings → Server and runner → Updates shows what it waits for, with **Cancel the update** (before the host has taken it) or **Lift the hold now** (once it is live).
+
+Phases: **waiting** (not sent) → **sent** (in the inbox or running) → **window** (deployed; until the standby window ends; a single-server host has none and the hold lifts on `deployed`) → **handover** (only when a runner update card is open: the hold stays until the runner drain's full hold starts, the card is put off, or 30 minutes pass). A switch-back, failure or refusal ends it.
+
+### The owner's card
+
+If it is still not quiet 30 minutes after approval (or the host holds a sent request for memory for 30 minutes), the owner gets one card: **Keep waiting another 30 min**, **Update now anyway** (sent with `"quiet":"override"`, which also skips the host's floor), or **Cancel the update**. Nothing ever sends by itself without room.
+
+### Restarts, main moving, stale reports
+
+- A restart or leader change keeps the wait: the row is in the database, the deadline is an absolute time and the card's dedupe key names the deadline, so no second card.
+- If main moves on while it waits, the approval lapses (the host deploys only the tip, BOS-124); the owner is told and approves the new offer.
+- Safety cap: a soft hold older than 3 hours, in any phase, lifts itself and pages the owner.
+- Last resort, if the hold ever sticks: delete the `deploy_wait` row from `settings`. Nothing else holds state.
+
+### The host's memory floor (`scripts/host-deployer.sh`)
+
+Every tick the deployer writes `outbox/headroom.json`: `totalMb`, `availableMb`, `swapTotalMb`, `swapUsedMb`, `needMb` and `needFrom`, plus `holding` while it holds a request and `lastUpdate` (the lowest free memory and swap peak of the last update). Every field is optional.
+
+- **Free memory** is `MemAvailable` from `/proc/meminfo`. When the cgroup has a memory limit that `/proc` doesn't show (cgroup v2 `memory.max`, or v1 `memory.limit_in_bytes`; for example a Proxmox LXC without lxcfs), it uses the smaller of that and the limit minus the working set.
+- **Need** is `DEPLOY_MIN_FREE_MB` from `host.conf` when set; otherwise `DEPLOY_BUILD_MEMORY_MB` (default 3072) + 1024, plus on blue/green room for a second, freshly started server: `DEPLOY_NEW_SERVER_MB` (default 4096), or `BOSSMAN_SERVER_MEMORY` when that cap is smaller. It is never what the live server uses now: a leaking live server (17.5 GB on 7 Nov) would otherwise hold back the very update that replaces it. On blue/green, `headroom.json` also carries `newServerMb` (that room) and `liveServerMb` (the live colour's use from `docker stats`).
+- **When the live server is the shortage:** if memory is short but the live server's use above a fresh one's would cover it, the wait's reason and the 30-minute card say so (waiting won't free it; the update replaces it), and the card recommends **Update now anyway** (for a hand-applied update: stop waiting and apply it). It still never sends by itself.
+- **Floor:** a request that arrives while `availableMb < needMb` stays in `inbox/`, the hold is logged once, and it is tried again next minute. A request with `"quiet":"override"` is taken anyway. A host that can't read its memory never holds.
+- **Measuring:** it samples memory and swap at each swap step and through the standby window, and logs one line after the window: the lowest free memory, where, and the swap peak. Use it to set `DEPLOY_BUILD_MEMORY_MB` from real numbers.
+
+To check the numbers on a host, compare `cat outbox/headroom.json` with `free -m`. In a Proxmox LXC, also compare with the container's memory limit in the Proxmox UI: if `free -m` shows the whole host's memory, lxcfs is off and the deployer uses the cgroup limit instead.
+
+### Hand-applied (infra) updates
+
+The owner's to-do for a hand-applied server update starts with **Quiet the machine first**. Pressing it starts the same wait with origin "hand": the same soft hold and quiet test, but nothing is sent. The to-do shows how quiet the machine is and says **Ready** when it is; the owner gets a "Ready" note too. The hold then follows the hand-applied update through its standby window as above.
+
+### Mixed versions and rollback
+
+- New server, old deployer: memory isn't tested; runs and checks still gate.
+- Old server, new deployer: the floor still holds a request until memory is free.
+- Rollback: revert the merge through the normal deploy. Old code ignores a leftover `deploy_wait` row; an unsent approval is lost and is approved again. For the deployer, copy the previous `scripts/host-deployer.sh` back (the same hand-apply step).
 
 ## Open items
 

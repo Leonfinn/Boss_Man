@@ -8,11 +8,12 @@ import path from "node:path";
 import { and, count, desc, eq, gt, inArray, isNull } from "drizzle-orm";
 import { agentIdentity, BUILT_IN_RULES } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, ownerChatMessages, projects, runs, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, ownerChatMessages, ownerChatTraces, projects, runs, tickets, wakes } from "../db/schema.js";
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 import { forgetRunTrace, runTrace } from "../mcp-trace.js";
 import { missingPageNote } from "./wiki.js";
 import { runCapabilities } from "./run-capabilities.js";
+import type { ChatTraceService } from "./chat-trace.js";
 
 export const CHAT_REASON = "owner_chat";
 
@@ -68,7 +69,7 @@ export class ChatError extends Error {
 
 type Agent = typeof agents.$inferSelect;
 
-export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
+export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string; trace?: ChatTraceService }) {
   // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
   const saving = new Map<string, Promise<unknown>>();
   // shortcut: how many changes the run had when it last replied, so the run-end line lists only what came after (BOS-758).
@@ -145,7 +146,19 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id)))
         .orderBy(desc(ownerChatMessages.createdAt))
         .limit(200);
-      return { agentId: agent.id, items: items.reverse(), state: await state(companyId, agent.id) };
+      const ordered = items.reverse();
+      // The Thinking trace for each reply (BOS-1368): one query for the page's messages, only this company's.
+      const ids = ordered.filter((m) => m.role === "assistant").map((m) => m.id);
+      const traceRows = ids.length ? await db.select({ messageId: ownerChatTraces.messageId, trace: ownerChatTraces.trace }).from(ownerChatTraces).where(and(eq(ownerChatTraces.companyId, companyId), inArray(ownerChatTraces.messageId, ids))) : [];
+      const byMessage = new Map(traceRows.map((t) => [t.messageId, t.trace]));
+      // While the agent is answering, the trace so far goes as its own live item at the end of the log.
+      const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.companyId, companyId), eq(runs.agentId, agent.id), eq(runs.purpose, "chat"), isNull(runs.endedAt)));
+      const live = running ? (deps.trace?.live(running.id) ?? null) : null;
+      const withTrace = ordered.map((m) => {
+        const trace = byMessage.get(m.id);
+        return trace ? { ...m, trace } : m;
+      });
+      return { agentId: agent.id, items: withTrace, state: await state(companyId, agent.id), live };
     },
 
     /** Everyone the owner can message, CEO first, each with their last message and what they're doing. */
@@ -237,8 +250,18 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       const done = await doneInThisReply(db, runId, text, changesAtReply.get(runId));
       const notes = [links, done].filter(Boolean);
       const saved = notes.length ? `${text}\n\n${notes.join("\n\n")}` : text;
+      // The Thinking trace so far is saved with the reply (BOS-1368), so a reload shows it; a reply
+      // with no steps saves nothing, so it shows no trace. Taken before the insert can fail, so its
+      // steps don't leak into the next reply.
+      const trace = deps.trace?.take(runId) ?? null;
       // Started once and shared: awaiting a query builder twice would insert the reply twice.
-      const save = db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text: saved, runId }).then(() => {});
+      const save = db
+        .insert(ownerChatMessages)
+        .values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text: saved, runId })
+        .returning({ id: ownerChatMessages.id })
+        .then(([row]) => {
+          if (trace && row) return db.insert(ownerChatTraces).values({ messageId: row.id, companyId: r.companyId, agentId: r.agentId, runId, trace }).then(() => {});
+        });
       saving.set(runId, save.catch(() => {}));
       changesAtReply.set(runId, runTrace(runId).changes.length);
       await save;
@@ -250,6 +273,9 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       await saving.get(runId);
       saving.delete(runId);
       forgetRunTrace(runId);
+      // Any steps left after the run's last reply are dropped with the run; nothing is kept for a run
+      // that answered, and a run that never answered shows nothing.
+      deps.trace?.forget(runId);
       const [r] = await db
         .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, name: agents.name, duty: agents.duty })
         .from(runs)
@@ -298,6 +324,7 @@ function paPrompt(agent: Agent, company: string, recent: Array<{ role: string; t
     "",
     "Your tools are read-only: tickets (find and read), decisions (what is waiting on someone), list_my_work, board, whats_new and wiki (list and read). You can't create or change anything.",
     "- Look the answer up with your tools first, then answer the owner's LAST message with pa_reply: text, cites (the tickets and decisions your answer rests on, each with its id; empty is fine for a \"nothing found\" answer after you searched tickets or decisions) and confidence (high only when the tools show it plainly). Your closing text is not shown to the owner; pa_reply is the only way you answer.",
+    "- Answer the LAST message in the light of the owner's messages before it. If the last one is material for an earlier question (pasted text, a link, \"here it is\"), treat them as one question, and escalate it as one.",
     "- Boss Man checks every reply in code. It escalates to the CEO instead of posting when you cite an id no tool showed you, cite nothing without having searched, are unsure, or the question asks for judgement (why, should, plans, priorities, money, risk, deploys, hiring). If you can't answer from what the tools return, call pa_escalate with a short summary of what you found.",
     "",
     "The conversation so far, oldest first:",

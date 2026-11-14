@@ -29,6 +29,7 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Filter tasks
   - Most expensive tasks
   - Passed, held
   - Project brief
@@ -119,7 +120,6 @@ reads:
 sections: 
   - How you're told
   - Notifications
-  - Recent phone pushes
   - Set up your phone
 reads: 
   - /api/notification-settings
@@ -230,6 +230,7 @@ sections:
   - Facts only you can give
   - Network guard
   - Now
+  - Outgoing email
   - Private details to block
   - Runner
   - Runner update
@@ -254,7 +255,9 @@ reads:
   - /api/run-limits
   - /api/runner-report
   - /api/self-deploy
+  - /api/self-deploy/wait
   - /api/settings/check-queue
+  - /api/settings/email
   - /api/wip-limits
 
 ## #/settings/<company>/team
@@ -342,6 +345,7 @@ reads:
   - /api/runs/:id/transcript
   - /api/tickets/:id
   - /api/tickets/:id/artifacts
+  - /api/tickets/:id/ci
   - /api/tickets/:id/diff
   - /api/tickets/:id/images
   - /api/tickets/:id/landing

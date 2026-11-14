@@ -133,7 +133,7 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
  * says (merged, or done; ticketBlockerFinished, BOS-989), with no wait for a deploy.
  */
 export async function ticketInForce(db: Db, ticketId: string, until: "merged" | "done" = "merged"): Promise<boolean> {
-  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
   if (!b) return true;
   if (!b.fixesMergeCheck) return ticketBlockerFinished({ ticketState: b.state, mergeCommit: b.mergeCommit, until });
   if (!b.mergeCommit) return b.state === "done";

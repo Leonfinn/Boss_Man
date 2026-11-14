@@ -281,6 +281,25 @@ describe("scheduler", () => {
     expect(low.notBefore?.getTime()).toBe(resets * 1000);
   });
 
+  // BOS-1409: a reading taken before its own reset says nothing about the window now, so a stale 100%
+  // (Fable or any named limit) must not hold work; a fresh 100% still does.
+  it("does not hold work on a reading taken before its reset", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    // Last week's 100% Fable reading: observed three days ago, for a window that has since reset.
+    const day = 86_400_000;
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "seven_day_overage_included", utilization: 1, resetsAt: new Date(Date.now() - day), observedAt: new Date(Date.now() - 3 * day) });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    await ctx.endRun(ctx.commands[0]!.runId);
+
+    // A fresh full reading of the same limit holds again.
+    await ctx.db.insert(quotaSamples).values({ fundingSourceId: sub.id, window: "seven_day_overage_included", utilization: 1, resetsAt: new Date(Date.now() + 4 * day), observedAt: new Date() });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect(await ctx.tick()).toMatchObject({ launched: 0, deferred: 1 });
+  });
+
   it("runs an urgent ticket at 96% while routine work is held", async () => {
     ctx = await setup({ agent: 5 });
     const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();

@@ -837,6 +837,14 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -C/ -i -pe s/a/b/ etc/hosts",
     "ruby -C /srv -i -pe s/a/b/ x.rb",
     "ruby -C /srv -i.bak -pe s/a/b/ f",
+    // -C and -x[dir] inside a switch bundle change directory too (BOS-858).
+    "ruby -pC/ -i -e s/a/b/ x.rb",
+    "ruby -pC / -i -e s/a/b/ x.rb",
+    "ruby -pC/ -i.bak -e s/a/b/ x.rb",
+    "ruby -i -pC/ -e s/a/b/ x.rb",
+    "ruby -x/ -i -pe s/a/b/ x.rb",
+    "ruby -px/ -i -e s/a/b/ x.rb",
+    "ruby -x/srv -i.bak -pe s/a/b/ f",
     "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
     // ruby long options whose value is the next word must not hide the -i (security review round 3).
     "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
@@ -875,6 +883,9 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -rdate script.rb",
     // -C without -i only reads a script from another folder.
     "ruby -C /srv script.rb",
+    "ruby -pC/ -e 'p 1' x.rb",
+    "ruby -px -i -e s/a/b/ x.rb",
+    "ruby -x script.rb",
     // Long options that read a value, without -i.
     "ruby --encoding utf-8 script.rb",
     "ruby --encoding utf-8 -pe s/a/b/ x.rb",
@@ -985,6 +996,138 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "firejail --private ls",
     "firejail --seccomp ls",
     "bwrap --ro-bind / / ls",
+  ])("leaves %j alone", (c) => {
+    expect(commandRisks(c)).toEqual([]);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("allow");
+  });
+});
+
+describe("delete forms left out of BOS-571 (BOS-856)", () => {
+  // Each of these got "allow" from the BOS-571 reader: the rows below fail on that code, which the ticket requires.
+  const owner: string[] = [
+    // gcloud storage rm, and rsync that deletes what the source lacks.
+    "gcloud storage rm -r gs://b",
+    "gcloud storage rm gs://b/o",
+    "gcloud --project p storage rm gs://b/o",
+    "gcloud alpha storage rm gs://b/o",
+    "gcloud storage rsync --delete-unmatched-destination-objects d gs://b",
+    "gcloud storage rsync -r --delete-unmatched-destination-objects d gs://b",
+    "gcloud storage rsync --$x d gs://b",
+    // gsutil (rm and its aliases, rsync -d).
+    "gsutil rm -r gs://b",
+    "gsutil -m rm gs://b/**",
+    "gsutil -o GSUtil:x=y rm gs://b/o",
+    "gsutil -h x:y -m rm gs://b/o",
+    "gsutil del gs://b/o",
+    "gsutil delete gs://b/o",
+    "gsutil remove gs://b/o",
+    "gsutil rsync -d d gs://b",
+    "gsutil rsync -rd d gs://b",
+    "gsutil -m rsync -r -d d gs://b",
+    "gsutil rsync $FLAGS d gs://b",
+    "gsutil \"$v\" gs://b",
+    // terraform state rm, workspace delete, apply -replace.
+    "terraform state rm aws_instance.a",
+    "terraform -chdir=infra state rm x",
+    "terraform state rm -dry-run x",
+    "terraform state \"$v\" x",
+    "terraform workspace delete prod",
+    "terraform workspace delete -force prod",
+    "terraform workspace \"$v\" prod",
+    "terraform apply -replace=aws_instance.a",
+    "terraform apply -replace aws_instance.a",
+    "terraform apply -auto-approve -replace=aws_instance.a",
+    "terraform apply $FLAGS",
+    // pulumi stack rm/remove, state delete/remove.
+    "pulumi stack rm prod",
+    "pulumi stack remove prod",
+    "pulumi stack rm --force -y prod",
+    "pulumi -C dir stack rm prod",
+    "pulumi --color always stack rm prod",
+    "pulumi state delete urn",
+    "pulumi state remove urn",
+    "pulumi stack \"$v\" prod",
+    "pulumi state \"$v\" urn",
+    // az delete-batch and other delete-* verbs, purge, storage remove, blob sync (deletes by default).
+    "az storage blob delete-batch -s c",
+    "az storage file delete-batch -s s",
+    "az --subscription s storage blob delete-batch -s c",
+    "az keyvault purge -n v",
+    "az keyvault secret purge --vault-name v -n s",
+    "az storage remove -c c",
+    "az storage blob sync -c c -s d",
+    "az storage blob sync -c c -s d --delete-destination true",
+    "az storage blob sync -c c -s d --delete-destination false --delete-destination true",
+    // The one row already flagged before BOS-856 (az flags any word only known when it runs): kept so the
+    // --delete-destination false exception can't open it.
+    "az storage blob sync -c c -s d --delete-destination \"$x\"",
+    // docker compose down -v / --rmi, compose rm, and the standalone programs.
+    "docker compose down -v",
+    "docker compose down --volumes",
+    "docker compose down --volumes=true",
+    "docker compose -f a.yml -p p down -v",
+    "docker --context x compose down -v",
+    "docker compose down --rmi all",
+    "docker compose down --rmi=local",
+    "docker compose down $FLAGS",
+    "docker compose \"$v\"",
+    "docker compose rm -f",
+    "docker-compose down -v",
+    "docker-compose -f a.yml down --volumes",
+    "podman compose down -v",
+    "podman-compose down -v",
+    "docker-compose run web rm -rf /srv/x",
+    // Through wrappers, which reach the same code.
+    "sudo docker compose down -v",
+    "sh -c 'gsutil rm -r gs://b'",
+    "cd infra && terraform state rm x",
+  ];
+
+  it.each(owner)("sends %j to the owner, recommended Deny", (c) => {
+    expect(destroys(c)).toBe(true);
+    expect(evaluatePermission(exec(c), []).outcome).toBe("owner");
+    expect(recommendedVerdict(exec(c))).toBe("deny");
+  });
+
+  it.each([
+    "gcloud storage ls gs://b",
+    "gcloud storage cp a gs://b",
+    "gcloud storage rsync d gs://b",
+    "gcloud storage rsync -r --dry-run d gs://b",
+    "gsutil ls",
+    "gsutil -m cp a gs://b",
+    "gsutil rsync -r d gs://b",
+    "gsutil rsync -x 'd.*' d gs://b",
+    "gsutil -d ls",
+    "gsutil rb gs://b",
+    "terraform state list",
+    "terraform state show x",
+    "terraform state mv a b",
+    "terraform workspace list",
+    "terraform workspace new dev",
+    "terraform workspace select dev",
+    "terraform plan -replace=aws_instance.a",
+    "terraform apply \"$PLAN\"",
+    "terraform apply tfplan",
+    "pulumi stack ls",
+    "pulumi stack select dev",
+    "pulumi stack init dev",
+    "pulumi stack",
+    "pulumi state unprotect urn",
+    "az storage blob list -c c",
+    "az storage blob upload -c c -f x",
+    "az storage blob sync -c c -s d --delete-destination false",
+    "az storage blob sync -c c -s d --delete-destination=false",
+    "az keyvault list",
+    "docker compose down",
+    "docker compose -f a.yml down --remove-orphans",
+    "docker compose down -t 5",
+    "docker compose up -d",
+    "docker compose ps",
+    "docker compose logs -f",
+    "docker-compose up -d",
+    "podman-compose ps",
+    "docker compose exec web ls",
   ])("leaves %j alone", (c) => {
     expect(commandRisks(c)).toEqual([]);
     expect(evaluatePermission(exec(c), []).outcome).toBe("allow");

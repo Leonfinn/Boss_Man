@@ -87,6 +87,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/OwnerMessageBox.tsx": "Any screen",
   "components/SaveButton.tsx": "Any screen",
   "components/Sidebar.tsx": "Any screen",
+  // The page-intro fold, on four screens (P7, BOS-1278).
+  "components/MoreAbout.tsx": "Any screen",
   "components/ReviewPolicy.tsx": "Reviews",
   "components/ScrumMasterLog.tsx": "Scrum Master",
   "components/TicketActivity.tsx": "Ticket",
@@ -94,6 +96,10 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "components/TicketOutputs.tsx": "Ticket",
   "components/TicketRelated.tsx": "Ticket",
   "components/TicketReviews.tsx": "Ticket",
+  // The Board's filters panel, opened by its Filter button (BOS-1194).
+  "components/FilterPanel.tsx": "Board",
+  // The Thinking trace above each agent reply, rendered in the Chat page (BOS-1368).
+  "components/ThinkingTrace.tsx": "Chat",
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
@@ -163,6 +169,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>RunnerUpdate": "Server and runner",
   "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
+  "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
@@ -205,6 +212,11 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Merge queue": ["Merges", "Queued checks"],
   // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
   Agents: ["Retire"],
+  // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
+  // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
+  Board: ["Working now"],
+  // The Unread and Read filter chips are drawn by one helper (chip) that adds the count, so their text is a variable (BOS-1277).
+  Notifications: ["Unread", "Read"],
 };
 
 function skipString(s: string, i: number): number {
@@ -448,6 +460,8 @@ describe("OWNER_CONTROLS matches the web app", () => {
     expect(tsx.some((f) => /\bconfirm\(/.test(readFileSync(f, "utf8")))).toBe(true);
     const approveLabel = readFileSync(join(WEB, "pages/Ticket.tsx"), "utf8").match(/const approveLabel = (.*);/)?.[1] ?? "";
     expect(shown(approveLabel).sort()).toEqual([...NOT_FROM_BUTTONS.Ticket!].sort());
+    // The Board's "Working now" is a switch in its filter panel, named by the panel's own heading (BOS-1194).
+    expect(readFileSync(join(WEB, "components/FilterPanel.tsx"), "utf8")).toMatch(/role="switch"[^>]*aria-labelledby="filter-working-label/);
     const stale = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).flatMap((s) =>
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );

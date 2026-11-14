@@ -588,15 +588,18 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
         <div>
           <h1>Features</h1>
           <p className="sub">
-            What people have asked for and what to build next. New features go on the feedback portal by default.{" "}
+            New features show on your feedback portal unless they look like security work.{" "}
             <button type="button" className="link" style={{ padding: 0 }} aria-expanded={showHelp} aria-controls="features-portal-help" onClick={() => setShowHelp(!showHelp)}>
               {showHelp ? "Less" : "How the portal works"}
             </button>
           </p>
           {showHelp && (
-            <p id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-              Security-looking work is kept off. Tick "On portal" on a row to change it; a feature needs a public summary before visitors see it. Visitors see the public summary and its first line as the title, or the public title when you write one, never the internal title. To keep one off on purpose, open it and tick "Keep off the portal (sensitive)".
-            </p>
+            <ul id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+              <li>Tick "On portal" on a row to put a feature on the portal or take it off.</li>
+              <li>Visitors only see a feature once it has a public summary.</li>
+              <li>Visitors see the public title if you write one. If not, the first line of the public summary is the title. They never see the internal title or description.</li>
+              <li>To keep a feature off on purpose, open it and tick "Keep off the portal (sensitive)".</li>
+            </ul>
           )}
         </div>
       </header>
@@ -808,8 +811,16 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   // title to visitors (BOS-991).
   const publicTitleDraftKey = `feature-public-title/${id}`;
   const [publicTitleDraft, setPublicTitleDraft] = useState<string | null>(null);
+  // Why the feature is kept off the portal is saved with the mark (BOS-1358), so the owner's card says why.
+  const keepOffReasonDraftKey = `feature-keep-off-reason/${id}`;
+  const [keepOffReasonDraft, setKeepOffReasonDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
+  const saveKeepOffReason = (reason: string) =>
+    void api(`/api/features/${id}`, { method: "PATCH", body: { keepOffPortal: true, keepOffReason: reason.trim() || null } }).then(
+      () => (setError(null), setKeepOffReasonDraft(null), clearDraft(keepOffReasonDraftKey), data.reload()),
+      (err: Error) => setError(err.message),
+    );
   const saveSummary = (summary: string) =>
     void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null, ...(publicTitleDraft !== null ? { publicTitle: publicTitleDraft.trim() || null } : {}) } }).then(
       () => (setError(null), setSummaryDraft(null), clearDraft(summaryDraftKey), clearDraft(publicTitleDraftKey), setPublicTitleDraft(null), data.reload()),
@@ -1016,6 +1027,29 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           <input type="checkbox" checked={f.keepOffPortal} onChange={(e) => patch({ keepOffPortal: e.target.checked })} />
           Keep off the portal (sensitive)
         </label>
+        {f.keepOffPortal && (
+          <div className="field">
+            <label htmlFor="f-keep-off-reason">Why it's kept off (optional)</label>
+            <DraftTextarea
+              draftKey={keepOffReasonDraftKey}
+              id="f-keep-off-reason"
+              rows={2}
+              maxLength={500}
+              placeholder="A short reason; the owner sees it if they are asked about this feature"
+              value={keepOffReasonDraft ?? f.keepOffReason ?? ""}
+              onChange={setKeepOffReasonDraft}
+            />
+            <button
+              type="button"
+              className="btn small"
+              style={{ alignSelf: "flex-start" }}
+              disabled={keepOffReasonDraft === null || keepOffReasonDraft.trim() === (f.keepOffReason ?? "")}
+              onClick={() => saveKeepOffReason(keepOffReasonDraft!)}
+            >
+              Save reason
+            </button>
+          </div>
+        )}
         <p className="muted" style={{ fontSize: 13 }}>
           Demand {f.demand} of {d.maxDemand} gives {f.demandPart.toFixed(1)}/5 at weight {d.settings.demandWeight}
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.

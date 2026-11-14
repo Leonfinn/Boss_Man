@@ -115,6 +115,7 @@ connection = new RunnerConnection({
   pendingPermissions: () => sessions.pendingPermissions(),
   restart,
   runningChecks: () => checkJobs.running(),
+  checkSlots: Math.max(1, checkSlots), // applyCheckSlots says 0 when unset: one check at a time
   onWelcome: () => checkJobs.resend(),
   liveRuns: () => sessions.liveRunIds(),
 });

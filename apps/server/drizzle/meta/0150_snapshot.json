@@ -1,5 +1,5 @@
 {
-  "id": "c21fa061-ed38-4174-ae53-c17d449c520b",
+  "id": "3957ab38-cd85-465f-bd2e-4bbda3fa3ae3",
   "prevId": "01d56c7a-928b-4561-bb2e-b27572fb79d8",
   "version": "7",
   "dialect": "postgresql",
@@ -1841,24 +1841,6 @@
         "fence_mode_chosen_at": {
           "name": "fence_mode_chosen_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fence_off_fingerprint": {
-          "name": "fence_off_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "guard_off_chosen_at": {
-          "name": "guard_off_chosen_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "guard_off_fingerprint": {
-          "name": "guard_off_fingerprint",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

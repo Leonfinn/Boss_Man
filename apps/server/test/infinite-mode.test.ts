@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, notifications, quotaSamples, runners, runs, wakes } from "../src/db/schema.js";
+import { costEvents, notifications, quotaSamples, runners, runs, settings, wakes } from "../src/db/schema.js";
 import type { Limits } from "../src/services/scheduler.js";
 import type { SweepLimits } from "../src/services/sweeps.js";
 
@@ -198,6 +198,18 @@ describe("Synthetic Infinite mode (BOS-279)", () => {
     const saved = (await ctx.req("PUT", "/api/run-limits", { instance: 8, company: 8, background: 3 })).json() as { background: number; defaults: { background: number } };
     expect(saved).toMatchObject({ background: 3, defaults: { background: 2 } });
     expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 3 });
+  });
+
+  it("starts no new background run while a server update waits for a quiet machine, and resumes when the wait ends (BOS-420)", async () => {
+    ctx = await setup({ limits: { instance: 8, company: 8, agent: 5, background: 2 } });
+    const p = await ctx.plan();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { model: INF, fundingSourceId: p.id });
+    await ctx.ticket("One", ctx.ceo.id);
+    await ctx.db.insert(settings).values({ key: "deploy_wait", value: { phase: "waiting", approvedAt: new Date().toISOString() } });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0 });
+    expect((await ctx.db.select().from(runs)).filter((r) => !r.endedAt)).toHaveLength(0);
+    await ctx.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
   });
 
   it("adds nothing to usage: an infinite run's cost event isn't recorded", async () => {

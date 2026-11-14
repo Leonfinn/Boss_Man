@@ -95,9 +95,10 @@ describe("the merge line's timeline (BOS-769)", () => {
     const c = await setup({ verify: FAIL });
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
     const rows = await c.line();
-    expect(events(rows)).toEqual(["approved", "attempt", "check_queued", "check_started", "check_ended", "left"]);
+    expect(events(rows)).toEqual(["approved", "attempt", "check_queued", "check_started", "check_ended", "left", "attempt_failed"]);
     expect(rows[4]!.detail).toMatchObject({ passed: false });
     expect(rows[5]!.detail).toMatchObject({ event: "left", to: "in_progress" });
+    expect(rows[6]!.detail).toMatchObject({ event: "attempt_failed", reason: "check_failed" });
   });
 
   it("records a carried-work hold with the tickets it waits on, once, and ends it when the merge goes ahead", async () => {
