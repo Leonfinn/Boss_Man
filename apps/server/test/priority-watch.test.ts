@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { checkJobs, notifications, runs, tickets } from "../src/db/schema.js";
-import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, type Facts } from "../src/services/priority-watch.js";
+import { judge, OWNER_AFTER_MS, priorityWatchService, QUIET_AFTER_MS, stopped, type Facts } from "../src/services/priority-watch.js";
 import { WAKE_CLASS } from "../src/services/wake-classes.js";
 
 const NOW = new Date("2026-11-14T12:00:00Z");
@@ -81,6 +81,41 @@ describe("priority watch: what counts as a next step", () => {
 
   it("registers its wake as one that is never dropped", () => {
     expect(WAKE_CLASS["priority watch"]).toBe("waiting");
+  });
+});
+
+describe("priority watch: merged, waiting for go-live (BOS-1547)", () => {
+  const blocked = (over: Partial<Facts> = {}) => facts({ state: "blocked", ...over });
+  it("a fresh go-live wait is a step under way, named for the server update, and raises no alarm", () => {
+    const v = judge(blocked({ goLive: { wait: "server", since: ago(10 * MIN) } }), NOW);
+    expect(v.underWay).toContain("merged, waiting for the server update");
+    expect(v.alarms).toEqual([]);
+  });
+  it("a company that puts its own work live is named for its own deploy", () => {
+    expect(judge(blocked({ goLive: { wait: "own", since: ago(10 * MIN) } }), NOW).underWay).toContain("merged, waiting for the company's own deploy");
+  });
+  it("a long wait tells the CEO once-per-wait, never 'stopped'", () => {
+    const v = judge(blocked({ goLive: { wait: "server", since: ago(3 * 60 * MIN) } }), NOW);
+    expect(v.alarms.map((a) => a.cause)).toEqual(["go_live_slow"]);
+    expect(stopped(v)).toBe(false);
+  });
+  it("once it is live (no wait) and nothing else is under way, the ordinary rules apply again", () => {
+    expect(causes(blocked({ goLive: null }))).toEqual(["nothing"]);
+  });
+  it("the sweep tells the CEO of a slow wait but never the owner, and drops it when live", async () => {
+    ctx = await setup();
+    const t = await ctx.ticket("Merged urgent");
+    await ctx.db.update(tickets).set({ urgent: true, systemState: "blocked", goLiveWait: "server", goLiveWaitSince: ago(10 * MIN), lastActivityAt: ago(10 * MIN) }).where(eq(tickets.id, t.id));
+    expect(await ctx.watch.run(true)).toMatchObject({ checked: 1, told: 0 });
+    ctx.advance(3 * 60 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ told: 1, ownerTold: 0 });
+    expect(ctx.told[0]!.note).toContain("waiting for the server update");
+    ctx.advance(OWNER_AFTER_MS + 5 * MIN);
+    expect(await ctx.watch.run(true)).toMatchObject({ told: 0, ownerTold: 0 });
+    expect(ctx.sent).toHaveLength(0);
+    // Live: the wait is cleared and the ticket woken in progress; the watch finds it moving or done.
+    await ctx.db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null, systemState: "done" }).where(eq(tickets.id, t.id));
+    expect(await ctx.watch.run(true)).toMatchObject({ checked: 0, cleared: 1 });
   });
 });
 
