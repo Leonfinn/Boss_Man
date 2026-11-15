@@ -13,9 +13,11 @@ import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
-import { getHold } from "./maintenance.js";
+import { getHold, holdBlocksStarts } from "./maintenance.js";
+import { busyAgentIds } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
+import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
@@ -348,6 +350,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         dep: ticketDependencies,
         holderState: tickets.systemState,
         holderStateChangedAt: tickets.stateChangedAt,
+        holderMergeCommit: tickets.mergeCommit,
         engagementStatus: engagements.status,
         decisionStatus: decisions.status,
         decisionCreatedAt: decisions.createdAt,
@@ -358,9 +361,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .where(inArray(ticketDependencies.blockedTicketId, ids));
-    const holds: SnapHold[] = depRows.map(({ dep, holderState, engagementStatus, decisionStatus, decisionCreatedAt }) =>
+    const holds: SnapHold[] = depRows.map(({ dep, holderState, holderMergeCommit, engagementStatus, decisionStatus, decisionCreatedAt }) =>
       dep.blockerTicketId
-        ? { blockedTicketId: dep.blockedTicketId, kind: "ticket", holderTicketId: dep.blockerTicketId, resolved: holderState === "done" }
+        ? { blockedTicketId: dep.blockedTicketId, kind: "ticket", holderTicketId: dep.blockerTicketId, resolved: ticketBlockerFinished({ ticketState: holderState, mergeCommit: holderMergeCommit, until: dep.until }) }
         : dep.blockerEngagementId
           ? { blockedTicketId: dep.blockedTicketId, kind: "engagement", resolved: engagementStatus === "signed_off" }
           : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionCreatedAt ?? new Date(0) },
@@ -371,7 +374,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     for (const dep of depRows) {
       const at = dep.dep.blockerDecisionId
         ? (dep.decisionStatus !== "open" ? (dep.decisionAnsweredAt ?? dep.decisionCreatedAt) : null)
-        : (dep.holderState === "done" ? dep.holderStateChangedAt : null);
+        : (ticketBlockerFinished({ ticketState: dep.holderState, mergeCommit: dep.holderMergeCommit, until: dep.dep.until }) ? dep.holderStateChangedAt : null);
       if (at && (!freedAt.has(dep.dep.blockedTicketId) || at.getTime() > freedAt.get(dep.dep.blockedTicketId)!.getTime())) freedAt.set(dep.dep.blockedTicketId, at);
     }
     // When a ticket that had blockers became free of them (BOS-659): its last blocker's answer/finish, floored
@@ -647,7 +650,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const body = async () => {
       const team = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, c.id), isNull(agents.retiredAt)));
       const names = new Map(team.map((a) => [a.id, a.name]));
-      const live = new Set((await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, c.id), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`))).map((r) => r.agentId));
+      // Idle means not busy by the one rule (agent-wip.ts `agentBusy`): no live run that isn't a chat and no waiting wake.
+      const live = await busyAgentIds(db);
       const [{ prefix } = { prefix: null }] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, c.id));
       const open = await db
         .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState })
@@ -1212,7 +1216,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       running = true;
       try {
         const [paused] = await db.select().from(settings).where(eq(settings.key, "paused"));
-        if (paused?.value === true || (await getHold(db))) return { skipped: true };
+        if (paused?.value === true || holdBlocksStarts(await getHold(db), now())) return { skipped: true };
         await resumeExpired();
         const on = await db.select().from(companies).where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNull(companies.watchdogTrippedAt), eq(companies.paused, false)));
         let flagged = 0;
@@ -1440,19 +1444,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         case "raise_decision": {
           const [d] = await db.select().from(decisions).where(eq(decisions.id, after.decisionId!));
           if (!d || d.status !== "open") throw new WatchdogError(409, "The owner has already answered it (or it was withdrawn), so it can't be taken back.");
-          await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(eq(decisions.id, d.id));
+          await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
           await markDecisionNotificationRead(db, d.id);
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
           const [t] = await db.select().from(tickets).where(eq(tickets.id, a.ticketId!));
-          const left = await db
-            .select({ ticket: tickets.systemState, decision: decisions.status, engagement: engagements.status })
-            .from(ticketDependencies)
-            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-            .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-            .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-            .where(eq(ticketDependencies.blockedTicketId, a.ticketId!));
-          const held = left.some((x) => (x.ticket && x.ticket !== "done") || x.decision === "open" || (x.engagement && x.engagement !== "signed_off"));
+          const held = (await openBlockers(db, a.ticketId!)).length > 0;
           if (t?.systemState === "blocked" && !held && before.state && before.state !== "blocked") await deps.restoreState(t.id, before.state);
           what = "withdrew the decision";
           break;

@@ -307,8 +307,9 @@ export function allScreens(): Screen[] {
 /** Every component chunk that App.tsx (or the customer portal's entry) renders, directly or through anything it renders. */
 export function renderedFromApp(): Set<string> {
   const roots: Chunk[] = [];
-  // The two entry points mount the app (main.tsx) and the customer portal (portal-main.tsx); their top-level code is the root.
-  for (const entry of [join(SRC, "main.tsx"), join(SRC, "portal-main.tsx")]) {
+  // The entry points mount the app (main.tsx), the customer portal (portal-main.tsx) and the portal's email confirm page
+  // (confirm-main.tsx); their top-level code is the root.
+  for (const entry of [join(SRC, "main.tsx"), join(SRC, "portal-main.tsx"), join(SRC, "confirm-main.tsx")]) {
     if (!existsSync(entry)) continue;
     roots.push(...usesIn(entry, parse(entry).text.replace(/^import[^;]*;$/gm, "")));
   }

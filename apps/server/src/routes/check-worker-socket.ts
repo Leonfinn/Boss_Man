@@ -13,7 +13,8 @@ export const WORKER_OFF_CLOSE = 4003;
 /** Close code for a socket that connected but never said hello within three heartbeats. */
 export const WORKER_NO_HELLO_CLOSE = 4008;
 
-type Checks = Pick<ReturnType<typeof checkDispatcher>, "onWorkerHello" | "onWorkerDone" | "onWorkerProgress" | "onWorkerGone">;
+type Checks = Pick<ReturnType<typeof checkDispatcher>, "onWorkerHello" | "onWorkerDone" | "onWorkerProgress" | "onWorkerGone"> &
+  Partial<Pick<ReturnType<typeof checkDispatcher>, "onWorkerNeedCode" | "onWorkerNoCode" | "onWorkerRepos">>;
 
 export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: CheckWorkersService, opts: { heartbeatMs?: number; isLeader?: () => boolean; checks?: Checks } = {}) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
@@ -69,6 +70,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
         switch (msg.type) {
           case "hello":
             if (msg.protocol !== PROTOCOL_VERSION) {
+              workers.refuse(worker.id, msg.protocol);
               send({ type: "error", message: `Protocol ${msg.protocol} is not supported; expected ${PROTOCOL_VERSION}.` });
               socket.close(4000, "protocol");
               return;
@@ -76,7 +78,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             queue = queue
               .then(async () => {
                 const helloAt = new Date();
-                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, features: msg.features });
+                const row = await workers.touch(worker.id, { imageCommit: msg.imageCommit, toolchain: msg.toolchain, imageVersion: msg.imageVersion, checkSlots: msg.checkSlots, features: msg.features });
                 // Turned off or removed since the upgrade: close, and the redial is refused in preValidation.
                 if (!row?.enabled) {
                   socket.close(WORKER_OFF_CLOSE, "worker off");
@@ -95,7 +97,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
                 );
                 // lastSeq 0: a worker keeps no journal, so there is nothing to replay; the welcome only says "live".
                 send({ type: "welcome", lastSeq: 0 });
-                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs, helloAt);
+                await opts.checks?.onWorkerHello(worker.id, msg.checkJobs, helloAt, msg.repos);
               })
               .catch((err) => app.log.error({ err, workerId: worker.id }, "check worker hello failed"));
             return;
@@ -104,6 +106,16 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
             return;
           case "check.done":
             queue = queue.then(() => opts.checks?.onWorkerDone(worker.id, msg)).catch((err) => app.log.error({ err, workerId: worker.id }, "check worker result failed"));
+            return;
+          // BOS-1436: getting the code. Only for the worker's own jobs (the dispatcher checks the job runs on it).
+          case "check.needCode":
+            queue = queue.then(() => opts.checks?.onWorkerNeedCode?.(worker.id, msg.jobId)).catch((err) => app.log.warn({ err, workerId: worker.id }, "check worker code request failed"));
+            return;
+          case "check.noCode":
+            queue = queue.then(() => opts.checks?.onWorkerNoCode?.(worker.id, msg.jobId, msg.reason)).catch((err) => app.log.warn({ err, workerId: worker.id }, "check worker no-code failed"));
+            return;
+          case "check.haves":
+            opts.checks?.onWorkerRepos?.(worker.id, msg.repos);
             return;
           case "ping":
             send({ type: "pong" });

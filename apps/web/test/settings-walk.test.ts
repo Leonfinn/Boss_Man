@@ -37,7 +37,8 @@ function answer(p: string): unknown {
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
   if (p === "/api/private-details") return { total: 0, counts: {} };
-  if (p === "/api/netguard-allow") return { report: null };
+  // The Network guard section only shows once a runner has reported (the panel hides itself with no report), so the walk gives it one.
+  if (p === "/api/netguard-allow") return { report: { mode: "on", entries: [], lineCanGo: false, automatic: [], env: { lines: [], reportedAt: now(), envFound: true }, warnings: [] } };
   if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
   if (p === "/api/companies/c1/projects") return [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }];
   if (p === "/api/policy-rules") return { company: [], global: [], defaults: [], shadowedIds: [] };
@@ -151,7 +152,13 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  // "Server and runner" is six pages (BOS-1492); each of its old panels is on the page the BOS-1491 table gives it.
+  updates: ["Updates", "Stop all work"],
+  limits: ["Agents at once", "Tickets in progress", "Checks"],
+  runner: ["Runner", "Workspace disk"],
+  email: ["Outgoing email"],
+  server: ["Server", "This host", "Network guard"],
+  devices: ["Your devices", "Private details to block"],
   transfer: ["Import a company"],
 };
 const SIZES = [
@@ -206,7 +213,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
     try {
       for (const vp of SIZES) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
-        for (const id of ["team", "permissions", "system"]) {
+        for (const id of ["team", "permissions"]) {
           await page.goto(`${base}/#/settings/c1/${id}`);
           await page.waitForSelector(".set-jump a", { timeout: 8000 });
           await new Promise((r) => setTimeout(r, 500));
@@ -244,10 +251,6 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
             }
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
-            // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
-            if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
-              await page.screenshot({ path: path.join(process.env.BOSSMAN_SHOT_DIR, `after-checks-${vp.name}.png`) });
-            }
           }
         }
         await page.close();
@@ -279,6 +282,8 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       ["settings/c1/workflow", "settings/c1/reviews"],
       ["rules/c1", "settings/c1/permissions"],
       ["settings/c1/gone", "settings"],
+      // BOS-1492: the one-page "Server and runner" opens Updates, the first of its six pages.
+      ["settings/c1/system", "settings/c1/updates"],
     ]);
   }, 60_000);
 

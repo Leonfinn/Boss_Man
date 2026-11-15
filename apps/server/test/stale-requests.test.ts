@@ -273,7 +273,7 @@ describe("stale requests (BOS-123)", () => {
     const provider = (await c.req("POST", "/api/companies", { name: "Hosting Co" })).json().company as { id: string };
     const [eng] = await c.db
       .insert(engagements)
-      .values({ requesterCompanyId: c.company.id, providerCompanyId: provider.id, title: "Deploy it", scope: "Ship the release", status: "in_progress" })
+      .values({ requesterCompanyId: c.company.id, providerCompanyId: provider.id, title: "Deploy it", scope: "Ship the release", status: "requested" })
       .returning();
     const [d] = await c.db
       .insert(decisions)

@@ -7,12 +7,14 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { RISK_TIERS, SENIOR_DEV, riskSummary } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { stagingReachable } from "../mcp-common.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
-import { CHECK_MEMORY_CEILING_BYTES, limitReason } from "../services/check-limit.js";
+import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
+import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
@@ -43,12 +45,14 @@ export function settingsLimitsRoutes(
   // With ?companyId the reviewer and sign-off come from that company's review policy.
   owner.get("/api/risk-tiers", async (req) => {
     const { companyId } = z.object({ companyId: Uuid.optional() }).parse(req.query);
-    if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+    // The staging promise is made only for a company with a staging target (BOS-1473).
+    if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, undefined, undefined, false) }));
     const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
-    if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+    if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, undefined, undefined, false) }));
+    const staging = await stagingReachable(db, companyId);
     const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
     const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
-    return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
+    return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer), staging) }));
   });
 
   // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
@@ -71,11 +75,28 @@ export function settingsLimitsRoutes(
       .parse(req.body);
     // A saved value without background (an older save) keeps whatever is stored, so this write never resets it to the default.
     const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
-    const before = row?.value as { background?: number } | undefined;
+    const before = row?.value as { instance?: number; company?: number; background?: number } | undefined;
     const merged = { instance: value.instance, company: value.company, background: value.background ?? before?.background ?? DEFAULT_LIMITS.background };
     await db.insert(settings).values({ key: "run_limits", value: merged }).onConflictDoUpdate({ target: settings.key, set: { value: merged } });
+    // BOS-1498: the agents number sizes the runners' memory, so a change reaches them the way Checks at once does (BOS-993):
+    // the launcher is told, and the runners that would change are recreated through the settings drain as each company goes idle.
+    if (launch.enabled && agentsAtOnce(merged) !== agentsAtOnce({ instance: before?.instance ?? scheduler.limits.instance, company: before?.company ?? scheduler.limits.company, background: before?.background ?? scheduler.limits.background })) await pushToRunners();
     return runLimits();
   });
+  /** Tells the launcher both settings and starts the settings drain when a runner would change. Never fails the save. */
+  const pushToRunners = async (): Promise<boolean> => {
+    try {
+      await launch.setChecks(await checkQueueSvc.slots(), await readRunnerAgents(db, scheduler.limits));
+      const lc = await launch.checks();
+      if (lc?.runners.some((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes)) {
+        await maintenance.start({ kind: "settings" }); // leader-only
+        return true;
+      }
+    } catch (e) {
+      owner.log.error(`runner settings: could not apply to the runners: ${(e as Error).message}`);
+    }
+    return false;
+  };
   // Tickets in progress per agent, and (optionally) in the whole company (BOS-1029). null is "No limit".
   owner.get("/api/wip-limits", async () => ({ ...(await readWipLimits(db)), defaultAgent: DEFAULT_AGENT_WIP_LIMIT }));
   owner.put("/api/wip-limits", async (req) => {
@@ -99,6 +120,8 @@ export function settingsLimitsRoutes(
           perCheckBytes: CHECK_MEMORY_CEILING_BYTES,
           // A lower limit always carries a reason (BOS-1152), also while the launcher has not yet been sent the setting.
           reason: limitReason(slots, lc),
+          // BOS-1498: what a runner is given and why, in one line.
+          memoryLine: memoryLine(lc),
           // Every runner is sized on its own from the whole host's memory, so with more than one the panel warns (BOS-993).
           runnerCount: lc.runners.length,
           pending: lc.runners.filter((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes).length,
@@ -137,19 +160,7 @@ export function settingsLimitsRoutes(
     if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
     // setting change uses (each as its company goes idle, agents woken afterwards), but only when a runner would really change.
-    let applying = false;
-    if (launch.enabled && b.slots !== slotsWere) {
-      try {
-        await launch.setChecks(b.slots);
-        const lc = await launch.checks();
-        if (lc?.runners.some((r) => r.slots !== lc.slots || r.memoryBytes !== lc.memoryBytes)) {
-          await maintenance.start({ kind: "settings" }); // leader-only
-          applying = true;
-        }
-      } catch (e) {
-        owner.log.error(`check slots: could not apply to the runners: ${(e as Error).message}`);
-      }
-    }
+    const applying = launch.enabled && b.slots !== slotsWere ? await pushToRunners() : false;
     // Back to legacy: nothing starts queued jobs any more, so each is cancelled with its reason and whoever asked is told
     // (an agent is woken to run check-quick.sh itself; a merge waiting on one gets the usual "check stopped" card). Running jobs finish.
     let cancelled = 0;
@@ -186,7 +197,14 @@ export function settingsLimitsRoutes(
     const b = WorkerBody.parse(req.body);
     await knownCompanies(b.companyIds);
     const { worker, token } = await w.register(b);
-    return { id: worker.id, token };
+    // BOS-1550: the commit the worker must be built from = the one its chosen companies' runners are built from, so the
+    // Add a check worker card can show a compose file already filled in. Null when no chosen runner has said one yet.
+    let commit: string | null = null;
+    for (const companyId of b.companyIds) {
+      commit = await runnerImageCommit(db, companyId);
+      if (commit) break;
+    }
+    return { id: worker.id, token, commit };
   });
   owner.patch("/api/settings/check-workers/:id", async (req, reply) => {
     const w = needWorkers();

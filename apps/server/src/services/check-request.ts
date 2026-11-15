@@ -44,6 +44,8 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
       }
       if (!d.tree) throw new CheckRequestError("The runner is too old to say which code the ticket holds. Ask the owner to update the runners.");
       if (d.files.length && !d.commits.length) throw new CheckRequestError("Nothing is committed yet: commit your work first, then ask again. A check runs on a commit.");
+      // BOS-1544: the job would fail to start ("invalid reference"); say why now and queue nothing.
+      if (d.unsynced) throw new CheckRequestError(`The runner couldn't copy your branch into its shared repo, so a check of it can't start, and nothing was queued (${d.unsynced}). Your code isn't at fault. If the reason says how to fix it, do that and ask again; if it's a runner error, don't requeue: tell the CEO with this message.`);
       const { job, reused } = await queue.enqueue({
         companyId: input.companyId,
         projectId: t.projectId,

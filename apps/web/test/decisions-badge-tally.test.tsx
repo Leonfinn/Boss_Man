@@ -34,11 +34,12 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   ...over,
 });
 
-const sidebar = (props: { decisions?: Decision[]; decisionsTally?: { open: number; waiting: number } | null }) =>
+const sidebar = (props: { decisions?: Decision[]; decisionsTally?: { open: number; waiting: number } | null; companies?: Company[]; companyTallies?: Record<string, { open: number; waiting: number }> }) =>
   render(
     <Sidebar
       active="decisions"
-      companies={[company]}
+      companies={props.companies ?? [company]}
+      companyTallies={props.companyTallies}
       current={company}
       decisions={props.decisions ?? []}
       decisionsTally={props.decisionsTally}
@@ -63,19 +64,29 @@ describe("the Decisions badge shows the server's needs-you-now count (BOS-969)",
     // Three cards on the page, two of them waiting: the server's count is 4.
     const cards = [decision({ id: "a" }), decision({ id: "b" }), decision({ id: "c", waiting: "Nothing to do yet: the ticket is back with an agent." })];
     sidebar({ decisions: cards, decisionsTally: { open: 4, waiting: 2 } });
-    const badge = within(decisionsLink()).getByLabelText("4 waiting");
+    const badge = within(decisionsLink()).getByLabelText("4 need you, 2 with the team");
     expect(badge.textContent).toBe("4");
+  });
+
+  it("the company switcher shows each company's own tally, not every open card (BOS-1485)", () => {
+    const other: Company = { ...company, id: "c2", name: "Other Co" };
+    const cards = [decision({ id: "a" }), decision({ id: "b", waiting: "Nothing to do yet." }), decision({ id: "c", waiting: "Nothing to do yet." })];
+    sidebar({ decisions: cards, decisionsTally: { open: 1, waiting: 2 }, companies: [company, other], companyTallies: { c1: { open: 1, waiting: 2 }, c2: { open: 3, waiting: 0 } } });
+    expect(screen.getByText("1 needs you")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Switch company/ }));
+    expect(screen.getAllByText("1 needs you").length).toBeGreaterThan(0);
+    expect(screen.getByText("3 need you")).toBeTruthy();
   });
 
   it("without the server figure, leaves the waiting cards out rather than showing the inflated number", () => {
     const cards = [decision({ id: "a" }), decision({ id: "b" }), decision({ id: "c", waiting: "Nothing to do yet: the ticket is back with an agent." })];
     sidebar({ decisions: cards });
-    expect(within(decisionsLink()).getByLabelText("2 waiting").textContent).toBe("2");
+    expect(within(decisionsLink()).getByLabelText("2 need you").textContent).toBe("2");
   });
 
   it("shows no badge when nothing needs the owner, even with cards waiting", () => {
     sidebar({ decisions: [decision({ id: "a", waiting: "Nothing to do yet." })], decisionsTally: { open: 0, waiting: 1 } });
-    expect(within(decisionsLink()).queryByLabelText(/waiting$/)).toBeNull();
+    expect(within(decisionsLink()).queryByLabelText(/need you/)).toBeNull();
   });
 });
 
@@ -94,7 +105,7 @@ describe("the Decisions page heading uses the same count (BOS-969)", () => {
     try {
       render(<Decisions decisions={cards} companies={[company]} loaded agentsWorking={0} onAnswered={noop} />);
       const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
-      expect(await within(head).findByText("8 decisions to do · 4 waiting", { exact: false })).toBeTruthy();
+      expect(await within(head).findByText("8 need you · 4 with the team", { exact: false })).toBeTruthy();
       const tallyCalls = asked.filter((u) => u.includes("/api/decisions/tally"));
       expect(tallyCalls.length).toBeGreaterThan(0);
       for (const u of tallyCalls) {
@@ -117,16 +128,16 @@ describe("the Decisions page heading uses the same count (BOS-969)", () => {
     const onAnswered = vi.fn();
     render(<Decisions decisions={cards} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} tally={{ open: 2, waiting: 0 }} />);
     const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
-    expect(await within(head).findByText(/^2 decisions to do/, { exact: false })).toBeTruthy();
+    expect(await within(head).findByText(/^2 need you/, { exact: false })).toBeTruthy();
     // The recommended option is one click; the first card's button is the first "Yes".
     fireEvent.click(within(head.parentElement!.parentElement!).getAllByRole("button", { name: /^Yes/ })[0]!);
-    await waitFor(() => expect(within(head).getByText(/^1 decision to do/, { exact: false })).toBeTruthy());
+    await waitFor(() => expect(within(head).getByText(/^1 needs you/, { exact: false })).toBeTruthy());
     expect(onAnswered).toHaveBeenCalled();
   });
   it("shows only the to-do number when nothing is waiting", () => {
     render(<Decisions decisions={[decision({ id: "a" })]} companies={[company]} loaded agentsWorking={0} onAnswered={noop} tally={{ open: 1, waiting: 0 }} />);
     const head = screen.getByRole("heading", { name: "Decisions" }).parentElement!;
-    expect(within(head).getByText(/^1 decision to do/, { exact: false }).textContent).toContain("1 decision to do");
+    expect(within(head).getByText(/^1 needs you/, { exact: false }).textContent).toContain("1 needs you");
     expect(within(head).queryByText(/waiting/, { exact: false })).toBeNull();
   });
 });

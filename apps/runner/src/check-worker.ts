@@ -7,9 +7,12 @@
 // housekeeping and the health marker. Every per-host value comes from the environment or the owner's settings.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { WORKER_FEATURES, type RunnerCommand } from "@boss-man/shared";
+import { WORKER_FEATURES, type RunnerCommand, type WorkerRepos } from "@boss-man/shared";
+import { bundleFetcher } from "./check-bundle-fetch.js";
+import { downloadCheckBundle } from "./check-bundle-http.js";
 import { CheckJobs } from "./check-jobs.js";
 import { RunnerConnection } from "./connection.js";
+import { readToolchain } from "./toolchain.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, sandboxSelfTest } from "./fence.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeWorkerToken } from "./token.js";
@@ -39,6 +42,9 @@ export function workerUrl(raw: string | undefined): string {
   return url;
 }
 
+/** The server's HTTP address for the worker socket's URL (where the code bundles are fetched from, BOS-1436). */
+export const workerHttpBase = (url: string) => url.replace(/^ws/, "http").replace(/\/api\/check-worker\/connect$/, "");
+
 export async function startCheckWorker(env: NodeJS.ProcessEnv = process.env) {
   const log = (m: string) => console.log(`[check-worker] ${m}`);
   const url = workerUrl(env.BOSSMAN_URL);
@@ -61,22 +67,34 @@ export async function startCheckWorker(env: NodeJS.ProcessEnv = process.env) {
   workspaces.fenceCloneGit = sandbox.level !== "unavailable";
   log(`agent fence: ${sandbox.level}; check slots: ${checkSlots}`);
 
+  // BOS-1436: the code comes as a git bundle through the server (the worker has no GitHub login). What it holds per
+  // project goes in every hello and after each fetch, so the runner's next bundle for it is thin.
+  let repos: WorkerRepos = await workspaces.checkBundleHaves().catch(() => []);
+  const httpBase = workerHttpBase(url);
   // eslint-disable-next-line prefer-const
   let connection: RunnerConnection;
-  const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log);
+  const prepare = bundleFetcher({
+    workspaces,
+    download: (jobId, file, want) => downloadCheckBundle(httpBase, token, jobId, file, want),
+    send: (m) => connection.sendDirect(m),
+    log,
+    onRepos: (r) => (repos = r),
+  });
+  const checkJobs = new CheckJobs(workspaces, (m) => connection.sendDirect(m), log, prepare);
   connection = new RunnerConnection({
     url,
     token,
     runnerVersion: "0.0.0",
     imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
     imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
+    toolchain: await readToolchain(),
     log,
     onCommand: (command) => {
       if (!workerHandles(command, checkJobs)) log(`ignored a ${command.type} command`);
     },
     runningChecks: () => checkJobs.running(),
     onWelcome: () => checkJobs.resend(),
-    checkWorker: { slots: checkSlots, features: WORKER_FEATURES },
+    checkWorker: { slots: checkSlots, features: WORKER_FEATURES, repos: () => repos },
   });
   connection.start();
 

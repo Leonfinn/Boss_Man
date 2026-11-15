@@ -7,9 +7,10 @@ import { buildPortalApp } from "./portal.js";
 import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
-import { checkLimitReconciler } from "./services/check-limit.js";
+import { checkLimitReconciler, readRunnerAgents } from "./services/check-limit.js";
 import { checkQueue } from "./services/check-queue.js";
 import { getHold } from "./services/maintenance.js";
+import { recordTakeover, takeoverCause } from "./services/merge-line.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
@@ -28,7 +29,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mailer, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -36,6 +37,8 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
   secureCookies: trustedProxies.length ? "auto" : env.BOSSMAN_INSECURE_COOKIES === "1" ? false : true,
   trustedProxies,
   leader,
+  // DR-049 point 1: an agent run starts only when its runner has proven the fence and the network guard (or the owner chose otherwise).
+  requireRunnerProof: true,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
   deployerDir: env.BOSSMAN_DEPLOYER_DIR,
@@ -53,6 +56,7 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
 const checkQueueSvc = checkQueue(db);
 const checkLimit = checkLimitReconciler({
   slots: () => checkQueueSvc.slots(),
+  agents: () => readRunnerAgents(db, scheduler.limits),
   launch: launcher,
   holdActive: async () => !!(await getHold(db)),
   startDrain: () => maintenance.start({ kind: "settings" }),
@@ -104,6 +108,8 @@ const bg = createBackground(
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
     { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
+    // The GitHub watcher (BOS-1393): files new issues, discussions and comments into the feedback inbox. Each watch has its own interval (default 60 min, minimum 15); this tick only runs the ones that are due. Calls api.github.com. // leader-only
+    { name: "github watch", everyMs: Number(env.BOSSMAN_GITHUB_WATCH_MS ?? 60_000), run: () => githubWatch.runDue() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
     { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },
@@ -125,15 +131,25 @@ const bg = createBackground(
 // A server that takes charge holds no merges: it restarts every approved, unmerged one (DR-026). The loop below keeps asking until the update hold is off and the runners are connected.
 // shortcut: real cross-request state, but lost on restart harmlessly: a restarted leader promotes again and resets this to now, then resumes merges from then (BOS-907).
 let resumeMergesSince: Date | null = null;
-leader.onPromote(() => {
+// BOS-1399: why this server took charge, for the merge-line "takeover" rows. SIGUSR2 is the deployer's switch.
+let promotions = 0; // shortcut: lost on restart, harmless because a fresh process is always its first promotion (cause "restart" or "deployer_switch").
+let signalled = false; // shortcut: lost on restart, harmless because it only marks a SIGUSR2 promotion in flight and is reset right after.
+leader.onPromote(async () => {
   resumeMergesSince = new Date();
+  const commit = env.BOSSMAN_COMMIT || null;
+  const cause = await takeoverCause(db, { first: promotions++ === 0, signalled, commit });
+  signalled = false;
+  await recordTakeover(db, { cause, commit }); // one row per company, merge waiting or not
   bg.startBackground();
   void launcher.syncAll(); // once per promotion: runners that outlived a deploy get their allow list (git hosts) without a restart
 });
 leader.onDemote(() => bg.stopBackground());
 // Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.
 process.on("SIGUSR1", () => void leader.demote());
-process.on("SIGUSR2", () => void leader.promote());
+process.on("SIGUSR2", () => {
+  signalled = true;
+  void leader.promote().finally(() => (signalled = false));
+});
 
 // Memory logging runs on every process, leader or standby (BOS-410), so it is not background work.
 memory.start();
@@ -162,6 +178,6 @@ if (env.BOSSMAN_PORTAL_PORT) {
   // BOSSMAN_PORTAL_CLIENT_HEADER: which header names the visitor; default X-Forwarded-For, cf-connecting-ip only for Cloudflare.
   const portalHeader = parseClientHeader(env.BOSSMAN_PORTAL_CLIENT_HEADER);
   if (portalHeader.bad) console.warn(`BOSSMAN_PORTAL_CLIENT_HEADER: "${portalHeader.bad}" is not x-forwarded-for or cf-connecting-ip, using x-forwarded-for`);
-  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header });
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header, mailer, portalUrl: env.BOSSMAN_PORTAL_URL });
   await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
 }

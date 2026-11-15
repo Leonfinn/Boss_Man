@@ -11,6 +11,15 @@ export const RUNNER_CODE_PATHS = /^(apps\/runner\/|apps\/launcher\/|apps\/netgua
 export const touchesRunnerCode = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_CODE_PATHS.test(p));
 
 /**
+ * The runner-update path (BOS-1467): the script the "Build and update runners" press runs. Runners are built only from
+ * the version the server runs, so a fix to it does nothing until the server runs it.
+ */
+export const RUNNER_UPDATE_PATHS = /^scripts\/update-runner\.sh$/;
+
+/** True when any of the changed files is on the runner-update path. */
+export const touchesRunnerUpdate = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_UPDATE_PATHS.test(p));
+
+/**
  * Files the owner must approve before a change to them merges (BOS-1094, widened by BOS-1100). A diff that touches one is
  * held at high risk, so the owner's sign-off is needed whatever the card says.
  *

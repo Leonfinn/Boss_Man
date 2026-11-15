@@ -3,7 +3,7 @@
 // goes quiet for three heartbeats is dropped and redialled.
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type Toolchain, type RunnerCommand, type RunnerEvent, type RunnerMessage, type WorkerMessage, type WorkerRepos } from "@boss-man/shared";
 import type { Journal } from "./journal.js";
 
 export type ConnectionOptions = {
@@ -16,6 +16,8 @@ export type ConnectionOptions = {
   imageVersion?: string | null;
   /** The git commit the image was built from (BOS-764), told to the server in hello. */
   imageCommit?: string;
+  /** The tools checks run with and their fingerprint (BOS-1570), told to the server in hello. */
+  toolchain?: Toolchain;
   /** Versions of the harnesses in the image, told to the server in hello (BOS-305). */
   harnessVersions?: HarnessVersions;
   heartbeatMs?: number;
@@ -36,7 +38,7 @@ export type ConnectionOptions = {
    * BOS-1435: this process is a check worker (BOSSMAN_ROLE=check-worker). Its hello carries only what the worker socket
    * reads (check features, its slot count, running checks), and it keeps no journal: the worker socket takes no events.
    */
-  checkWorker?: { slots: number; features: readonly string[] };
+  checkWorker?: { slots: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
 };
 
 export class RunnerConnection {
@@ -90,11 +92,11 @@ export class RunnerConnection {
   }
 
   /** A message that is not journalled (BOS-316 check progress and results); the caller resends what matters on reconnect. */
-  sendDirect(m: RunnerMessage) {
+  sendDirect(m: RunnerMessage | WorkerMessage) {
     this.send(m);
   }
 
-  private send(m: RunnerMessage) {
+  private send(m: RunnerMessage | WorkerMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
   }
 
@@ -119,14 +121,15 @@ export class RunnerConnection {
     this.listen(ws);
   }
 
-  private helloAsWorker(w: { slots: number; features: readonly string[] }) {
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}) });
+  private helloAsWorker(w: NonNullable<ConnectionOptions["checkWorker"]>) {
+    const repos = w.repos?.();
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), features: [...w.features], bootId: this.bootId, checkSlots: w.slots, ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(repos?.length ? { repos } : {}) });
   }
 
   private helloAsRunner() {
     const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
     const liveRuns = this.opts.liveRuns?.();
-    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
+    this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.imageCommit ? { imageCommit: this.opts.imageCommit } : {}), ...(this.opts.toolchain ? { toolchain: this.opts.toolchain } : {}), ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(this.opts.restart?.previousExit ? { previousExit: this.opts.restart.previousExit } : {}), ...(this.opts.restart?.hostBootAt ? { hostBootAt: this.opts.restart.hostBootAt } : {}), ...(this.opts.runningChecks ? { checkJobs: this.opts.runningChecks() } : {}), ...(this.opts.checkSlots ? { checkSlots: this.opts.checkSlots } : {}),...(pending.length ? { pending } : {}), ...(liveRuns ? { liveRuns } : {}) });
   }
 
   private listen(ws: WebSocket) {

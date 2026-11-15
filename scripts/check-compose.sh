@@ -37,6 +37,7 @@ sets=(
   "deploy/ntfy.yml"
   "deploy/ntfy.yml deploy/ntfy-bluegreen.yml"
   "deploy/penpot.yml"
+  "deploy/check-worker/compose.yaml"
 )
 
 failed=0 checked=0

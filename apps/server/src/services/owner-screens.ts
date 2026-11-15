@@ -19,9 +19,11 @@ export const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(
 type Place = { route: string; screen: OwnerScreen | null; tabs: readonly string[]; projects?: boolean };
 
 const isScreen = (s: string): s is OwnerScreen => Object.hasOwn(OWNER_CONTROLS, s);
+/** Menu entries whose label is longer than their screen's name (BOS-1494: plain words on the menu). */
+const MENU_SCREEN: Record<string, OwnerScreen> = { "Scrum Master log": "Scrum Master", "Workflow report": "Workflow" };
 const top = (name: string): Place => ({
   route: name,
-  screen: isScreen(name) ? name : null,
+  screen: MENU_SCREEN[name] ?? (isScreen(name) ? name : null),
   tabs: name === "Settings" ? OWNER_TABS.Settings : [],
   ...(name === "Projects" ? { projects: true } : {}),
 });
@@ -33,16 +35,31 @@ function tab(parent: Place, name: string): Place {
   return { route: `${parent.route} → ${name}`, screen, tabs: [] };
 }
 
+/**
+ * "Server and runner" is the name of a group of Settings pages, not a page (BOS-1492). Cards and notices still write
+ * "Settings → Server and runner → Updates", and they stay true: the group is a place of its own whose pages are the last
+ * Settings pages before "Import and export", and its buttons and fields are the ones on those pages.
+ */
+const SERVER_GROUP = "Server and runner";
+const SERVER_AND_RUNNER: Place = {
+  route: `Settings → ${SERVER_GROUP}`,
+  screen: "Server and runner",
+  tabs: OWNER_TABS.Settings.filter((t) => ["Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy"].includes(t)),
+};
+
 /** Every place a step can name, by its normalised name: the side menu, Setup, and the tabs of Settings and a project. */
 const PLACES = (() => {
   const out = new Map<string, Place>(); // not state: local to the PLACES lookup-table builder
   for (const m of OWNER_MENU) out.set(norm(m), top(m));
+  // The menu's names before BOS-1494, so a step that still says "Scrum Master" or "Workflow" finds its page.
+  for (const [label, screen] of Object.entries(MENU_SCREEN)) out.set(norm(screen), top(label));
   out.set("project", top("Projects"));
   const setup: Place = { route: "Setup (Settings → Run the setup wizard)", screen: "Setup", tabs: [] };
   out.set("setup", setup);
   out.set("setup wizard", setup);
   for (const t of OWNER_TABS.Settings) out.set(norm(t), tab(top("Settings"), t));
   for (const t of OWNER_TABS.Board) out.set(norm(t), tab(PROJECT, t));
+  out.set(norm(SERVER_GROUP), SERVER_AND_RUNNER);
   return out;
 })();
 
@@ -161,6 +178,7 @@ function walk(parts: string[], problems: string[]): Place | null | undefined {
     // A tab may be named by its first words ("Settings → Reviews" is Reviews and CEO), as cards shorten them.
     const child = at.tabs.find((t) => norm(t) === n) ?? at.tabs.find((t) => norm(t).startsWith(`${n} `));
     if (child) { at = tab(at, child); continue; }
+    if (at.route === "Settings" && (n === norm(SERVER_GROUP) || norm(SERVER_GROUP).startsWith(`${n} `))) { at = SERVER_AND_RUNNER; continue; }
     if (at.projects) {
       const boardTab = OWNER_TABS.Board.find((t) => norm(t) === n);
       at = boardTab ? tab(PROJECT, boardTab) : PROJECT;

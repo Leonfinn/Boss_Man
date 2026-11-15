@@ -3,17 +3,14 @@ import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewerRef, type ReviewKind
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
 import { Loader } from "./Loader";
-
-// Mirrors the server's defaults (packages/shared/src/review-policy.ts) for "Reset to defaults".
-const DEFAULTS: ReviewPolicy = {
-  trivial: { planApprover: "none", reviewer: "ceo", ownerSignoff: false },
-  low: { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false },
-  medium: { planApprover: "ceo", reviewer: "senior-dev", ownerSignoff: false },
-  high: { planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true },
-  critical: { planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true },
-};
+import { Advanced, PresetCards } from "./PresetCards";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
+import { matchPreset, REVIEW_PRESETS } from "../lib/presets";
 
 const cap = (r: string) => r[0]!.toUpperCase() + r.slice(1);
+/** Each review kind's column name in plain words, and a line of help where the name alone doesn't say it (BOS-1494). */
+const KIND_LABEL: Record<ReviewKindName, string> = { security: "Security review", infra: "Infrastructure review", adversarial: "Adversarial review" };
+const KIND_HELP: Partial<Record<ReviewKindName, string>> = { adversarial: "a reviewer told to try to break it" };
 const SEVERAL = "__several";
 
 /**
@@ -86,7 +83,15 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
           <th>Plan approved by</th>
           <th>Code reviewed by</th>
           {REVIEW_KINDS.map((k) => (
-            <th key={k}>{cap(k)} review</th>
+            <th key={k}>
+              <span>{KIND_LABEL[k]}</span>
+              {KIND_HELP[k] && (
+                <>
+                  <br />
+                  <small className="muted" style={{ fontWeight: "normal" }}>{KIND_HELP[k]}</small>
+                </>
+              )}
+            </th>
           ))}
           <th>You sign off</th>
         </tr>
@@ -107,7 +112,7 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
             </td>
             {REVIEW_KINDS.map((k) => (
               <td key={k}>
-                <ReviewerCell label={`${cap(tier)}: ${k} review by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k]} onChange={(v) => setKind(tier, k, v)} team={team} off />
+                <ReviewerCell label={`${cap(tier)}: ${KIND_LABEL[k].toLowerCase()} by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k]} onChange={(v) => setKind(tier, k, v)} team={team} off />
               </td>
             ))}
             <td>
@@ -146,12 +151,16 @@ export function CompanyReviews({ companyId, agents }: { companyId: string; agent
     }
   };
   if (!form) return <Loader label="Loading the review policy" />;
+  const preset = matchPreset(form, REVIEW_PRESETS);
   return (
     <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <ReviewPolicyTable value={form} onChange={setForm} agents={agents} idPrefix="co" />
+      <PresetCards label="Review preset" presets={REVIEW_PRESETS} active={preset} onPick={(p) => setForm(p.values)} />
+      <Advanced storeKey="reviews" forceOpen={!preset} summary={preset ? `The full table behind ${preset.name}.` : "Your own values: edit the table or pick a card."}>
+        <ReviewPolicyTable value={form} onChange={setForm} agents={agents} idPrefix="co" />
+      </Advanced>
       <div style={{ display: "flex", gap: 8 }}>
         <SaveButton {...sv} busy={busy} />
-        <button type="button" className="btn" onClick={() => setForm(DEFAULTS)}>
+        <button type="button" className="btn" onClick={() => setForm(DEFAULT_REVIEW_POLICY as ReviewPolicy)}>
           Reset to defaults
         </button>
       </div>

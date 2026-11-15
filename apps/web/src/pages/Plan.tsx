@@ -172,8 +172,9 @@ export function Causes({ plan }: { plan: PlanData }) {
   const byId = new Map(plan.nodes.map((n) => [n.id, n]));
   const [showAll, setShowAll] = useState(() => readChoice(CAUSES_OPEN_KEY));
   const [rolled, setRolled] = useState(() => readChoice(CAUSES_ROLLED_KEY));
-  if (!causes.length) return null;
-  const total = causes.length;
+  const hold = plan.startHold ?? null;
+  if (!causes.length && !hold) return null;
+  const total = causes.length + (hold ? 1 : 0);
   const shown = showAll ? causes : causes.slice(0, CAUSES_SHOWN);
   const toggleAll = () => {
     const next = !showAll;
@@ -199,6 +200,16 @@ export function Causes({ plan }: { plan: PlanData }) {
       </div>
       <div id="causes-body" hidden={rolled} style={rolled ? { display: "none" } : { display: "flex", flexDirection: "column", gap: 10 }}>
       <ul className="pl-causes" id="causes-list">
+        {hold && (
+          <li>
+            <span className="tag amber">New starts held</span> {hold.reason}{" "}
+            <span className="muted">
+              ({hold.tickets.length} Ready ticket{hold.tickets.length === 1 ? "" : "s"} wait: {hold.tickets.map((h, i) => (
+                <span key={h.id}>{i ? ", " : ""}<a href={h.link}>{h.title}</a></span>
+              ))}); they start by themselves when the line is shorter
+            </span>
+          </li>
+        )}
         {shown.map((c) => {
           const waiting = plan.nodes.filter((n) => n.causes.includes(c.id));
           return (

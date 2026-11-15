@@ -57,6 +57,8 @@ export type ServerStatusDeps = {
   runLimits?: (companyId: string) => Promise<unknown>;
   /** Failed merge attempts in the last hour, grouped by reason (merge-failures.ts, BOS-1461). Absent: null. */
   mergeFailures?: (companyId: string) => Promise<unknown>;
+  /** The merge train per project on this server: seats, who is seated and waits, tickets held to land alone, stall clocks (merge-stall.ts, BOS-1515). Absent: null. */
+  mergeTrain?: (companyId: string) => Promise<unknown>;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -236,6 +238,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // A wake held "at a concurrency limit: all companies" waits for the first; "this company" for the second.
         runLimits: deps.runLimits ? await deps.runLimits(companyId).catch(() => null) : null,
         mergeFailures: deps.mergeFailures ? await deps.mergeFailures(companyId).catch(() => null) : null,
+        mergeTrain: deps.mergeTrain ? await deps.mergeTrain(companyId).catch(() => null) : null,
         maintenance: await deps.hold(),
         // The check queue (DR-003): what runs, who waits and at which place, the last results, and whether main is red.
         checks: await checkQueue(db).status(companyId, at),

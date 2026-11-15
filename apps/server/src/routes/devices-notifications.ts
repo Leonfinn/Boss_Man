@@ -10,6 +10,7 @@ import type { deviceProfilesService } from "../services/device-profiles.js";
 import type { hostFactsService } from "../services/host-facts.js";
 import { NotifySettings, NtfyUrl, type notificationsService } from "../services/notifications.js";
 import type { phoneApproveService } from "../services/phone-approve.js";
+import type { phoneLoginService } from "../services/phone-login.js";
 import type { secretsService } from "../services/secrets.js";
 
 const Uuid = z.string().uuid();
@@ -138,9 +139,14 @@ export function notificationSettingsRoutes(
     phoneApprove: ReturnType<typeof phoneApproveService>;
     secretsSvc: ReturnType<typeof secretsService>;
     hostFacts: ReturnType<typeof hostFactsService>;
+    phoneLogin: ReturnType<typeof phoneLoginService>;
   },
 ) {
-  const { notes, phoneApprove, secretsSvc, hostFacts } = deps;
+  const { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin } = deps;
+  const phoneLoginStatus = async () => {
+    const a = await phoneLogin.availability();
+    return a.ok ? { available: true } : { available: false, why: a.why };
+  };
 
   /** Whether phone Approve buttons are on, and if not why, for Notifications (BOS-243). */
   const approveStatus = async (s: NotifySettings) => {
@@ -152,7 +158,7 @@ export function notificationSettingsRoutes(
   const phoneNtfyContainer = async () => (await hostFacts.value("ntfy.container").catch(() => null)) ?? null;
   owner.get("/api/notification-settings", async () => {
     const s = await notes.getSettings();
-    return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
+    return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus(), phoneLogin: await phoneLoginStatus() };
   });
   owner.put("/api/notification-settings", async (req) => {
     const b = NotifySettings.omit({ ntfy: true })
@@ -170,7 +176,22 @@ export function notificationSettingsRoutes(
         : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
     }
     const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
-    return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus() };
+    return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null, approve: await approveStatus(saved), phoneAddress: await phoneNtfyAddress(), phoneContainer: await phoneNtfyContainer(), phoneTest: await notes.testStatus(), phoneLogin: await phoneLoginStatus() };
+  });
+  // "Create phone login" (BOS-1004): ask the host to make the phone's read-only ntfy user, then poll for the answer. The
+  // password is in the poll answer once; nothing here logs a body or a response, and no cache may keep one.
+  owner.post("/api/notification-settings/phone-login", { logLevel: "silent" }, async (req, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const { action } = z.object({ action: z.enum(["create", "reset"]) }).parse(req.body);
+    const topic = (await notes.getSettings()).ntfy?.topic ?? "";
+    const r = await phoneLogin.begin(action, topic);
+    return r.ok ? { id: r.id } : reply.code(r.code === "busy" ? 409 : 400).send({ error: r.code, message: r.message });
+  });
+  owner.get("/api/notification-settings/phone-login/:id", { logLevel: "silent" }, async (req, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const { id } = IdParam.parse(req.params);
+    const r = await phoneLogin.poll(id);
+    return r.status === "gone" ? reply.code(404).send({ status: "gone" }) : r;
   });
   owner.post("/api/notification-settings/test", async (_req, reply) => {
     try {

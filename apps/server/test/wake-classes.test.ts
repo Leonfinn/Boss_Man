@@ -93,7 +93,9 @@ describe("wake classes: the table", () => {
       // Plain lower-case words only: the sentences after `reason:` elsewhere are refusals shown to people.
       for (const m of text.matchAll(/\breason: "([a-z_][a-z_ -]*)"/g)) found.set(m[1]!, file);
     }
-    for (const r of ["update pending"]) found.delete(r); // the maintenance hold's label, not a wake
+    // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
+    // stop-stragglers endpoint (BOS-1238). None is a wake.
+    for (const r of ["update pending", "no_wrapup", "too_early"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
     const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
     expect(unclassified).toEqual([]);
@@ -340,6 +342,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
     "services/retro.ts": NEVER_DROPPED,
+    "services/github-watch.ts": NEVER_DROPPED + " (github feedback and github security are scheduled)",
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
     "services/release-log.ts": CHECKS_OUTCOME + " (a dropped release wake is logged and retried next pass)",
     "services/review-kinds.ts": NEVER_DROPPED,
@@ -350,6 +353,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/sweeps.ts": NEVER_DROPPED,
     "services/owner-replies.ts": CHECKS_OUTCOME + " (a dropped re-wake still counts as the one try; the 10-minute ask does not need it to land)",
     "services/ticket-chat.ts": NEVER_DROPPED,
+    "services/merge-stall.ts": NEVER_DROPPED + " (merge line stalled is a waiting reason; deps.notify is the owner's notification, not a wake)",
     "services/watchdog.ts": CHECKS_OUTCOME + " (a dropped wake is reported, not counted as sent)",
   };
 

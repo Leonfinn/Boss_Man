@@ -35,13 +35,25 @@ async function setup(opts: { runnerSlots?: number; graceMs?: number } = {}) {
   const toWorker: Array<{ workerId: string; command: any }> = [];
   const closed: Array<{ workerId: string; code: number }> = [];
   let runnerUp = true;
-  const d = checkDispatcher(db, {
-    send: (runnerId, command) => (runnerUp ? (toRunner.push({ runnerId, command }), true) : false),
-    isConnected: () => runnerUp,
-    can: () => true,
+  const removed: string[] = [];
+  // setRunnerUp(false): the runner takes no checks itself (as if its slots were full), but stays connected, because since
+  // BOS-1436 a worker gets its code only through the company runner.
+  const dispatcher = checkDispatcher(db, {
+    send: (runnerId, command) => (runnerUp || command.type !== "check.run" ? (toRunner.push({ runnerId, command }), true) : false),
+    isConnected: () => true,
+    can: () => runnerUp,
     workers,
     workerGraceMs: opts.graceMs ?? 30,
+    // BOS-1436: the runner "packs" at once; the code itself is covered in check-bundles.test.ts.
+    bundles: { store: { remove: (id) => void removed.push(id), sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
   });
+  // A worker's job starts once its code is packed, after pump returns: every call here waits for that too.
+  const d = new Proxy(dispatcher, {
+    get: (t, k) => {
+      const v = (t as Record<string | symbol, unknown>)[k];
+      return typeof v === "function" && k !== "settled" ? async (...a: unknown[]) => { const r = await (v as (...x: unknown[]) => unknown)(...a); await t.settled(); return r; } : v;
+    },
+  }) as typeof dispatcher;
   const q = checkQueue(db);
   let n = 0;
   const req = async (c: typeof co, extra: Record<string, unknown> = {}) => {
@@ -105,7 +117,7 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const by = (id: string) => list.find((x) => x.id === id)!;
     expect(by(noBundle.id).reason).toMatch(/can't fetch the code/);
     expect(by(oldCommit.id).reason).toBeNull();
-    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/different commit than the company's runner/) });
+    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/its commit differs from your runner's.*one time only/) });
     expect(by(off.id).reason).toBe("Turned off.");
     expect(by(elsewhere.id).companies[0]!.id).toBe(other.id);
     const w = await s.workers.get(elsewhere.id);
@@ -123,7 +135,54 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(ran(s.toWorker)).toEqual([]);
     await s.db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, s.co.runnerId));
     const quiet = await s.worker({ commit: null });
-    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which commit/);
+    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which tools or commit/);
+  });
+
+  // BOS-1570: a runner update (new commit, same tools) must not idle a worker; only a tool change does, and it says which.
+  describe("toolchain match (BOS-1570)", () => {
+    const TOOLS = { node: "22.11.0", pnpm: "10.28.0", git: "2.39.5" };
+    const tc = (tools: Record<string, string>, fingerprint?: string) => ({ fingerprint: fingerprint ?? JSON.stringify(Object.entries(tools).sort()).replace(/\W/g, "").padEnd(64, "0").slice(0, 64), tools });
+    const withTools = async (s: Awaited<ReturnType<typeof setup>>, workerTc: ReturnType<typeof tc> | null, runnerTc: ReturnType<typeof tc> | null, o: { workerCommit?: string | null; runnerCommit?: string | null } = {}) => {
+      await s.db.update(runners).set({ toolchain: runnerTc, imageCommit: o.runnerCommit === undefined ? COMMIT : o.runnerCommit }).where(eq(runners.id, s.co.runnerId));
+      const { worker: w } = await s.workers.register({ name: `W${Math.random()}`, companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      await s.workers.touch(w.id, { imageCommit: o.workerCommit === null ? undefined : (o.workerCommit ?? OTHER), toolchain: workerTc ?? undefined, imageVersion: "1", features: ["check-jobs", BUNDLE_FEATURE] });
+      s.workers.connect(w.id, () => true, () => undefined, ["check-jobs", BUNDLE_FEATURE]);
+      return (await s.workers.get(w.id))!;
+    };
+
+    it("takes jobs with a different commit when the tools match, with no owner action", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc(TOOLS), tc(TOOLS));
+      expect(s.workers.readiness(w, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toEqual([w.id]);
+      // The commit is information only: a worker with no commit at all still matches.
+      const bare = await withTools(s, tc(TOOLS), tc(TOOLS), { workerCommit: null });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toContain(bare.id);
+    });
+
+    it("goes idle when a tool differs, and the reason names the tool", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc({ ...TOOLS, node: "22.10.0" }), tc(TOOLS));
+      expect(await s.workers.eligible(s.co.id)).toEqual([]);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.companies[0]!.reason).toMatch(/Out of date.*node 22\.10\.0 here, 22\.11\.0 on your runner.*Redeploy.*no file edit/);
+    });
+
+    it("says 'worker code too old' when a worker's protocol is refused, instead of a bare Offline", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const { worker: w } = await s.workers.register({ name: "Old", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      s.workers.refuse(w.id, 0);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.reason).toMatch(/Out of date: worker code too old \(it speaks protocol 0, your server needs 1\).*Redeploy/);
+    });
+
+    it("falls back to the commit when either side can't report its tools", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const oldWorker = await withTools(s, null, tc(TOOLS), { workerCommit: COMMIT });
+      expect(s.workers.readiness(oldWorker, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      const oldRunner = await withTools(s, tc(TOOLS), null, { workerCommit: OTHER });
+      expect(s.workers.readiness(oldRunner, s.co.id, COMMIT, null)).toMatchObject({ ok: false, reason: expect.stringMatching(/rebuild the runner/) });
+    });
   });
 
   it("caps a worker at the smaller of the owner's slots and what it reports, and counts its slots across companies", async () => {
@@ -160,10 +219,19 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const workers = s.workers;
     const sent: any[] = [];
     const w = await s.worker({ threads: 3, memoryMb: 7168 });
-    const d = checkDispatcher(db, { send: () => false, isConnected: () => false, can: () => true, scanList: async () => "ip\t192.0.2.77", workers: { ...workers, send: (_id, c) => (sent.push(c), true) } });
+    // The runner is connected (it packs the worker's code, BOS-1436) but takes no checks itself.
+    const d = checkDispatcher(db, {
+      send: () => false,
+      isConnected: () => true,
+      can: () => false,
+      scanList: async () => "ip\t192.0.2.77",
+      workers: { ...workers, send: (_id, c) => (sent.push(c), true) },
+      bundles: { store: { remove: () => {}, sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
+    });
     await s.req(s.co, { kind: "merge", scope: "full" });
     await d.pump();
-    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77" });
+    await d.settled();
+    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77", bundle: { bytes: 1 } });
     w.release();
   });
 
@@ -185,7 +253,8 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect((await s.job(onRunner.id)).state).toBe("running");
     // Progress from the wrong machine is ignored too.
     await s.d.onProgress(s.co.runnerId, { jobId: onWorker.id, tail: "from the runner" });
-    expect((await s.job(onWorker.id)).logTail).toBeNull();
+    // (The line it shows is still the dispatcher's own "getting the code" one, BOS-1436.)
+    expect((await s.job(onWorker.id)).logTail).toBe("Getting the code to the check worker.");
     await s.d.onWorkerProgress(w.id, { jobId: onWorker.id, tail: "from the worker" });
     expect((await s.job(onWorker.id)).logTail).toBe("from the worker");
     // The right machines answer.

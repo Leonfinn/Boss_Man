@@ -6,6 +6,7 @@ import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
+import { workerComposeFile, workerSocketUrl } from "./check-worker-compose";
 import { useAction } from "./shared";
 
 export type CheckWorkerView = {
@@ -19,6 +20,7 @@ export type CheckWorkerView = {
   checkThreads: number | null;
   checkMemoryMb: number | null;
   imageCommit: string | null;
+  toolchain: Record<string, string> | null;
   lastSeenAt: string | null;
   companies: { id: string; name: string; ready: boolean; reason: string | null }[];
   reason: string | null;
@@ -76,14 +78,14 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
   const act = useAction();
   const [adding, setAdding] = useState<Draft | null>(null);
   const [editing, setEditing] = useState<{ id: string; draft: Draft } | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const [added, setAdded] = useState<{ token: string; commit: string | null; slots: number } | null>(null);
   const list = companies.data ?? [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
       <h3 style={{ margin: "8px 0 0" }}>Check workers</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks only when it was built from the same version as the company's runner.
+        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (
@@ -94,7 +96,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
             <span className="muted" style={{ fontSize: 14 }}>
               {w.limit} check{w.limit === 1 ? "" : "s"} at once{w.reportedSlots !== null && w.reportedSlots < w.slots ? ` (the machine says it can run ${w.reportedSlots})` : ""}
               {w.lastSeenAt ? ` · last seen ${when(w.lastSeenAt)}` : ""}
-              {w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
+              {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
           </div>
           {w.reason ? (
@@ -177,17 +179,27 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
           )}
         </div>
       ))}
-      {token && (
+      {added && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-worker-token">
           <p>
-            <strong>Copy this token now; it isn't shown again.</strong> Save it in a file on the worker's machine, readable only by uid 1000, and point BOSSMAN_CHECK_WORKER_TOKEN_FILE at it.
+            <strong>Copy this file now; it holds the worker's token and isn't shown again.</strong> On the worker's machine, save it as <code>compose.yaml</code> in an empty folder (or paste it into a TrueNAS custom app, Portainer or Dockge) and run <code>docker compose up -d</code>. Nothing else to edit, now or after a runner update.
           </p>
-          <pre className="mono codebox">{token}</pre>
+          <pre className="mono codebox" data-testid="check-worker-compose" style={{ maxHeight: 320, overflow: "auto" }}>
+            {workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })}
+          </pre>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="btn" onClick={() => void act.run(async () => copyMessage(await copyText(token), "Token"))}>
-              Copy token
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() =>
+                void act.run(async () =>
+                  copyMessage(await copyText(workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })), "Compose file"),
+                )
+              }
+            >
+              Copy compose file
             </button>
-            <button type="button" className="btn" onClick={() => setToken(null)}>
+            <button type="button" className="btn" onClick={() => setAdded(null)}>
               Done
             </button>
           </div>
@@ -203,8 +215,9 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               disabled={act.busy || !valid(adding, maxSlots)}
               onClick={() =>
                 void act.run(async () => {
-                  const r = await api<{ id: string; token: string }>("/api/settings/check-workers", { method: "POST", body: { ...toBody(adding), enabled: true } });
-                  setToken(r.token);
+                  const body = { ...toBody(adding), enabled: true };
+                  const r = await api<{ id: string; token: string; commit?: string | null }>("/api/settings/check-workers", { method: "POST", body });
+                  setAdded({ token: r.token, commit: r.commit ?? null, slots: body.slots });
                   setAdding(null);
                   reload();
                 })

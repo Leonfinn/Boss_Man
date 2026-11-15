@@ -88,6 +88,25 @@ The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE
 
 `target` is `server`, `runner` or `restart`. Anything else, a missing field, a bad format, or a file over 4 KB is refused; unknown extra fields are ignored. Every field is validated against a strict pattern before it is used, and the only action chosen from it is the `target`. `approvedBy` is only for the log.
 
+### Phone login (BOS-1004)
+
+The Notifications page's **Create phone login** and **Reset password** buttons use a second request file, `inbox/phone-login.json`, so they never compete with a deploy. The deployer reads it on every tick (before any deploy request), whatever else is going on.
+
+```json
+{ "id": "uuid", "action": "create", "user": "phone-read", "topic": "your-topic", "pubkey": "base64 of an RSA public key (DER, SPKI)" }
+```
+
+What the deployer does, and nothing else:
+
+1. Rejects the file unless it is a plain file under 2 KB with exactly those five fields. `action` is `create` or `reset`; `user` matches `^[a-z][a-z0-9_-]{2,31}$` and is not `admin`, `bossman-publish`, `bossman`, `root` or `everyone`; `topic` matches `^[A-Za-z0-9_-]{1,64}$`; `pubkey` must parse as an RSA key of 2048 bits or more. A used id is never run twice, and there is one phone login per 30 seconds.
+2. Finds the ntfy container by its Compose service label (`com.docker.compose.service=ntfy`), never by name, and refuses if there is not exactly one running.
+3. Makes a 24-character password from `/dev/urandom`, seals it to the public key (RSA-OAEP, SHA-256) **before** changing anything, then runs only these fixed commands in the container: `ntfy user list`, `ntfy user add --role=user <user>` (create) or `ntfy user change-pass <user>` (reset), and `ntfy access <user> <topic> read-only`. The password reaches ntfy as the `NTFY_PASSWORD` environment variable, never on a command line.
+4. Writes `outbox/phone-login.json`: the id, the result (`created`, `reset`, `exists`, `missing`, `rejected`, `unavailable` or `failed`), a message, and the **sealed** password. `state/phone-login.log` gets one line per request (time, id, result, user): no password.
+
+`create` for a user that already exists answers `exists` and changes nothing (the page then offers **Reset password**). `reset` for a user that does not exist answers `missing`. The read-only access is re-applied on every run, so running it again repairs a drifted rule. Remove the user by hand with `docker exec <ntfy container> ntfy user del phone-read`.
+
+The server makes a new RSA key pair for each click and keeps the private half in memory only (10 minutes, one use). Nothing but the sealed password is ever on disk, so a backup, the outbox or a log never holds it. The browser gets it once, in a response marked `no-store`. If the server restarts before the owner picks it up, press the button again: that makes a new password. The host needs `openssl` (it reports `phoneLogin.openssl` in `host.json`; the page says so when it is missing) and needs no other tool.
+
 ### Restart (BOS-647)
 
 Settings → Server and runner → Updates → **Restart the server** (owner session only; `POST /api/self-deploy/restart`, no MCP tool) writes a request with `target: "restart"`, a fresh random `id` (there is no decision card: the owner's click is the approval) and `commit` = the `deployed` commit from `available.json`. The server refuses it when self-deploy is off, the host has not reported, a deploy is running or a request is already waiting. It is for the server-health cards (memory high, freezes piling up) when no update is waiting.
@@ -182,7 +201,7 @@ The same panel counts a rate-limit refusal from the host ("Rejected: only one se
 - Get a change to `docker-compose.yml`, Dockerfiles, `deploy/`, `scripts/` or CI files deployed without the owner running `scripts/deploy.sh` on the host. This depends on the infra list being complete (open item 1).
 - Change `host-deployer.sh` or `host.conf`: root-owned, outside the checkout.
 - Make the host deploy a commit that is not on main, or one older than the owner approved, or (in place of the approved one) a newer one the server does not list as checked. It also can't replay an old request, or deploy more than once per 10 minutes per target.
-- Get `docker.sock` or any host command execution from the server: it writes one data file in one folder and reads another read-only.
+- Get `docker.sock` or any host command execution from the server: it writes two data files in one folder and reads another read-only. The one command path the deployer offers it is the phone login (see "Phone login"): four fixed `ntfy` commands, with a validated topic, a user name the deployer pins to `phone-read` (it refuses any other, so an existing admin login can never be reset through it), and a read-only access rule. A compromised server can ask for a new password for `phone-read` (which locks the phone out until the owner resets it again), and can read that password because it holds the key. It cannot make or reset any other user, grant write access, or run any other command.
 - Reach the deploy key, `host.conf` or the webhook URL: root-only, not mounted.
 - Approve its own deploy: owner tier, and the request is written only after the owner's answer.
 
@@ -227,7 +246,7 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 1. **The hold is one `settings` row** (`maintenance`: `{reason, since, deadline, minutes, force?, swapped?, failed?}`), so no migration, and it survives a restart. It is separate from a company's Pause: Pause is `companies.paused`, which the drain never reads or writes, so companies the owner paused stay paused afterwards.
 2. **What the hold blocks.** The scheduler, in `tickOnce`, launches no new run in any company. Held wakes stay `queued` with the reason `update pending` (the same way a paused company's wakes wait), so nothing is lost and the first pass after the hold lifts starts them. Wakes that were `deferred` with a time (quiet hours, budgets) keep their own reason and time. **Nothing is exempt, chat and owner messages included.** Exempting chat would let a conversation start a run in a company mid-drain and keep that company's runner from swapping; the cost is that a chat message sent during a drain is answered after it. Runs already going are untouched.
 3. **Telling everyone.**
-   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Updates > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
+   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Updates has **Update runners (finish runs first)** (start by hand, for a manual `update-runner.sh` run; under **For a hand-built runner image** when self-deploy is on) and, in the status box while a drain runs, **Cancel the runner update**.
    - A CEO's brief (and the owner's plain brief page) starts with an `UPDATE PENDING` line: finish what is in flight, do not delegate new work. A CEO run that was already going when the hold started has its old brief; the hold is what actually stops its delegations from launching anything.
    - The stall and missed-work sweeps: held wakes are `queued`, so a ticket with one counts as busy (not forgotten), and watchers' "tree stopped" check treats queued wakes as work. The missed-work sweep is skipped while the hold is on, so it cannot pile up wakes or raise "looks stuck" decisions for tickets that simply cannot start.
 4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. "Keep waiting" moves the deadline by the same number of minutes and the next deadline asks again; "Stop the remaining runs" sets `force`, so the next step recreates every runner whatever is running (crash recovery restarts those runs once the hold lifts); "Cancel" lifts the hold. Runners already swapped stay on the new image.
@@ -243,7 +262,7 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 - `--now`: the old behaviour for emergencies on the host: `compose up -d` and `recreate-all`, runs cut off, no drain. It combines with `--rollback`.
 - `--settings`: no build. For a change to the runner settings in `.env` (`BOSSMAN_RUNNER_CPUS`, ...; not the check slots or runner memory, which follow "Checks at once" in Settings and need no host step): recreates the launcher so it reads them, then asks for a drain marked "setting change". Runs finish, each runner is recreated as its company goes idle, and the agents told to wrap up are woken afterwards. It refuses without a launcher or a deployer folder (use `--settings --now` there). Owner cards must use this, not `recreate-all`: the card lint refuses a bare recreate (R15, BOS-594).
 - `--rollback` retags `:previous` as `:current` and then drains onto it.
-- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Updates > Runner update > **Update runners**.
+- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Updates > **Update runners (finish runs first)**.
 - `deploy.sh --runner` calls `update-runner.sh`, so it drains too.
 - **Why each runner restarted (BOS-594).** Before Boss Man recreates or restarts a runner (an update drain, a setting-change drain, the owner's Restart or Reconnect) it records why. The runner's hello says whether its last process was stopped from outside (SIGTERM) or ended without being told (crash or out of memory), and when the host booted. The server turns that into one reason (update, setting change, owner restart, host, crash or out of memory, unknown), puts it in the owner's feed (a crash is a flag) and the activity log, and shows the latest in `server_status` under `runner.lastRestart`.
 

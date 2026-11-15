@@ -47,11 +47,37 @@ export const TRAIN_RESTACK_CAP = 10;
 /** After a server start, how long admissions wait for the tickets that had live merge jobs to re-join in their old order. */
 export const TRAIN_SEED_WAIT_MS = 3 * 60_000;
 
+/** BOS-1515: why a head-only ticket waits to land alone: the members it clashed with (ticket ids) and the files, and when. */
+export type TrainClash = { with: string[]; files: string[]; at: number };
+
+/** BOS-1515: a waiting head-only ticket, with its clash and how many tickets have taken a seat past it (it holds the line at `seats`). */
+export type HeldAlone = { ticketId: string; clash: TrainClash | null; passed: number; holdsLine: boolean };
+
+/** BOS-1515: the train's state for server_status and the stall alarm. Times are ms; null when not so. */
+export type TrainFacts = {
+  seats: number;
+  seated: string[];
+  waiting: string[];
+  heldAlone: HeldAlone[];
+  /** Since when a ticket that could take a seat has waited while one is free (outside the restart seed wait). */
+  emptySeatSince: number | null;
+  /** The last landing since this server built the train; null when none yet. */
+  lastLandingAt: number | null;
+  /** While tickets are in the train: since when nothing has landed (the later of the last landing and the line getting busy). */
+  noLandingSince: number | null;
+  /** True during the restart seed wait (BOS-1289): empty seats are expected then. */
+  seeding: boolean;
+};
+
 export class MergeTrain {
   /** Seated members, head first. */
   private members: TrainMember[] = [];
   /** Joined but not seated yet. */
-  private waiting = new Map<string, { priority: number; place: number; seq: number; headOnly: boolean; passed: number }>();
+  private waiting = new Map<string, { priority: number; place: number; seq: number; headOnly: boolean; passed: number; clash: TrainClash | null }>();
+  /** BOS-1515 stall clocks, kept by track() after every change and on each read. */
+  private emptySince: number | null = null;
+  private busySince: number | null = null;
+  private lastLanding: number | null = null;
   private seq = 0;
   /** Prepared commits of members that left without landing (or re-prepared): a head based on one is stale. */
   private lost = new Set<string>();
@@ -86,15 +112,67 @@ export class MergeTrain {
    * on main alone, where its result is the real one. It keeps its place; later tickets may take free seats past it a few
    * times (see admit), then it holds the line until the train ahead has drained.
    */
-  join(ticketId: string, at: { priority: number; place: number; headOnly?: boolean }) {
+  join(ticketId: string, at: { priority: number; place: number; headOnly?: boolean; clash?: TrainClash | null }) {
     if (this.index(ticketId) >= 0 || this.waiting.has(ticketId)) return;
-    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++, headOnly: !!at.headOnly, passed: 0 });
+    this.waiting.set(ticketId, { priority: at.priority, place: at.place, seq: this.seq++, headOnly: !!at.headOnly, passed: 0, clash: at.clash ?? null });
+    this.track();
   }
 
   /** Seats waiting tickets while seats are free; true when this ticket has a seat. Members are never pushed out by a later arrival. */
   seated(ticketId: string): boolean {
     this.admit();
+    this.track();
     return this.index(ticketId) >= 0;
+  }
+
+  private seeding() {
+    return !!this.seed && this.now() < this.seed.until && this.seed.order.some((id) => this.wanted(id));
+  }
+
+  /**
+   * BOS-1515: keeps the stall clocks. An empty seat counts only while a ticket that could take it waits: a head-only ticket
+   * alone, waiting for the members ahead to land, is the design (B2 sends it back if its clash reaches main), not a stall. It
+   * does count when the head-only ticket has been passed `seats` times and holds the line for others (14 Nov).
+   */
+  private track() {
+    const t = this.now();
+    const seats = Math.max(1, this.opts.seats());
+    const blocked = [...this.waiting.values()].some((w) => !w.headOnly);
+    const empty = this.members.length < seats && blocked && !this.seeding();
+    if (!empty) this.emptySince = null;
+    else this.emptySince ??= t;
+    if (!this.size) this.busySince = null;
+    else this.busySince ??= t;
+  }
+
+  /** BOS-1515: waiting head-only tickets, in line order, with their clash and whether they hold the line now. */
+  heldAlone(): HeldAlone[] {
+    const seats = Math.max(1, this.opts.seats());
+    return this.queue()
+      .map((id) => [id, this.waiting.get(id)!] as const)
+      .filter(([, w]) => w.headOnly)
+      .map(([id, w]) => ({ ticketId: id, clash: w.clash ? { ...w.clash, with: [...w.clash.with], files: [...w.clash.files] } : null, passed: w.passed, holdsLine: w.passed >= seats && this.members.length > 0 }));
+  }
+
+  /** BOS-1515: the clash a waiting ticket was held alone for, if any. */
+  clashOf(ticketId: string): TrainClash | null {
+    return this.waiting.get(ticketId)?.clash ?? null;
+  }
+
+  /** BOS-1515: the facts the stall alarm and server_status read. Reading also brings the clocks up to date (seats can change). */
+  facts(): TrainFacts {
+    this.track();
+    const noLandingSince = this.busySince === null ? null : Math.max(this.busySince, this.lastLanding ?? 0);
+    return {
+      seats: Math.max(1, this.opts.seats()),
+      seated: this.seatedIds(),
+      waiting: this.queue(),
+      heldAlone: this.heldAlone(),
+      emptySeatSince: this.emptySince,
+      lastLandingAt: this.lastLanding,
+      noLandingSince,
+      seeding: this.seeding(),
+    };
   }
 
   private admit() {
@@ -238,6 +316,8 @@ export class MergeTrain {
     const i = this.index(ticketId);
     if (i < 0) return;
     this.members.splice(i, 1);
+    this.lastLanding = this.now();
+    this.track();
   }
 
   /**
@@ -248,13 +328,31 @@ export class MergeTrain {
     this.waiting.delete(ticketId);
     this.seenSince.add(ticketId);
     const i = this.index(ticketId);
-    if (i < 0) return;
-    const [m] = this.members.splice(i, 1);
-    if (m?.commit) this.lost.add(m.commit);
+    if (i >= 0) {
+      const [m] = this.members.splice(i, 1);
+      if (m?.commit) this.lost.add(m.commit);
+    }
+    this.track();
   }
 
   get size() {
     return this.members.length + this.waiting.size;
+  }
+
+  /** Seated tickets, head first (BOS-1504: the check queue serves their merge jobs in this order). */
+  seatedIds(): string[] {
+    return this.members.map((m) => m.ticketId);
+  }
+
+  /**
+   * BOS-1504: a merge job of this ticket must not take a check slot now. True while it waits for a seat, and after a restart
+   * while the seed still names it and it hasn't been seated or left (its landing may not have re-joined yet). A slot spent on
+   * it would check a tree no landing uses: when it is seated, it prepares again on the train's base.
+   */
+  withheld(ticketId: string): boolean {
+    if (this.index(ticketId) >= 0) return false;
+    if (this.waiting.has(ticketId)) return true;
+    return !!this.seed && this.now() < this.seed.until && this.seed.order.includes(ticketId) && this.wanted(ticketId);
   }
 }
 
@@ -275,8 +373,44 @@ export function trainFor(projectId: string, seats: number): { train: MergeTrain;
   return { train, created: true };
 }
 
+/**
+ * BOS-1504: what the check queue needs from a project's train: the seated tickets (head first) and which tickets' merge jobs to
+ * hold back. Null when this server has no train for the project (a standby copy, or no landing since it started): then the
+ * queue serves as it did before. Runners connect only to the server in charge, so the queue's pump runs beside the trains.
+ */
+export function trainView(projectId: string): { seated: string[]; withheld: (ticketId: string) => boolean } | null {
+  const train = trains.get(projectId);
+  return train ? { seated: train.seatedIds(), withheld: (id) => train.withheld(id) } : null;
+}
+
+/** BOS-1515: the train's facts (seats, who waits, held-alone clashes, stall clocks); null when this server has no train for it. */
+export function trainFacts(projectId: string): TrainFacts | null {
+  return trains.get(projectId)?.facts() ?? null;
+}
+
+/** BOS-1515: the projects this server has a train for (the stall sweep walks these). */
+export function trainProjects(): string[] {
+  return [...trains.keys()];
+}
+
+// lost on restart, harmless: a waiting ticket's first trial runs whatever the count is (its last-seen value starts unset).
+const mainGens = new Map<string, number>();
+
+/**
+ * BOS-1515 (B2): main moved for this project (a ticket landed through Boss Man). Waiting tickets try a merge on main again when
+ * this changes. A merge made outside Boss Man doesn't count here; the waiting loop's fallback trial catches it.
+ */
+export function mainMoved(projectId: string) {
+  mainGens.set(projectId, (mainGens.get(projectId) ?? 0) + 1);
+}
+
+export function mainGen(projectId: string): number {
+  return mainGens.get(projectId) ?? 0;
+}
+
 /** Tests only: forget every train, as a restart does. */
 export function resetTrains() {
   trains.clear();
   seatCounts.clear();
+  mainGens.clear();
 }

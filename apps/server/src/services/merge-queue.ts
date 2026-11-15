@@ -9,8 +9,9 @@ import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold } from "./deploy-wait-hold.js";
-import { heldTicketIds, holdView } from "./review-holds.js";
+import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
+import { clashWords } from "./merge-line.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -38,9 +39,18 @@ export type RunningNow = {
   slot: number;
   /** True past the limit, so the screen says what happens next. */
   overLimit: boolean;
+  /** BOS-1517: the same facts as one line. */
+  statusLine: StatusLine;
 };
 
-export type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
+/**
+ * BOS-1517: the one status line of a ticket in the merge pipeline, from live state. `step` is what it is doing now, `since`
+ * when it began that step (a running check's own start, never the landing's), `next` what happens after, `blocker` what is
+ * in the way (null when nothing is).
+ */
+export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
+
+export type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 
 /** Approved work held by the carried-work guard (BOS-130): the ticket(s) it waits for, by ref and title. */
 export type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
@@ -74,7 +84,14 @@ export type WaitingRow = {
   why?: string | null;
   /** When the owner's sign-off for this round was given, if it was: a merge held by another card says so. */
   signedOffAt?: string | null;
+  /** BOS-1517: the one status line (step, since, next, what is in the way). */
+  statusLine?: StatusLine;
+  /** BOS-1515: held by the merge train to land on main alone: who it clashed with (refs), the files, since when. */
+  heldAlone?: { clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean } | null;
 };
+
+/** BOS-1515: a ticket the merge train holds to land on main alone (merge-stall.ts mergeTrainStatus). */
+export type HeldAloneView = { ticketId: string; clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean };
 
 /** The card a waiting merge is held by, in the owner's words (BOS-1078). */
 export type HoldingCardView = {
@@ -142,6 +159,14 @@ export function failingStep(output: string | null | undefined): string | null {
 /** Where the merge is in the owner's words, from the running marker's phase. */
 export const PHASE_LABEL: Record<MergePhase, string> = {
   queued: "waiting for a check slot",
+  checking: "running the check",
+  merging: "merging",
+  waiting_to_retry: "trying again after the runner restarted",
+};
+
+/** BOS-1517: a running merge's step in the status line. Unlike PHASE_LABEL, "queued" here already holds a slot. */
+const PHASE_TEXT: Record<MergePhase, string> = {
+  queued: "about to start the check",
   checking: "running the check",
   merging: "merging",
   waiting_to_retry: "trying again after the runner restarted",
@@ -243,10 +268,18 @@ export function mergeQueueService(
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
     /** This company's running check jobs, oldest start first: what really holds a slot (server mode). */
-    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string }>>;
+    runningChecks?: (companyId: string) => Promise<Array<{ ticketId: string; kind: string; startedAt?: Date | null }>>;
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number; why: string | null }>>;
+    /** BOS-1486: whether this company's runner is connected right now (a waiting merge can't start without one). */
+    runnerConnected?: (companyId: string) => Promise<boolean>;
+    /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
+    runnerUpdateOn?: () => Promise<boolean>;
+    /** BOS-1486: whether the launcher is on, so the screen may point at Start runner in Settings. */
+    launcherOn?: () => boolean;
+    /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
+    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[]; /** BOS-1515: tickets held to land on main alone, with the clash (refs and files). */ heldAlone?: HeldAloneView[] }>;
     now?: () => Date;
   },
 ) {
@@ -377,46 +410,75 @@ export function mergeQueueService(
     });
   }
 
+  /**
+   * Running now: this process's merges (the same markers the ticket page shows), with their phase.
+   * In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
+   * after a restart is only queued until the check queue starts it. Slots are numbered by start order among
+   * the running checks, so each is unique and never past the limit.
+   */
+  async function liveMerges(companyId: string) {
+    let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const slotOf = new Map<string, number>();
+    const restarted = new Set<string>();
+    // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
+    // wait for a seat and earlier attempts.
+    const checkStart = new Map<string, Date>();
+    const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
+    if (deps.runningChecks && queueMode?.mode === "server") {
+      const held = await deps.runningChecks(companyId);
+      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
+      for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+      live = live.filter((l) => slotOf.has(l.ticketId));
+    }
+    return { live, slotOf, restarted, checkStart };
+  }
+
   return {
+    /**
+     * How many approved tickets wait in the merge line, not counting running merges: the same figure as `get(...).waitingCount`
+     * (the screen's rows are exactly these), without building the rest of the view. BOS-1489's start hold reads it.
+     */
+    async waitingCount(companyId: string): Promise<number> {
+      const { live } = await liveMerges(companyId);
+      const running = new Set(live.map((l) => l.ticketId));
+      const approved = await approvedOnly(await mergeQueueQueries.inReview(db, companyId));
+      return approved.filter((r) => !running.has(r.id)).length;
+    },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
       const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      // Running now: this process's merges (the same markers the ticket page shows), with their phase.
-      let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
       const limit = await deps.limit();
-      // In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
-      // after a restart is only queued until the check queue starts it. Slots are numbered by start order among
-      // the running checks, so each is unique and never past the limit.
-      const slotOf = new Map<string, number>();
-      const restarted = new Set<string>();
-      const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
-      if (deps.runningChecks && queueMode?.mode === "server") {
-        const held = await deps.runningChecks(companyId);
-        held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) slotOf.set(j.ticketId, i + 1); });
-        for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
-        live = live.filter((l) => slotOf.has(l.ticketId));
-      }
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
         ? new Map((await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, liveIds))).map((r) => [r.id, r]))
         : new Map<string, { id: string; title: string; number: number | null }>();
       const running: RunningNow[] = live.map((l, i) => {
         const row = liveTitles.get(l.ticketId);
-        const started = new Date(l.startedAt);
+        const started = checkStart.get(l.ticketId) ?? new Date(l.startedAt);
         const elapsed = t.getTime() - started.getTime();
+        const phase = l.phase ?? "checking";
+        const slot = slotOf.get(l.ticketId) ?? (i % Math.max(1, limit)) + 1;
+        const over = elapsed > RUNNING_LIMIT_MS;
         return {
+          statusLine: {
+            step: `slot ${slot}: ${PHASE_TEXT[phase]}`,
+            since: started.toISOString(),
+            next: phase === "merging" ? "It is done once the merge is in." : "It merges by itself if the check passes.",
+            blocker: over ? "The check has run for over an hour." : null,
+          },
           ticketId: l.ticketId,
           ref: ticketRef(prefix, row?.number),
           title: row?.title ?? "a ticket",
-          phase: l.phase ?? "checking",
+          phase,
           startedAt: started.toISOString(),
           startedBy: l.startedBy,
           minutes: mins(elapsed),
           what: "merge_check",
-          slot: slotOf.get(l.ticketId) ?? (i % Math.max(1, limit)) + 1,
-          overLimit: elapsed > RUNNING_LIMIT_MS,
+          slot,
+          overLimit: over,
         };
       });
 
@@ -431,9 +493,16 @@ export function mergeQueueService(
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
       // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
       const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
+      // BOS-1486: live state for the reason a merge waits. Absent deps (older callers, tests) mean "unknown", never a reason.
+      const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
+      const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
+      const detail = deps.queueDetail && queue?.mode === "server" ? await deps.queueDetail(companyId).catch(() => null) : null;
 
       const waiting: WaitingRow[] = [];
-      const heldIds = await heldTicketIds(db, ids);
+      // BOS-1517: the status line's own parts, set as each row's reason is worked out (a hold's label is its step).
+      const sinceOf = new Map<string, string>();
+      const blockerOf = new Map<string, string>();
+      const stepOf = new Map<string, string>();
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         const card = cards.get(r.id);
@@ -442,10 +511,13 @@ export function mergeQueueService(
         // How long it has waited, in milliseconds so the "over an hour" limit compares like with like
         // (the ticket shows whole minutes). The last activity is the best stamp we have for an approval.
         const waitedMs = t.getTime() - r.lastActivityAt.getTime();
+        sinceOf.set(r.id, r.lastActivityAt.toISOString());
         const overAnHour = waitedMs > WAITING_LIMIT_MS;
         const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: mins(waitedMs), risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
         // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
-        const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
+        // DR-061 Q2b: the one merge-hold answer (mergeHolds), the same one the merge paths refuse on.
+        const holds = await mergeHolds(db, r.id);
+        const hold = holds.some((h) => h.kind === "hold") ? await holdView(db, r.id, t) : null;
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
@@ -484,6 +556,11 @@ export function mergeQueueService(
           });
           continue;
         }
+        // A wait on another ticket (mergeWaits): the merge gate refuses it, so the screen must not say "next in line".
+        if (holds.some((h) => h.kind === "waits")) {
+          waiting.push({ ...base, state: "waiting_for_other_ticket", label: "waiting for another ticket to be merged and live", stuck: false, next: "It merges by itself once what it waits on is merged and live.", actor: "system", decisionId: null });
+          continue;
+        }
         if (r.pullRequestUrl && r.pullRequestNote) {
           waiting.push({ ...base, state: "waiting_host", label: `pull request waiting on the host: ${carriedNoteText(r.pullRequestNote).slice(0, 120)}`, stuck: overAnHour || failedCheck, next: "Boss Man checks the host again every couple of minutes.", actor: "system", decisionId: null });
           continue;
@@ -512,15 +589,67 @@ export function mergeQueueService(
           continue;
         }
         const why = restarted.has(r.id) ? "; the server restarted during this merge, so it is starting again" : "";
+        // BOS-1486: the reason is worked out from live state, in this order: no runner; an update holding the line;
+        // a red main; every slot busy (naming what is in each); otherwise next in line.
+        if (runnerUp === false) {
+          blockerOf.set(r.id, "No runner is connected.");
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting: no runner is connected${why}`, stuck: overAnHour, next: deps.launcherOn?.() ? "Start the runner in Settings → Server and runner → Runner. Boss Man checks it as soon as the runner connects." : "Start the runner container on your host; it connects by itself, and Boss Man checks this as soon as it does.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (runnerUpdateOn) {
+          blockerOf.set(r.id, "A runner update is holding new checks.");
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the runner update${why}`, stuck: false, next: "New checks start once the runner update is done (runs in progress finish first, then each runner is swapped).", actor: "system", decisionId: null });
+          continue;
+        }
         if (held) {
+          blockerOf.set(r.id, "A server update is holding new checks.");
           waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the server update${why}`, stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
           continue;
         }
-        if (queue?.mode === "server" && queue.waiting > 0) {
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+        // BOS-1517: a merge waiting for a seat in the merge train has no check to wait for yet: its check starts once it is
+        // seated. Saying "waiting for a check slot (21 ahead)" here counted the whole queue and named the wrong thing.
+        const alone = detail?.heldAlone?.find((h) => h.ticketId === r.id);
+        if (alone) {
+          // BOS-1515: held to land on main alone. Say who it clashed with and in which files, and what happens next.
+          const clash = clashWords(alone.clashWith, alone.files);
+          blockerOf.set(r.id, "The tickets ahead in the merge train haven't landed yet.");
+          waiting.push({
+            ...base,
+            state: "waiting_for_seat",
+            label: `waiting to land on main alone: it clashed with ${clash}${why}`,
+            stuck: overAnHour,
+            next: alone.holdsLine
+              ? "It goes next, once the tickets ahead have landed; others wait behind it until then. It is sent back at once if the clash reaches main."
+              : "It goes once the tickets ahead have landed. It is sent back at once if the clash reaches main.",
+            actor: "system",
+            decisionId: null,
+            heldAlone: { clashWith: alone.clashWith, files: alone.files, since: alone.since, holdsLine: alone.holdsLine },
+          });
           continue;
         }
-        waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+        if (detail?.seatWait?.includes(r.id)) {
+          blockerOf.set(r.id, "Every merge-train seat is taken.");
+          waiting.push({ ...base, state: "waiting_for_seat", label: `waiting for a train seat${why}`, stuck: overAnHour, next: "It takes a seat as soon as one frees; its check then starts by itself.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (detail?.mainRed) {
+          blockerOf.set(r.id, "Main is failing its check.");
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting: main is failing its check${why}`, stuck: false, next: detail.fixRef ? `New checks wait until the fix (${detail.fixRef}) merges.` : "New checks wait until main is fixed.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (detail && detail.busy.length >= detail.slots) {
+          const names = detail.busy.map((b, i) => `slot ${i + 1}: ${b.ref ?? b.title} (${b.kind})`).join("; ");
+          blockerOf.set(r.id, `Every slot is busy: ${names}.`);
+          stepOf.set(r.id, `waiting for a check slot (${queue?.waiting ?? 0} ahead)${why}`);
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue?.waiting ?? 0} ahead). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (!detail) {
+          // Legacy check-queue mode, or the detail lookup failed: slot use is not known, so don't claim a slot is free.
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+          continue;
+        }
+        waiting.push({ ...base, state: "waiting_for_check_capacity", label: `next in line for a check${why}`, stuck: overAnHour, next: "A slot is free; Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
       // BOS-1384: the order the check queue will serve them in (a fix for main, a move to front, urgent, then oldest), with why.
       const places = deps.places ? await deps.places(companyId).catch(() => null) : null;
@@ -533,8 +662,11 @@ export function mergeQueueService(
           if (w.state === "waiting_for_check_capacity") {
             const ahead = Math.max(0, p.place - 1);
             w.label = w.label.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`);
+            const s = stepOf.get(w.ticketId);
+            if (s) stepOf.set(w.ticketId, s.replace(/\(\d+ ahead\)/, ahead === 0 ? "(next up)" : `(${ahead} ahead)`));
           }
         }
+        w.statusLine = { step: stepOf.get(w.ticketId) ?? w.label, since: sinceOf.get(w.ticketId) ?? t.toISOString(), next: w.next ?? "", blocker: blockerOf.get(w.ticketId) ?? null };
       }
       waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
@@ -548,6 +680,11 @@ export function mergeQueueService(
         waitingCount: waiting.length,
         stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
       };
+    },
+    /** BOS-1517: a ticket's status line for its page: from the same live view as the queue, or null when it isn't in the merge pipeline. */
+    async statusLineFor(companyId: string, ticketId: string): Promise<StatusLine | null> {
+      const v = await (this as { get(c: string): Promise<MergeQueueView> }).get(companyId);
+      return v.running.find((r) => r.ticketId === ticketId)?.statusLine ?? v.waiting.find((w) => w.ticketId === ticketId)?.statusLine ?? null;
     },
   };
 }

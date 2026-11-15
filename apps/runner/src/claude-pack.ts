@@ -3,7 +3,7 @@
 // content-addressed folder on a named volume, by a one-shot installer container. This module is
 // the one copy of the rules both the runner and the installer follow. Pure and injectable, so a
 // test drives every path (a missing pack, a tampered lock, a failed canary) without a real npm.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -104,6 +104,9 @@ export function discardDir(dir: string) {
 /** How old a folder without a READY marker must be before the installer removes it (a crashed install). */
 export const STALE_PACK_MS = 60 * 60_000;
 
+/** An installer builds in `<hash>.tmp-<pid>-<random>` and renames it to `<hash>` once READY is written. */
+const TMP_SUFFIX = ".tmp-";
+
 /**
  * Cleans up half-made pack folders beside a fresh install (a crash or an older installer left them), so the
  * volume doesn't grow without bound. Only folders whose names are a pack hash, that are NOT the folder just
@@ -124,7 +127,7 @@ export function cleanStalePacks(root: string, keepDir: string, opts: { now?: num
     return removed;
   }
   for (const name of names) {
-    if (!/^[0-9a-f]{24}$/.test(name)) continue;
+    if (!new RegExp(`^[0-9a-f]{24}(${TMP_SUFFIX.replace(".", "\\.")}.+)?$`).test(name)) continue;
     const old = path.join(root, name);
     if (path.resolve(old) === path.resolve(keepDir)) continue;
     try {
@@ -194,21 +197,39 @@ export async function installPack(opts: {
     return { installed: false, dir, version };
   }
   mkdirSync(root, { recursive: true });
-  // A previous try that died mid-install leaves a folder without READY: start it clean.
-  discardDir(dir);
-  mkdirSync(dir, { recursive: true });
+  // Build in a private folder beside the final one and rename it into place only when READY is written
+  // (BOS-1282). Two installers for the same hash (two runners, a launcher retry) each work in their own
+  // folder, so neither can wipe the other's half-done npm ci. The final folder never exists without READY.
+  const work = `${dir}${TMP_SUFFIX}${process.pid}-${randomBytes(4).toString("hex")}`;
+  mkdirSync(work, { recursive: true });
   try {
-    log(`installing the Claude pack ${hash} into ${dir}`);
-    steps.copySource(dir);
-    await steps.npmCi(dir);
-    const got = parseClaudeVersion(await steps.claudeVersion(dir));
+    log(`installing the Claude pack ${hash} into ${work}`);
+    steps.copySource(work);
+    await steps.npmCi(work);
+    const got = parseClaudeVersion(await steps.claudeVersion(work));
     if (got !== version) throw new Error(`the pack installed Claude Code ${got ?? "an unknown version"}, but ${version} is pinned`);
-    if (!(await steps.canary(dir))) throw new Error("the Claude pack's canary failed");
-    markReady(dir, { version, hash, ...(opts.now ? { at: opts.now() } : {}) });
+    if (!(await steps.canary(work))) throw new Error("the Claude pack's canary failed");
+    markReady(work, { version, hash, ...(opts.now ? { at: opts.now() } : {}) });
+    if (readPack(root, hash).ready) {
+      // Another installer finished first: keep its folder, drop ours.
+      discardDir(work);
+      log(`the Claude pack ${hash} was installed by someone else meanwhile`);
+      return { installed: false, dir, version };
+    }
+    // A folder without READY here is a leftover of an older installer or a crash: clear it for the rename.
+    discardDir(dir);
+    try {
+      renameSync(work, dir);
+    } catch (err) {
+      // Lost a rename race against another installer; fine if theirs is ready.
+      if (!readPack(root, hash).ready) throw err;
+      discardDir(work);
+      return { installed: false, dir, version };
+    }
     log(`the Claude pack ${hash} is ready (Claude Code ${version})`);
     return { installed: true, dir, version };
   } catch (err) {
-    discardDir(dir);
+    discardDir(work);
     throw err;
   }
 }
