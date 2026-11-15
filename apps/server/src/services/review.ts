@@ -1877,20 +1877,23 @@ export function reviewService(
       const reviewedHead = changed?.head ? await this.passedHead(t, await latestRows(db, ticketId)).catch(() => null) : null;
       const pinHead = reviewedHead ?? changed?.head;
       let pin: string | null = pinHead && /^[0-9a-f]{7,64}$/.test(pinHead) && deps.runners.can(runner.id, "merge-pin") ? pinHead : null;
-      const askMerge = async (build: (requestId: string) => Record<string, unknown>, timeoutMs: number): Promise<MergeResult> => {
+      // Also used for the pull-request push (workspace.push), whose answer carries the same branch_moved status.
+      const askMerge = async <R extends MergeResult | PushResult = MergeResult>(build: (requestId: string) => Record<string, unknown>, timeoutMs: number): Promise<R> => {
         for (let again = 0; ; again++) {
           const pinned = pin;
-          const r = await ask<MergeResult>((requestId) => ({ ...build(requestId), ...(pinned ? { pin: pinned } : {}) }) as never, timeoutMs);
-          if (!pinned) return r;
+          const r = await ask<MergeResult | PushResult>((requestId) => ({ ...build(requestId), ...(pinned ? { pin: pinned } : {}) }) as never, timeoutMs);
+          if (!pinned) return r as R;
           // A runner older than this change ignores the pin and doesn't name the branch commit: it can't be trusted to keep it.
-          const head = r.status === "branch_moved" ? r.head : r.status === "prepared" && r.branchSha !== pinned ? (r.branchSha ?? "") : null;
-          if (head === null) return r;
+          // A push answer naming another commit comes from a runner that announces merge-pin but drops the push pin: the branch
+          // ref is out there, but no pull request may be opened or merged on it unless signoffCovers says it only added main.
+          const head = r.status === "branch_moved" ? r.head : r.status === "prepared" && r.branchSha !== pinned ? (r.branchSha ?? "") : r.status === "pushed" && !(r.commit.startsWith(pinned) || pinned.startsWith(r.commit)) ? r.commit : null;
+          if (head === null) return r as R;
           if (head && again < 3 && (await this.signoffCovers(ticketId, pinned, head))?.covers) {
             await record(db, { companyId: t.companyId, ticketId, kind: "signoff_carried", summary: `The approval of ${pinned.slice(0, 8)} still covers ${head.slice(0, 8)}: while the merge waited, main was only merged in automatically, with no clashes and no new code from the ticket.` });
             pin = head;
             continue;
           }
-          return { status: "branch_moved", head, pinned };
+          return { status: "branch_moved", head, pinned } as R;
         }
       };
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
@@ -2406,7 +2409,7 @@ export function reviewService(
       const m1: MergeResult | PushResult | ServerMergeEnd = serverChecks
         ? await whileActive(trainMode ? trainMerge : serverMerge)
         : pr
-        ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
+        ? await whileActive(() => askMerge<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
         : await whileActive(() =>
             (checkMerged
               ? (w: () => Promise<MergeResult>) =>

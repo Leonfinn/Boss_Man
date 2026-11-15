@@ -907,6 +907,14 @@ export class Workspaces {
           }),
         );
       }
+      // BOS-1476: a review copy made as a worktree (an older runner, or BOSSMAN_TICKET_COPIES=worktree once) keeps its git admin
+      // folder inside the read-only shared repo, so the fenced checkout can't create index.lock there ("Permission denied", exit
+      // 128). A review copy is disposable: replace it with a clone, which the fence can write. Installed packages are reinstalled.
+      if (this.fenceCloneGit && this.newCopiesAreClones() && lstatSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isFile()) {
+        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+        rmSync(dir, { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo });
+      }
       if (existsSync(path.join(dir, ".git"))) {
         await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
         await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);
@@ -2306,7 +2314,7 @@ export class Workspaces {
    * Pushes the ticket's branch to origin for a pull request into target (R59), after the same
    * checks as a merge: nothing uncommitted, no conflicts with target. The host merges it.
    */
-  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<PushResult> {
+  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}, pin?: string): Promise<PushResult> {
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -2320,6 +2328,9 @@ export class Workspaces {
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
       if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
+      // BOS-1413: a branch that isn't at the head the reviews covered is not pushed to the pull request.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };

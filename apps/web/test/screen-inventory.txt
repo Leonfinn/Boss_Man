@@ -37,6 +37,7 @@ sections:
   - Your review
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/objectives
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
