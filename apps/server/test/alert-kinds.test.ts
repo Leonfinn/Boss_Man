@@ -43,6 +43,7 @@ const RAISE_SITES: Array<{ file: string; kind: string; why: string }> = [
   { file: "services/merge-failures.ts", kind: "merge_failures", why: "the same merge failure, repeatedly (BOS-1461)" },
   { file: "services/server-health.ts", kind: "server_memory", why: "the server's memory running high or climbing" },
   { file: "services/server-health.ts", kind: "server_freezes", why: "the server freezing again and again" },
+  { file: "services/github-watch.ts", kind: "github_watch", why: "the GitHub watcher unable to read the repo (BOS-1393)" },
 ];
 
 /**

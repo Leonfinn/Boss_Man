@@ -82,7 +82,7 @@ export const OWNER_CONTROLS = {
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
-  Projects: ["Open …", "Unarchive", "Re-detect"],
+  Projects: ["Open …", "Unarchive", "Re-detect", "Check now"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
@@ -227,6 +227,9 @@ export const OWNER_FIELDS = {
   Projects: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
+    // The GitHub feedback watcher panel (BOS-1393).
+    "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
+    "Skip posts by these GitHub logins (yours, Boss Man's account)",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
   Wiki: [

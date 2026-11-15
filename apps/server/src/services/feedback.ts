@@ -230,7 +230,22 @@ export function feedbackService(
     return { token, pending: { tokenHash: sha256(token), expiresAt: new Date(now().getTime() + c.hours * 3_600_000), email: c.email.trim(), name: name?.trim() || null } };
   }
 
+  /**
+   * A note from outside that must be filed once, whatever retries or overlapping passes there are (BOS-1393):
+   * the unique (company, externalId) index decides, so a repeat is a no-op and returns null. It never fires
+   * onNote: the caller (the GitHub watcher) wakes whoever triages, once per pass, not once per note.
+   */
+  async function createExternalNote(companyId: string, input: Pick<NoteInput, "title" | "text" | "source"> & { externalId: string }) {
+    const [n] = await db
+      .insert(feedbackNotes)
+      .values({ companyId, title: input.title ?? null, text: input.text, source: input.source ?? "import", untrusted: true, externalId: input.externalId })
+      .onConflictDoNothing()
+      .returning();
+    return n ?? null;
+  }
+
   return {
+    createExternalNote,
     settings,
     async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro" | "portalBackUrl" | "portalBackText">>) {
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...patch }).onConflictDoUpdate({ target: feedbackSettings.companyId, set: patch });
