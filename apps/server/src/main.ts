@@ -29,7 +29,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mailer, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -108,6 +108,8 @@ const bg = createBackground(
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
     { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
+    // The GitHub watcher (BOS-1393): files new issues, discussions and comments into the feedback inbox. Each watch has its own interval (default 60 min, minimum 15); this tick only runs the ones that are due. Calls api.github.com. // leader-only
+    { name: "github watch", everyMs: Number(env.BOSSMAN_GITHUB_WATCH_MS ?? 60_000), run: () => githubWatch.runDue() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
     { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },

@@ -182,6 +182,104 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
   );
 }
 
+type GithubWatchView = {
+  enabled: boolean;
+  repo: string;
+  intervalMinutes: number;
+  watchIssues: boolean;
+  watchDiscussions: boolean;
+  skipLogins: string[];
+  status: string;
+  lastError: string | null;
+  lastRunAt: string | null;
+  lastNewNotes: number;
+  backoffUntil: string | null;
+  hasToken: boolean;
+  tokenName: string;
+};
+
+/**
+ * The GitHub feedback watcher (BOS-1393): off by default. New issues, discussions and comments on a GitHub repo land in
+ * the feedback inbox for Support to triage. Read-only: the token only reads. The token itself lives in Secrets.
+ */
+export function GithubWatch({ projectId }: { projectId: string }) {
+  const url = `/api/projects/${projectId}/github-watch`;
+  const [w, setW] = useState<GithubWatchView | null>(null);
+  const [form, setForm] = useState<{ enabled: boolean; repo: string; intervalMinutes: string; watchIssues: boolean; watchDiscussions: boolean; skip: string } | null>(null);
+  const act = useAction();
+  const sv = useSaveState(form);
+  const load = (v: GithubWatchView) => {
+    setW(v);
+    const f = { enabled: v.enabled, repo: v.repo, intervalMinutes: String(v.intervalMinutes), watchIssues: v.watchIssues, watchDiscussions: v.watchDiscussions, skip: v.skipLogins.join(", ") };
+    setForm(f);
+    sv.reset(f);
+  };
+  useEffect(() => void api<GithubWatchView>(url).then(load).catch(() => {}), [projectId]);
+  if (!w || !form) return null;
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const v = await api<GithubWatchView>(url, {
+        method: "PUT",
+        body: { enabled: form.enabled, repo: form.repo.trim(), intervalMinutes: Number(form.intervalMinutes), watchIssues: form.watchIssues, watchDiscussions: form.watchDiscussions, skipLogins: form.skip.split(/[,\s]+/).filter(Boolean) },
+      });
+      setW(v);
+      sv.markSaved();
+      return "Saved.";
+    });
+  };
+  const checkNow = () =>
+    void act.run(async () => {
+      const v = await api<GithubWatchView>(`${url}/check-now`, { method: "POST" });
+      setW(v);
+      return v.status === "ok" ? `Checked. ${v.lastNewNotes} new note${v.lastNewNotes === 1 ? "" : "s"} in the feedback inbox.` : undefined;
+    });
+  return (
+    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+      <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>GitHub feedback watcher</p>
+      <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
+        Files new issues, discussions and comments from a GitHub repo into the feedback inbox for Support to triage. Off until you switch it on. It only reads: it never replies, labels or closes anything on GitHub. The token is a read-only fine-grained token (Issues, Discussions and Metadata: read), saved in Secrets and granted to the company as <span className="mono">{w.tokenName}</span>. {w.hasToken ? "A token is granted." : "No token is granted yet."}
+      </p>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label>
+          <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} /> Watch this repo
+        </label>
+      </div>
+      <div className="field">
+        <label htmlFor={`gw-repo-${projectId}`}>GitHub repo (owner/name)</label>
+        <input id={`gw-repo-${projectId}`} className="mono" placeholder="your-name/your-repo" value={form.repo} onChange={(e) => setForm({ ...form, repo: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`gw-int-${projectId}`}>Check every (minutes, at least 15)</label>
+        <input id={`gw-int-${projectId}`} type="number" min={15} max={1440} value={form.intervalMinutes} onChange={(e) => setForm({ ...form, intervalMinutes: e.target.value })} />
+      </div>
+      <div className="field">
+        <label>
+          <input type="checkbox" checked={form.watchIssues} onChange={(e) => setForm({ ...form, watchIssues: e.target.checked })} /> Issues
+        </label>
+        <label>
+          <input type="checkbox" checked={form.watchDiscussions} onChange={(e) => setForm({ ...form, watchDiscussions: e.target.checked })} /> Discussions
+        </label>
+      </div>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label htmlFor={`gw-skip-${projectId}`}>Skip posts by these GitHub logins (yours, Boss Man's account)</label>
+        <input id={`gw-skip-${projectId}`} className="mono" placeholder="login-one, login-two" value={form.skip} onChange={(e) => setForm({ ...form, skip: e.target.value })} />
+      </div>
+      <p style={{ gridColumn: "1 / -1", fontSize: 14, margin: 0 }} className={w.status === "error" ? "error" : "muted"}>
+        {w.status === "idle" ? "Not run yet." : w.status === "ok" ? `Working. Last check ${w.lastRunAt ? new Date(w.lastRunAt).toLocaleString() : ""}: ${w.lastNewNotes} new.` : w.lastError}
+        {w.status !== "ok" && w.backoffUntil ? ` Next try after ${new Date(w.backoffUntil).toLocaleString()}.` : ""}
+      </p>
+      <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+        <SaveButton {...sv} busy={act.busy} />
+        <button type="button" className="btn" disabled={act.busy || !w.enabled || sv.dirty} onClick={checkNow}>
+          Check now
+        </button>
+      </div>
+      <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
+    </form>
+  );
+}
+
 /** The project's brief page (a map of the code the CEO writes for other agents), and the button that asks for it. */
 export function ProjectBrief({ p }: { p: Project }) {
   const brief = usePoll((signal) => api<{ slug: string; exists: boolean; commit: string | null; branch: string | null; updatedAt: string | null; ticketId: string | null }>(`/api/projects/${p.id}/brief`, { signal }), 30_000, `brief-${p.id}`);
@@ -262,6 +360,7 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
                       Open {p.name}'s Kanban
                     </button>
                     <ProjectRow p={p} agents={company.agents} />
+                    <GithubWatch projectId={p.id} />
                   </div>
                 ))
               : projects.data && <p>No projects yet.</p>}

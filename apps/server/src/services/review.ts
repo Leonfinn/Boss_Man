@@ -982,7 +982,10 @@ export function reviewService(
       const row = ready[0]!;
       const who = row.kind === "code" ? input.reviewer : `${input.reviewer}, ${row.kind} review`;
       if (input.verdict === "approved") {
-        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null });
+        // BOS-1528: stamp the head this reviewer approved on their own row, now, not whatever the branch is at when the last
+        // review of the round comes in. A runner that can't say leaves the row unstamped (it never blocks a review).
+        const readHead = await this.diff(ticketId).then((x) => x.head || null, () => null);
+        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null, head: readHead });
         // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
         if (input.hold) await startHold(t, row, input.hold, who);
       } else {
@@ -1001,6 +1004,27 @@ export function reviewService(
         return { verdict: o.verdict, outcome: "waiting" as const, delivered: `recorded; waiting for the other reviews (${activeRows(rows).map((r) => r.kind).join(", ")})` };
       }
       if (state === "passed") {
+        // BOS-1528: every approval must be on the same code. An earlier reviewer whose head differs from the newest approval's
+        // reads again, unless only clean merges of main came in since (signoffCovers). Unstamped rows can't be compared.
+        const stamped = rows.filter((r) => r.status === "approved" && r.head).sort((a, b) => (a.decidedAt?.getTime() ?? 0) - (b.decidedAt?.getTime() ?? 0));
+        const newest = stamped.at(-1)?.head;
+        if (newest) {
+          const stale: ReviewRow[] = [];
+          for (const r of stamped) {
+            if (r.head === newest) continue;
+            if (!(await this.signoffCovers(t.id, r.head!, newest).catch(() => null))?.covers) stale.push(r);
+          }
+          // Covered rows only saw clean merges of main since: restamp them to the newest head, so the round has one passed
+          // head (passedHead and the merge pin would otherwise see mixed heads and send the ticket back at merge).
+          if (!stale.length) for (const r of stamped) if (r.head !== newest) await db.update(reviewRequests).set({ head: newest }).where(eq(reviewRequests.id, r.id));
+          if (stale.length) {
+            for (const r of stale) await db.update(reviewRequests).set({ status: "pending", head: null, decidedAt: null, notes: null }).where(eq(reviewRequests.id, r.id));
+            await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_reopened", summary: `The branch moved from ${stale.map((r) => r.head!.slice(0, 8)).join(", ")} to ${newest.slice(0, 8)} while the round was open, so ${stale.map((r) => (r.kind === "code" ? "the code" : `the ${r.kind}`)).join(" and ")} review${stale.length > 1 ? "s were" : " was"} reopened to read the newer code.` });
+            const reopened = await latestRows(db, t.id);
+            if (wake) await wakeReviewers(db, t, activeRows(reopened).filter((r) => stale.some((s) => s.id === r.id)), (id, i) => wake!(id, i), [], o.causedByRunId);
+            return { verdict: o.verdict, outcome: "waiting" as const, delivered: `recorded; the branch moved since an earlier approval, so ${stale.length} review${stale.length > 1 ? "s were" : " was"} reopened` };
+          }
+        }
         const names = [...new Set(rows.filter((r) => r.status === "approved").map((r) => r.reviewerAgentId))];
         const label = names.length > 1 ? (await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, names.filter((n): n is string => !!n)))).map((a) => a.name).join(" and ") : o.reviewer;
         return await this.approve(t, { reviewer: label, reviewerAgentId: o.reviewerAgentId, background: o.background, causedByRunId: o.causedByRunId });
@@ -1028,10 +1052,7 @@ export function reviewService(
         if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
         return x.head || null;
       }, () => null);
-      if (head) {
-        const [latest] = await latestRows(db, ticketId);
-        if (latest) await db.update(reviewRequests).set({ head }).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, latest.round), eq(reviewRequests.status, "approved"), sql`${reviewRequests.head} is null`));
-      }
+      // BOS-1528: approvals are stamped by submit() with the head each reviewer approved; this read is for the sign-off card only.
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
@@ -1936,6 +1957,15 @@ export function reviewService(
       // says main was merged in cleanly (askMerge); otherwise it goes back for review. No stamped head (older rounds): the
       // head read now. A runner without "merge-pin" ignores the pin, so none is sent: it merges as before.
       const reviewedHead = changed?.head ? await this.passedHead(t, await latestRows(db, ticketId)).catch(() => null) : null;
+      // BOS-1528: a round that has stamped approvals but no single passed head (mixed, or some unstamped) pins nothing reviewed:
+      // fail closed instead of pinning the head read now. Rounds with no stamps at all (from before heads were kept) go on as before.
+      if (changed?.head && !reviewedHead) {
+        const approvedNow = (await latestRows(db, ticketId)).filter((r) => r.status === "approved");
+        if (approvedNow.some((r) => r.head)) {
+          const delivered = await sendBack(`The reviews were approved, but on different commits (or one has no commit recorded), so nothing was merged: the branch is at ${changed.head.slice(0, 8)}. Check the work, then move the ticket back to review for a fresh round.`, "approved heads differ");
+          return { outcome: "branch_changed", delivered, detail: { status: "branch_moved", head: changed.head, pinned: "" } };
+        }
+      }
       const pinHead = reviewedHead ?? changed?.head;
       let pin: string | null = pinHead && /^[0-9a-f]{7,64}$/.test(pinHead) && deps.runners.can(runner.id, "merge-pin") ? pinHead : null;
       // Also used for the pull-request push (workspace.push), whose answer carries the same branch_moved status.

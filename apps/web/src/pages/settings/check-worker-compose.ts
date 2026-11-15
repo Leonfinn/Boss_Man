@@ -3,7 +3,6 @@
 // deploy/check-worker/compose.yaml (the web build has no deploy/ folder); test/check-worker-compose.test.ts keeps them equal.
 import template from "./check-worker-compose.yaml?raw";
 
-const ZEROS = "0".repeat(40);
 const SERVER_PLACEHOLDER = "wss://boss.example.com/api/check-worker/connect";
 const TOKEN_PLACEHOLDER = "PASTE-THE-WORKER-TOKEN-HERE";
 
@@ -11,12 +10,11 @@ const TOKEN_PLACEHOLDER = "PASTE-THE-WORKER-TOKEN-HERE";
 export const workerSocketUrl = (origin: string) => `${origin.replace(/^http/, "ws").replace(/\/+$/, "")}/api/check-worker/connect`;
 
 /**
- * The template with each CHANGE THIS value replaced. `commit` is null when no runner has reported one yet: the
- * placeholder then stays, and the owner is told to fill it in. JSON.stringify quotes the strings the way YAML wants.
+ * The template with each CHANGE THIS value replaced (address, slots, token). There is no commit to fill in any more
+ * (BOS-1570): a worker matches the runner on its tools. JSON.stringify quotes the strings the way YAML wants.
  */
-export function workerComposeFile(v: { url: string; commit: string | null; slots: number; token: string }): string {
+export function workerComposeFile(v: { url: string; slots: number; token: string }): string {
   let out = template.split(SERVER_PLACEHOLDER).join(v.url);
-  if (v.commit && /^[0-9a-f]{40}$/i.test(v.commit)) out = out.split(ZEROS).join(v.commit.toLowerCase());
   out = out.replace(/BOSSMAN_CHECK_SLOTS: "\d+"/, `BOSSMAN_CHECK_SLOTS: "${Math.max(1, Math.floor(v.slots))}"`);
   return out.split(`content: "${TOKEN_PLACEHOLDER}"`).join(`content: ${JSON.stringify(v.token)}`);
 }

@@ -36,6 +36,7 @@ sections:
   - Filter tasks
   - Passed, held
   - Project brief
+  - Spending limit
   - Tokens
   - Your review
 reads: 
@@ -200,6 +201,7 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - Spending limit
   - Spending limits
   - Tokens
 reads: 

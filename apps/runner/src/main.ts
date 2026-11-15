@@ -8,6 +8,7 @@ import { probeGuardWhenReady } from "./guard-probe.js";
 import { platformReport } from "./platform.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
+import { readToolchain } from "./toolchain.js";
 import { CheckJobs } from "./check-jobs.js";
 import { Journal } from "./journal.js";
 import { DEFAULT_VACUUM_TIMEOUT_MS, keepDaysFrom, opencodeDataHomes, pruneOpencodeSessions } from "./opencode-prune.js";
@@ -157,6 +158,7 @@ connection = new RunnerConnection({
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
   imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
+  toolchain: await readToolchain(),
   harnessVersions: await harnessVersions({ claudeAdapterVersion: claudePackAdapterVersion() }),
   log,
   onCommand: (command) => sessions.handle(command),

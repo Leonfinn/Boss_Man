@@ -328,6 +328,30 @@ export type RunnerCommand = z.infer<typeof RunnerCommand>;
 export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
 export type HarnessVersions = z.infer<typeof HarnessVersions>;
 
+/**
+ * The tools a check runs with (BOS-1570): `tools` maps a tool name to its version, `fingerprint` is the sha256 of the
+ * compared ones. A check worker takes a company's checks when its fingerprint equals the runner's, so a runner update
+ * that leaves the tools alone leaves every worker working. Sent in hello; absent from an image built before this.
+ */
+export const Toolchain = z.object({
+  fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  tools: z.record(z.string().max(40), z.string().max(80)).refine((t) => Object.keys(t).length <= 40),
+});
+export type Toolchain = z.infer<typeof Toolchain>;
+
+/** Tools left out of the fingerprint: shown to the owner, never compared (a runner may lack the browser add-on a worker has). */
+export const TOOLCHAIN_NOT_COMPARED = ["chromium"] as const;
+
+/** In the owner's words, which compared tools differ between a worker and the runner ("Node 22.11 here, 22.12 on your runner"). Empty when none. */
+export function toolchainDifferences(worker: Record<string, string>, runner: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const name of [...new Set([...Object.keys(worker), ...Object.keys(runner)])].sort()) {
+    if ((TOOLCHAIN_NOT_COMPARED as readonly string[]).includes(name)) continue;
+    if (worker[name] !== runner[name]) out.push(`${name} ${worker[name] ?? "missing"} here, ${runner[name] ?? "missing"} on your runner`);
+  }
+  return out;
+}
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -343,6 +367,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
     harnessVersions: HarnessVersions.optional(),
+    /** The tools checks run with (BOS-1570); absent from an older image. */
+    toolchain: Toolchain.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
@@ -401,6 +427,8 @@ export const WorkerMessage = z.discriminatedUnion("type", [
     runnerVersion: z.string().max(100),
     imageVersion: z.string().max(200).nullable(),
     imageCommit: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+    /** BOS-1570: the tools it checks with; the match against the runner is on this, not on the commit. */
+    toolchain: Toolchain.optional(),
     features: z.array(z.string().max(40)).max(50).optional(),
     bootId: z.string().max(100).optional(),
     checkJobs: z.array(Uuid).max(100).optional(),
