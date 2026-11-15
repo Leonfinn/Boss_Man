@@ -2314,7 +2314,7 @@ export class Workspaces {
    * Pushes the ticket's branch to origin for a pull request into target (R59), after the same
    * checks as a merge: nothing uncommitted, no conflicts with target. The host merges it.
    */
-  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<PushResult> {
+  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}, pin?: string): Promise<PushResult> {
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -2328,6 +2328,9 @@ export class Workspaces {
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
       if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
+      // BOS-1413: a branch that isn't at the head the reviews covered is not pushed to the pull request.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };
