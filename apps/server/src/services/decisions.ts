@@ -27,6 +27,7 @@ import {
   commandOf,
   type JudgeReading,
   type PermissionJudgeMode,
+  TEMP_CLEANUP_AUTO_RULE,
   TEMP_CLEANUP_RULE,
   UNKNOWN_TOOL_RULE,
   UNMATCHED_RULE,
@@ -54,7 +55,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
-import { record } from "./activity.js";
+import { record, record as recordActivity } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
@@ -1497,6 +1498,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
   }
 
+  /** The company's switch for allowing plain /tmp cleanups with no card (BOS-1453). Only an explicit off turns it off, so a missing row never widens or narrows anything by accident. */
+  async function autoCleanupOn(companyId: string): Promise<boolean> {
+    const [c] = await db.select({ on: companies.autoTempCleanup }).from(companies).where(eq(companies.id, companyId));
+    return c?.on !== false;
+  }
+
   async function rulesFor(companyId: string): Promise<PolicyRuleSpec[]> {
     // Company rules before global ones, each in the owner's order (R19).
     const rows = await db
@@ -1849,7 +1856,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
-          : evaluatePermission(info, await rulesFor(runner.companyId));
+          : evaluatePermission(info, await rulesFor(runner.companyId), { autoTempCleanup: await autoCleanupOn(runner.companyId) });
       // tier is where a card ended up (the CEO's own requests, or a paused CEO, go to the owner); outcome is what the rule said.
       const record = (decisionId: string | null, tier: string = outcome, ruleName: string = rule) =>
         permLog.decision({ companyId: runner.companyId, runId: event.runId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, title: event.title, kind: event.kind, rule: ruleName, position, outcome, tier, decisionId });
@@ -1891,6 +1898,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       if (outcome === "allow" || outcome === "deny") {
         record(null);
+        // BOS-1453: a plain /tmp cleanup is allowed with no card, so the owner's activity feed is where it shows: the agent and the command.
+        if (rule === TEMP_CLEANUP_AUTO_RULE) {
+          const [who] = asking?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, asking.agentId)) : [];
+          const command = commandOf(info.rawInput) ?? "";
+          await recordActivity(db, { companyId: runner.companyId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, kind: "temp_cleanup_allowed", summary: `Allowed a temp-file cleanup by ${who?.name ?? "an agent"} without asking (only entries directly in /tmp): ${command.slice(0, 300)}`, detail: { command: command.slice(0, 2000), rule }, at: now() });
+        }
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
         // won't be applied again when it's resent, so keep the verdict as an answered row that
@@ -2193,7 +2206,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // The asking agent counts too: a rule limited to one agent must apply here as it did at the first ask (BOS-598).
         const [asker] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, p.runId));
         const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput, agentId: asker?.agentId ?? null };
-        const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId));
+        const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId), { autoTempCleanup: await autoCleanupOn(runner.companyId) });
         const mayRepeat = outcome !== "allow" && outcome !== "deny";
         const allowed = mayRepeat ? await allowedCommandOnRun(p.runId, payload, fingerprint) : null;
         if (allowed && send(runner.id, { type: "permission.decide", runId: p.runId, requestId: p.requestId, verdict: "allow" })) {

@@ -73,6 +73,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** A cleanup that only deletes plain entries directly in /tmp is allowed by the rules with no card (BOS-1453). On by default; off sends it to the CEO first as before. */
+  autoTempCleanup: boolean("auto_temp_cleanup").notNull().default(true),
   /**
    * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
    * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
