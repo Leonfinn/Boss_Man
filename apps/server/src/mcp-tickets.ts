@@ -640,7 +640,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
 async function migrationWarning(review: Services["review"], ticketId: string, companyId: string): Promise<string> {
   const m = await review.migrations(ticketId, companyId).catch(() => null);
   if (!m?.needed) return "";
-  return `\n\nHeads up (BOS-219): a migration number is already taken on the default branch: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
+  return `\n\nHeads up (BOS-219): a migration number is already taken on the default branch: ${m.why.join("; ")}. The merge gate renumbers it (to ${String(m.next).padStart(4, "0")} or later) and keeps the SQL unchanged; don't rename it by hand. The merge will send it back only if the gate refuses.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
 }
 
 /** The merge-line conflict warning for a mark-urgent (BOS-1411, warning 2): the same line the sign-off card gets. Empty when there is none. */

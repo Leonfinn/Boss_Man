@@ -442,7 +442,8 @@ export type MergeResult =
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
-  | { status: "conflicts"; files: string[] }
+  /** `why`: the migration renumber (BOS-690) looked at the clash and refused; its reason, for the send-back text (BOS-1540). */
+  | { status: "conflicts"; files: string[]; why?: string }
   | Uncommitted
   /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
   | { status: "migration_journal"; problems: string[] }

@@ -19,7 +19,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
-import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -283,7 +283,7 @@ export function schedulerService(
   async function wipHeldRefusal(ticketId: string): Promise<string | null> {
     const [t] = await db.select({ state: tickets.systemState, heldAt: tickets.wipHeldAt, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "ready" || !t.heldAt || !t.agentId) return null;
-    const oldest = await oldestInProgress(db, t.agentId);
+    const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
     return `you are at your limit of in-progress tickets, so it stays in Ready and starts when one finishes. Carry on with your oldest unfinished ticket, "${o?.title ?? oldest}", instead.`;
@@ -1186,7 +1186,7 @@ export function schedulerService(
      */
     async freeSlots(companyId: string): Promise<number> {
       if (await globallyPaused()) return 0;
-      if (await getHold(db)) return 0;
+      if (holdBlocksStarts(await getHold(db), now())) return 0;
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
