@@ -1588,10 +1588,12 @@ export function reviewService(
           else if (r.outcome === "lock_wait" && attempt >= LOCK_RETRY_ATTEMPTS) await failed("lock_timeout");
           if (r.outcome !== "lock_wait") return r;
           const { t } = await ticketWithRepo(ticketId);
-          const d = r.detail as { command: string; output: string };
+          // A main_moved lock wait carries only { status } (no command or output): BOS-1604 crashed here with "reading 'slice'".
+          const d = r.detail as { command?: string; output?: string; status?: string } | undefined;
           if (attempt >= LOCK_RETRY_ATTEMPTS) {
-            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
-            await raiseCheckStuck(db, t, d.command, "kept waiting for the shared lock, which other checks held", d.output);
+            const moved = d?.status === "main_moved";
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: moved ? `The merge gave up after ${attempt} tries: main kept moving before it could land; it's in your Decisions.` : `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
+            await raiseCheckStuck(db, t, d?.command ?? "the merge", moved ? "kept finding that main had moved before it could land" : "kept waiting for the shared lock, which other checks held", d?.output ?? "");
             return { outcome: "check_stuck", delivered: null, detail: r.detail };
           }
           const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);

@@ -111,6 +111,15 @@ describe("each reason is written by the real merge path (BOS-1461)", () => {
     expect((await c.failed()).map((e) => e.reason)).toEqual(["main_moved", "main_moved"]);
   });
 
+  it("main moving on every try gives up with a card for the CEO, not a crash (BOS-1604)", async () => {
+    // A main_moved lock wait has no command or output; on 15 Nov the give-up read output.slice and threw.
+    const c = await setup({ merge: { status: "main_moved" } });
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "check_stuck" });
+    expect((await c.failed()).map((e) => e.reason)).toEqual(Array(LOCK_RETRY_ATTEMPTS).fill("main_moved"));
+    const cards = await c.db.select({ question: decisions.question }).from(decisions).where(eq(decisions.companyId, c.company.id));
+    expect(cards.filter((d) => d.question.includes("kept finding that main had moved before it could land"))).toHaveLength(1);
+  }, 30_000);
+
   it("lock_timeout: no row on the retries, one when the tries have run out", async () => {
     const c = await setup({ verify: GAVE_UP });
     await approveAndWait(c.req, c.ticket.id);
