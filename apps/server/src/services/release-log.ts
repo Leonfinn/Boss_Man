@@ -9,7 +9,7 @@ import { agents, decisions, projects, settings, ticketMessages, tickets, wakes }
 import { OWNER_SETUP_FIX_PREFIX, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { OwnerSetupFacts } from "./owner-setup-check.js";
 import type { NotifyInput } from "./notifications.js";
-import { allMergeOrder } from "./go-live-wait.js";
+import { allMergeOrder, serverIsGoLive } from "./go-live-wait.js";
 import { isRunnerOnlyStep, splitSteps, stepKey } from "./runner-image.js";
 import { moveTicket } from "./ticket-moves.js";
 
@@ -135,6 +135,10 @@ export const releaseLogService = (
 
   /** Opens the ticket for this company and change, reusing an open one, and queues the wake on it. */
   async function wakeOne(companyId: string, from: string, to: string, how: ReleaseHow, ticketId?: string | null) {
+    // BOS-1477: this change is a Boss Man server update. Only the company that update deploys (the home
+    // company) has a release to record; every other company ships from its own repository, with or without a
+    // deploy target, and a server update says nothing about its site (HolidayHours HOL-625/629/631).
+    if (!(await serverIsGoLive(db, companyId))) return false;
     const rm = await releaseManagerOf(companyId);
     if (!rm) return false;
     const title = `${LOG_TITLE_PREFIX}${short(to)}`;

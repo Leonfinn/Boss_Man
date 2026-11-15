@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, deployTargets, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { RELEASE_REASON, releaseLogService } from "../src/services/release-log.js";
 
 let ctx: Awaited<ReturnType<typeof setupApp>> | undefined;
@@ -122,6 +122,26 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(await c.releaseLog.releaseManagerWakes("restarted")).toBe(1);
     const [w] = await c.db.select().from(wakes);
     expect(w!.note).toContain("restart after a hand-apply");
+  });
+
+  it("BOS-1477: a server update opens a release-log ticket only for the home company, not for one with no deploy target or one with a target", async () => {
+    const c = (ctx = await setupApp());
+    const home = await withReleaseManager(c); // oldest company: the one Boss Man's own server update deploys
+    const mk = async (name: string) => {
+      const { company } = (await c.req("POST", "/api/companies", { name })).json() as { company: { id: string } };
+      await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Releases" });
+      await c.db.insert(agents).values({ companyId: company.id, name: `Rm ${name}`, role: "worker", agentKind: "claude", title: "Release Manager" });
+      return company.id;
+    };
+    const none = await mk("No Target Co");
+    const withTarget = await mk("Target Co");
+    await c.db.insert(deployTargets).values({ companyId: withTarget, name: "site", kind: "ssh", endpoint: "deploy@example.com" });
+    for (const id of [home.companyId, none, withTarget]) await c.releaseLog.note(id, A);
+    await c.releaseLog.releaseManagerWakes("restarted");
+    await deployResult(c, { from: A, to: B });
+    await c.selfDeploy.sync();
+    const logs = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
+    expect(logs.map((x) => x.companyId)).toEqual([home.companyId]);
   });
 
   it("does nothing when the company has no Release Manager", async () => {
