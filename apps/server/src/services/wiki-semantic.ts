@@ -11,8 +11,11 @@ export const BATCH = 64;
 const MAX_CHARS = 6000;
 export const TOP = 50;
 
-export type SemanticSettings = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null };
-export const DEFAULTS: SemanticSettings = { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", dims: 768, secretId: null };
+/** `ownerAnswers`: the same provider and key also embed the owner's past answers (BOS-1593); off by default, ticked apart from the wiki. */
+export type SemanticSettings = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean };
+export const DEFAULTS: SemanticSettings = { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", dims: 768, secretId: null, ownerAnswers: false };
+/** Embeds texts with a company's saved provider, for a caller other than the wiki (owner answers, BOS-1593). */
+export type Embedder = { model: string; dims: number; embed: (input: string[], timeoutMs?: number) => Promise<number[][]> };
 export type SemanticHit = { slug: string; title: string; path: string; snippet: string };
 
 /** The first `dims` numbers (Matryoshka models allow cutting), scaled to length 1. */
@@ -36,7 +39,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
 
   async function settings(companyId: string): Promise<SemanticSettings> {
     const [row] = await db.select().from(wikiSemanticSettings).where(eq(wikiSemanticSettings.companyId, companyId));
-    return row ? { enabled: row.enabled, baseUrl: row.baseUrl, model: row.model, dims: row.dims, secretId: row.secretId } : DEFAULTS;
+    return row ? { enabled: row.enabled, baseUrl: row.baseUrl, model: row.model, dims: row.dims, secretId: row.secretId, ownerAnswers: row.ownerAnswers } : DEFAULTS;
   }
 
   /** The settings, but only when semantic search is on and its key resolves. */
@@ -48,7 +51,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
   }
 
   /** POST {baseUrl}/embeddings. Errors carry no request or response body, and never the key. */
-  async function embed(s: SemanticSettings, key: string, input: string[]): Promise<number[][]> {
+  async function embed(s: SemanticSettings, key: string, input: string[], timeoutMs = 30_000): Promise<number[][]> {
     const out: number[][] = [];
     for (let i = 0; i < input.length; i += BATCH) {
       const chunk = input.slice(i, i + BATCH);
@@ -58,7 +61,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
           method: "POST",
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
           body: JSON.stringify({ model: s.model, input: chunk, dimensions: s.dims }),
-          signal: AbortSignal.timeout(30_000),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch {
         throw new Error("the embeddings provider could not be reached");
@@ -110,6 +113,32 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
 
   return {
     settings,
+    /**
+     * The company's provider for owner-answer meaning search (BOS-1593), or null when that is off or the
+     * key doesn't resolve. A failure is kept as the panel's last error and rethrown for the caller to fall back.
+     */
+    async ownerAnswerEmbedder(companyId: string): Promise<Embedder | null> {
+      const s = await settings(companyId);
+      if (!s.ownerAnswers || !s.secretId) return null;
+      const key = await deps.reveal(s.secretId);
+      if (!key) return null;
+      return {
+        model: s.model,
+        dims: s.dims,
+        embed: async (input, timeoutMs) => {
+          try {
+            return await embed(s, key, input, timeoutMs);
+          } catch (err) {
+            failed(companyId, err as Error);
+            throw err;
+          }
+        },
+      };
+    },
+    /** Companies with owner-answer meaning search on, for the background embedder (BOS-1593). */
+    async ownerAnswerCompanies(): Promise<string[]> {
+      return (await db.select({ id: wikiSemanticSettings.companyId }).from(wikiSemanticSettings).where(eq(wikiSemanticSettings.ownerAnswers, true))).map((r) => r.id);
+    },
     async setSettings(companyId: string, patch: Partial<SemanticSettings>) {
       const set = { ...DEFAULTS, ...(await settings(companyId)), ...patch };
       await db.insert(wikiSemanticSettings).values({ companyId, ...set }).onConflictDoUpdate({ target: wikiSemanticSettings.companyId, set });

@@ -7,8 +7,33 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
-import { agentNotes, decisions, ownerChatMessages, ticketMessages } from "../src/db/schema.js";
-import { describeOwnerAnswer, isRepeat, searchOwnerAnswers } from "../src/services/owner-answers.js";
+import { agentNotes, decisions, ownerAnswerEmbeddings, ownerChatMessages, ticketMessages } from "../src/db/schema.js";
+import { describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
+
+// A fake embedder: words that mean the same thing share a concept, so their vectors point the same way.
+const DIMS = 768;
+const CONCEPT: Record<string, string> = { repo: "code", code: "code", source: "code", repository: "code", public: "visible", strangers: "visible", see: "visible", anyone: "visible", github: "code" };
+const STOP = new Set(["the", "a", "is", "our", "can", "yet", "now", "make", "it", "be", "to", "owner", "yes"]);
+function fakeVector(text: string) {
+  const v = new Array(DIMS).fill(0);
+  for (const w of text.toLowerCase().match(/[a-z]+/g) ?? []) {
+    if (STOP.has(w)) continue;
+    v[[...(CONCEPT[w] ?? w)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % DIMS] += 1;
+  }
+  return v;
+}
+type Provider = { calls: string[][]; fail: false | "500" | "slow" };
+const provider = (): Provider => ({ calls: [], fail: false });
+function fakeFetch(p: Provider): typeof fetch {
+  return (async (_url: unknown, init?: RequestInit) => {
+    if (p.fail === "500") return new Response("provider detail", { status: 500 });
+    if (p.fail === "slow")
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError"))));
+    const body = JSON.parse(String(init?.body)) as { input: string[] };
+    p.calls.push(body.input);
+    return Response.json({ data: body.input.map((s, index) => ({ index, embedding: fakeVector(s) })) });
+  }) as typeof fetch;
+}
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -17,12 +42,12 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
+async function setup(p: Provider = provider()) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", fetch: fakeFetch(p), semanticDebounceMs: 0 });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Website" })).json() as { id: string };
   const ticket = async (title: string) => (await req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string; number: number };
@@ -128,7 +153,7 @@ describe("owner-answer memory (BOS-1593)", () => {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     try {
       const found = (await client.callTool({ name: "owner_answers", arguments: { q: "Is the repo going public?" } })) as { content: Array<{ text: string }> };
-      expect(found.content[0]!.text).toMatch(/^The owner has already answered this \(1 match\):/);
+      expect(found.content[0]!.text).toMatch(/^Searched by words \(meaning search is off for this company\)\.\nThe owner has already answered this \(1 match\):/);
       expect(found.content[0]!.text).toContain(`card `);
       expect(found.content[0]!.text).toContain(`on APP-${launch.number}`);
       expect(found.content[0]!.text).toContain("Done, I've made it public.");
@@ -137,6 +162,76 @@ describe("owner-answer memory (BOS-1593)", () => {
     } finally {
       await client.close();
     }
+  });
+
+  describe("meaning search (opt-in)", () => {
+    const enable = async (c: Awaited<ReturnType<typeof setup>>, over: object = {}) => {
+      const secret = (await c.req("POST", "/api/secrets", { name: "embeddings key", kind: "generic", value: "sk-test-embeddings-0001" })).json() as { secret: { id: string } };
+      const r = await c.req("PUT", `/api/companies/${c.company.id}/wiki-semantic`, { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", secretId: secret.secret.id, ownerAnswers: true, ...over });
+      expect(r.statusCode).toBe(200);
+      return r.json() as { ownerAnswers: boolean };
+    };
+    const embedder = (c: Awaited<ReturnType<typeof setup>>) => (companyId: string) => c.semantic.ownerAnswerEmbedder(companyId);
+    const ASK = "Can strangers see our source code?";
+
+    it("is off by default: nothing is sent to a provider and word search answers alone", async () => {
+      const p = provider();
+      const c = (ctx = await setup(p));
+      const t = await c.ticket("Launch");
+      await c.answered({ question: "Make the GitHub repo public now?", answer: "Yes", ticketId: t.id });
+      const got = (await c.req("GET", `/api/companies/${c.company.id}/wiki-semantic`)).json() as { ownerAnswers: boolean };
+      expect(got.ownerAnswers).toBe(false);
+      const r = await ownerAnswerSearch(c.db, { companyId: c.company.id, q: ASK }, { embedder: embedder(c) });
+      expect(r.meaning).toBe("off");
+      expect(r.hits).toEqual([]);
+      expect(p.calls).toEqual([]);
+    });
+
+    it("finds the same question in different words once switched on, and counts it as a repeat", async () => {
+      const p = provider();
+      const c = (ctx = await setup(p));
+      const t = await c.ticket("Launch");
+      const card = await c.answered({ question: "Make the GitHub repo public now?", answer: "Yes", note: "Done, it's public.", ticketId: t.id });
+      await c.answered({ question: "Which font for the blog?", answer: "Inter", ticketId: t.id });
+      expect((await enable(c)).ownerAnswers).toBe(true);
+      // Switching it on embeds the owner's past answers at once, in the background.
+      await c.ownerAnswerEmbeds.drain();
+      expect(await c.db.select().from(ownerAnswerEmbeddings)).toHaveLength(2);
+      expect(p.calls.flat()).toHaveLength(2);
+      // Nothing new: the next pass sends nothing; a new answer is picked up by the next pass.
+      const e = (await c.semantic.ownerAnswerEmbedder(c.company.id))!;
+      expect(await embedMissingOwnerAnswers(c.db, c.company.id, e)).toBe(0);
+      await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: "Keep the old logo." });
+      expect(await embedMissingOwnerAnswers(c.db, c.company.id, e)).toBe(1);
+
+      // Words alone miss it: the ask shares no word with the card.
+      expect((await searchOwnerAnswers(c.db, { companyId: c.company.id, q: ASK })).filter(isRepeat)).toEqual([]);
+      const r = await ownerAnswerSearch(c.db, { companyId: c.company.id, q: ASK }, { embedder: embedder(c) });
+      expect(r.meaning).toBe("used");
+      expect(r.hits[0]).toMatchObject({ kind: "card", sourceId: card.id, method: "meaning", ticketRef: `APP-${t.number}` });
+      expect(isRepeat(r.hits[0]!)).toBe(true);
+      expect(describeOwnerAnswer(r.hits[0]!)).toMatch(/meaning \d+%/);
+      expect(r.hits.some((h) => h.answer === "Inter" && isRepeat(h))).toBe(false);
+    });
+
+    it("falls back to word search, and says why, when the provider fails or is slow", async () => {
+      const p = provider();
+      const c = (ctx = await setup(p));
+      const t = await c.ticket("Launch");
+      await c.answered({ question: "Make the GitHub repo public now?", answer: "Yes", ticketId: t.id });
+      await enable(c);
+      p.fail = "500";
+      const failed = await ownerAnswerSearch(c.db, { companyId: c.company.id, q: "Is the repo going public?" }, { embedder: embedder(c) });
+      expect(failed.meaning).toEqual({ unavailable: "the embeddings provider answered 500" });
+      expect(failed.hits[0]).toMatchObject({ kind: "card", method: "words" });
+      p.fail = "slow";
+      const t0 = Date.now();
+      const slow = await ownerAnswerSearch(c.db, { companyId: c.company.id, q: "Is the repo going public?" }, { embedder: embedder(c), timeoutMs: 50 });
+      expect(slow.meaning).toEqual({ unavailable: "the embeddings provider could not be reached" });
+      expect(slow.hits[0]).toMatchObject({ kind: "card", method: "words" });
+      // The wait is the timeout passed in, not the wiki's 30 s: this catches a lost timeout, not a speed.
+      expect(Date.now() - t0).toBeLessThan(20_000);
+    });
   });
 
   it("never reads another company's answers", async () => {

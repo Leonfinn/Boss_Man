@@ -4,13 +4,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db/client.js";
-import { describeOwnerAnswer, isRepeat, OWNER_ANSWER_KINDS, searchOwnerAnswers } from "./services/owner-answers.js";
+import { describeOwnerAnswer, isRepeat, OWNER_ANSWER_KINDS, ownerAnswerSearch } from "./services/owner-answers.js";
+import type { Embedder } from "./services/wiki-semantic.js";
 import { text, type Scope } from "./mcp-common.js";
 
 export const OWNER_ANSWERS_DESCRIPTION =
   "Read-only: has the owner already answered this? Before you ask the owner anything (raise_decision, notify_owner, a question in a reply), search here with the question in your own words. It searches everything the owner has said in your company: answers and notes on cards, messages on tickets, the owner chat, and the lasting notes kept from their corrections, with the ticket and date of each. A hit marked 'already answered' means the owner settled it: act on that answer, and only ask again (raise_decision stillNeeded) if you can say what has changed since. Pass since (ISO date) to look only at recent answers, kinds to narrow the sources. Words are matched by their stems, so try the key nouns if a long question finds nothing.";
 
-export function registerOwnerAnswers(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
+export function registerOwnerAnswers(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope, embedder?: (companyId: string) => Promise<Embedder | null>) {
   server.registerTool(
     "owner_answers",
     {
@@ -23,17 +24,16 @@ export function registerOwnerAnswers(server: Pick<McpServer, "registerTool">, db
       },
     },
     async ({ q, since, kinds, limit }) => {
-      const hits = await searchOwnerAnswers(db, {
-        companyId: scope.companyId,
-        q,
-        since: since ? new Date(since) : undefined,
-        kinds: kinds as typeof OWNER_ANSWER_KINDS | undefined,
-        limit: limit ?? 8,
-        minScore: 0.34,
-      });
-      if (!hits.length) return text(`Nothing the owner has said matches "${q}". If you still need to ask, try once more with the key nouns only first.`);
+      const { hits, meaning } = await ownerAnswerSearch(
+        db,
+        { companyId: scope.companyId, q, since: since ? new Date(since) : undefined, kinds: kinds as typeof OWNER_ANSWER_KINDS | undefined, limit: limit ?? 8, minScore: 0.34 },
+        { embedder },
+      );
+      const how = meaning === "used" ? "Searched by words and by meaning." : meaning === "off" ? "Searched by words (meaning search is off for this company)." : `Searched by words only: meaning search is on but unavailable (${meaning.unavailable}).`;
+      if (!hits.length) return text(`Nothing the owner has said matches "${q}". ${how} If you still need to ask, try once more with the key nouns only first.`);
       const settled = hits.filter(isRepeat);
       const lines = [
+        how,
         settled.length ? `The owner has already answered this (${settled.length} match${settled.length === 1 ? "" : "es"}):` : "No exact match, but the owner said these related things:",
         ...settled.map(describeOwnerAnswer),
         ...(settled.length && settled.length < hits.length ? ["", "Related:"] : []),

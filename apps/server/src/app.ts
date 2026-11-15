@@ -94,6 +94,7 @@ import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { ownerRepliesService } from "./services/owner-replies.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
+import { ownerAnswerEmbedLoop } from "./services/owner-answers.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
@@ -629,6 +630,9 @@ export async function buildApp(opts: AppOptions) {
   const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w), replyLane: (agentId, w) => scheduler.replyLaneFor(agentId, { reason: "message", ...w }), replies: ownerReplies });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
+  // Owner-answer meaning search (BOS-1593): embeds new owner answers every two minutes for companies that switched it on.
+  const ownerAnswerEmbeds = ownerAnswerEmbedLoop(db, { companies: () => semantic.ownerAnswerCompanies(), embedder: (companyId) => semantic.ownerAnswerEmbedder(companyId), log: (m) => app.log.warn(m) });
+  app.addHook("onClose", async () => (ownerAnswerEmbeds.stop(), await ownerAnswerEmbeds.drain()));
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status() });
@@ -1177,7 +1181,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests, ownerAnswerEmbedder: (companyId) => semantic.ownerAnswerEmbedder(companyId) }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 
@@ -1985,7 +1989,7 @@ export async function buildApp(opts: AppOptions) {
       return { markdown: await buildBrief(db, { companyId: id, agentId: null, role: "ceo", since: null, now: opts.now?.() ?? new Date(), plain: true }) };
     });
     // The company wiki, semantic search settings and what each ticket produced (R69): routes/wiki.ts.
-    wikiRoutes(owner, { wiki, semantic });
+    wikiRoutes(owner, { wiki, semantic, ownerAnswersNow: () => ownerAnswerEmbeds.run() });
     // The model second opinion on permission cards (BOS-338). The key is picked from Secrets, never sent back.
     owner.get("/api/companies/:id/second-opinion", async (req) => secondOpinion.settings(IdParam.parse(req.params).id));
     owner.put("/api/companies/:id/second-opinion", async (req, reply) => {
@@ -2437,5 +2441,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, ownerAnswerEmbeds, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

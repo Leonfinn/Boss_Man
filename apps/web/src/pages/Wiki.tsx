@@ -316,7 +316,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
 /** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
 const BRIEF = "~brief";
 
-type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
+type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; ownerAnswers: boolean; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
 
 /** Semantic search: off by default. The key is a secret from the encrypted store. */
 function SemanticSettings({ companyId }: { companyId: string }) {
@@ -338,9 +338,9 @@ function SemanticSettings({ companyId }: { companyId: string }) {
   const save = (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
-    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId } })
+    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId, ownerAnswers: v.ownerAnswers } })
       .then(
-        () => (sv.markSaved(), setMsg(v.enabled ? "Saved. Pages are being embedded in the background." : "Saved.")),
+        () => (sv.markSaved(), setMsg(v.enabled || v.ownerAnswers ? "Saved. Embedding runs in the background." : "Saved.")),
         (err: Error) => setMsg(err.message),
       )
       .finally(() => setBusy(false));
@@ -353,6 +353,12 @@ function SemanticSettings({ companyId }: { companyId: string }) {
         <label>
           <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Search by meaning as well as words
         </label>
+        <label>
+          <input type="checkbox" checked={v.ownerAnswers} onChange={(e) => setV({ ...v, ownerAnswers: e.target.checked })} /> Also search your past answers by meaning
+        </label>
+        <small className="muted" style={{ marginTop: -8 }}>
+          Before anyone asks you something, Boss Man checks whether you already answered it (cards, ticket messages, chat and the CEO's notes). That check always matches by words. Tick this to also catch the same question in different words: your answers and messages are then sent to the provider below too. Off by default.
+        </small>
         <div className="field">
           <label htmlFor="sem-url">Provider address</label>
           <input id="sem-url" value={v.baseUrl} onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />

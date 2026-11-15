@@ -72,6 +72,7 @@ import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
 import { registerPermissionReport } from "./mcp-permission-report.js";
 import { registerOwnerAnswers } from "./mcp-owner-answers.js";
+import type { Embedder } from "./services/wiki-semantic.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -180,6 +181,8 @@ export type Services = {
   addons?: () => Promise<AddonFacts>;
   /** Facts for the card lint's R15 (DR-036): whether Boss Man raises its own update card, and its commit. Absent: R15 is not checked. */
   selfDeployCards?: () => Promise<SelfDeployFacts>;
+  /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
+  ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
 };
 
 /**
@@ -217,7 +220,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
   registerPermissionReport(server, db, scope);
-  registerOwnerAnswers(server, db, scope);
+  registerOwnerAnswers(server, db, scope, services.ownerAnswerEmbedder);
   return server;
 }
 
@@ -1392,7 +1395,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   registerRequestNote(server, db, scope, hooks);
   registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
-  registerOwnerAnswers(server, db, scope);
+  registerOwnerAnswers(server, db, scope, services.ownerAnswerEmbedder);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
     if (err instanceof WorkError) return fail(err.message);
