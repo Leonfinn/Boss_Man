@@ -10,6 +10,7 @@ import { TOOL_KINDS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies } from "../db/schema.js";
 import { record } from "../services/activity.js";
+import { PERMISSION_REPORT_MAX_HOURS, permissionReport } from "../services/permission-report.js";
 import { RuleError, type policyRulesService } from "../services/policy-rules.js";
 import { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { schedulerService } from "../services/scheduler.js";
@@ -43,6 +44,12 @@ export function policyRoutes(
     if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
     const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
     return c ? c.policy : reply.code(404).send({ error: "not_found" });
+  });
+  // Owner-tier permission cards by deciding rule, across every company (BOS-1456). Read-only.
+  owner.get("/api/permission-report", async (req, reply) => {
+    const q = z.object({ hours: z.coerce.number().int().min(1).max(PERMISSION_REPORT_MAX_HOURS).optional() }).safeParse(req.query);
+    if (!q.success) return reply.code(400).send({ error: "invalid_hours", message: `hours must be a whole number from 1 to ${PERMISSION_REPORT_MAX_HOURS}.` });
+    return permissionReport(db, { hours: q.data.hours });
   });
   // A project's own review policy is routes/projects.ts, registered with the project routes.
   // Standing rules (BOS-353): the owner or the CEO sets a short block every agent reads at the start of every run.

@@ -146,8 +146,31 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
-  if (v && !v.enabled) return null;
-  const s = v?.status ?? null;
+  if (v && !v.enabled) {
+    // BOS-1486: with no host deployer there is no Build and update runners button, but a hand-built image still needs the drain.
+    return (
+      <Section id="deploy-h" title="Updates">
+        <p className="muted" style={{ fontSize: 14 }}>
+          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+        </p>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !!maint.data?.on}
+          onClick={() =>
+            act.run(async () => {
+              await api("/api/maintenance/start", { method: "POST", body: {} });
+              maint.reload();
+            })
+          }
+        >
+          Update runners (finish runs first)
+        </button>
+        {act.view}
+      </Section>
+    );
+  }
+  const s =v?.status ?? null;
   const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;
