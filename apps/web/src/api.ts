@@ -272,6 +272,8 @@ export type Ticket = {
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
   reviewWait?: string | null;
+  /** BOS-1546: a merged ticket that only waits to go live, in plain words, and the owner's open update card if there is one. */
+  goLiveNote?: { text: string; cardId: string | null } | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
   reviewStage?: "awaiting_review" | "merging" | "held" | null;
   /** A reviewer passed it but holds the merge (BOS-808). */

@@ -749,6 +749,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       )}
 
+      {t.goLiveNote && (
+        <div className="card" role="status" data-ticket-go-live-note="true" style={{ marginBottom: 16 }}>
+          <strong>{t.goLiveNote.text}</strong>{" "}
+          {t.goLiveNote.cardId && <a href={`#/decisions/${t.goLiveNote.cardId}`}>Open the card</a>}
+        </div>
+      )}
+
       {t.hold && t.systemState === "review" && (
         <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
