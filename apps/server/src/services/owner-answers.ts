@@ -14,7 +14,7 @@ import { and, cosineDistance, eq, inArray, sql } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, ownerAnswerEmbeddings, tickets } from "../db/schema.js";
-import { decisionTicketIds } from "./stale-requests.js";
+import { ANSWERED_LOOKBACK_MS, answeredBefore, answerHoldsAsFact, decisionTicketIds, quotedAnswer } from "./stale-requests.js";
 import type { Embedder } from "./wiki-semantic.js";
 
 export type OwnerAnswerKind = "card" | "ticket_reply" | "chat" | "note";
@@ -349,4 +349,56 @@ export function describeOwnerAnswer(h: OwnerAnswerHit): string {
   const words = `${Math.round(Math.max(h.score, h.sameQuestion) * 100)}% of the words`;
   const match = h.meaning === null ? words : `meaning ${Math.round(h.meaning * 100)}%${h.method === "both" ? `, ${words}` : ""}`;
   return `- [${where}; ${match}]${asked} Owner: "${clip(h.answer, 300)}".${note}`;
+}
+
+export type OwnerAskCheck = {
+  /** The owner already answered this: a quoted reading of that answer, and the ask is refused unless stillNeeded says why it no longer holds. */
+  refusal: string | null;
+  /** Earlier owner answers close to the ask but not counted as the same one: shown to the asker, not refused. */
+  related: OwnerAnswerHit[];
+  /** Whether meaning search took part, and why not when it couldn't. */
+  meaning: OwnerAnswerSearch["meaning"];
+};
+
+/**
+ * The duplicate-ask check every new owner card and "needs you" notice runs (BOS-123, BOS-1591, BOS-1593).
+ * First the card check (answeredBefore: this ticket and its blockers, then any owner-answered question in
+ * the company in the last 30 days); then the owner-answer search over the same 30 days, so an answer the
+ * owner gave in chat, in a ticket message, in a correction kept as a note, or (meaning search on) in other
+ * words also stops the repeat. Only an answer that stays true counts for a card (answerHoldsAsFact).
+ */
+export async function checkOwnerAsk(
+  db: Db,
+  input: { companyId: string; ticketId?: string | null; question: string },
+  deps: { embedder?: (companyId: string) => Promise<Embedder | null>; timeoutMs?: number } = {},
+): Promise<OwnerAskCheck> {
+  const card = await answeredBefore(db, input);
+  if (card) return { refusal: quotedAnswer(card), related: [], meaning: "off" };
+  const since = new Date(Date.now() - ANSWERED_LOOKBACK_MS);
+  const { hits, meaning } = await ownerAnswerSearch(db, { companyId: input.companyId, q: input.question, since, limit: 10 }, deps);
+  const cardIds = hits.filter((h) => h.kind === "card").map((h) => h.sourceId);
+  const ctxs = cardIds.length ? await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(inArray(decisions.id, cardIds)) : [];
+  const fact = new Map(
+    ctxs.map((d) => {
+      const c = (d.context as { type?: string; settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null) ?? {};
+      return [d.id, c.type === "question" && answerHoldsAsFact(c)] as const;
+    }),
+  );
+  const counts = (h: OwnerAnswerHit) => h.kind !== "card" || fact.get(h.sourceId) === true;
+  const repeat = hits.find((h) => isRepeat(h) && counts(h));
+  const related = hits.filter((h) => h !== repeat && counts(h) && Math.max(h.score, h.sameQuestion, h.meaning ?? 0) >= 0.5).slice(0, 3);
+  if (!repeat) return { refusal: null, related, meaning };
+  const what = repeat.question ? `"${clip(repeat.question, 160)}"` : "this";
+  const where = `${KIND_LABEL[repeat.kind]} ${repeat.sourceId}${repeat.ticketRef ? ` on ${repeat.ticketRef}` : ""}`;
+  const said = repeat.kind === "note" && repeat.ownerNote ? `${clip(repeat.ownerNote, 300)} (${clip(repeat.answer, 200)})` : clip(repeat.answer, 300);
+  const note = repeat.kind === "card" && repeat.ownerNote ? `; their note: "${clip(repeat.ownerNote, 200)}"` : "";
+  return { refusal: `The owner already answered ${what} (${where}) on ${day(repeat.at)} UTC: "${said}"${note}`, related, meaning };
+}
+
+/** The lines added to a raise or notice that went through: related earlier answers, and a word on meaning search when it couldn't help. */
+export function askCheckNotes(c: OwnerAskCheck): string {
+  const out: string[] = [];
+  if (c.related.length) out.push(`Possibly related earlier owner answers (not the same question, so this went through; withdraw it if one of these settles it):\n${c.related.map(describeOwnerAnswer).join("\n")}`);
+  if (typeof c.meaning === "object") out.push(`Meaning search was unavailable (${clip(c.meaning.unavailable, 160)}), so only word search checked whether the owner already answered this.`);
+  return out.join("\n\n");
 }

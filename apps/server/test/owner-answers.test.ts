@@ -47,7 +47,7 @@ async function setup(p: Provider = provider()) {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", fetch: fakeFetch(p), semanticDebounceMs: 0 });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Website" })).json() as { id: string };
   const ticket = async (title: string) => (await req("POST", `/api/projects/${project.id}/tickets`, { title })).json() as { id: string; number: number };
@@ -258,6 +258,115 @@ describe("owner-answer memory (BOS-1593)", () => {
       expect(slow.hits[0]).toMatchObject({ kind: "card", method: "words" });
       // The wait is the timeout passed in, not the wiki's 30 s: this catches a lost timeout, not a speed.
       expect(Date.now() - t0).toBeLessThan(20_000);
+    });
+  });
+
+  // Step 4: the re-ask check at all three ask points (raise_decision, notify_owner, the Scrum Master's
+  // raise) uses this search, so an answer given in chat, a ticket message or a kept correction stops a
+  // repeat card too, not only an earlier card (BOS-1591 looked at cards alone).
+  describe("the re-ask refusal", () => {
+    const clients: Client[] = [];
+    afterEach(async () => {
+      for (const cl of clients.splice(0)) await cl.close();
+    });
+    const mcpAs = async (c: Awaited<ReturnType<typeof setup>>, agentId: string) => {
+      if (!c.app.server.listening) await c.app.listen({ host: "127.0.0.1", port: 0 });
+      const port = (c.app.server.address() as { port: number }).port;
+      const token = await issueRunToken(c.db, { companyId: c.company.id, agentId, runId: randomUUID() });
+      const cl = new Client({ name: "t", version: "0" });
+      await cl.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+      clients.push(cl);
+      return cl;
+    };
+    const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+    const isError = (r: unknown) => (r as { isError?: boolean }).isError === true;
+    const raise = (cl: Client, question: string, extra: Record<string, unknown> = {}) =>
+      cl.callTool({ name: "raise_decision", arguments: { question, options: ["Yes", "No"], recommended: "Yes", triedFirst: "Read the ticket and the earlier tickets about it.", ...extra } });
+
+    it("replays 15 Nov: the CEO's go-public question on another ticket is refused and quotes the owner's answer from the day before", async () => {
+      const c = (ctx = await setup());
+      const launch = await c.ticket("Open-source launch");
+      const yesterday = new Date(Date.now() - 86_400_000);
+      const card = await c.answered({ question: "Make the GitHub repo public now?", answer: "Yes", note: "Done, I've made it public.", ticketId: launch.id, at: yesterday });
+      const ci = await c.ticket("CI wait switch");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Is the repo going public?", { blocksTicketId: ci.id });
+      expect(isError(r)).toBe(true);
+      expect(textOf(r)).toContain("Done, I've made it public.");
+      expect(textOf(r)).toContain(card.id);
+      expect(textOf(r)).toContain(`APP-${launch.number}`);
+      expect(textOf(r)).toContain(yesterday.toISOString().slice(0, 10));
+      expect(textOf(r)).toContain("stillNeeded");
+    });
+
+    it.each([
+      { kind: "chat", ask: "Which port should the staging site use?", said: "Use port 8080 for the staging site, never 3000." },
+      { kind: "ticket message", ask: "Send the weekly email on Sundays?", said: "Never send the weekly email on Sundays." },
+      { kind: "lasting note", ask: "Do invoices go out in euros?", said: "Owner: always invoice in euros, never pounds." },
+    ])("refuses a card the owner already answered in a $kind, and lets it through with stillNeeded", async ({ kind, ask, said }) => {
+      const c = (ctx = await setup());
+      const earlier = await c.ticket("Earlier work");
+      if (kind === "chat")
+        await c.db.insert(ownerChatMessages).values([
+          { companyId: c.company.id, agentId: c.ceo.id, role: "assistant", text: "Which port should staging use?", createdAt: new Date(Date.now() - 60_000) },
+          { companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: said },
+        ]);
+      if (kind === "ticket message") await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: earlier.id, author: "owner", text: said });
+      if (kind === "lasting note") await c.db.insert(agentNotes).values({ companyId: c.company.id, agentId: c.ceo.id, title: "Invoices go out in euros", text: "Bill every customer in EUR.", why: said, source: "chat" });
+      const asking = await c.ticket("Unrelated ticket");
+      const cl = await mcpAs(c, c.ceo.id);
+      const r = await raise(cl, ask, { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(true);
+      expect(textOf(r)).toContain(`The owner already answered`);
+      expect(textOf(r)).toContain(`(${kind} `);
+      expect(textOf(r)).toContain(said);
+      expect(isError(await raise(cl, ask, { blocksTicketId: asking.id, stillNeeded: "The owner said it would change this month." }))).toBe(false);
+    });
+
+    it("refuses notify_owner and the Scrum Master's card the same way", async () => {
+      const c = (ctx = await setup());
+      const earlier = await c.ticket("Newsletter");
+      await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: earlier.id, author: "owner", text: "Never send the weekly email on Sundays." });
+      const asking = await c.ticket("Email schedule");
+      const n = await (await mcpAs(c, c.ceo.id)).callTool({ name: "notify_owner", arguments: { level: "flag", title: "Needs you: send the weekly email on Sundays?", ticketId: asking.id } });
+      expect(isError(n)).toBe(true);
+      expect(textOf(n)).toContain("Never send the weekly email on Sundays.");
+
+      const sm = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Scrum Master" })).json() as { id: string };
+      expect((await c.req("PATCH", `/api/companies/${c.company.id}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true })).statusCode).toBe(200);
+      const smAsk = c.watchdog.raiseDecision(c.company.id, sm.id, randomUUID(), { ticketId: asking.id, question: "Send the weekly email on Sundays?", options: ["Yes", "No"], recommended: "No", triedFirst: "Read the ticket and its history.", reason: "the ticket has waited a day" });
+      await expect(smAsk).rejects.toThrow(/Never send the weekly email on Sundays\./);
+    });
+
+    it("lets a different question through and lists the close earlier answer", async () => {
+      const c = (ctx = await setup());
+      const earlier = await c.ticket("Newsletter");
+      await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: earlier.id, author: "owner", text: "Don't send the weekly email on Sundays." });
+      const asking = await c.ticket("Email schedule");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Should the weekly email go out on Sunday?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(false);
+      expect(textOf(r)).toContain("Possibly related earlier owner answers");
+      expect(textOf(r)).toContain("Don't send the weekly email on Sundays.");
+    });
+
+    it("with meaning search on, refuses the same question in other words; with the provider down, warns and checks by words", async () => {
+      const p = provider();
+      const c = (ctx = await setup(p));
+      const launch = await c.ticket("Launch");
+      await c.answered({ question: "Make the GitHub repo public now?", answer: "Yes", note: "Done, it's public.", ticketId: launch.id });
+      const secret = (await c.req("POST", "/api/secrets", { name: "embeddings key", kind: "generic", value: "sk-test-embeddings-0001" })).json() as { secret: { id: string } };
+      expect((await c.req("PUT", `/api/companies/${c.company.id}/wiki-semantic`, { enabled: false, baseUrl: "https://openrouter.ai/api/v1", model: "google/gemini-embedding-001", secretId: secret.secret.id, ownerAnswers: true })).statusCode).toBe(200);
+      await c.ownerAnswerEmbeds.drain();
+      const cl = await mcpAs(c, c.ceo.id);
+      const asking = await c.ticket("Docs site");
+
+      const meant = await raise(cl, "Can strangers see our source code?", { blocksTicketId: asking.id });
+      expect(isError(meant)).toBe(true);
+      expect(textOf(meant)).toContain("Done, it's public.");
+
+      p.fail = "500";
+      const down = await raise(cl, "Can strangers see our source code?", { blocksTicketId: asking.id });
+      expect(isError(down)).toBe(false);
+      expect(textOf(down)).toContain("Meaning search was unavailable (the embeddings provider answered 500)");
     });
   });
 

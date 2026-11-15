@@ -166,7 +166,8 @@ describe("an answered question is not asked again, anywhere in the company (crit
     expect(isError(refused)).toBe(true);
     expect(textOf(refused)).toContain("I've made it public");
     expect(textOf(refused)).toContain(card.id);
-    expect(textOf(refused)).toMatch(/BOS-\d+/);
+    // The company's own ticket prefix ("App Co" → APP), not a hard-coded BOS- (BOS-1593).
+    expect(textOf(refused)).toMatch(/on APP-\d+\)/);
 
     expect(isError(await ask({ stillNeeded: "It was made private again on the 15th." }))).toBe(false);
   });
