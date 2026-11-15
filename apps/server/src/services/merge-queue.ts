@@ -133,7 +133,7 @@ export type MergeQueueView = {
   recent: RecentRow[];
   /** How many approved tickets are waiting to merge (the side menu's badge). */
   waitingCount: number;
-  /** How many items look stuck: running past the limit, or waiting rows flagged stuck (BOS-767). */
+  /** 1 while the merge line is stuck (the same verdict as `line`), else 0; slow-but-landing is not stuck (BOS-767, BOS-1594). */
   stuckCount: number;
   /** BOS-1594: the one verdict on the line's health (healthy, stuck, or merging but slowly); the banner and the jam alert both read it. */
   line: MergeLineHealth;
@@ -681,6 +681,7 @@ export function mergeQueueService(
       const slots = queue?.slots ?? limit;
       const emptySeatSince = deps.emptySeatSince ? await deps.emptySeatSince(companyId).catch(() => null) : null;
       const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
+      const line = mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady });
       return {
         companyId,
         mode: queue?.mode ?? "legacy",
@@ -689,8 +690,9 @@ export function mergeQueueService(
         waiting,
         recent: recentRows,
         waitingCount: waiting.length,
-        stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
-        line: mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady }),
+        // BOS-1594: the side-menu "stuck" badge follows the same verdict as the banner: 1 while the line is stuck, 0 when merging (even slowly) or healthy.
+        stuckCount: line.state === "stuck" ? 1 : 0,
+        line,
       };
     },
     /** BOS-1517: a ticket's status line for its page: from the same live view as the queue, or null when it isn't in the merge pipeline. */
