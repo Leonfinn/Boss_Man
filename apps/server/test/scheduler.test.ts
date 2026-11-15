@@ -509,7 +509,10 @@ describe("scheduler", () => {
     await ctx.tick();
     // One slot for the company: only the result started, the new ticket waits.
     expect(ctx.commands).toHaveLength(1);
-    expect(ctx.commands[0]!.prompt).toContain("Finished work");
+    const [result] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, mine.id));
+    const [newWake] = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, next.id));
+    expect(result!.runId).not.toBeNull();
+    expect(newWake!.runId).toBeNull();
   });
 
   it("drops older unstarted wakes for the same ticket and reason, keeping the newest (BOS-1555)", async () => {
