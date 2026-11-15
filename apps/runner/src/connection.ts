@@ -41,6 +41,23 @@ export type ConnectionOptions = {
   checkWorker?: { slots: number; features: readonly string[]; /** BOS-1436: the commits it holds per project, for thin bundles. */ repos?: () => WorkerRepos };
 };
 
+/**
+ * BOS-1601: what a failed dial means in plain words. A name that does not resolve (ENOTFOUND, EAI_AGAIN) is the usual
+ * first-install slip: the address is a Tailscale (MagicDNS) name and this host is not on the tailnet. Only the host
+ * name of the address is printed, never the token (which is in a header, not the URL).
+ */
+export function describeConnectError(message: string, url: string): string {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // not a URL: the raw message is all there is
+  }
+  if (!host || !/ENOTFOUND|EAI_AGAIN/.test(message)) return message;
+  const tailscale = /\.ts\.net$/i.test(new URL(url).hostname);
+  return `${message}. Can't find the address ${host} from this machine.${tailscale ? " It is a Tailscale name and this host is not on your tailnet" : " If it is a Tailscale name, this host is not on your tailnet"}: use the server's LAN address instead (BOSSMAN_URL=ws://<server LAN address>:<port>/api/check-worker/connect), or check this host's DNS.`;
+}
+
 export class RunnerConnection {
   private ws: WebSocket | null = null;
   private live = false;
@@ -197,7 +214,7 @@ export class RunnerConnection {
       }
     });
 
-    ws.on("error", (err) => this.opts.log?.(`connection error: ${err.message}`));
+    ws.on("error", (err) => this.opts.log?.(`connection error: ${describeConnectError(err.message, this.opts.url)}`));
     ws.on("close", () => {
       this.teardown();
       if (this.stopped) return;

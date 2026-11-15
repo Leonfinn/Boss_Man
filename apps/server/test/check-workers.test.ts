@@ -102,6 +102,14 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.d.capacity(s.co.id)).toBe(1);
   });
 
+  it("a worker that never connected shows the can't-find-the-address hint, not only 'has not connected yet' (BOS-1601)", async () => {
+    const s = await setup({ runnerSlots: 1 });
+    const { worker: w } = await s.workers.register({ name: "never", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+    const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+    expect(row.reason).toMatch(/Has not connected yet/);
+    expect(row.reason).toMatch(/Can't find the address.*ENOTFOUND.*Tailscale name.*tailnet.*local network address/s);
+  });
+
   it("gives no job to a worker that can't fetch code yet, is built from another commit, is off or isn't set up for the company, and says why", async () => {
     const s = await setup({ runnerSlots: 1 });
     const other = await s.company("Other");

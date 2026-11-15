@@ -222,6 +222,7 @@ sections:
   - Tickets in progress
 reads: 
   - /api/companies
+  - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
   - /api/wip-limits
