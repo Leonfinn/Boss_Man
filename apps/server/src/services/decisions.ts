@@ -52,6 +52,9 @@ import {
   type RunnerCommand,
   type RunnerEvent,
   untrusted,
+  PLAN_REAL_USE_MISSING,
+  realUseWalkthrough,
+  usabilityGated,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
@@ -1656,7 +1659,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       .values({
         companyId: runner.companyId,
         kind: "approval",
-        question: t ? `Approve ${agent?.name ?? "An agent"}'s plan for "${t.title}"?${amendsText(t.planApprovedAt)}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        // BOS-1571: a gated ticket's plan without a real-use walk-through says so on the card itself.
+        question: t ? `Approve ${agent?.name ?? "An agent"}'s plan for "${t.title}"?${amendsText(t.planApprovedAt)}${usabilityGated(t) && !realUseWalkthrough(plan) ? `\n\n${PLAN_REAL_USE_MISSING}` : ""}` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
         options: [APPROVE_PLAN, KEEP_PLANNING],
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
