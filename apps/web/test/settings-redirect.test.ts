@@ -25,8 +25,8 @@ describe("old Settings links land on the new page (BOS-1018 §5)", () => {
     expect(settingsRedirect(route("settings/c1/access"), "c1")).toBe("settings/c1/tools");
   });
 
-  it("sends the one-page #/settings/<co>/system to the front page, where its six pages are (BOS-1492)", () => {
-    expect(settingsRedirect(route("settings/c1/system"), "c1")).toBe("settings");
+  it("sends the one-page #/settings/<co>/system to Updates, the first of its six pages, keeping the company (BOS-1492)", () => {
+    expect(settingsRedirect(route("settings/c1/system"), "c1")).toBe("settings/c1/updates");
   });
 
   it("sends #/settings/<co>/workflow to Reviews", () => {

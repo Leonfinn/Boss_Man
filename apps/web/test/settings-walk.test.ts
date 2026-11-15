@@ -281,8 +281,8 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       ["settings/c1/workflow", "settings/c1/reviews"],
       ["rules/c1", "settings/c1/permissions"],
       ["settings/c1/gone", "settings"],
-      // BOS-1492: the one-page "Server and runner" opens the front page, where its six pages are one click away.
-      ["settings/c1/system", "settings"],
+      // BOS-1492: the one-page "Server and runner" opens Updates, the first of its six pages.
+      ["settings/c1/system", "settings/c1/updates"],
     ]);
   }, 60_000);
 

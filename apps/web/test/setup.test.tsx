@@ -149,7 +149,7 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     );
     render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
     expect((await screen.findByTestId("setup-runner-line")).textContent).toContain("not connected");
-    expect(screen.getByText("Settings → Server and runner").getAttribute("href")).toBe("#/settings/c1/system");
+    expect(screen.getByText("Settings → Server and runner").getAttribute("href")).toBe("#/settings/c1/runner");
     expect(screen.queryByText("Add-ons")).toBeNull();
   });
 });

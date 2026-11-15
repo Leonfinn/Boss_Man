@@ -109,9 +109,9 @@ export function settingsRedirect(route: readonly string[], companyId: string | u
     if (rest.length <= 1) return null;
     const [company, tab] = [rest[0], rest[1]];
     if (settingsEntry(tab)) return null;
-    // "Server and runner" was one page (`system`, BOS-1492): it is now a group of six. The old address opens the front
-    // page, where that group's pages are one click away, rather than guessing which panel the link was after.
-    if (tab === "system") return "settings";
+    // "Server and runner" was one page (`system`, BOS-1492): it is now a group of six. The old address opens the first
+    // of them, Updates, which keeps the company; the other five are one click away in the side list.
+    if (tab === "system") return `settings/${company}/updates`;
     // The two tabs that were split up (BOS-1018's old → new map): their links land on the page that took each part.
     if (tab === "access") return `settings/${company}/tools`;
     if (tab === "workflow") return `settings/${company}/reviews`;
