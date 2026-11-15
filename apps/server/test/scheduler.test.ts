@@ -479,6 +479,54 @@ describe("scheduler", () => {
     expect(ctx.commands[0]!.prompt).toContain("Assigned work");
   });
 
+  it("picks a waiting check result for the agent's own in-progress ticket before an older 'assigned' wake for a new ticket (BOS-1555)", async () => {
+    ctx = await setup({ agent: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const mine = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Finished work" })).json();
+    const next = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "New work" })).json();
+    await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "in_progress" }).where(eq(tickets.id, mine.id));
+    await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "ready" }).where(eq(tickets.id, next.id));
+    await ctx.db.delete(wakes);
+    // The new-ticket wake is older and ranks the same, so the old order started it first.
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: next.id, reason: "assigned", priority: 2, createdAt: new Date(Date.now() - 60_000) });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: mine.id, reason: "check_result", priority: 2, note: "Quick check passed." });
+    expect(await ctx.tick()).toMatchObject({ launched: 1 });
+    expect(ctx.commands[0]!.prompt).toContain("Finished work");
+    const held = await ctx.db.select().from(wakes).where(eq(wakes.ticketId, next.id));
+    expect(held[0]!.status).toBe("queued");
+  });
+
+  it("holds a wake for a new ticket while the agent's check result waits for a slot, and starts it once the result has started (BOS-1555)", async () => {
+    ctx = await setup({ agent: 5, company: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const mine = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Finished work" })).json();
+    const next = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "New work" })).json();
+    await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "in_progress" }).where(eq(tickets.id, mine.id));
+    await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "ready" }).where(eq(tickets.id, next.id));
+    await ctx.db.delete(wakes);
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: next.id, reason: "assigned", priority: 3, createdAt: new Date(Date.now() - 60_000) });
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: mine.id, reason: "check_result", priority: 2, note: "Quick check passed." });
+    await ctx.tick();
+    // One slot for the company: only the result started, the new ticket waits.
+    expect(ctx.commands).toHaveLength(1);
+    expect(ctx.commands[0]!.prompt).toContain("Finished work");
+  });
+
+  it("drops older unstarted wakes for the same ticket and reason, keeping the newest (BOS-1555)", async () => {
+    ctx = await setup({ agent: 5 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const mine = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Finished work" })).json();
+    await ctx.db.update(tickets).set({ assigneeAgentId: worker.id, systemState: "in_progress" }).where(eq(tickets.id, mine.id));
+    await ctx.db.delete(wakes);
+    for (const [i, note] of ["first", "second", "third"].entries()) {
+      await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: worker.id, ticketId: mine.id, reason: "checking an old card", priority: 2, note, createdAt: new Date(Date.now() - (3 - i) * 60_000) });
+    }
+    expect(await ctx.tick()).toMatchObject({ launched: 1, dropped: 2 });
+    expect(ctx.commands[0]!.prompt).toContain("third");
+    const dropped = await ctx.db.select().from(wakes).where(eq(wakes.status, "dropped"));
+    expect(dropped).toHaveLength(2);
+  });
+
   it("drops a replay for a closed ticket, but still starts a nudge sent after it closed (BOS-256)", async () => {
     ctx = await setup({ agent: 5 });
     // A ticket the owner reopened after it closed, then closed once more: it is done, and the reopen
