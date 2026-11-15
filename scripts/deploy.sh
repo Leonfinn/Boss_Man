@@ -247,6 +247,8 @@ main() {
   run git merge --ff-only --quiet "$new"
   rebuild_and_start || { RESULT=failed; MESSAGE="server not healthy after ${HEALTH_TIMEOUT}s"; write_status; print_rollback_help; exit 1; }
   say "The server is healthy."
+  # BOS-1588: keep the host's own copy of the deployer script current; a failure here never fails the deploy.
+  if ((! DRY)) && [[ -x scripts/install-deployer.sh ]]; then scripts/install-deployer.sh || say "Warning: the deployer copy was not refreshed (see above); the deploy itself is fine."; fi
 
   local do_runner=0
   case $RUNNER in

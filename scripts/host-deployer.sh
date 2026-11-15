@@ -63,8 +63,10 @@ if [[ -e $CONF ]]; then
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
-# docs/09-self-deploy.md lists the same files.
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
+# what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
+# itself with scripts/install-deployer.sh (also on the list, as it runs as root).
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
@@ -902,10 +904,10 @@ host_extra_facts() {
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
-do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+do_deploy_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
 # commit the request named, which main() has already checked is HEAD, so nothing new can come in.
-do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
+do_restart_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -1738,6 +1740,8 @@ main() {
   if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
     # A good swap keeps measuring through the standby window (soak_tick); anything else ends here.
+    # BOS-1588: a good swap also refreshes this deployer's own copy (it takes effect on the next run); a failure only warns.
+    if [[ $BG_RESULT == deployed && -x $REPO/scripts/install-deployer.sh ]]; then BOSSMAN_DEPLOYER="$D" "$REPO/scripts/install-deployer.sh" >>"$LOG" 2>&1 || log "Warning: the deployer copy was not refreshed."; fi
     [[ $BG_RESULT == deployed ]] || { mem_report; BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."; }
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
