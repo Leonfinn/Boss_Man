@@ -55,6 +55,12 @@ type SelfDeployView = {
   lateAfterMinutes?: number;
   /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
   trial?: { endsAt: string; seconds: number } | null;
+  /** BOS-1469: a request waiting for the host or running; it comes first, and the last result moves below it as the previous attempt. */
+  active?: { phase: "waiting" | "running"; what: string; since: string } | null;
+  /** BOS-1469: the last real run when a refusal came after it (a refusal never replaces it). */
+  previousRun?: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
+  /** BOS-1469: the runner image's version next to the one the live server needs. */
+  runnerImage?: { running: string | null; needed: string | null };
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
   deployWait?: { until: string } | null;
   /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
@@ -213,9 +219,25 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     <Section id="deploy-h" title="Updates">
       {/* "Ask agents to wrap up", inside the update box (BOS-988): the main action while an update or rebuild waits on runs. */}
       <WrapUpAction m={maint.data} reload={maint.reload} />
-      <p style={{ fontSize: 14 }}>
-        {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
-      </p>
+      {v.active && (
+        <p style={{ fontSize: 14 }}>
+          <strong>{v.active.what}, pressed {when(v.active.since)}:</strong> {v.active.phase === "waiting" ? "waiting for the host, it checks every minute." : `running since ${when(v.active.since)}.`}
+        </p>
+      )}
+      {(() => {
+        const last = v.active && v.previousRun ? v.previousRun : s;
+        return (
+          <p className={v.active ? "muted" : undefined} style={{ fontSize: 14 }}>
+            {last ? `${v.active ? "Previous attempt" : "Last deploy"}: ${last.result.replace(/_/g, " ")}, ${last.target} ${last.to_commit.slice(0, 8)}, ${when(last.ended || last.started)}. ${last.message}` : v.active ? "" : "No deploy yet."}
+          </p>
+        );
+      })()}
+      {v.runnerImage?.needed && (
+        <p className="muted" style={{ fontSize: 14 }}>
+          Runner image: {v.runnerImage.running ? v.runnerImage.running.slice(0, 8) : "version not recorded"}. The live server needs {v.runnerImage.needed.slice(0, 8)}
+          {v.runnerImage.running ? (v.runnerImage.running === v.runnerImage.needed ? ": the runners match." : ": a runner update may still be needed.") : "."}
+        </p>
+      )}
       <p className="muted" style={{ fontSize: 14 }}>
         {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
       </p>

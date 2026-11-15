@@ -132,7 +132,20 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     }
   };
   const available = () => (dir ? readJson(path.join(dir, "outbox", "available.json"), Available) : Promise.resolve(null));
-  const status = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
+  /** The last real run: what the host's status.json holds. A refusal never replaces it (BOS-1469). */
+  const realStatus = () => (dir ? readJson(path.join(dir, "outbox", "status.json"), Status) : Promise.resolve(null));
+  /** The newest rate-limit refusal, kept apart from the real result (BOS-1469); null when none. */
+  const refusal = () => (dir ? readJson(path.join(dir, "outbox", "refused.json"), Status) : Promise.resolve(null));
+  /**
+   * What the host did last: the real run, or a refusal that came after it. Everything that reasons about "the last
+   * result" sees a refusal as before; the panel also gets the real run it did not replace (`previousRun`).
+   */
+  const status = async () => {
+    const [real, refused] = [await realStatus(), await refusal()];
+    if (!refused) return real;
+    if (!real || real.result === "running") return real ?? refused;
+    return Date.parse(refused.ended || refused.started) >= Date.parse(real.ended || real.started) ? refused : real;
+  };
   const pending = async () => !!inboxFile && (await stat(inboxFile).then(() => true, () => false));
   /** BOS-1086: whether the request waiting in the inbox is a runner update (read from the file the host reads; false when none or unreadable). */
   const pendingRunnerRequest = async () => {
@@ -145,6 +158,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   };
   const availableFile = dir && path.join(dir, "outbox", "available.json");
   const statusFile = dir && path.join(dir, "outbox", "status.json");
+  const refusedFile = dir && path.join(dir, "outbox", "refused.json");
   const checkedFile = dir && path.join(dir, "inbox", "checked");
 
   /**
@@ -223,7 +237,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    */
   const unchanged = async () => {
     const nowMs = Date.now();
-    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(inboxFile)])).join("|");
+    const print = (await Promise.all([fingerprint(availableFile), fingerprint(statusFile), fingerprint(refusedFile), fingerprint(inboxFile)])).join("|");
     const skip = seen !== null && seen.print === print && nowMs - seen.at < FORCED_SYNC_MS;
     // On a skip only the print is refreshed: the clock for the forced pass stays on the last real pass.
     seen = skip ? { print, at: seen!.at } : { print, at: nowMs };
@@ -873,6 +887,41 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return { until: new Date(ended + Number(mins) * 60_000).toISOString() };
   }
 
+  /**
+   * The host takes one deploy of each kind per RATE_LIMIT (10 minutes, stamped when the run starts). Plain words when
+   * the last real run of this kind started inside it, so a press is told so at once; null otherwise. Only the last
+   * run is known here, so a miss is possible and the host's refusal (shown in the panel) still covers it.
+   */
+  function rateLimitNote(s: DeployStatus | null, target: "server" | "runner" | "restart"): string | null {
+    if (!s || s.result === "rejected" || s.result === "nothing_new") return null;
+    const slot = (t: string) => (t === "restart" ? "server" : t);
+    if (slot(s.target) !== slot(target)) return null;
+    const left = Date.parse(s.started) + 600_000 - Date.now();
+    if (!Number.isFinite(left) || left <= 0) return null;
+    const mins = Math.ceil(left / 60_000);
+    return `Turned away: the host only takes one ${slot(target)} deploy every 10 minutes, and the last one started at ${clock(s.started)}. Press again in about ${mins} minute${mins === 1 ? "" : "s"}.`;
+  }
+
+  /**
+   * The request the owner pressed that the host has not finished (BOS-1469): waiting in the inbox (with the time the
+   * file was written) or running (since its start). Null when none. `what` is plain words for the button pressed.
+   */
+  async function activeRequest(s: DeployStatus | null): Promise<{ phase: "waiting" | "running"; what: string; since: string } | null> {
+    const words = (t: string | undefined) => (t === "runner" ? "Build and update runners" : t === "restart" ? "Restart the server" : "Server update");
+    if (inboxFile && (await pending())) {
+      let target: string | undefined;
+      try {
+        target = (JSON.parse(await readFile(inboxFile, "utf8")) as { target?: string }).target;
+      } catch {
+        target = undefined;
+      }
+      const since = (await stat(inboxFile).then((st) => st.mtime.toISOString(), () => null)) ?? new Date().toISOString();
+      return { phase: "waiting", what: words(target), since };
+    }
+    if (s?.result === "running") return { phase: "running", what: words(s.target), since: s.started };
+    return null;
+  }
+
   /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
   async function releaseRunnerDue(a: Available | null) {
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
@@ -1317,11 +1366,22 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // BOS-953: the runner trial (with the time it ends) and any "try again in N minutes" wait, both worked out
       // from the real time rather than the frozen text in the host's last status, so the panel counts down by itself.
       const trial = await trialState(a);
-      const wait = deployWait(s);
+      // BOS-1469: a request that is waiting for the host or running comes first in the panel, and a refusal from
+      // before it is shown as the previous attempt, without its "Try again in N minutes" (that press was superseded).
+      const active = await activeRequest(s);
+      const wait = active ? null : deployWait(s);
+      const [real, refused] = [await realStatus(), await refusal()];
+      const shown = s && active && s.result === "rejected" ? { ...s, message: s.message.replace(/\s*Try again in \d+ minute\(s\)\.?/i, "").trim() } : s;
+      const companyId = await homeCompany();
+      const runnerImage = companyId ? await runnerImageCommit(db, companyId) : null;
       // BOS-753: when the host deployer last showed it is alive, so Settings only says "not reported" when it really is overdue.
       return {
         enabled: !!dir,
-        status: s,
+        status: shown,
+        active,
+        // The last real run when a refusal is the newest word: the refusal never replaced it (BOS-1469).
+        previousRun: real && s && refused && s.id === refused.id && s.ended === refused.ended && real.result !== "running" ? real : null,
+        runnerImage: { running: runnerImage, needed: a?.deployed ?? null },
         available: a,
         pending: await pending(),
         deployer: await deployerSeen(a, s),
@@ -1362,6 +1422,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
+      // BOS-1469: say so now when the host's one-deploy-every-10-minutes limit would turn this away, not only later in the panel.
+      const limit = rateLimitNote(await realStatus(), ctx.target);
+      if (limit) throw new AnswerError(limit);
       if (ctx.target === "runner") {
         const a = await available();
         const trial = await trialState(a);

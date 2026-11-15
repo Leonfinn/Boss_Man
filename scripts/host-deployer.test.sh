@@ -322,8 +322,11 @@ has "$D/outbox/status.json" "already handled"
 c2="$(push apps/server/b)"
 req server "$c2"
 host
-[[ $(status result) == rejected ]] || fail "rate limit result"
-has "$D/outbox/status.json" "only one server deploy every 10 minutes"
+# BOS-1469: the refusal is its own record and never replaces the last real result in status.json.
+[[ $(jget "$D/outbox/refused.json" result) == rejected ]] || fail "rate limit result"
+has "$D/outbox/refused.json" "only one server deploy every 10 minutes"
+has "$D/outbox/status.json" "already handled" # the step before's result is still there
+! grep -q "only one server deploy" "$D/outbox/status.json" || fail "refusal text leaked into status.json"
 [[ $(calls) == 1 ]] || fail "deploy ran despite the rate limit"
 has "$T/hook.out" '"result": "rejected"'
 node -e '
@@ -521,8 +524,9 @@ has "$STUB_LOG" "deploy.sh --yes --no-runner --force --commit $head"
 # It shares the server's rate limit (one slot, state/last-server), both ways.
 [[ -e $D/state/last-server && ! -e $D/state/last-restart ]] || fail "restart did not use the server's rate-limit slot"
 req restart "$head"; host
-[[ $(status result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/status.json")"
-has "$D/outbox/status.json" "updated or restarted less than 10 minutes ago"
+[[ $(jget "$D/outbox/refused.json" result) == rejected ]] || fail "second restart inside the limit: $(cat "$D/outbox/refused.json")"
+has "$D/outbox/refused.json" "updated or restarted less than 10 minutes ago"
+[[ $(status result) == deployed && $(status target) == restart ]] || fail "the refused restart replaced the real result: $(cat "$D/outbox/status.json")"
 [[ $(calls) == $((before + 1)) ]] || fail "a restart ran inside the rate limit"
 # A commit that is not what runs (an update ran since the click): refused, nothing runs.
 rm -f "$D/state/last-server"
