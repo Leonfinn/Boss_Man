@@ -1,7 +1,7 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
 import { reportAnswered, reportFailure, reportSlow } from "./server-watch";
 import { sharedGet } from "./shared-get";
-import type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport } from "@boss-man/shared";
+import type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport, PortalShowVerdict } from "@boss-man/shared";
 
 export type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport };
 
@@ -521,6 +521,8 @@ export type Feature = {
   showPublicly: boolean;
   /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
   portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
+  /** Whether visitors actually see it, by the portal's own rule (BOS-1496). */
+  portalShow?: PortalShowVerdict;
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
