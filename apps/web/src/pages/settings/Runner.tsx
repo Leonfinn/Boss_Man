@@ -34,7 +34,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put the line <code className="mono">RUNNER_ADDONS={a.id}</code> in the server's <code className="mono">.env</code> file, then run <code className="mono">scripts/update-runner.sh</code> on the server as root (the administrator account). Skills that need it are left out of runs until then.
+                  To add it, put the line <code className="mono">RUNNER_ADDONS={a.id}</code> in the server's <code className="mono">.env</code> file. If that line is already there, add <code className="mono">,{a.id}</code> to its end instead, so the add-ons already listed stay. Then choose Updates → Build and update runners, or run <code className="mono">scripts/update-runner.sh</code> on the server as root (the administrator account). Skills that need it are left out of runs until then.
                 </p>
               )}
             </li>

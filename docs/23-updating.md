@@ -32,8 +32,12 @@ You need:
 
 Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
-- Single server, by hand: run `scripts/deploy.sh`. It backs up, pulls, rebuilds, restarts and waits for the server to report healthy. Add `--dry-run` to see the steps first. Success is the line `The server is healthy.` The full description is in [docs/00, step 14](00-first-time-install.md#14-updating-later) and [docs/06, step 9](06-install-truenas.md#9-updates-and-checks).
-- With the host deployer: approve the "Deploy <commit>?" card on Decisions, or use Settings → Server and runner → Updates → Deploy latest. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
+- With the host deployer: approve the "Deploy <commit>?" card on Decisions. Settings → Server and runner → Updates shows the same offer under **Review and deploy**, or **Check for updates now** when there is none yet. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
+- Single server, by hand: run `scripts/deploy.sh` from the checkout. It backs up, pulls, rebuilds, restarts, waits for the server to report healthy, and offers to update the runners if their code changed. Success is the line `The server is healthy.` Useful options:
+  - `--dry-run` shows the steps without running anything.
+  - `--force` rebuilds even when there is nothing new.
+  - `--runner` or `--no-runner` forces or skips the runner update. `--yes` skips its question.
+  - `--rollback` puts the previous commit back and rebuilds. It never touches the database.
 - Blue/green: `scripts/deploy.sh` refuses to run. The host deployer swaps the colours for you. See [docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional).
 
 The host deployer refuses changes to files that control how Boss Man runs or deploys: `deploy/`, the compose files, the deploy scripts and any `Dockerfile`. If an update contains one, apply it by hand. On a single server, run `scripts/deploy.sh`. On blue/green, follow "What the deployer will not do for you" in [docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional).
@@ -44,17 +48,7 @@ If the health check fails, the script changes nothing by itself and prints the c
 
 Skip this step if you do not use the host deployer.
 
-The host deployer runs from its own copy of `scripts/host-deployer.sh`, so an update to the checkout does not change it. This script changes often. Set `D` to your deployer folder, then compare the two copies:
-
-```sh
-cmp scripts/host-deployer.sh $D/host-deployer.sh
-```
-
-If `cmp` prints nothing, the copies are the same. If it prints a difference, read the new script, then copy it:
-
-```sh
-cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
-```
+The host deployer runs from its own copy of `scripts/host-deployer.sh`, so an update to the checkout does not change it. You do not need to compare the copies yourself. When the host's copy is behind, Boss Man puts a card on Decisions with the copy command for your folders, a check and an undo, and Settings → Server and runner → This server says "Deployer script: behind". Read the new script, then run the card's commands. The card closes by itself once the host runs the new copy.
 
 Do not link to the checkout instead of copying. A link would let a merged change alter what root runs.
 
@@ -68,7 +62,14 @@ To update the runners yourself, use Settings → Server and runner → Updates �
 scripts/update-runner.sh
 ```
 
-With the launcher, Boss Man drains first: nothing new starts and runs in progress finish. Each runner is then swapped when its company is idle. A banner shows on every page until every runner is on the new image, and then you get a notification. To undo, run `scripts/update-runner.sh --rollback`. The details are in [docs/06, step 9](06-install-truenas.md#9-updates-and-checks) and [docs/09](09-self-deploy.md).
+With the launcher, Boss Man drains first: nothing new starts and runs in progress finish. Each runner is then swapped when its company is idle. A banner shows on every page until every runner is on the new image, and then you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env`), you get one decision: stop them and update now, keep waiting, or cancel. Follow it in the status box at the top of Settings → Server and runner → Updates, which also has **Cancel the runner update**.
+
+Without the host deployer, the script cannot ask Boss Man to drain, and says so. Start the swap yourself with **Update runners (finish runs first)** on the same Updates page.
+
+- Undo a runner update: `scripts/update-runner.sh --rollback`.
+- Emergency, restart every runner now and cut off runs in progress: `scripts/update-runner.sh --now`.
+
+How the drain works is in [docs/09](09-self-deploy.md).
 
 A runner update takes no backup. Runners hold no database.
 
@@ -96,7 +97,56 @@ The script refuses to start unless the database volume has at least twice the li
 
 If the code is the problem, roll back the code with `scripts/deploy.sh --rollback`. Your data stays as it is.
 
-Restore the database only if an update has damaged the data itself. A restore replaces the live data and loses everything written since the backup. Follow "Restore the live database from a backup (last resort)" in [docs/06, step 9](06-install-truenas.md#9-updates-and-checks).
+### Restore the live database from a backup (last resort)
+
+Restore the database only if an update has damaged the data itself. If the code is the problem, use `scripts/deploy.sh --rollback` (or `host-deployer.sh --rollback` on blue/green) instead: they never touch the data. A restore **replaces the live data** and loses everything written after the backup was taken. Do it at a quiet time, and ask for help if anything below does not look as described. Run every command as root from the checkout. The backups are in the folder above it.
+
+1. Pick the backup and rehearse it on the throwaway database first (the live database is not written to). It must end with a line starting `OK:`. If it does not, stop and choose another file:
+```sh
+ls -lt ../bossman-*.sql.gz | head -5
+```
+```sh
+scripts/restore-test.sh ../bossman-YYYY-MM-DD-HHMM.sql.gz
+```
+2. Note the data you will lose: the "live minus restored" column of that output, and the age on its `Backup:` line.
+3. Stop the app so nothing writes. With a single server:
+```sh
+docker compose stop server
+```
+   With blue/green ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), stop both colours:
+```sh
+docker compose stop server-blue server-green
+```
+4. Keep a copy of the current, damaged data in case the restore was the wrong call (this file is a full copy of your data; delete it when you are sure):
+```sh
+docker compose exec -T db pg_dump -U bossman bossman | gzip > ../before-restore-$(date +%F-%H%M).sql.gz && ls -l ../before-restore-*.sql.gz
+```
+5. Replace the live database. The first command fails with "being accessed by other users" if something is still connected: go back to step 3 and do not continue.
+```sh
+docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'
+```
+```sh
+gunzip -c ../bossman-YYYY-MM-DD-HHMM.sql.gz | docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U bossman -d bossman
+```
+6. Start the app. Single server:
+```sh
+docker compose up -d
+```
+   Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep 'Live colour' <deployer-folder>/proxy/active.caddy`, where `<deployer-folder>` is the `BOSSMAN_DEPLOYER` value in `.env`), then start only that colour:
+```sh
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
+```
+```sh
+docker compose up -d --no-deps server-blue
+```
+   If the live colour is green, also run `docker compose kill -s SIGUSR2 server-green`; green starts as a standby and nothing is in charge until it gets that signal.
+7. Check: `curl -s http://<host-ip>:<port>/api/ready` shows `"role":"leader"`; sign in and open Tickets; and compare the counts with the rehearsal output:
+```sh
+docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FROM tickets' -c 'SELECT count(*) FROM drizzle.__drizzle_migrations'
+```
+8. To undo the restore (step 4's copy holds the damaged state): repeat steps 3, 5 and 6 with `../before-restore-….sql.gz`.
+
+If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
 
 ## Breaking changes
 
@@ -139,11 +189,13 @@ If agents need any other service on your home network or tailnet, list it in `.e
 BOSSMAN_NETGUARD_ALLOW="host:port host:port"
 ```
 
-The launcher reads `.env` only when it is recreated. Recreate it, then recreate the runners. `--settings` waits for runs to finish:
+Then apply it. This recreates the launcher so it reads `.env`, then recreates each runner once its company is idle:
 
 ```sh
-docker compose up -d launcher && scripts/update-runner.sh --settings
+scripts/update-runner.sh --settings
 ```
+
+It needs the host deployer to ask Boss Man to wait for runs. Without one it says so and changes nothing; `scripts/update-runner.sh --settings --now` then applies it at once, cutting off runs in progress.
 
 Settings → Server and runner lists the entries the launcher is using. How the guard works, and how to turn it off, is in [docs/27-netguard.md](27-netguard.md).
 
@@ -162,4 +214,4 @@ To see what changed, use these 2 sources:
 
 `scripts/deploy.sh` says "Nothing new to deploy". The checkout is already at the newest commit. Add `--force` only if you want to rebuild anyway.
 
-Deploy latest refuses an update. The update changes a file the deployer refuses. Apply it by hand, as in step 2.
+The update card is only an alert ("Got it") and does not deploy. The update changes a file the deployer refuses. Apply it by hand, as in step 2.

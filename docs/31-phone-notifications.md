@@ -36,11 +36,7 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    Nothing else is needed. ntfy finds the `edge` network by its default name (`boss-man_edge`). Only if you changed the Compose project name, or want a different data folder, set `NTFY_EDGE_NETWORK` (the network's name, which `docker network ls` lists; it ends in `_edge`) or `NTFY_DATA`.
 
-3. **Start it.** First check that Tailscale Serve publishes port 8443. This must print `1`:
-   ```sh
-   grep -c ':8443' deploy/tailscale/serve.json
-   ```
-   Then start ntfy:
+3. **Start it.** Tailscale Serve already publishes port 8443 (it is in `deploy/tailscale/serve.json`). Start ntfy:
    ```sh
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
    ```
@@ -50,35 +46,35 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    It should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it mentions Funnel, stop and run the rollback below.
 
-4. **Pick a topic and make two users.** Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make one user that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
+4. **Pick a topic and make the publish user.** Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make the user Boss Man publishes as. `ntfy user add` asks for a password, so type a long one:
    ```sh
    docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
    ```
    ```sh
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
-   ```
-   ```sh
    docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
    ```
    ```sh
    docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 
+   The phone's read-only user comes in step 6. With the host deployer set up, a button makes it for you. Without the host deployer, make it now:
+   ```sh
+   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
+   ```
+   ```sh
+   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
+   ```
+
 5. **Tell Boss Man.** Open **Notifications** in the side menu. In the **How you're told** box below the feed:
    - Tick **Send to my phone through my own ntfy server**.
    - **ntfy server:** `http://ntfy:80`. Boss Man and ntfy share the private `edge` network, so Boss Man needs no tailnet name.
    - **Topic:** your topic.
    - **Access token:** the publish token from step 4. Boss Man stores it encrypted as "ntfy access token", so you do not add it under **Settings > Secrets** yourself.
-   - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address.
+   - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address. If you opened this page through that address, it is already filled in.
    - Choose **Save**.
 
-   Already saved on the **Notifications** page? The **Create phone login** button under **Set up your phone** makes the `phone-read` user and its read-only access for you and shows the password once, so you can skip the `phone-read` lines in step 4 (it needs `openssl` on the host; the page says if it is missing). If you try the button after making the user by hand, it says the user exists and offers **Reset password**.
-
-6. **Set up the phone.** In the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
+6. **Set up the phone.** With the host deployer, choose **Create phone login** under **Set up your phone** on the **Notifications** page. It makes the `phone-read` user with read-only access to your topic and shows its password once (it needs `openssl` on the host; the page says if it is missing). If the user already exists, it offers **Reset password**. Then, in the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
 
 7. **Send a test.** On the **Notifications** page, choose **Send a test to my phone** (it only appears after you Save). It should arrive within seconds. A test that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.
 
@@ -128,7 +124,7 @@ ntfy rides on the Tailscale container, which runs in Tailscale's userspace mode 
 docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down
 ```
 
-Port 8443 then answers with an error until you start it again. To remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
+Port 8443 then answers with an error until you start it again. That is harmless. Do not edit `deploy/tailscale/serve.json` to remove it: it is part of the checkout, and a changed file makes `scripts/deploy.sh` refuse to run. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
 
 ## Related pages
 

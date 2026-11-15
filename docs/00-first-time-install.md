@@ -1,6 +1,6 @@
 # 00 — First-time install
 
-This is the short path from nothing to a working Boss Man on a Linux host with Docker. It has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). For a worked example on TrueNAS SCALE, see [docs/06-install-truenas.md](06-install-truenas.md).
+This is the short path from nothing to a working Boss Man on a Linux host with Docker. It has the install steps only. Tuning (memory limits and more) and troubleshooting are in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md). On TrueNAS SCALE, follow this guide too, with the differences in the next section and the extras in [docs/06-install-truenas.md](06-install-truenas.md).
 
 > **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
 
@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is sized at 16 GB of memory for one check slot, less on a smaller host.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is given about 2 GB, plus 1 GB for each agent that runs at once, plus 3 GB for each check slot, and at least 4 GB. Memory limits are in [docs/29](29-tune-and-troubleshoot.md#memory-limits).
 - **On Proxmox, a VM, not an LXC container.** Install Docker in the VM and follow these steps inside it. Why: [docs/32-proxmox.md](32-proxmox.md).
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
@@ -153,7 +153,7 @@ mkdir -p $B/data/postgres
 ## 4. Write the settings file
 
 Boss Man reads a file called `.env` in the repo folder. This one:
-- turns on the **launcher**, which starts each company's runner for you (details in [docs/06, step 7b](06-install-truenas.md#7b-let-the-launcher-run-the-runners-recommended));
+- turns on the **launcher**, which starts each company's runner for you. It is the only container that can reach Docker, and it accepts only "start, stop or restart company X's runner";
 - opens the web page on your host's LAN address only.
 
 Before you run the command, replace `<host-ip>` (the `BOSSMAN_BIND` line) with your host's address on your home network, for example `192.168.1.20`. The command reads the Docker socket's group number for you.
@@ -205,25 +205,19 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page), the launcher and netguard. The network guard (netguard) is not a service of its own: the launcher starts one small guard container beside every runner, so its image must be built too (name it, as below). Your Docker dashboard may show "update check failed" on the runner and guard containers; that is expected and harmless (the images are built here, not pulled), and you update them with Build and update runners:
+Build the server (it includes the web page) and the launcher:
 
 ```sh
-docker compose build server launcher netguard
+docker compose build server launcher
 ```
 
-Using the optional blue/green setup? Build both server copies instead:
-
-```sh
-docker compose build server-blue server-green launcher netguard
-```
-
-Build the runner image. This builds it, runs a safety check (the "canary") with networking off and no credentials, and only then marks it ready. It then starts everything.
+Build the runner image and the network guard that runs beside each runner. The script builds them, runs a safety check (the "canary") with networking off and no credentials, and only then marks the runner image ready. It then starts everything.
 
 ```sh
 scripts/update-runner.sh
 ```
 
-Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset.
+Expect a line saying no launcher is running, so it restarts runners at once. That is harmless on a first install: it is how the script brings the stack up. If the canary fails, it says so and leaves the runner image unset. Your Docker dashboard may later show "update check failed" on the runner and guard containers. That is expected: the images are built here, not pulled.
 
 Check it worked:
 
@@ -273,7 +267,7 @@ Check it worked: you see "Saved." and the step shows a tick.
 - With the launcher on, the step shows the container `boss-man-runner-<slug>`. If the connection says **Not started**, choose **Start runner**.
 - Wait for the tag to say **Connected**. It goes through **Starting…** first. This can take up to a minute.
 
-Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected). To run runners without the launcher instead, see [docs/06, step 7](06-install-truenas.md#7-the-runner-token).
+Check it worked: **Connected**. If not, see [docs/29, "The runner stays Offline"](29-tune-and-troubleshoot.md#the-runner-stays-offline-or-never-says-connected).
 
 ## 9. Wizard steps "Claude" and "A git token"
 
@@ -344,27 +338,15 @@ Check it worked: a run appears under **Runs** within a minute or two and the tic
 
 ## 14. Updating later
 
-Set `B` first if this is a new shell (step 1).
-
-**The server and web page.** The deploy script backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and updates runners only if their code changed:
+Read [docs/23-updating.md](23-updating.md) before each update. In short, from the checkout:
 
 ```sh
 cd $B/src && scripts/deploy.sh
 ```
 
-Add `--dry-run` to see the steps without running them. It stops if the checkout has uncommitted changes or isn't on the default branch, and says so. If the health check fails it prints the rollback commands and changes nothing by itself.
+It backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and offers to update the runners when their code changed. Docs/23 covers the runners, backups and what to do if an update goes wrong.
 
-**The runner** (roughly weekly, for new Claude Code releases, and after any change under `apps/runner`, `apps/launcher` or `packages/shared`). It builds a new image and checks it. With the launcher on, Boss Man then drains (nothing new starts, runs finish) and swaps each runner when its company is idle. It doesn't back up anything.
-
-```sh
-cd $B/src && scripts/update-runner.sh
-```
-
-Follow it in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)** on the same card. With the host deployer set up, that button is under **For a hand-built runner image**. To undo, run `scripts/update-runner.sh --rollback`.
-
-**Update from the web page (optional).** With the host deployer, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates** appears. Set it up with [docs/30-in-app-updates.md](30-in-app-updates.md).
-
-Before each update, read [docs/23-updating.md](23-updating.md).
+To update from the web page instead, with one approval on **Decisions**, set up the host deployer: [docs/30-in-app-updates.md](30-in-app-updates.md).
 
 ## Security notes
 
@@ -375,7 +357,7 @@ Before each update, read [docs/23-updating.md](23-updating.md).
 - **Never paste tokens into chats, tickets or wiki pages.** Anything an agent can read, it may repeat.
 - **Back up `secrets/master.key` off the host.** Without it, stored secrets can't be decrypted.
 - **Give git tokens the least access needed:** only the repos the company works on.
-- **Protect your default branch** so agents can only land reviewed pull requests, especially if you set up Deploy latest.
+- **Protect your default branch** so agents can only land reviewed pull requests, especially if you set up updates from the web page.
 
 ## Next steps
 
@@ -385,8 +367,8 @@ Before each update, read [docs/23-updating.md](23-updating.md).
 - [docs/20-https-tailscale.md](20-https-tailscale.md): HTTPS through Tailscale, for access away from home.
 - [docs/32-proxmox.md](32-proxmox.md): running Boss Man on Proxmox (use a VM).
 - [docs/21-move-to-new-host.md](21-move-to-new-host.md): moving Boss Man to another Docker host.
-- [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, blue/green and the feedback portal.
-- [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
+- [docs/06-install-truenas.md](06-install-truenas.md): TrueNAS SCALE extras: the dataset, snapshots, blue/green and the feedback portal.
+- [docs/09-self-deploy.md](09-self-deploy.md): how updates from the web page, the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.
 - [docs/14-paperclip-migration.md](14-paperclip-migration.md): move a company over from Paperclip, as an optional later step.
 - [docs/11-import-export.md](11-import-export.md): export a company as a backup or import one (**Settings > Import and export**).

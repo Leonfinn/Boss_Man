@@ -2,7 +2,7 @@
 
 This page is for owners who want to update Boss Man from its own web page, rather than by typing `scripts/deploy.sh` on the host. It works on any Linux host that runs Docker. A short section at the end covers TrueNAS SCALE.
 
-Once it is set up, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves. You approve it, and a root script on the host (the **host deployer**) runs `scripts/deploy.sh` for you. **Settings → Server and runner → Updates** gains **Deploy latest**, **Build and update runners** and **Restart the server**.
+Once it is set up, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves. You approve it, and a root script on the host (the **host deployer**) runs `scripts/deploy.sh` for you. **Settings → Server and runner → Updates** shows the same offer (**Review and deploy**, or **Check for updates now** when there is none), and gains **Build and update runners** and **Restart the server**.
 
 It is optional. Without it you update by hand, as [docs/23-updating.md](23-updating.md) says. How it works and what it refuses is in [docs/09-self-deploy.md](09-self-deploy.md). Nothing here gives a container the Docker socket: the server only drops request files in a folder, and the host script decides.
 
@@ -74,7 +74,7 @@ Read it first (`less $B/src/scripts/host-deployer.sh`). Copy it. Do not link to 
 cp $B/src/scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
 
-When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it. Read the change, update by hand with `scripts/deploy.sh`, and copy the script over again. [docs/23-updating.md, step 3](23-updating.md#3-copy-the-deployer-script-if-it-changed) shows how to tell.
+When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it. Update by hand with `scripts/deploy.sh`. Boss Man then sees that the host's copy is behind and puts a card on Decisions with the copy command for your folders; read the change and run it ([docs/23-updating.md, step 3](23-updating.md#3-copy-the-deployer-script-if-it-changed)).
 
 ## 4. Add an alert webhook (optional)
 
@@ -115,7 +115,7 @@ $D/host-deployer.sh && cat $D/outbox/available.json
 
 You should see a short block of JSON.
 
-Then rehearse a request without running anything. `--dry-run` runs every check and changes nothing:
+Optional: rehearse a request without running anything. `--dry-run` runs every check and changes nothing. Skip to step 6 if you would rather see the first real update in step 8:
 
 ```sh
 TIP=$(git -C $B/src ls-remote origin refs/heads/main | cut -f1)
@@ -190,15 +190,15 @@ The log is `$D/deployer.log`.
 
 ## 8. Try it
 
-When `main` is ahead, a "Deploy abc1234?" decision appears, with a notification. **Settings → Server and runner → Updates → Deploy latest** raises it on demand. Approve it. Within a minute the host starts the update, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the host with `tail -f $D/deployer.log`.
+When `main` is ahead, a "Deploy abc1234?" decision appears, with a notification. **Settings → Server and runner → Updates → Check for updates now** asks the host to look at once. Approve it (on Decisions, or **Review and deploy** on Updates). Within a minute the host starts the update, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the host with `tail -f $D/deployer.log`.
 
-**Deploy** and **Deploy latest** update the server only. When an update changes the runners' code, a second decision "Update the runners?" appears after the server is deployed. Approving it builds the new runner image, then drains: runs in progress finish and each runner is swapped when its company is idle. Anything under `packages/shared/` counts as runner code, even text the runner never reads; when the change is only that, **Not now** is fine.
+A server deploy updates the server only. When an update changes the runners' code, a second decision "Update the runners?" appears after the server is deployed. Approving it builds the new runner image, then drains: runs in progress finish and each runner is swapped when its company is idle. Anything under `packages/shared/` counts as runner code, even text the runner never reads; when the change is only that, **Not now** is fine.
 
 ## What you may see instead of a deploy
 
 - **"Rejected: this change touches deployment files"**: run `scripts/deploy.sh` yourself in `$B/src`. The deployer refuses changes to files such as `scripts/`, `deploy/`, compose files and Dockerfiles.
-- **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Deploy latest**.
-- **"is not the tip of main"**: `main` moved after you approved. Approve the new one. The host looks at `main` at most every 5 minutes, so after two merges close together Boss Man can briefly offer the older one. To refresh at once: `rm -f $D/outbox/available.json` (the next minute writes a new one).
+- **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Try again** on Updates.
+- **`main` moved after you approved:** nothing to do. The approval deploys the newest checked commit on `main`. Only if `main` was rewritten so the approved commit is gone do you see "is not on main any more"; a new question for `main` follows within a few minutes.
 - **An alert about deployment files you have already applied by hand**: the note was written before you did. Press **Got it**; it refreshes within about 6 minutes.
 - **Updates stuck behind an infra change.** The deployer offers only the tip of `main`. While an unapplied infra change is in that range, every later update waits behind it until you apply it by hand. Merge infra changes on their own, after the app changes before them are deployed.
 - **The update waits for free memory.** The deployer holds a request while the host is short of memory and tries again each minute. [docs/09-self-deploy.md](09-self-deploy.md#the-hosts-memory-floor-scriptshost-deployersh) explains the numbers.

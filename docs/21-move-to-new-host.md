@@ -90,27 +90,7 @@ git --version && flock --version | head -1 && curl --version | head -1
 
 **Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. Merges may still change it before stage 3, so the stage 3 card names the final commit and stage 4 moves the checkout to it (`git -C "$BOSSMAN_HOME/src" reset --hard <commit>`) before building.
 
-The repository is private, so the new host needs its own read-only deploy key (never copy the old host's). Make the key:
-
-```sh
-ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$BOSSMAN_HOME/deploy_key"
-```
-
-Print the public half and add it on GitHub: the repository's Settings > Deploy keys > Add deploy key, paste it, leave "Allow write access" unticked:
-
-```sh
-cat "$BOSSMAN_HOME/deploy_key.pub"
-```
-
-Clone with that key, and save the key in the checkout so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too (replace `OWNER/REPO` with your repository):
-
-```sh
-GIT_SSH_COMMAND="ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git "$BOSSMAN_HOME/src"
-```
-
-```sh
-git -C "$BOSSMAN_HOME/src" config core.sshCommand "ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes"
-```
+Get the code into `$BOSSMAN_HOME/src` as in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host), with `B` set to `$BOSSMAN_HOME`. For a private repository that means a new read-only deploy key for this host: never copy the old host's.
 
 Check it reads the repository (prints commit ids, no password prompt):
 
@@ -124,7 +104,7 @@ Check the Docker socket group, for `BOSSMAN_DOCKER_GID` in `.env`:
 stat -c %g /var/run/docker.sock
 ```
 
-Make the folders and give the data to uid 1000 (compare `docs/06` step 3 and 7b):
+Make the folders and give the data to uid 1000 (as in [docs/00, step 3](00-first-time-install.md#3-make-the-folders-the-master-key-and-the-token-file), plus the database folder for the TrueNAS overlay):
 
 ```sh
 mkdir -p "$BOSSMAN_HOME/data/postgres" "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secrets"
