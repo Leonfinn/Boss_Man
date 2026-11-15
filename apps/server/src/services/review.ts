@@ -2363,7 +2363,7 @@ export function reviewService(
       }
       if (m.status === "conflicts") {
         const delivered = await sendBack(
-          `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}.${m.why ? ` The gate tried to renumber the migration itself and refused: ${m.why}.` : ""} Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
+          `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}.${"why" in m && m.why ? ` The gate tried to renumber the migration itself and refused: ${m.why}.` : ""} Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
           "merge conflicts",
         );
         return { outcome: "conflicts", delivered, detail: m };
