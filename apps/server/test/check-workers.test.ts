@@ -35,13 +35,25 @@ async function setup(opts: { runnerSlots?: number; graceMs?: number } = {}) {
   const toWorker: Array<{ workerId: string; command: any }> = [];
   const closed: Array<{ workerId: string; code: number }> = [];
   let runnerUp = true;
-  const d = checkDispatcher(db, {
-    send: (runnerId, command) => (runnerUp ? (toRunner.push({ runnerId, command }), true) : false),
-    isConnected: () => runnerUp,
-    can: () => true,
+  const removed: string[] = [];
+  // setRunnerUp(false): the runner takes no checks itself (as if its slots were full), but stays connected, because since
+  // BOS-1436 a worker gets its code only through the company runner.
+  const dispatcher = checkDispatcher(db, {
+    send: (runnerId, command) => (runnerUp || command.type !== "check.run" ? (toRunner.push({ runnerId, command }), true) : false),
+    isConnected: () => true,
+    can: () => runnerUp,
     workers,
     workerGraceMs: opts.graceMs ?? 30,
+    // BOS-1436: the runner "packs" at once; the code itself is covered in check-bundles.test.ts.
+    bundles: { store: { remove: (id) => void removed.push(id), sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
   });
+  // A worker's job starts once its code is packed, after pump returns: every call here waits for that too.
+  const d = new Proxy(dispatcher, {
+    get: (t, k) => {
+      const v = (t as Record<string | symbol, unknown>)[k];
+      return typeof v === "function" && k !== "settled" ? async (...a: unknown[]) => { const r = await (v as (...x: unknown[]) => unknown)(...a); await t.settled(); return r; } : v;
+    },
+  }) as typeof dispatcher;
   const q = checkQueue(db);
   let n = 0;
   const req = async (c: typeof co, extra: Record<string, unknown> = {}) => {
@@ -160,10 +172,19 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const workers = s.workers;
     const sent: any[] = [];
     const w = await s.worker({ threads: 3, memoryMb: 7168 });
-    const d = checkDispatcher(db, { send: () => false, isConnected: () => false, can: () => true, scanList: async () => "ip\t192.0.2.77", workers: { ...workers, send: (_id, c) => (sent.push(c), true) } });
+    // The runner is connected (it packs the worker's code, BOS-1436) but takes no checks itself.
+    const d = checkDispatcher(db, {
+      send: () => false,
+      isConnected: () => true,
+      can: () => false,
+      scanList: async () => "ip\t192.0.2.77",
+      workers: { ...workers, send: (_id, c) => (sent.push(c), true) },
+      bundles: { store: { remove: () => {}, sweep: () => [] }, canPack: () => true, pack: async () => ({ sha256: "f".repeat(64), bytes: 1, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: false }) },
+    });
     await s.req(s.co, { kind: "merge", scope: "full" });
     await d.pump();
-    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77" });
+    await d.settled();
+    expect(sent[0]).toMatchObject({ type: "check.run", limits: { threads: 3, memoryMb: 7168 }, scanList: "ip\t192.0.2.77", bundle: { bytes: 1 } });
     w.release();
   });
 
@@ -185,7 +206,8 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect((await s.job(onRunner.id)).state).toBe("running");
     // Progress from the wrong machine is ignored too.
     await s.d.onProgress(s.co.runnerId, { jobId: onWorker.id, tail: "from the runner" });
-    expect((await s.job(onWorker.id)).logTail).toBeNull();
+    // (The line it shows is still the dispatcher's own "getting the code" one, BOS-1436.)
+    expect((await s.job(onWorker.id)).logTail).toBe("Getting the code to the check worker.");
     await s.d.onWorkerProgress(w.id, { jobId: onWorker.id, tail: "from the worker" });
     expect((await s.job(onWorker.id)).logTail).toBe("from the worker");
     // The right machines answer.

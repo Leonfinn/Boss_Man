@@ -111,9 +111,9 @@ export const OWNER_CONTROLS = {
   Feedback: [
     "Add feedback", "Add to the inbox", "Cancel", "Use the whole note", "Create …", "Back to the list", "Unlink",
     "Link to …", "Done: mark processed", "Back to unprocessed", "Archive", "Delete", "Copy", "New link", "Remove",
-    "Feedback portal", "Search", "Anonymous …",
+    "Feedback portal", "Search", "Anonymous …", "Save times",
   ],
-  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea"],
+  "Feedback portal": ["Edit your comment", "Tell us why", "Remove my vote", "Send", "Cancel", "Send idea", "Send my vote"],
   Agents: [
     "Refresh models", "Asking the runner", "Choose from the list", "Hire …", "Use the default", "Replace with the current …",
     "Fill in from the …", "Rehire", "Undo", "Save", "Add note", "Cancel", "Edit", "Delete", "Start", "Pause", "Close",
@@ -237,10 +237,12 @@ export const OWNER_FIELDS = {
   Feedback: [
     "Feedback, as they said it", "Title (optional)", "From (optional)", "Their email (optional)", "Segment (optional)",
     "Came in by", "Feature", "Portal on", "Heading", "Replace", "Add logo", "Introduction", "Link back to your website (optional)", "Link text (optional)", "Search feedback",
+    "Visitors must click a link we email them before a post, comment or vote counts", "Link works for (hours)",
+    "Remember a confirmed browser for (days)",
   ],
   "Feedback portal": [
     "Your name (optional)", "Email, if you'd like to hear back (optional)", "What would it let you do",
-    "Your idea, in a few words", "What problem would it solve for you", "Website",
+    "Your idea, in a few words", "What problem would it solve for you", "Website", "Your email",
   ],
   Agents: [
     "Thinking", "Blank", "Name", "Job title", "Agent", "Model", "Paid from", "Instructions", "Upload a picture", "Title",

@@ -23,11 +23,18 @@ export const RECHECK_CEO_MS = 30 * 60_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The cards this table judges: an agent's own question or plan, never a card Boss Man raised itself (the ladder) or a sign-off. */
-export const checkableCard = sql`(${decisions.raisedByAgentId} is not null and ${decisions.context}->'ladder' is null and (${decisions.context}->>'type' = 'question' or (${decisions.context}->>'type' = 'permission' and ${decisions.context}->>'plan' = 'true')))`;
+export const checkableCard = sql`(${decisions.raisedByAgentId} is not null and ${decisions.context}->'ladder' is null and (${decisions.context}->>'type' in ('question', 'engagement') or (${decisions.context}->>'type' = 'permission' and ${decisions.context}->>'plan' = 'true')))`;
 
 type CardRow = { id: string; companyId: string; createdAt: Date; question: string; context: unknown };
 
-type Ctx = { type?: string; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown };
+type Ctx = { type?: string; plan?: boolean; ticketId?: string; runId?: string; criterionIndexes?: unknown; steps?: unknown; setsUp?: unknown; engagementId?: string; ladder?: { ticketId?: string | null } };
+
+/** The same cards as `checkableCard`, for a row already in hand (answering and phone approve). */
+export function isCheckableCard(d: { raisedByAgentId: string | null; context: unknown }): boolean {
+  const c = d.context as Ctx;
+  if (!d.raisedByAgentId || c.ladder) return false;
+  return c.type === "question" || c.type === "engagement" || (c.type === "permission" && c.plan === true);
+}
 
 /** True when this plan or permission card's run is still alive: that run is waiting on the answer, so only its own end closes the card. */
 export async function holdsLiveRun(db: Db, context: unknown): Promise<boolean> {
@@ -39,7 +46,7 @@ export async function holdsLiveRun(db: Db, context: unknown): Promise<boolean> {
 
 /** The tickets a card is about: the one it names, else the ones it holds up. */
 async function cardTickets(db: Db, d: CardRow) {
-  const named = (d.context as Ctx).ticketId;
+  const named = (d.context as Ctx).ticketId ?? (d.context as Ctx).ladder?.ticketId;
   const ids = typeof named === "string" && UUID_RE.test(named)
     ? [named]
     : (await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id))).map((r) => r.id);
@@ -54,6 +61,11 @@ async function cardTickets(db: Db, d: CardRow) {
 export async function cardInvalidReason(db: Db, d: CardRow): Promise<string | null> {
   const c = d.context as Ctx;
   const isPlan = c.plan === true;
+  if (c.type === "engagement" && typeof c.engagementId === "string") {
+    // The owner's approval row lives only while the engagement still waits for it; a withdrawn or declined one is over.
+    const [e] = await db.select({ status: engagements.status }).from(engagements).where(eq(engagements.id, c.engagementId));
+    return !e || e.status === "requested" || e.status === "countered" ? null : `the engagement is ${e.status.replace("_", " ")}`;
+  }
   if (await holdsLiveRun(db, d.context)) return null;
   const ts = await cardTickets(db, d);
   const afterMerge = !isPlan && (c.criterionIndexes !== undefined || c.steps !== undefined || c.setsUp !== undefined);

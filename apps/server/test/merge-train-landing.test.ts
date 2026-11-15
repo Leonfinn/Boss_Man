@@ -246,7 +246,32 @@ describe("merge train landings (BOS-1366)", () => {
     // B's first try was stacked on A; the one that landed was on main.
     const bPrepares = c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B");
     expect(bPrepares[0]!.base).toBeDefined();
+    // BOS-1518: right after the stacked clash it is asked on main alone; clean there, so it waits rather than goes back.
+    expect(bPrepares[1]!.base).toBeUndefined();
     expect(bPrepares.at(-1)!.base).toBeUndefined();
+  });
+
+  it("a clash with main itself is sent back at once, not after the train drains (BOS-1518)", async () => {
+    const c = await setup();
+    c.git.outside("X");
+    c.git.clashes.push(["A", "B"], ["X", "B"]);
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    // No check runs yet: A's check stays queued, so the train can't drain. B must still get its answer now.
+    expect(await c.outcome(b)).toBe("conflicts");
+    expect(c.git.pushes).toEqual([]);
+    expect((await c.db.select({ s: checkJobs.state }).from(checkJobs).where(eq(checkJobs.ticketId, a)))[0]?.s).toBe("queued");
+    // One stacked try, one on main alone, and no check job or head-only wait for B.
+    const bPrepares = c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B");
+    expect(bPrepares.map((s) => !!s.base)).toEqual([true, false]);
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, b))).length).toBe(0);
+    expect((await c.events(b, "hold_started")).filter((d) => /main alone/.test(String(d.note)))).toEqual([]);
+    const stop = c.runJobs(() => false);
+    expect(await c.outcome(a)).toBe("merged");
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A"]);
   });
 
   it("a member moved out of review gives up its seat at once: its check is cancelled and the ones behind restack and land (BOS-1504)", async () => {

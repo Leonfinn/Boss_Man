@@ -120,6 +120,8 @@ describe.skipIf(!URL)("leader lock (real Postgres)", () => {
       expect((await app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "Two" } })).statusCode).toBe(503);
       expect((await app.inject({ method: "GET", url: `/api/runner/env`, headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(503);
       expect((await app.inject({ method: "POST", url: "/mcp", payload: {} })).statusCode).toBe(503);
+      // BOS-1436: check bundles live only in the leader's folder, so a standby refuses their downloads too.
+      expect((await app.inject({ method: "GET", url: `/api/check-bundles/${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`, headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(503);
       expect((await app.inject({ method: "GET", url: "/api/me", headers: { cookie } })).statusCode).toBe(200); // reads stay open
       expect((await app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "wrong wrong wrong" } })).statusCode).toBe(401); // login works
       const h = (await app.inject({ method: "GET", url: "/api/health" })).json();

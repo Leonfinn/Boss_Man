@@ -18,8 +18,8 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
-import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
-import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
+import { oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -288,7 +288,7 @@ export function schedulerService(
   async function wipHeldRefusal(ticketId: string): Promise<string | null> {
     const [t] = await db.select({ state: tickets.systemState, heldAt: tickets.wipHeldAt, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "ready" || !t.heldAt || !t.agentId) return null;
-    const oldest = await oldestInProgress(db, t.agentId);
+    const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
     return `you are at your limit of in-progress tickets, so it stays in Ready and starts when one finishes. Carry on with your oldest unfinished ticket, "${o?.title ?? oldest}", instead.`;
@@ -1191,7 +1191,7 @@ export function schedulerService(
      */
     async freeSlots(companyId: string): Promise<number> {
       if (await globallyPaused()) return 0;
-      if (await getHold(db)) return 0;
+      if (holdBlocksStarts(await getHold(db), now())) return 0;
       if (deps.quietHours && quietHoursEnd(now(), await deps.quietHours())) return 0;
       const { maxTotal, maxCompany } = await limitsNow();
       const reserved = maxCompany > 2 && maxTotal > 2 ? 1 : 0;
@@ -2068,7 +2068,8 @@ export function schedulerService(
     async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
-      if ((await openBlockers(db, ticketId)).length) return false;
+      // A Blocked ticket uses the one "held in Blocked" rule (DR-061 Q2a, BOS-1532); a date still ahead is left to the parked branch below, which tells the assignee.
+      if (cur.systemState === "blocked" ? (await blockedHolds(db, ticketId, { now: now() })).some((h) => h.kind !== "date") : (await openBlockers(db, ticketId)).length) return false;
       // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
       // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
       // blocker; a later blocker that frees has a newer time and is news.

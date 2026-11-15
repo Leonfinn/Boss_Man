@@ -63,7 +63,7 @@ import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, 
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
-import { addTicketDependency, openBlockers } from "./ticket-links.js";
+import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -79,7 +79,7 @@ import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similar
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
-import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
+import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
 import { runCapabilities } from "./run-capabilities.js";
 
@@ -1302,7 +1302,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
-    if ((await openBlockers(db, ticketId)).length) return null;
+    // DR-061 Q2a: the same "held in Blocked" rule Blocked is accepted by (a date ahead, an open blocker, another open card, unreported after-merge checks, a go-live wait).
+    if ((await blockedHolds(db, ticketId, { now: now() })).length) return null;
     const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
@@ -1718,20 +1719,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (c.ladder?.ticketId) return `ticket:${c.ladder.ticketId}`;
     const own = (c as { ticketId?: unknown }).ticketId;
     return typeof own === "string" ? `ticket:${own}` : null;
-  }
-
-  /** Its ticket is done or cancelled, so the card no longer asks for anything (BOS-149). */
-  async function isStale(d: typeof decisions.$inferSelect): Promise<boolean> {
-    const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
-    const ids = new Set<string>();
-    const own = (c as { ticketId?: unknown }).ticketId;
-    if (typeof own === "string") ids.add(own);
-    if (c.ladder?.ticketId) ids.add(c.ladder.ticketId);
-    const blocked = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-    for (const b of blocked) ids.add(b.ticketId);
-    if (!ids.size) return false;
-    const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
-    return rows.length === ids.size && rows.every((r) => r.systemState === "done");
   }
 
   /**
@@ -3004,11 +2991,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // without their seeing it, exactly what the ladder exists to prevent (BOS-149). The one exception
       // is a plain "Got it" system card about an agent's run (not the owner's own choice): once it is
       // stale, the CEO may clear it, as it could before the ladder handed it over (BOS-469 point 4).
-      // A folded account card (account_limit) can name several agents' live failures, and `isStale` sees only
+      // A folded account card (account_limit) can name several agents' live failures, and `cardInvalidReason` sees only
       // its first raise's ticket, so it stays out of this: it closes itself once the cause is gone (BOS-469).
       const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type) && (ctx as { decisionsKind?: string }).decisionsKind !== "alert:account_limit";
       if (ctx.ladder?.rung === "owner" && !ownerTierInfo) throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
-      if (ownerTierInfo && !(await isStale(d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
+      if (ownerTierInfo && !(await cardInvalidReason(db, d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or merged, or the card is otherwise dead).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       // BOS-1193: except a plan card whose run has ended. Nothing is waiting on it any more, and it is the CEO's to close
@@ -3024,11 +3011,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (staleOnly) {
         // Two open sign-offs or loop cards for one ticket are normal (one per round), so a duplicate
         // is not a reason to clear one of the owner's own cards: only a finished ticket is.
-        if (!(await isStale(d))) {
-          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
+        if (!(await cardInvalidReason(db, d))) {
+          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished or merged.");
         }
-      } else if (!direct && !inRecheck && !(await isStale(d)) && !(await isDuplicate(d))) {
-        throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
+      } else if (!direct && !inRecheck && !(await cardInvalidReason(db, d)) && !(await isDuplicate(d))) {
+        throw new AnswerError("This card is the owner's. Withdraw it only when it is dead (its ticket is finished or merged) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       // DR-058 B, after the checks above so a card the CEO may not withdraw is refused for that reason first.
@@ -3160,6 +3147,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           if (row?.status === "answered" && (row.context as DecisionContext).type === "risk_review") return { settled: "already" };
         }
         return null;
+      }
+      // DR-061 Q4: a card Boss Man can see is dead (a newer plan, a ticket already in review, a withdrawn engagement) is closed here
+      // rather than answered, so a press before the next sweep can't set planApprovedAt or start work nobody asked for.
+      if (isCheckableCard(d)) {
+        const dead = await cardInvalidReason(db, d);
+        if (dead) {
+          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now });
+          throw new AnswerError(`This card is no longer valid (${dead}), so Boss Man closed it instead of taking the answer.`);
+        }
       }
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
