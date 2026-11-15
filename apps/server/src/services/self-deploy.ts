@@ -11,7 +11,8 @@ import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
+import { priorityGroup } from "./priority-group.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, DEPLOY_AND_RUNNERS, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, fixesLiveHeading, markDecisionNotificationRead, raiseOwnerTodo, readyHeading, type DecisionContext, type DeployUpdate, type DeployUrgent, type LiveFix } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
@@ -337,9 +338,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const symptom = r?.fixesLive?.trim();
       return r && ref && symptom ? [{ ticketId: r.id, ref, symptom }] : [];
     });
-    if (!fixes.length) return undefined;
+    // BOS-1516: no live fix on it, but the owner's Priority 1 work is: "Ready to put live", once the whole group has merged.
+    const ready = fixes.length ? [] : await readyFor(ids);
+    const listed = fixes.length ? fixes : ready;
+    if (!listed.length) return undefined;
     let repeat = true;
-    for (const f of fixes) {
+    for (const f of listed) {
       const [earlier] = await db
         .select({ id: decisions.id })
         .from(decisions)
@@ -347,7 +351,29 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         .limit(1);
       if (!earlier) repeat = false;
     }
+    if (!fixes.length) return { heading: readyHeading(ready), fixes: ready, kind: "ready", ...(repeat ? { repeat } : {}) };
     return { heading: fixesLiveHeading(fixes), fixes, ...(repeat ? { repeat } : {}) };
+  }
+
+  /**
+   * BOS-1516: the tickets in `ids` that carry the owner's Priority 1 mark and whose whole group (parent links, waits-on links, a
+   * Priority 1 feature's tickets) has merged. A group still open pages nobody: the card is raised without the heading, and the
+   * last member to merge brings the heading (the earlier members are in the card's range too, or already on an earlier card).
+   * `symptom` holds the ticket's title here.
+   */
+  async function readyFor(ids: string[]): Promise<LiveFix[]> {
+    const rows = await db
+      .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.id, ids), eq(tickets.urgent, true), eq(tickets.urgentByOwner, true)));
+    const out: LiveFix[] = [];
+    for (const r of rows) {
+      const ref = ticketRef(r.prefix, r.number);
+      if (!ref) continue;
+      if ((await priorityGroup(db, r.id)).every((m) => m.finished)) out.push({ ticketId: r.id, ref, symptom: r.title });
+    }
+    return out;
   }
 
   async function openFor(target: string) {
