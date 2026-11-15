@@ -345,6 +345,8 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
+    /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
+    touchesRunnerUpdate: boolean("touches_runner_update"),
     /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
@@ -396,6 +398,8 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
+    /** The files the branch changed when its diff was last read for a landing (BOS-1411): the plan-overlap warning reads them, so it needs no runner call. */
+    diffFiles: jsonb("diff_files").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */

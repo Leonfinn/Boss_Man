@@ -39,7 +39,7 @@ describe("R7: a card names a button that doesn't exist", () => {
       "Open the ticket and press Approve and merge.",
       'Click "Request changes" and write what is wrong.',
       "Click Settings, then click Server and runner.",
-      "Press the Deploy latest button.",
+      "Press the Review and deploy button.",
       "Press Save again, then press Enter.",
       "Click Open Acme's Kanban.",
       "Press Update runners (finish runs first).",
@@ -139,6 +139,7 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/settings/Watchdog.tsx": "Watchdog",
   "pages/settings/shared.tsx": "Any screen",
   "pages/Setup.tsx": "Setup",
+  "pages/SetupClaude.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
@@ -167,8 +168,6 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>PrivateDetails": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
-  "pages/Settings.tsx>RunnerUpdate": "Server and runner",
-  "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
@@ -218,6 +217,9 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   Board: ["Working now"],
   // The Unread and Read filter chips are drawn by one helper (chip) that adds the count, so their text is a variable (BOS-1277).
   Notifications: ["Unread", "Read"],
+  // The Updates card's buttons come from updateStatus() in settings/updates.tsx as `label:` values and are drawn by
+  // one loop in System.tsx, so no <button> holds their text (BOS-1238). The tests in updates.test.tsx check the labels.
+  "Server and runner": ["Review and deploy", "Check for updates now", "Cancel queued runner update", "Cancel the update", "Stop making room", "Lift the hold now"],
 };
 
 function skipString(s: string, i: number): number {
@@ -443,7 +445,7 @@ describe("OWNER_CONTROLS matches the web app", () => {
 
   it("puts a component on the screens it's shown on, not its file's", () => {
     expect([...screensOf("pages/settings/Projects.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
-    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner", "Setup"]);
+    expect([...screensOf("pages/settings/Runner.tsx#Runner")].sort()).toEqual(["Server and runner"]);
     expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Funding"]);
     // A funding source is added on Funding (and in Setup), the place for it since BOS-1019.
     expect([...screensOf("pages/settings/Funding.tsx#Funding")].sort()).toEqual(["Funding", "Setup"]);

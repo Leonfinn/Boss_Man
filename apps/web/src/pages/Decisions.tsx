@@ -725,8 +725,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
-            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
+            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
+            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (

@@ -86,8 +86,9 @@ async function waitsOf(db: Db, holdId: string): Promise<WaitRow[]> {
   const out: WaitRow[] = [];
   for (const r of rows) {
     if (r.blockerTicketId) {
-      const [t] = await db.select({ number: tickets.number, title: tickets.title, state: tickets.systemState, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.blockerTicketId));
-      out.push({ kind: "ticket", id: r.blockerTicketId, label: (t && ticketRef(t.prefix, t.number)) || t?.title || r.blockerTicketId, closed: !t || t.state === "done" });
+      const [t] = await db.select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.blockerTicketId));
+      // The same test the release uses (releaseReadyHolds), so the view and the release can't disagree.
+      out.push({ kind: "ticket", id: r.blockerTicketId, label: (t && ticketRef(t.prefix, t.number)) || t?.title || r.blockerTicketId, closed: await ticketInForce(db, r.blockerTicketId) });
     } else if (r.blockerDecisionId) {
       const [d] = await db.select({ status: decisions.status, question: decisions.question }).from(decisions).where(eq(decisions.id, r.blockerDecisionId));
       out.push({ kind: "decision", id: r.blockerDecisionId, label: d ? `decision "${d.question.slice(0, 40)}"` : "a decision", closed: !d || d.status !== "open" });

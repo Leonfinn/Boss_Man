@@ -4,6 +4,8 @@
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
 import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { openBlockers } from "./ticket-links.js";
+import { ticketBlockerOpenSql } from "./blocker-sql.js";
 import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
@@ -36,7 +38,7 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
 type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
 export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
-          where d.blocked_ticket_id = ${t.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
+          where d.blocked_ticket_id = ${t.id} and ${ticketBlockerOpenSql("d", "b")})
   or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
   or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
 )`;
@@ -132,14 +134,7 @@ export async function oldestInProgress(db: Db, agentId: string): Promise<string 
 
 /** Whether the ticket has an unresolved dependency: a ticket not done, an engagement not signed off, or an open decision. */
 export async function ticketIsBlocked(db: Db, ticketId: string): Promise<boolean> {
-  const deps = await db
-    .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-    .from(ticketDependencies)
-    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(eq(ticketDependencies.blockedTicketId, ticketId));
-  return deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
+  return (await openBlockers(db, ticketId)).length > 0;
 }
 
 /**

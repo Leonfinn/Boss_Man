@@ -2,9 +2,9 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode } from "@boss-man/shared";
+import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode, touchesRunnerUpdate } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
-import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
@@ -23,6 +23,7 @@ import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import { lineEvent, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
+import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
 import { trainFor, type RestackWhy } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
@@ -504,7 +505,7 @@ export function reviewService(
     await db
       .update(tickets)
       // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
-      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true, touchesRunnerUpdate: files ? touchesRunnerUpdate(files) : null } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
     await announceMerged(t.id);
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
@@ -910,7 +911,12 @@ export function reviewService(
       // The head this round passed on (BOS-1173): a return to review on the same code keeps the round (keptRound).
       // The owner signs off a commit, not a ticket (DR-013). A runner that can't say the head never reuses a sign-off.
       let files: number | undefined;
-      const head = await this.diff(ticketId).then((x) => { files = x.files.length; return x.head || null; }, () => null);
+      const head = await this.diff(ticketId).then(async (x) => {
+        files = x.files.length;
+        // Keep the files where the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a review.
+        if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
+        return x.head || null;
+      }, () => null);
       if (head) {
         const [latest] = await latestRows(db, ticketId);
         if (latest) await db.update(reviewRequests).set({ head }).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, latest.round), eq(reviewRequests.status, "approved"), sql`${reviewRequests.head} is null`));
@@ -928,7 +934,11 @@ export function reviewService(
           await record(db, { companyId: t.companyId, agentId: o.reviewerAgentId, ticketId, kind: "signoff_reused", summary: `The owner's sign-off from ${when(prior.reuse.at)} was reused: ${o.reviewer} approved the same commit ${head!.slice(0, 8)}, so it merges without asking again.` });
           return this.landApproved(ticketId, o);
         }
-        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier, files });
+        // A real conflict with a branch ahead in the merge line doesn't hold the card (BOS-1411): it adds a line
+        // saying a sign-off now will likely need signing again. A read-only probe; nothing is linked.
+        const conflicts = await this.mergeLineClashes(ticketId);
+        const conflictsBecause = conflicts.length ? conflictNote(conflicts) : undefined;
+        const id = await raiseSignoffCard(db, t, { reviewer: o.reviewer, reviewerAgentId: o.reviewerAgentId, head, earlier: prior.earlier, files, ...(conflictsBecause ? { conflictsBecause } : {}) });
         await lineEvent(db, t, { event: "hold_started", hold: "sign_off", decisionId: id ?? null });
         return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${id}` };
       }
@@ -1221,6 +1231,37 @@ export function reviewService(
         return r.clashes ? (r.files ?? []) : null;
       } catch {
         return null;
+      }
+    },
+
+    /**
+     * Which approved branches ahead in the merge line really conflict with this ticket's (BOS-1411). A read-only
+     * merge-tree on the runner; [] when there is nothing to tell (the only approved work is this ticket, the runner
+     * is away or too old, or nothing clashes). A warning only: it never holds a card or changes a merge, so every
+     * answer that isn't a real conflict reads as "no warning". Refs are resolved for the note.
+     */
+    async mergeLineClashes(ticketId: string): Promise<Array<{ ticketId: string; ref: string | null; title: string; files: string[] }>> {
+      try {
+        const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
+        if (!repoUrl || !t.branch) return [];
+        const others = await mergeLineApproved(db, t.projectId, t.id);
+        if (!others.length) return [];
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "merge-conflicts")) return [];
+        const r = await deps.runners.request<MergeLineConflictsResult>(
+          runner.id,
+          (requestId) => ({ type: "workspace.mergeLine", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch, branches: others.map((o) => ({ ticketId: o.id, branch: o.branch })) }),
+          60_000,
+        );
+        const byId = new Map(others.map((o) => [o.id, o]));
+        const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+        const rows = await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, (r?.conflicts ?? []).map((x) => x.ticketId)));
+        const info = new Map(rows.map((x) => [x.id, { title: x.title, ref: ticketRef(c?.prefix, x.number) }]));
+        return (r?.conflicts ?? [])
+          .filter((x) => x.clashes && byId.has(x.ticketId))
+          .map((x) => ({ ticketId: x.ticketId, ref: info.get(x.ticketId)?.ref ?? null, title: info.get(x.ticketId)?.title ?? byId.get(x.ticketId)!.branch, files: x.files.slice(0, 20) }));
+      } catch {
+        return [];
       }
     },
 
@@ -1776,6 +1817,8 @@ export function reviewService(
       // files. Fail closed the way a runner that went away does: land() asks again, and raises its card only when
       // the retries fail too (BOS-1396).
       if (!changed && t.branch) throw new RunnerGone("The runner couldn't say which files the ticket changes.");
+      // Keep the files it changes, so the plan-overlap warning can read them without a runner call (BOS-1411). Never fails a merge.
+      if (changed?.files.length) await db.update(tickets).set({ diffFiles: changed.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
       const ownerFiles = ownerApprovedFiles(changed?.files.map((f) => f.path) ?? []);
       let because: string | undefined;
       if (ownerFiles.length) {
@@ -1962,7 +2005,7 @@ export function reviewService(
       type Stuck = { status: "job_stuck"; command: string; reason: string; output: string };
       type Prepared = Extract<MergeResult, { status: "prepared" }>;
       type CheckFailed = Extract<MergeResult, { status: "check_failed" }>;
-      type RoundEnd = { status: "passed" } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | CheckFailed;
+      type RoundEnd = { status: "passed" } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | CheckFailed;
       const message = `Merge "${t.title}" (${ticketId})`;
       const retargetOn = async () => {
         const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
@@ -1981,7 +2024,7 @@ export function reviewService(
        * every poll: once it names a reason the round ends and the caller prepares again. Queueing the new tree then replaces a
        * queued job and keeps its place (BOS-1328); a running one is cancelled as a leftover, which frees its slot.
        */
-      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined }): Promise<RoundEnd> => {
+      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; leftReview?: () => Promise<boolean> }): Promise<RoundEnd> => {
         let lastRefresh = Date.now();
         for (const command of queuedChecks) {
           {
@@ -2018,6 +2061,15 @@ export function reviewService(
               }
               cur = row;
               await started(cur);
+              // Merge train (BOS-1504): the ticket left review (sent back, moved by hand) while its check waited or ran. Its seat
+              // must not stay taken by a check nobody will land, so the job is cancelled and the round ends; trainMerge's
+              // `finally` then gives up the seat and the members behind restack. Only the train passes leftReview: today's path
+              // keeps its behaviour.
+              if ((cur.state === "queued" || cur.state === "running") && o.leftReview && (await o.leftReview())) {
+                await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
+                await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
+                return { status: "left_review" };
+              }
               // Merge train: the base this tree was built on no longer holds. Leave the job to the next round (it replaces it).
               const why = cur.state === "queued" || cur.state === "running" ? o.stale?.() : null;
               if (why) {
@@ -2098,9 +2150,9 @@ export function reviewService(
         // BOS-1435: seats grow with ready check workers; a worker that drops shrinks them, and admit never evicts a seated member.
         const { train, created } = trainFor(t.projectId, deps.checkCapacity ? await deps.checkCapacity(t.companyId) : await queue.slots());
         if (created) {
-          // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live.
-          const live = await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(eq(checkJobs.projectId, t.projectId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]))).orderBy(asc(checkJobs.queuedAt));
-          train.seedOrder([...new Set(live.map((r) => r.ticketId).filter((id): id is string => !!id))]);
+          // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live, ordered the way
+          // admit orders (tier, then place: BOS-1504), so a background-lane ticket isn't seated right behind the head.
+          train.seedOrder(await queue.liveMergeOrder(t.projectId));
         }
         const pl = await queue.place(ticketId);
         // BOS-1403 tiers: urgent/fix 0, ordinary 1, background lane 2; a ticket at the front of the line counts as 0.
@@ -2184,6 +2236,7 @@ export function reviewService(
                   stale: () => train.stale(ticketId),
                   onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree }),
                   train: seatOf,
+                  leftReview: async () => !(await inReview()),
                 });
               let r = await round();
               if (r.status === "check_failed") {

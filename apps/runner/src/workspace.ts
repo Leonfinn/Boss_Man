@@ -27,7 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -565,7 +565,9 @@ export class Workspaces {
         // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
         // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
         const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
-        const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
+        // The first line is usually the reason (git's "Unable to create '...index.lock'"), the rest advice: keep it and the tail (BOS-1476).
+        const lines = String(e.stderr ?? "").trim().split("\n").filter(Boolean);
+        const why = (lines.length > 4 ? [lines[0], ...lines.slice(-3)] : lines).join(" | ").slice(0, 300);
         const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
         // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
         throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
@@ -883,8 +885,8 @@ export class Workspaces {
         );
       }
       if (existsSync(path.join(dir, ".git"))) {
-        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir, repo });
-        await this.git(["clean", "-fdq"], { cwd: dir, repo });
+        await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
+        await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);
       } else {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
@@ -894,6 +896,39 @@ export class Workspaces {
       await this.refreshCopy(spec.projectId, repo, dir, auth);
       return { path: dir, commit };
     });
+  }
+
+  /** How long a review copy's prep waits for a git lock that someone else holds before it gives up (BOS-1476). */
+  reviewLockWaitMs = 30_000;
+  /** A lock file this old belongs to a git that died: no git operation holds its lock for a minute. */
+  reviewStaleLockMs = 60_000;
+
+  /**
+   * git in a review copy, waiting out a lock file (BOS-1476). The repo lock only keeps the runner's own jobs apart; a
+   * reviewer's agent already running in the same copy (or the author's, before the copy exists) runs its own git, which
+   * holds index.lock for a moment. The runner's checkout then exits 128 ("Unable to create index.lock: File exists") and
+   * the review never started. So it waits and tries again until the deadline; a lock file older than a minute is a crashed
+   * git's and is removed. Any other failure is thrown at once, and the fence is the same on every try.
+   */
+  private async gitWaitingForLocks(args: string[], dir: string, repo: string) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    let removedStale = false;
+    for (;;) {
+      try {
+        return await this.git(args, { cwd: dir, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        const lock = /Unable to create '([^']+\.lock)'/.exec(text)?.[1];
+        if (!lock) throw err;
+        const gitDir = path.join(path.resolve(dir), ".git") + path.sep;
+        const mtime = path.resolve(lock).startsWith(gitDir) ? statSync(lock, { throwIfNoEntry: false })?.mtimeMs : undefined;
+        if (!removedStale && mtime !== undefined && Date.now() - mtime > this.reviewStaleLockMs) {
+          removedStale = true;
+          rmSync(lock, { force: true });
+        } else if (Date.now() >= deadline) throw err;
+        else await new Promise((r) => setTimeout(r, 250));
+      }
+    }
   }
 
   /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
@@ -1864,6 +1899,50 @@ export class Workspaces {
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
+  }
+
+  /**
+   * Which approved branches in the merge line really conflict with the ticket's branch (BOS-1411): a read-only
+   * merge-tree of the ticket's branch on top of the target with each of `branches`, the tickets ahead in the line.
+   * The same three calls `tryMerge` makes, but nothing is written, built or pushed, and a branch that can't be read
+   * here is left out rather than reported as clean: the caller shows this to the owner and mustn't invent a clash.
+   */
+  async mergeLineConflicts(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, branches: Array<{ ticketId: string; branch: string }>, secrets: Record<string, string | undefined> = {}): Promise<MergeLineConflictsResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      // A clone's branch reaches the shared repo only when it's synced (BOS-343), as for a clash check (BOS-832).
+      const dir = this.ticketDir(spec.ticketId);
+      if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const sha = async (ref: string) => {
+        const r = await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo });
+        return r.code === 0 ? r.stdout.trim() : null;
+      };
+      const targetSha = await sha(`refs/remotes/origin/${target}`);
+      const mine = await sha(`refs/heads/${branchFor(spec.ticketId)}`);
+      // Nothing of the ticket's to merge, or no target to merge onto: no conflicts to tell anyone about.
+      if (!targetSha || !mine) return { conflicts: [] };
+      const conflicts: MergeLineConflict[] = [];
+      let ahead = false;
+      for (const b of branches) {
+        if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
+        ahead = true;
+        const theirs = await sha(`refs/heads/${b.branch}`);
+        if (!theirs) continue;
+        // A branch already inside this one merges cleanly by definition; merging it again would say nothing.
+        if ((await this.gitCode(["merge-base", "--is-ancestor", theirs, mine], { cwd: repo })).code === 0) continue;
+        const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", mine, theirs], { cwd: repo });
+        if (tried.code === 0) continue;
+        if (tried.code !== 1) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
+        const out = tried.stdout.split("\n");
+        const end = out.indexOf("");
+        const files = out.slice(1, end === -1 ? undefined : end).filter(Boolean);
+        conflicts.push({ ticketId: b.ticketId, branch: b.branch, ahead, clashes: true, files });
+      }
+      return { conflicts };
     });
   }
 
