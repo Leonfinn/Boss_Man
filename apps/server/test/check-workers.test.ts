@@ -168,6 +168,14 @@ describe("check workers: scheduling (BOS-1435)", () => {
       expect(row.companies[0]!.reason).toMatch(/Out of date.*node 22\.10\.0 here, 22\.11\.0 on your runner.*Redeploy.*no file edit/);
     });
 
+    it("says 'worker code too old' when a worker's protocol is refused, instead of a bare Offline", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const { worker: w } = await s.workers.register({ name: "Old", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      s.workers.refuse(w.id, 0);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.reason).toMatch(/Out of date: worker code too old \(it speaks protocol 0, your server needs 1\).*Redeploy/);
+    });
+
     it("falls back to the commit when either side can't report its tools", async () => {
       const s = await setup({ runnerSlots: 1 });
       const oldWorker = await withTools(s, null, tc(TOOLS), { workerCommit: COMMIT });

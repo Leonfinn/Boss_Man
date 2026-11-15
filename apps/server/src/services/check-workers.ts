@@ -11,7 +11,7 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { toolchainDifferences, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
+import { PROTOCOL_VERSION, toolchainDifferences, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
@@ -50,6 +50,9 @@ function validate(s: Partial<WorkerSettings>) {
 export function checkWorkersService(db: Db) {
   // shortcut: live sockets on this process (only the leader holds any); lost on restart, harmless because a worker redials, like a runner.
   const connected = new Map<string, { send: WorkerSender; close: (code: number, why: string) => void }>();
+  // BOS-1570: a worker whose code speaks another protocol is refused at hello and never "connects"; remember what it said so
+  // the panel can show "worker code too old" instead of a bare "Offline". Lost on restart; the worker redials within seconds.
+  const refused = new Map<string, { protocol: number; at: Date }>();
   // shortcut: per live socket; lost on restart, harmless because a worker sends its features again in hello.
   const features = new Map<string, string[]>();
 
@@ -65,6 +68,10 @@ export function checkWorkersService(db: Db) {
   /** Why this worker can take no company's checks at all (off, offline, an image that can't), or null. */
   function machineReason(w: CheckWorker): string | null {
     if (!w.enabled) return "Turned off.";
+    const bad = refused.get(w.id);
+    if (!connected.has(w.id) && bad && Date.now() - bad.at.getTime() < 10 * 60_000) {
+      return `Out of date: worker code too old (it speaks protocol ${bad.protocol}, your server needs ${PROTOCOL_VERSION}). Redeploy this worker so it rebuilds from the current source; no file edit is needed.`;
+    }
     if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet.";
     const feats = features.get(w.id) ?? [];
     if (!feats.includes("check-jobs")) return "Its image can't run queued checks: update this machine.";
@@ -121,6 +128,11 @@ export function checkWorkersService(db: Db) {
     },
 
     get,
+
+    /** A hello with a protocol this server doesn't speak was refused: keep it so the owner is told why (BOS-1570). */
+    refuse(id: string, protocol: number, now = new Date()) {
+      refused.set(id, { protocol, at: now });
+    },
 
     async update(id: string, s: Partial<WorkerSettings>): Promise<CheckWorker | null> {
       validate(s);

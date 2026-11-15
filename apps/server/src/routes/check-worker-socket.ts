@@ -70,6 +70,7 @@ export async function checkWorkerSocketRoutes(app: FastifyInstance, workers: Che
         switch (msg.type) {
           case "hello":
             if (msg.protocol !== PROTOCOL_VERSION) {
+              workers.refuse(worker.id, msg.protocol);
               send({ type: "error", message: `Protocol ${msg.protocol} is not supported; expected ${PROTOCOL_VERSION}.` });
               socket.close(4000, "protocol");
               return;
