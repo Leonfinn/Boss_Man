@@ -13,7 +13,8 @@ import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
-import { getHold } from "./maintenance.js";
+import { getHold, holdBlocksStarts } from "./maintenance.js";
+import { busyAgentIds } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
@@ -649,7 +650,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const body = async () => {
       const team = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, c.id), isNull(agents.retiredAt)));
       const names = new Map(team.map((a) => [a.id, a.name]));
-      const live = new Set((await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, c.id), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`))).map((r) => r.agentId));
+      // Idle means not busy by the one rule (agent-wip.ts `agentBusy`): no live run that isn't a chat and no waiting wake.
+      const live = await busyAgentIds(db);
       const [{ prefix } = { prefix: null }] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, c.id));
       const open = await db
         .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState })
@@ -1214,7 +1216,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       running = true;
       try {
         const [paused] = await db.select().from(settings).where(eq(settings.key, "paused"));
-        if (paused?.value === true || (await getHold(db))) return { skipped: true };
+        if (paused?.value === true || holdBlocksStarts(await getHold(db), now())) return { skipped: true };
         await resumeExpired();
         const on = await db.select().from(companies).where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNull(companies.watchdogTrippedAt), eq(companies.paused, false)));
         let flagged = 0;
