@@ -527,10 +527,10 @@ export function siteKey(hostOrVendor: string): string {
 /** Every outside site a step sends the owner to (URLs not on this server and vendors named in words), as `siteKey`s. */
 export function outsideSiteKeys(prose: string, serverHost: string | null | undefined): string[] {
   const text = prose.replace(new RegExp(NOT_SEEN_MARK.source, "gi"), " ");
-  const keys = new Set<string>();
-  for (const m of text.matchAll(/https?:\/\/([^\s/?#)>\]`'"]+)/gi)) if (!ownHost(m[1]!, serverHost)) keys.add(siteKey(m[1]!));
-  for (const m of text.matchAll(new RegExp(OUTSIDE_VENDORS.source, "gi"))) keys.add(siteKey(m[0]));
-  return [...keys];
+  const keys: string[] = [];
+  for (const m of text.matchAll(/https?:\/\/([^\s/?#)>\]`'"]+)/gi)) if (!ownHost(m[1]!, serverHost)) keys.push(siteKey(m[1]!));
+  for (const m of text.matchAll(new RegExp(OUTSIDE_VENDORS.source, "gi"))) keys.push(siteKey(m[0]));
+  return [...new Set(keys)];
 }
 /** The refusal for a `not seen` step on a site whose docs misled the owner within SEEN_MAX_DAYS, or null. */
 function mismatchRefusal(prose: string, facts: LintFacts, now: Date): string | null {
