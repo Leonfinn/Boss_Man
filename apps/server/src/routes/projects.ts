@@ -11,7 +11,7 @@ import { agents, companies, costEvents, fundingSources, projects, runners as run
 import type { gitHostService } from "../services/git-hosts.js";
 import type { launcherService } from "../services/launcher.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
-import { monthStartUtc, projectSpendMicros } from "../services/project-spend.js";
+import { monthStartUtc, projectPlanUse, projectSpendMicros } from "../services/project-spend.js";
 import type { checkPolicy as checkPolicyIn } from "../services/review-policy.js";
 import type { runnersService } from "../services/runners.js";
 import type { secretsService } from "../services/secrets.js";
@@ -137,17 +137,21 @@ export function projectRoutes(
     const monthStart = monthStartUtc(t);
     const month = await projectSpendMicros(db, id, monthStart);
     const all = await projectSpendMicros(db, id);
+    // Costliest tasks: pay-as-you-go money and plan (subscription) list-price estimate, ranked by the two together (BOS-1563).
     const sum = sql<string>`sum(${costEvents.costMicros})`;
+    const paygSum = sql<string>`coalesce(sum(${costEvents.costMicros}) filter (where ${fundingSources.kind} <> 'subscription'), 0)`;
+    const planSum = sql<string>`coalesce(sum(${costEvents.costMicros}) filter (where ${fundingSources.kind} = 'subscription'), 0)`;
     const top = await db
-      .select({ id: tickets.id, title: tickets.title, micros: sum })
+      .select({ id: tickets.id, title: tickets.title, micros: paygSum, planMicros: planSum })
       .from(costEvents)
       .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
       .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
       .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
-      .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
+      .where(eq(tickets.projectId, id))
       .groupBy(tickets.id, tickets.title)
       .orderBy(desc(sum))
       .limit(10);
+    const plan = await projectPlanUse(db, id, monthStart);
     // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
     const tokenSum = (since?: Date) =>
       db
@@ -157,7 +161,7 @@ export function projectRoutes(
         .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
         .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
     const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
-    return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
+    return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), plan, topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros), planMicros: Number(r.planMicros) })) };
   });
 
   // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
