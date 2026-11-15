@@ -57,10 +57,10 @@ describe("merge_line_records", () => {
     const c = await asCeo(ctx.mine);
     const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T21:22:00Z" }))) as { rows: Array<Record<string, unknown>> };
     expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended"]);
-    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null });
+    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, commit: null });
     expect(out.rows[1]).toMatchObject({ hold: "card", heldMs: 1234 });
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by");
+    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,commit");
     for (const leak of ["private", "secret summary", "jobId", "j1"]) expect(all).not.toContain(leak);
     expect(textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-08T21:10:00Z" }))).toContain('"event":"approved"');
     await c.close();

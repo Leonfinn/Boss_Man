@@ -27,9 +27,24 @@ export type GuardReport = z.infer<typeof GuardReport>;
  * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
  * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
  */
+/** What the runner is running on (DR-049 point 1): an owner's choice to run without a safety feature is kept with this, and a different host or kernel asks again. */
+export const PlatformReport = z.object({
+  kernel: z.string().max(100),
+  dockerVersion: z.string().max(60),
+  osType: z.string().max(40),
+});
+export type PlatformReport = z.infer<typeof PlatformReport>;
+
+/** One comparable string for a platform; null while the runner hasn't reported one. */
+export function platformFingerprint(p: PlatformReport | null | undefined): string | null {
+  return p ? `${p.kernel}|docker ${p.dockerVersion}|${p.osType}` : null;
+}
+
 export const SandboxReport =z.object({
   /** The runner's own network-guard probe (DR-049 point 2); absent on a runner that predates it. */
   guard: GuardReport.optional(),
+  /** Kernel, Docker version and OS type (DR-049 point 1); absent on a runner that predates it. */
+  platform: PlatformReport.optional(),
   landlockAbi: z.number().int().nonnegative(),
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),
@@ -244,6 +259,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(),
+    /** BOS-1413: the branch head the reviews and sign-off covered; a branch at any other commit is not merged (branch_moved). */
+    pin: z.string().min(7).optional(),
     /** Merge train (BOS-1366, runner feature "merge-base"): prepare on this commit (main's tip or a train member ahead) instead of main's tip. */
     base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
@@ -251,7 +268,9 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
-  z.object({ type: z.literal("workspace.push"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
+  z.object({ type: z.literal("workspace.push"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1),
+    /** BOS-1413 follow-up: the branch head the reviews and sign-off covered; a branch at any other commit is not pushed (branch_moved). */
+    pin: z.string().min(7).optional() }),
   /**
    * Which other open tickets' unmerged commits this ticket's branch carries (BOS-130), so a merge
    * can't put code on the target that nobody approved yet.
@@ -351,8 +370,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-conflicts", "check-bundle"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-conflicts", "merge-pin", "check-bundle"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -419,6 +438,11 @@ export type WorkspaceDiff = {
   truncated: boolean;
   /** For a last-turn diff: which checkpoint it ends at, and when that was taken. */
   turn?: { number: number; at: string };
+  /**
+   * BOS-1544: set when head isn't in the runner's shared repo (a clone's sync failed), with why. A check job opens its
+   * work area from the shared repo, so a check of head would fail with "invalid reference": request_check refuses instead.
+   */
+  unsynced?: string;
 };
 
 /** The outcome of a ticket's check (R47). */
@@ -470,7 +494,9 @@ export type Uncommitted = { status: "uncommitted"; files: string[]; foreign?: st
 
 export type MergeResult =
   /** Server-queued merge check, phase "prepare" (BOS-316): the merge commit is built and kept, not pushed. */
-  | { status: "prepared"; commit: string; tree: string; targetSha: string; renamed?: MigrationRenamed[] }
+  | { status: "prepared"; commit: string; tree: string; targetSha: string; /** BOS-1413: the branch commit the merge was built from; a runner without it can't be pinned. */ branchSha?: string; renamed?: MigrationRenamed[] }
+  /** BOS-1413: the branch is not at the pinned head (a commit came in after the approval). Nothing was built, kept or pushed. */
+  | { status: "branch_moved"; head: string; pinned: string }
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }
@@ -499,7 +525,7 @@ export type MergeLineConflict = { ticketId: string; branch: string; ahead: boole
 export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
-export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
+export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
 
 /** The answer to workspace.resolve (DR-033). `commit` is null when the ref names no commit (an image tag, say). */
 export type ResolveResult = { commit: string | null; onBase: boolean; branches: string[]; error?: string };

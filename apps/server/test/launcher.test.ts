@@ -365,7 +365,7 @@ describe("runners through the launcher (R55)", () => {
     const c = (ctx = await setup({ launcher: false }));
     const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
     expect((await c.req("POST", `/api/companies/${company.id}/runner/launch`)).statusCode).toBe(409);
-    expect((await c.req("GET", `/api/companies/${company.id}/runner`)).json()).toEqual({ registered: false, launcher: null });
+    expect((await c.req("GET", `/api/companies/${company.id}/runner`)).json()).toEqual({ registered: false, launcher: null, memoryLine: null });
     expect(c.fake.calls).toEqual([]);
   });
 });

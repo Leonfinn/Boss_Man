@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
@@ -18,17 +18,17 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
 import { agentWipHold, busyAgentIds, canStartNow, cantMoveFor, cantMoveSql, nothingToDoFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
-import { openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
+import { blockedHolds, openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
-import { heldTicketIds, wakeReadyHolds } from "./review-holds.js";
+import { heldTicketIds, mergeHolds, wakeReadyHolds } from "./review-holds.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
-import { fenceDefaultSweep } from "./fence-default.js";
+import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -685,20 +685,23 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
     const out: Array<(typeof stuck)[number] & { approvedAt: number }> = [];
-    // A reviewer's hold (BOS-808): neither a merge retry nor a merge-stuck card for a ticket that is held on purpose.
-    const heldIds = await heldTicketIds(db, stuck.map((s) => s.id));
     for (const ticket of stuck) {
-      if (heldIds.has(ticket.id)) continue;
       const rows = await latestRows(db, ticket.id);
       if (!rows.length || evaluate(rows) !== "passed") continue;
       // A merge that is alive holds the sweep back. Chat, chases and note refreshes on the ticket don't count (BOS-362).
       if (opts.landingActive?.(ticket.id)) continue;
-      const [signoff] = await db
+      // Held at the merge gate (DR-061 Q2b, mergeHolds): the owner's sign-off, a reviewer's hold (BOS-808), a card that
+      // holds the merge or a wait on another ticket. Neither a merge retry nor a merge-stuck card for a ticket held on
+      // purpose. A plain question linked to the ticket holds nothing, so it no longer stops the sweep.
+      if ((await mergeHolds(db, ticket.id)).length) continue;
+      // The carried-work card ("merge that one first") is left out of mergeHolds on purpose (BOS-733), but the sweep still
+      // waits for it: the merge starts again by itself once the carried ticket lands.
+      const [carriedCard] = await db
         .select({ id: decisions.id })
         .from(ticketDependencies)
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
-      if (signoff) continue;
+        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'carried'`));
+      if (carriedCard) continue;
       // Owed the owner's sign-off, card or not: never retried as a merge; the sign-off sweep raises a lost card (BOS-503, DR-021).
       const [full] = await db.select().from(tickets).where(eq(tickets.id, ticket.id));
       if (!full) continue;
@@ -885,15 +888,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function releaseStrandedBlocked(t: Date) {
     const rows = await db
-      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote })
+      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "blocked"), isNull(tickets.blockedUntil), isNull(tickets.goLiveWait), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
-        sql`not exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`,
-        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`));
+      .where(and(eq(tickets.systemState, "blocked"), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
+        // Cheap prefilter so the per-ticket rule below only runs for tickets that might be free (BOS-409: reads must not
+        // grow with live dependencies). Each line is a hold blockedHolds also finds; it stays the one judge.
+        or(isNull(tickets.blockedUntil), lte(tickets.blockedUntil, t)),
+        isNull(tickets.goLiveWait),
+        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`,
+        sql`not exists (select 1 from ticket_dependencies td left join tickets b on b.id = td.blocker_ticket_id left join engagements e on e.id = td.blocker_engagement_id left join decisions dd on dd.id = td.blocker_decision_id
+          where td.blocked_ticket_id = ${tickets.id} and ((b.id is not null and ${ticketBlockerOpenSql("td", "b")}) or (e.id is not null and e.status <> 'signed_off') or dd.status = 'open'))`));
     let released = 0;
     for (const r of rows) {
-      if (r.mergeCommit && unreportedAfterMerge(r.criteria, r.note).length > 0) continue;
+      // The one "held in Blocked" rule (DR-061 Q2a, BOS-1532), the same one Blocked is accepted by.
+      if ((await blockedHolds(db, r.id, { now: t })).length) continue;
       const [name] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.assigneeAgentId ?? ""));
       const moved = await systemMoveTicket(db, { ticketId: r.id, from: ["blocked"], to: "ready", reason: "Boss Man: nothing holds it any more", now: t, stateNote: `Ready: nothing is holding it any more. Starts when ${name?.name ?? "its assignee"} has a free slot.` });
       if (!moved) continue;
@@ -903,7 +912,41 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return released;
   }
 
+  /**
+   * BOS-1509: the plan's "deadline passed" card in the states missedWork doesn't look at (Backlog, Blocked, Review).
+   * A ticket moved out of Ready or In progress used to lose its plan's deadline card for good. One card per plan.
+   */
+  async function planDeadlineOutsideWork(t: Date) {
+    const rows = await db
+      .select({ ticket: tickets, agent: agents.name })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(inArray(tickets.systemState, ["backlog", "blocked", "review"]), isNotNull(tickets.ceoPlanDeadline), isNull(tickets.ceoPlanAlertedAt), isNotNull(tickets.ceoPlan), eq(companies.paused, false), lte(tickets.ceoPlanDeadline, new Date(t.getTime() - limits.planGraceMs))));
+    let raised = 0;
+    for (const { ticket, agent } of rows) {
+      const planAt = ticket.ceoPlanDeadline!;
+      const row = await opts.alert({
+        companyId: ticket.companyId,
+        kind: "looks_stuck",
+        from: "scrum_master",
+        duty: true,
+        ticketId: ticket.id,
+        about: ticket.assigneeAgentId ? [ticket.assigneeAgentId] : [],
+        question: `The plan for "${ticket.title}" had a deadline of ${planAt.toISOString().slice(0, 16).replace("T", " ")} UTC and it has passed. The ticket is ${ticket.systemState.replace("_", " ")}${agent ? `, assigned to ${agent}` : ""}. The plan was: ${(ticket.ceoPlan ?? "").slice(0, 300)}`,
+        options: [REASSIGN, "Got it"],
+        recommended: "Got it",
+        dedupeKey: `missed:${ticket.id}:plan:${planAt.getTime()}`,
+        clearWhen: [{ kind: "ticketDone", ticketId: ticket.id }],
+      });
+      await db.update(tickets).set({ ceoPlanAlertedAt: t }).where(eq(tickets.id, ticket.id));
+      if (row) raised++;
+    }
+    return raised;
+  }
+
   async function missedWork(t: Date) {
+    const planCards = await planDeadlineOutsideWork(t);
     const msObjective = alias(objectives, "ms_objective");
     const rows = await db
       .select({ ticket: tickets, agent: agents.name, krPriority: objectives.priority, msPriority: msObjective.priority })
@@ -934,7 +977,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     // Most important objective first (a lower number is more important; no objective goes last), then idle longest.
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
     const candidates = rows.filter((c) => !busy.has(c.ticket.assigneeAgentId!)).sort((a, b) => rank(a) - rank(b) || a.ticket.lastActivityAt.getTime() - b.ticket.lastActivityAt.getTime());
-    const result = { woken: 0, gaveUp: 0 };
+    const result = { woken: 0, gaveUp: planCards };
     const done = new Set<string>();
     for (const { ticket, agent } of candidates) {
       const agentId = ticket.assigneeAgentId!;
@@ -1357,7 +1400,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const heldLines: string[] = [];
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
-        const why = scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        const why = scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
         heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.
@@ -1458,6 +1501,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // The fence cards: one asking about an old unchosen Off (BOS-940), one per episode of agent work held because
       // the runner can't fence (BOS-373), which goes by itself when the episode ends.
       await fenceDefaultSweep(db, t).catch(() => ({ raised: 0, heldCards: 0, released: 0 }));
+      // And one per episode of a runner whose network guard isn't proven on (DR-049 point 1, BOS-938).
+      await guardHoldSweep(db, t).catch(() => ({ raised: 0, released: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);

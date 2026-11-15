@@ -151,6 +151,20 @@ describe("setup wizard: Claude and runner steps (BOS-1495)", () => {
     expect((await screen.findByTestId("setup-runner-line")).textContent).toContain("not connected");
     expect(screen.getByText("Settings → Server and runner").getAttribute("href")).toBe("#/settings/c1/system");
     expect(screen.queryByText("Add-ons")).toBeNull();
+    expect(screen.queryByTestId("setup-runner-memory")).toBeNull(); // no launcher line: nothing shown
+  });
+
+  it("BOS-1498: says what memory the runner is given and why", async () => {
+    const line = "11 GB: 6 agents at once and 1 check, on a 16 GB machine.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const body = url === "/api/setup-progress" ? { dismissed: false, step: 2, companyId: "c1" } : url.endsWith("/runner") ? { registered: false, launcher: null, memoryLine: line } : [];
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    expect((await screen.findByTestId("setup-runner-memory")).textContent).toBe(`Memory: ${line}`);
   });
 });
 

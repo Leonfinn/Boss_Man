@@ -208,6 +208,11 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
+function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
+  return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
+}
+
 /** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
 export class RepoLockTimeout extends Error {
   constructor(projectId: string) {
@@ -902,6 +907,14 @@ export class Workspaces {
           }),
         );
       }
+      // BOS-1476: a review copy made as a worktree (an older runner, or BOSSMAN_TICKET_COPIES=worktree once) keeps its git admin
+      // folder inside the read-only shared repo, so the fenced checkout can't create index.lock there ("Permission denied", exit
+      // 128). A review copy is disposable: replace it with a clone, which the fence can write. Installed packages are reinstalled.
+      if (this.fenceCloneGit && this.newCopiesAreClones() && lstatSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isFile()) {
+        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+        rmSync(dir, { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo });
+      }
       if (existsSync(path.join(dir, ".git"))) {
         await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
         await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);
@@ -1187,7 +1200,33 @@ export class Workspaces {
     const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
     // Fetches under the repo lock, like every other git call that touches the shared refs.
-    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, dir, head, recorded, baseRef, secrets));
+    const { base: baseCommit, tip, unsynced } = await this.withRepoLock(spec.projectId, async () => {
+      // BOS-1544: a clone's commits reach the shared repo only by syncBranch, which otherwise runs at turn checkpoints, and
+      // only on the ticket's own branch name. A check job opens its work area from the shared repo, so head must be there
+      // now, not after the turn. When it isn't (the sync failed, or the copy's HEAD is on another branch or detached, as an
+      // agent's `git switch` can leave it), the reason goes back with the diff instead of a check that dies with
+      // "invalid reference".
+      let unsynced: string | undefined;
+      if (isClone(dir)) {
+        const own = branchFor(spec.ticketId);
+        let failed: string | undefined;
+        await this.syncBranch(repo, dir, spec.ticketId).catch((err: unknown) => {
+          // git's reason can be on any line of its stderr, so all of it, on one line.
+          failed = String((err as Error)?.message ?? err).replace(/\s+/g, " ").trim().slice(0, 600);
+        });
+        if ((await this.gitCode(["cat-file", "-e", `${head}^{commit}`], { cwd: repo })).code !== 0) {
+          const on = (await this.gitCode(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir, repo })).stdout;
+          const why =
+            on && on !== own
+              ? `the copy is on branch ${on}, not the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+              : !on
+                ? `the copy's HEAD is detached, not on the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+                : (failed ?? "the ticket's branch moved while it was being copied over; ask again");
+          unsynced = `commit ${head.slice(0, 12)} isn't in the runner's shared repo: ${why}`;
+        }
+      }
+      return { ...(await this.reviewBase(repo, dir, head, recorded, baseRef, secrets)), unsynced };
+    });
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir, repo });
@@ -1214,7 +1253,7 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -1245,10 +1284,18 @@ export class Workspaces {
   async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string, by?: string): Promise<{ turn: number; commit: string; files: number } | null> {
     const dir = this.ticketDir(spec.ticketId);
     if (!existsSync(path.join(dir, ".git"))) return null;
-    const made = await this.recordCheckpoint(spec, dir, label, by);
     // Before and after every turn, recorded or not (a commit can leave the files unchanged), so the
-    // shared repo is never more than a turn behind a clone's branch.
-    if (isClone(dir)) await this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId));
+    // shared repo is never more than a turn behind a clone's branch. BOS-1544: even when recording fails (a file git
+    // can't read, a lock), the branch is still synced, so one bad checkpoint can't leave the branch behind for good.
+    const sync = () => (isClone(dir) ? this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId)) : Promise.resolve());
+    let made: Awaited<ReturnType<typeof this.recordCheckpoint>>;
+    try {
+      made = await this.recordCheckpoint(spec, dir, label, by);
+    } catch (err) {
+      await sync().catch(() => undefined);
+      throw err;
+    }
+    await sync();
     return made;
   }
 
@@ -1405,6 +1452,10 @@ export class Workspaces {
       await this.withRepoLock(spec.projectId, async () => {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
+        // BOS-1544: git's own "invalid reference" reads like a bad commit id; this says where it's missing and why.
+        if ((await this.gitCode(["cat-file", "-e", `${spec.commit}^{commit}`], { cwd: repo })).code !== 0) {
+          throw new Error(`commit ${spec.commit.slice(0, 12)} isn't in this runner's shared repo, so there is nothing to check out. The code isn't at fault: the ticket's copy wasn't synced there (the runner's log says why: "Couldn't bring ticket ... over"), or on a check worker the bundle didn't carry it.`);
+        }
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
@@ -1831,9 +1882,9 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
-    if (phase) return this.mergePhase(spec, target, message, secrets, phase);
-    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string): Promise<MergeResult> {
+    if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, pin);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -1847,6 +1898,8 @@ export class Workspaces {
       for (let attempt = 0; attempt < 2; attempt++) {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         const { tree, targetSha, branchSha } = tried;
         // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
@@ -1867,7 +1920,7 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
     const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
@@ -1886,13 +1939,16 @@ export class Workspaces {
       // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
       const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
+      // BOS-1413: both phases refuse a branch that is not at the head the reviews covered, before anything is kept or pushed.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
       if (problems.length) return { status: "migration_journal" as const, problems };
       if (phase.phase === "prepare") {
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again.
       if (tried.tree !== phase.tree) return { status: "main_moved" };
@@ -1920,7 +1976,7 @@ export class Workspaces {
    * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
    * a changed one is checked again (three checks at most, then main_moved so the caller retries).
    */
-  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number): Promise<MergeResult> {
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
@@ -1945,6 +2001,8 @@ export class Workspaces {
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         // Same journal rule as the plain merge (BOS-360): a refused branch builds and pushes nothing.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
         const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
@@ -2256,7 +2314,7 @@ export class Workspaces {
    * Pushes the ticket's branch to origin for a pull request into target (R59), after the same
    * checks as a merge: nothing uncommitted, no conflicts with target. The host merges it.
    */
-  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<PushResult> {
+  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}, pin?: string): Promise<PushResult> {
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -2270,6 +2328,9 @@ export class Workspaces {
       const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
       if (tried.status === "main_moved") throw new Error("unreachable: no base was given");
       if (tried.status !== "clean") return tried;
+      // BOS-1413: a branch that isn't at the head the reviews covered is not pushed to the pull request.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const pushed = await this.pushOrigin(repo, tried.branchSha, name, auth);
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };

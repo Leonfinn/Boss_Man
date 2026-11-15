@@ -9,7 +9,7 @@ import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold } from "./deploy-wait-hold.js";
-import { heldTicketIds, holdView } from "./review-holds.js";
+import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 
 /** How many recently finished items the screen shows. */
@@ -404,30 +404,47 @@ export function mergeQueueService(
     });
   }
 
+  /**
+   * Running now: this process's merges (the same markers the ticket page shows), with their phase.
+   * In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
+   * after a restart is only queued until the check queue starts it. Slots are numbered by start order among
+   * the running checks, so each is unique and never past the limit.
+   */
+  async function liveMerges(companyId: string) {
+    let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const slotOf = new Map<string, number>();
+    const restarted = new Set<string>();
+    // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
+    // wait for a seat and earlier attempts.
+    const checkStart = new Map<string, Date>();
+    const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
+    if (deps.runningChecks && queueMode?.mode === "server") {
+      const held = await deps.runningChecks(companyId);
+      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
+      for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+      live = live.filter((l) => slotOf.has(l.ticketId));
+    }
+    return { live, slotOf, restarted, checkStart };
+  }
+
   return {
+    /**
+     * How many approved tickets wait in the merge line, not counting running merges: the same figure as `get(...).waitingCount`
+     * (the screen's rows are exactly these), without building the rest of the view. BOS-1489's start hold reads it.
+     */
+    async waitingCount(companyId: string): Promise<number> {
+      const { live } = await liveMerges(companyId);
+      const running = new Set(live.map((l) => l.ticketId));
+      const approved = await approvedOnly(await mergeQueueQueries.inReview(db, companyId));
+      return approved.filter((r) => !running.has(r.id)).length;
+    },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
       const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      // Running now: this process's merges (the same markers the ticket page shows), with their phase.
-      let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
       const limit = await deps.limit();
-      // In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
-      // after a restart is only queued until the check queue starts it. Slots are numbered by start order among
-      // the running checks, so each is unique and never past the limit.
-      const slotOf = new Map<string, number>();
-      const restarted = new Set<string>();
-      // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
-      // wait for a seat and earlier attempts.
-      const checkStart = new Map<string, Date>();
-      const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
-      if (deps.runningChecks && queueMode?.mode === "server") {
-        const held = await deps.runningChecks(companyId);
-        held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
-        for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
-        live = live.filter((l) => slotOf.has(l.ticketId));
-      }
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
         ? new Map((await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, liveIds))).map((r) => [r.id, r]))
@@ -480,7 +497,6 @@ export function mergeQueueService(
       const sinceOf = new Map<string, string>();
       const blockerOf = new Map<string, string>();
       const stepOf = new Map<string, string>();
-      const heldIds = await heldTicketIds(db, ids);
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         const card = cards.get(r.id);
@@ -493,7 +509,9 @@ export function mergeQueueService(
         const overAnHour = waitedMs > WAITING_LIMIT_MS;
         const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: mins(waitedMs), risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
         // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
-        const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
+        // DR-061 Q2b: the one merge-hold answer (mergeHolds), the same one the merge paths refuse on.
+        const holds = await mergeHolds(db, r.id);
+        const hold = holds.some((h) => h.kind === "hold") ? await holdView(db, r.id, t) : null;
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
@@ -530,6 +548,11 @@ export function mergeQueueService(
             card: view(merge ? "merge" : "hold", hint),
             signedOffAt,
           });
+          continue;
+        }
+        // A wait on another ticket (mergeWaits): the merge gate refuses it, so the screen must not say "next in line".
+        if (holds.some((h) => h.kind === "waits")) {
+          waiting.push({ ...base, state: "waiting_for_other_ticket", label: "waiting for another ticket to be merged and live", stuck: false, next: "It merges by itself once what it waits on is merged and live.", actor: "system", decisionId: null });
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {

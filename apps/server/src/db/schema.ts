@@ -64,6 +64,10 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Most minutes one run may go before the server stops it (BOS-846); null means no limit. */
   maxRunMinutes: integer("max_run_minutes"),
+  /** BOS-1489: hold new starts (a Ready ticket is not started) while this many approved merges wait in the merge line; null is off. */
+  holdStartsMergesWaiting: integer("hold_starts_merges_waiting"),
+  /** BOS-1489: ...while this many quick checks are queued in the check queue; null is off. */
+  holdStartsQuickChecksQueued: integer("hold_starts_quick_checks_queued"),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */
@@ -73,6 +77,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** A cleanup that only deletes plain entries directly in /tmp is allowed by the rules with no card (BOS-1453). On by default; off sends it to the CEO first as before. */
+  autoTempCleanup: boolean("auto_temp_cleanup").notNull().default(true),
   /**
    * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
    * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
@@ -84,6 +90,14 @@ export const companies = pgTable("companies", {
    * unchosen Off gets the card.
    */
   fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
+  /**
+   * The runner platform (kernel, Docker version, OS type) the owner was on when they answered the fence card with
+   * "Run agents without the fence" (DR-049 point 1). A different platform asks again. Null for an Off chosen in Settings.
+   */
+  fenceOffFingerprint: text("fence_off_fingerprint"),
+  /** When the owner chose to run agents without the network guard, and on which runner platform; a different platform asks again (DR-049 point 1). */
+  guardOffChosenAt: timestamp("guard_off_chosen_at", { withTimezone: true }),
+  guardOffFingerprint: text("guard_off_fingerprint"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */

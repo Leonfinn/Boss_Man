@@ -35,7 +35,10 @@ export const EVENT_WINDOW_MS = 15 * 60_000;
 const RANK: Record<string, number> = { backlog: 0, ready: 1, in_progress: 2, review: 3 };
 const CUT_OFF = /^(interrupted|cancelled|lost:|error:|stopped)/i;
 
-export type Cause = "nothing" | "cut_off" | "moved_back" | "left_line" | "seat_free";
+/** BOS-1547: a merged ticket waiting for go-live this long (the update card or deploy still open) tells the CEO. */
+export const GO_LIVE_SLOW_MS = 2 * 60 * 60_000;
+
+export type Cause = "nothing" | "cut_off" | "moved_back" | "left_line" | "seat_free" | "go_live_slow";
 
 export type Facts = {
   state: string;
@@ -57,6 +60,8 @@ export type Facts = {
   movedBack: { id: string; text: string } | null;
   /** The merge-line "left" row in the event window. */
   left: { id: string; to: string } | null;
+  /** BOS-1547: merged, with after-merge checks waiting for go-live; null once it is live (or if it never waited). */
+  goLive?: { wait: string; since: Date | null } | null;
 };
 
 export type Verdict = {
@@ -82,6 +87,14 @@ export function judge(f: Facts, now: Date): Verdict {
   if (f.openCards) under.push(`${f.openCards} open owner card${f.openCards === 1 ? "" : "s"}`);
   if (f.state === "blocked" && f.openWaitsOn) under.push(`waiting on ${f.openWaitsOn} open blocker${f.openWaitsOn === 1 ? "" : "s"}`);
   if (f.bookedUntil && f.bookedUntil > now) under.push(`a check or date is booked for ${f.bookedUntil.toISOString()}`);
+  // BOS-1547: a merged ticket whose after-merge checks wait for go-live is a step under way, kept in view until
+  // it is live (the wait is then cleared and the ticket is woken). Too long a wait tells the CEO, never "stopped".
+  let slowGoLive: string | null = null;
+  if (f.goLive) {
+    const what = f.goLive.wait === "own" ? "the company's own deploy" : f.goLive.wait === "runner" ? "the runner rebuild" : f.goLive.wait === "both" ? "the server update and the runner rebuild" : "the server update";
+    under.push(`merged, waiting for ${what}`);
+    if (f.goLive.since && now.getTime() - f.goLive.since.getTime() >= GO_LIVE_SLOW_MS) slowGoLive = `merged ${ageWords(now.getTime() - f.goLive.since.getTime())} ago and still waiting for ${what}`;
+  }
   // A merge attempt that has just started has not yet queued its check.
   if (lineEv && (lineEv.event === "attempt" || lineEv.event === "approved") && now.getTime() - lineEv.at.getTime() < QUIET_AFTER_MS) under.push("merge attempt starting");
   const live = under.length > 0;
@@ -97,6 +110,7 @@ export function judge(f: Facts, now: Date): Verdict {
   if (waitingSeat && f.seatsFree && now.getTime() - lineEv!.at.getTime() >= QUIET_AFTER_MS) {
     alarms.push({ cause: "seat_free", key: `seat_free:${lineEv!.at.toISOString()}`, text: `it has waited ${ageWords(now.getTime() - lineEv!.at.getTime())} for a merge-train seat while a check slot is free` });
   }
+  if (slowGoLive) alarms.push({ cause: "go_live_slow", key: `go_live_slow:${f.goLive!.since!.toISOString()}`, text: `${slowGoLive}; this is the update step, not a stopped ticket` });
   const quiet = now.getTime() - f.lastActiveAt.getTime() >= QUIET_AFTER_MS;
   if (!live && quiet && !waitingSeat) {
     const why = f.deferredWakes.length ? `; ${f.deferredWakes.length} wake${f.deferredWakes.length === 1 ? " is" : "s are"} held (${f.deferredWakes[0] ?? "no reason recorded"})` : "";
@@ -215,6 +229,7 @@ export function priorityWatchService(
       seatsFree: busyJobs < slots,
       lastRun: lastRun ? { id: lastRun.id, outcome: lastRun.outcome, endedAt: lastRun.endedAt } : null,
       movedBack,
+      goLive: t.goLiveWait ? { wait: t.goLiveWait, since: t.goLiveWaitSince } : null,
       left: leftRow ? { id: leftRow.id, to: (leftRow.detail as { to?: string }).to ?? "another state" } : null,
     };
   }

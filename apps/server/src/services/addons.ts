@@ -20,6 +20,10 @@ export type AddonFact = {
   detail?: string;
   /** ntfy only (BOS-1482): the last test push and when the phone tapped Got it (null: never confirmed). "running" says only that ntfy accepted a push. */
   phone?: { testSentAt: string | null; confirmedAt: string | null };
+  /** ntfy only (BOS-1484): the owner's phone type, or "unknown" until they set it on the Notifications page. */
+  phoneType?: "android" | "iphone" | "both" | "unknown";
+  /** ntfy only, with phoneType "unknown": what an agent should do instead of guessing. */
+  phoneTypeNote?: string;
 };
 export type AddonFacts = Record<Addon, AddonFact>;
 /** Each add-on's name as the owner reads it. */
@@ -98,6 +102,8 @@ export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySe
             : { state: "stopped", since: last.createdAt.toISOString(), source: "the last phone push failed", detail: last.pushError ?? undefined };
         const test = deps.phoneTest ? await deps.phoneTest().catch(() => null) : null;
         ntfy.phone = { testSentAt: test?.sentAt ?? null, confirmedAt: test?.confirmedAt ?? null };
+        ntfy.phoneType = s.phoneType ?? "unknown";
+        if (!s.phoneType) ntfy.phoneTypeNote = "phone type unknown: ask the owner";
       }
 
       const penpot: AddonFact = { state: "unknown", since: null, source: "Boss Man can't see Penpot until the host reports it (BOS-419)" };

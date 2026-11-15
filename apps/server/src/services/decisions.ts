@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
-import { applyFenceAnswer, applyFenceUnavailableAnswer, checkFenceAnswer } from "./fence-default.js";
+import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -27,6 +27,7 @@ import {
   commandOf,
   type JudgeReading,
   type PermissionJudgeMode,
+  TEMP_CLEANUP_AUTO_RULE,
   TEMP_CLEANUP_RULE,
   UNKNOWN_TOOL_RULE,
   UNMATCHED_RULE,
@@ -54,7 +55,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
-import { record } from "./activity.js";
+import { record, record as recordActivity } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
@@ -63,7 +64,7 @@ import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, 
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
-import { addTicketDependency, openBlockers } from "./ticket-links.js";
+import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -252,6 +253,8 @@ export type DecisionContext =
   | { type: "fence_default" }
   /** A company's agent work held because its runner can't fence (BOS-373): run agents without the fence, or keep them stopped. */
   | { type: "fence_unavailable" }
+  /** A company's agent work held because its runner's network guard isn't proven on (DR-049 point 1, BOS-938). */
+  | { type: "guard_unavailable" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -394,6 +397,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "run_time_limit",
   "fence_default",
   "fence_unavailable",
+  "guard_unavailable",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
@@ -1299,7 +1303,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
-    if ((await openBlockers(db, ticketId)).length) return null;
+    // DR-061 Q2a: the same "held in Blocked" rule Blocked is accepted by (a date ahead, an open blocker, another open card, unreported after-merge checks, a go-live wait).
+    if ((await blockedHolds(db, ticketId, { now: now() })).length) return null;
     const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
@@ -1494,6 +1499,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, eng.providerCompanyId), eq(agents.role, "ceo")));
       if (ceo && wake) await wake({ agentId: ceo.id, reason: "chased", priority: 3, note: `The engagement "${eng.title}" (${eng.id}) is holding up the requesting company's work. Move it forward, or tell them what's in the way.` });
     }
+  }
+
+  /** The company's switch for allowing plain /tmp cleanups with no card (BOS-1453). Only an explicit off turns it off, so a missing row never widens or narrows anything by accident. */
+  async function autoCleanupOn(companyId: string): Promise<boolean> {
+    const [c] = await db.select({ on: companies.autoTempCleanup }).from(companies).where(eq(companies.id, companyId));
+    return c?.on !== false;
   }
 
   async function rulesFor(companyId: string): Promise<PolicyRuleSpec[]> {
@@ -1848,7 +1859,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
-          : evaluatePermission(info, await rulesFor(runner.companyId));
+          : evaluatePermission(info, await rulesFor(runner.companyId), { autoTempCleanup: await autoCleanupOn(runner.companyId) });
       // tier is where a card ended up (the CEO's own requests, or a paused CEO, go to the owner); outcome is what the rule said.
       const record = (decisionId: string | null, tier: string = outcome, ruleName: string = rule) =>
         permLog.decision({ companyId: runner.companyId, runId: event.runId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, title: event.title, kind: event.kind, rule: ruleName, position, outcome, tier, decisionId });
@@ -1890,6 +1901,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       if (outcome === "allow" || outcome === "deny") {
         record(null);
+        // BOS-1453: a plain /tmp cleanup is allowed with no card, so the owner's activity feed is where it shows: the agent and the command.
+        if (rule === TEMP_CLEANUP_AUTO_RULE) {
+          const [who] = asking?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, asking.agentId)) : [];
+          const command = commandOf(info.rawInput) ?? "";
+          await recordActivity(db, { companyId: runner.companyId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, kind: "temp_cleanup_allowed", summary: `Allowed a temp-file cleanup by ${who?.name ?? "an agent"} without asking (only entries directly in /tmp): ${command.slice(0, 300)}`, detail: { command: command.slice(0, 2000), rule }, at: now() });
+        }
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
         // won't be applied again when it's resent, so keep the verdict as an answered row that
@@ -2192,7 +2209,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // The asking agent counts too: a rule limited to one agent must apply here as it did at the first ask (BOS-598).
         const [asker] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, p.runId));
         const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput, agentId: asker?.agentId ?? null };
-        const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId));
+        const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId), { autoTempCleanup: await autoCleanupOn(runner.companyId) });
         const mayRepeat = outcome !== "allow" && outcome !== "deny";
         const allowed = mayRepeat ? await allowedCommandOnRun(p.runId, payload, fingerprint) : null;
         if (allowed && send(runner.id, { type: "permission.decide", runId: p.runId, requestId: p.requestId, verdict: "allow" })) {
@@ -3481,6 +3498,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await applyFenceAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "fence_unavailable") {
         await applyFenceUnavailableAnswer(db, d.companyId, answer, now());
+      } else if (ctx.type === "guard_unavailable") {
+        await applyGuardAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.

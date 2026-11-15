@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { decisions, runners, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { agentWipCount } from "../src/services/agent-wip.js";
 
@@ -153,6 +153,61 @@ describe("Blocked on an open card is freed when the card is answered (BOS-1209)"
     expect((await c.row(stranded.id)).systemState).toBe("ready");
     expect((await c.row(stranded.id)).stateNote).toMatch(/^Ready: nothing is holding it any more/);
     for (const id of [withCard.id, withDate.id, merged.id]) expect((await c.row(id)).systemState).toBe("blocked");
+  });
+});
+
+describe("one 'held in Blocked' rule on the way in and the way out (BOS-1532, DR-061 Q2a)", () => {
+  const card = (c: Awaited<ReturnType<typeof setup>>, ticketId: string) =>
+    c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Plan?", options: ["Approve plan", "Keep planning"], recommendedOption: "Approve plan", tier: "ceo", context: { type: "permission", plan: true, ticketId, runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID() } }).returning();
+
+  it("answering a linked card does not release a ticket whose date is still ahead", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "blocked", blockedUntil: new Date(Date.now() + 86_400_000) });
+    const [d] = await card(c, t.id);
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve plan" });
+    expect((await c.row(t.id)).systemState).toBe("blocked");
+  });
+
+  it("answering one card does not release a ticket another open card (not linked) still names", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "blocked" });
+    const [a] = await card(c, t.id);
+    await card(c, t.id);
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: a!.id });
+    await c.req("POST", `/api/decisions/${a!.id}/answer`, { answer: "Approve plan" });
+    expect((await c.row(t.id)).systemState).toBe("blocked");
+  });
+
+  it("answering the last card releases a ticket whose date has passed", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "blocked", blockedUntil: new Date(Date.now() - 3_600_000) });
+    const [d] = await card(c, t.id);
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve plan" });
+    expect((await c.row(t.id)).systemState).toBe("ready");
+  });
+
+  it("the stranded sweep releases a ticket whose date has passed and keeps a go-live wait", async () => {
+    const c = await setup();
+    const old = new Date(Date.now() - 3_600_000);
+    const past = await c.ticket();
+    const live = await c.ticket();
+    await c.put(past.id, { systemState: "blocked", stateChangedAt: old, blockedUntil: new Date(Date.now() - 1_800_000) });
+    await c.put(live.id, { systemState: "blocked", stateChangedAt: old, goLiveWait: "own" });
+    await c.sweeps.run();
+    expect((await c.row(past.id)).systemState).toBe("ready");
+    expect((await c.row(live.id)).systemState).toBe("blocked");
+  });
+
+  it("Blocked accepts a go-live wait, as the sweep keeps it", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.put(t.id, { systemState: "in_progress", mergeCommit: "a".repeat(40), goLiveWait: "own" });
+    expect(await c.block(await c.mcp(c.worker.id), t.id)).toContain("is now blocked");
   });
 });
 

@@ -749,6 +749,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       )}
 
+      {t.goLiveNote && (
+        <div className="card" role="status" data-ticket-go-live-note="true" style={{ marginBottom: 16 }}>
+          <strong>{t.goLiveNote.text}</strong>{" "}
+          {t.goLiveNote.cardId && <a href={`#/decisions/${t.goLiveNote.cardId}`}>Open the card</a>}
+        </div>
+      )}
+
       {t.hold && t.systemState === "review" && (
         <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
@@ -878,6 +885,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               // BOS-639: set by the CEO, the author or a reviewer. When it merges, the deploy card says it is urgent.
               <p className="fixes-live" style={{ margin: 0 }}>
                 <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
+              </p>
+            )}
+            {t.ceoPlan?.trim() && (
+              // BOS-1509: the CEO's plan, so the assignee and the owner see what the ticket is held to.
+              <p className="ceo-plan" style={{ margin: 0 }}>
+                <strong>CEO plan{t.ceoPlanDeadline ? ` (due ${new Date(t.ceoPlanDeadline).toLocaleString()})` : ""}:</strong> {t.ceoPlan.trim()}
               </p>
             )}
             <OwnerSetup t={t} patch={patch} busy={busy} />

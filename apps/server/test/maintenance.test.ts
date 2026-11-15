@@ -7,7 +7,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkJobs, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, checkWorkers, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
@@ -433,6 +433,27 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
   });
 
   // BOS-382: a swap that fails is tried again on its own, then goes back to the previous image, then says so once.
+  it("tells the owner the check workers need updating by hand (BOS-1437), and only when one is set up", async () => {
+    const c = (ctx = await setup());
+    await c.company("App Co", "app-co");
+    await c.maintenance.start();
+    await c.maintenance.step();
+    expect(await getHold(c.db)).toBeNull();
+    expect((await c.maint()).last.body).not.toContain("Check workers");
+
+    await c.db.insert(checkWorkers).values([
+      { name: "second-host", tokenHash: "h1" },
+      { name: "turned-off-host", tokenHash: "h2", enabled: false },
+    ]);
+    await c.maintenance.start();
+    await c.maintenance.step();
+    const body = (await c.maint()).last.body as string;
+    expect(body).toContain("Check workers are not swapped by this update");
+    expect(body).toContain("second-host");
+    expect(body).not.toContain("turned-off-host");
+    expect(body).toContain("docs/26-check-workers.md");
+  });
+
   it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {
     const c = (ctx = await setup({ reconnectMs: 1000 }));
     await c.company("App Co", "app-co");

@@ -19,6 +19,8 @@ const ROUTES: Array<["GET" | "POST" | "PUT" | "PATCH" | "DELETE", string]> = [
   ["GET", "/api/notification-settings"],
   ["PUT", "/api/notification-settings"],
   ["POST", "/api/notification-settings/test"],
+  ["POST", "/api/notification-settings/phone-login"],
+  ["GET", `/api/notification-settings/phone-login/${ID}`],
 ];
 
 it("every device and notification route is registered and answers 401 without the owner's session", async () => {

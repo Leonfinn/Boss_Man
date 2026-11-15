@@ -7,7 +7,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne,
 import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
-import { fenceHold } from "./fence-default.js";
+import { agentHold } from "./fence-default.js";
 import { runCapabilities } from "./run-capabilities.js";
 import { runFolder } from "./run-folder.js";
 import type { Db } from "../db/client.js";
@@ -18,8 +18,8 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
-import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
-import { oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
+import { agentWipHold, oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -183,6 +183,14 @@ function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { sy
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
+/** BOS-1555: a finished check's result wake; the agent picks it up before starting anything new. */
+const CHECK_RESULT_REASON = "check_result";
+/** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
+const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
+const SUPERSEDED_WAKE_REASON = "replaced by a newer wake for the same ticket";
+/** Wakes that start an agent on a new ticket; they wait while the agent has a check result to pick up (BOS-1555). */
+const NEW_TICKET_REASONS = ["assigned", "idle slot", "idle agents", "spare capacity", "urgent idle"];
+
 export type WakeInput = {
   agentId: string;
   reason: string;
@@ -249,6 +257,11 @@ export function schedulerService(
     notifyOwner?: (input: { companyId: string | null; level: "note" | "flag" | "page" | "ask"; title: string; body?: string | null; link: string }) => Promise<unknown>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
+    /**
+     * The gate holds a run until its runner's latest report proves the fence and the network guard (DR-049 point 1,
+     * BOS-938). The server's main.ts turns this on; tests that connect a stand-in runner with no report leave it off.
+     */
+    requireRunnerProof?: boolean;
     /** Server errors; a company id files the line under that company's recent errors in server_status. */
     log?: (msg: string, companyId?: string) => void;
   },
@@ -283,6 +296,10 @@ export function schedulerService(
   async function wipHeldRefusal(ticketId: string): Promise<string | null> {
     const [t] = await db.select({ state: tickets.systemState, heldAt: tickets.wipHeldAt, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "ready" || !t.heldAt || !t.agentId) return null;
+    // BOS-1489: held for a long merge line or check queue, not for the agent's own limit: say so.
+    const [full] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    const hold = full ? (await agentWipHold(db, full)).hold : null;
+    if (hold?.scope === "queue") return `${hold.reason.replace(/\. It starts by itself.*$/, "")}, so it stays in Ready and starts by itself when the line is shorter. (Not started.)`;
     const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
@@ -1679,6 +1696,30 @@ export function schedulerService(
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
       queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
+      // BOS-1555: of several unstarted wakes of one reason for the same agent and ticket (a check result, a
+      // "check due", a "checking an old card"), only the newest is worth a run: it says what is true now. The older
+      // ones are dropped, so the queue shows real work and one run isn't started per copy.
+      const newestOf = new Map<string, (typeof queue)[number]>();
+      const copyKey = (w: (typeof queue)[number]) => `${w.agentId}|${w.ticketId}|${w.reason}`;
+      const isCopyable = (w: (typeof queue)[number]) => !!w.ticketId && !w.runId && SUPERSEDED_REASONS.includes(w.reason);
+      for (const w of queue) if (isCopyable(w) && (newestOf.get(copyKey(w))?.createdAt.getTime() ?? -1) <= w.createdAt.getTime()) newestOf.set(copyKey(w), w);
+      const older = queue.filter((w) => isCopyable(w) && newestOf.get(copyKey(w))!.id !== w.id);
+      if (older.length) {
+        await db.update(wakes).set({ status: "dropped", statusReason: SUPERSEDED_WAKE_REASON }).where(inArray(wakes.id, older.map((w) => w.id)));
+        result.dropped += older.length;
+        for (const w of older) queue.splice(queue.indexOf(w), 1);
+        if (queue.length === 0) return result;
+      }
+      // BOS-1555: an agent whose own in-progress ticket has a check result waiting finishes that first: its wakes that
+      // would start a new ticket wait until the result wake has started. Only a wake still waiting for a slot counts,
+      // so a result held by a cost cap or the quota never keeps the agent from other work.
+      const resultTickets = queue.filter((w) => w.reason === CHECK_RESULT_REASON && w.ticketId && w.status === "queued" && !w.runId);
+      const resultFor = new Map<string, string>();
+      if (resultTickets.length) {
+        const mine = await db.select({ id: tickets.id, agentId: tickets.assigneeAgentId }).from(tickets).where(and(inArray(tickets.id, resultTickets.map((w) => w.ticketId!)), eq(tickets.systemState, "in_progress")));
+        for (const w of resultTickets) if (mine.some((m) => m.id === w.ticketId && m.agentId === w.agentId)) resultFor.set(w.agentId, w.ticketId!);
+      }
+
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
       // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
@@ -1744,13 +1785,14 @@ export function schedulerService(
       // The fence hold (BOS-373, DR-047): a company's agent work waits while its connected runner can't fence, unless
       // the owner chose Off. An offline runner is left to launch()'s own "runner offline".
       const fenceRows = await db
-        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, runnerId: runners.id, level: sql<string | null>`${runners.sandbox}->>'level'` })
+        .select({ companyId: companies.id, fenceMode: companies.fenceMode, fenceModeChosenAt: companies.fenceModeChosenAt, fenceOffFingerprint: companies.fenceOffFingerprint, guardOffChosenAt: companies.guardOffChosenAt, guardOffFingerprint: companies.guardOffFingerprint, runnerId: runners.id, sandbox: runners.sandbox, sandboxCheckedAt: runners.sandboxCheckedAt })
         .from(companies)
         .innerJoin(runners, eq(runners.companyId, companies.id));
       const fenceHeld = new Map<string, string>();
       for (const r of fenceRows) {
         if (!deps.runners.isConnected(r.runnerId)) continue;
-        const why = fenceHold(r, r.level);
+        // The one gate (DR-049 point 1): the fence and the network guard, each proven by the runner's latest report or chosen off by the owner.
+        const why = agentHold(r, r.sandbox, r.sandboxCheckedAt, { requireProof: !!deps.requireRunnerProof, now: t });
         if (why) fenceHeld.set(r.companyId, why);
       }
       // A board-tools-only run (the CEO's or Scrum Master's chat, the PA) has no file or shell tools, so the fence hold
@@ -1817,6 +1859,11 @@ export function schedulerService(
         // A ticketless wake an agent started doesn't take the slot its own assigned ticket is waiting for (BOS-1136).
         if (!w.ticketId && wakeClassOf(w) === "agent" && (await hasWaitingTicket(w.agentId))) {
           await wait("holding while the agent's assigned ticket starts");
+          continue;
+        }
+        // BOS-1555: finish first. A wake that would start the agent on a new ticket waits for its check result.
+        if (NEW_TICKET_REASONS.includes(w.reason) && wakeClassOf(w) !== "waiting" && resultFor.has(w.agentId) && w.ticketId !== resultFor.get(w.agentId)) {
+          await wait("holding while the agent's check result is picked up");
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
@@ -1999,6 +2046,7 @@ export function schedulerService(
           continue;
         }
         result.launched++;
+        if (w.reason === CHECK_RESULT_REASON && resultFor.get(w.agentId) === w.ticketId) resultFor.delete(w.agentId);
         if (isReply) replying.add(w.agentId);
         else if (isChat) chatting.add(w.agentId);
         else {
@@ -2062,7 +2110,8 @@ export function schedulerService(
     async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
-      if ((await openBlockers(db, ticketId)).length) return false;
+      // A Blocked ticket uses the one "held in Blocked" rule (DR-061 Q2a, BOS-1532); a date still ahead is left to the parked branch below, which tells the assignee.
+      if (cur.systemState === "blocked" ? (await blockedHolds(db, ticketId, { now: now() })).some((h) => h.kind !== "date") : (await openBlockers(db, ticketId)).length) return false;
       // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
       // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
       // blocker; a later blocker that frees has a newer time and is news.

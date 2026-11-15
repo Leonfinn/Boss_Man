@@ -37,6 +37,7 @@ sections:
   - Your review
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/objectives
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
@@ -123,6 +124,7 @@ sections:
   - Set up your phone
 reads: 
   - /api/notification-settings
+  - /api/notification-settings/phone-login/:id
   - /api/notifications
   - /api/notifications/pushes
 
@@ -194,6 +196,7 @@ sections:
   - Advice on permission cards
   - Agent fence
   - Built-in defaults
+  - Cleaning up temp files
   - Decision rules
   - Second opinion from a model (optional)
   - Try a command
