@@ -1187,7 +1187,23 @@ export class Workspaces {
     const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
     // Fetches under the repo lock, like every other git call that touches the shared refs.
-    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, dir, head, recorded, baseRef, secrets));
+    const { base: baseCommit, tip, unsynced } = await this.withRepoLock(spec.projectId, async () => {
+      // BOS-1544: a clone's commits reach the shared repo only by syncBranch, which otherwise runs at turn checkpoints. A
+      // check job opens its work area from the shared repo, so head must be there now, not after the turn; when it can't
+      // be brought over, the reason goes back with the diff instead of a check that dies with "invalid reference".
+      let unsynced: string | undefined;
+      if (isClone(dir)) {
+        await this.syncBranch(repo, dir, spec.ticketId).catch((err: unknown) => {
+          // git's reason can be on any line of its stderr, so all of it, on one line.
+          unsynced = String((err as Error)?.message ?? err).replace(/\s+/g, " ").trim().slice(0, 600);
+        });
+        if ((await this.gitCode(["cat-file", "-e", `${head}^{commit}`], { cwd: repo })).code !== 0) {
+          unsynced ??= "the ticket's branch moved while it was being copied over";
+          unsynced = `commit ${head.slice(0, 12)} isn't in the runner's shared repo: ${unsynced}`;
+        } else unsynced = undefined;
+      }
+      return { ...(await this.reviewBase(repo, dir, head, recorded, baseRef, secrets)), unsynced };
+    });
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir, repo });
@@ -1214,7 +1230,7 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -1245,10 +1261,18 @@ export class Workspaces {
   async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string, by?: string): Promise<{ turn: number; commit: string; files: number } | null> {
     const dir = this.ticketDir(spec.ticketId);
     if (!existsSync(path.join(dir, ".git"))) return null;
-    const made = await this.recordCheckpoint(spec, dir, label, by);
     // Before and after every turn, recorded or not (a commit can leave the files unchanged), so the
-    // shared repo is never more than a turn behind a clone's branch.
-    if (isClone(dir)) await this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId));
+    // shared repo is never more than a turn behind a clone's branch. BOS-1544: even when recording fails (a file git
+    // can't read, a lock), the branch is still synced, so one bad checkpoint can't leave the branch behind for good.
+    const sync = () => (isClone(dir) ? this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId)) : Promise.resolve());
+    let made: Awaited<ReturnType<typeof this.recordCheckpoint>>;
+    try {
+      made = await this.recordCheckpoint(spec, dir, label, by);
+    } catch (err) {
+      await sync().catch(() => undefined);
+      throw err;
+    }
+    await sync();
     return made;
   }
 
@@ -1405,6 +1429,10 @@ export class Workspaces {
       await this.withRepoLock(spec.projectId, async () => {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
+        // BOS-1544: git's own "invalid reference" reads like a bad commit id; this says where it's missing and why.
+        if ((await this.gitCode(["cat-file", "-e", `${spec.commit}^{commit}`], { cwd: repo })).code !== 0) {
+          throw new Error(`commit ${spec.commit.slice(0, 12)} isn't in this runner's shared repo, so there is nothing to check out. The code isn't at fault: the ticket's copy wasn't synced there (the runner's log says why: "Couldn't bring ticket ... over"), or on a check worker the bundle didn't carry it.`);
+        }
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {

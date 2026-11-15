@@ -419,6 +419,11 @@ export type WorkspaceDiff = {
   truncated: boolean;
   /** For a last-turn diff: which checkpoint it ends at, and when that was taken. */
   turn?: { number: number; at: string };
+  /**
+   * BOS-1544: set when head isn't in the runner's shared repo (a clone's sync failed), with why. A check job opens its
+   * work area from the shared repo, so a check of head would fail with "invalid reference": request_check refuses instead.
+   */
+  unsynced?: string;
 };
 
 /** The outcome of a ticket's check (R47). */
