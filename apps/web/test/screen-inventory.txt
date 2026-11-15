@@ -180,9 +180,11 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - On your subscriptions
+  - Pay-as-you-go spend
   - Spending limits
   - Tokens
-reads: 
+reads:
   - /api/budgets
   - /api/companies/:id/projects
   - /api/funding-sources

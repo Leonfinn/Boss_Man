@@ -49,9 +49,9 @@ export async function projectPlanUse(db: Db, projectId: string, monthStart: Date
     .leftJoin(tickets, eq(tickets.id, runs.ticketId))
     .where(and(sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}, ${tickets.projectId}) = ${projectId}`, eq(fundingSources.kind, "subscription")))
     .groupBy(fundingSources.provider);
-  const by = new Map<string, PlanUse>();
-  const row = (p: string) => by.get(p) ?? by.set(p, { provider: p, monthRuns: 0, totalRuns: 0, monthMicros: 0, totalMicros: 0 }).get(p)!;
+  const by: Record<string, PlanUse> = {};
+  const row = (p: string) => (by[p] ??= { provider: p, monthRuns: 0, totalRuns: 0, monthMicros: 0, totalMicros: 0 });
   for (const r of runRows) Object.assign(row(r.provider), { monthRuns: Number(r.monthRuns), totalRuns: Number(r.totalRuns) });
   for (const c of costRows) Object.assign(row(c.provider), { monthMicros: Number(c.monthMicros), totalMicros: Number(c.totalMicros) });
-  return [...by.values()].sort((a, b) => b.totalRuns - a.totalRuns || a.provider.localeCompare(b.provider));
+  return Object.values(by).sort((a, b) => b.totalRuns - a.totalRuns || a.provider.localeCompare(b.provider));
 }
