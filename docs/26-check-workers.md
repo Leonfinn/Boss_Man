@@ -36,8 +36,10 @@ Repos live in a **named Docker volume** (`check-worker-repos`), not a host folde
 The worker image is the runner image built without Claude Code and OpenCode (`--build-arg WITH_HARNESS=0`), because a worker never runs an agent. It holds no Anthropic code. Build it where you build the runner, or pull the published one when images are published (docs/25-published-images.md):
 
 ```
-docker build -f apps/runner/Dockerfile --build-arg WITH_HARNESS=0 --build-arg BOSSMAN_IMAGE_COMMIT=$(git rev-parse HEAD) -t boss-man-check-worker:current .
+docker build -f apps/runner/Dockerfile --build-arg WITH_HARNESS=0 --build-arg RUNNER_ADDONS=agent-browser --build-arg BOSSMAN_IMAGE_COMMIT=$(git rev-parse HEAD) -t boss-man-check-worker:current .
 ```
+
+`RUNNER_ADDONS=agent-browser` puts Chromium in the image. The project's own tests paint pages in a browser and fail, not skip, in a full check when none is there, so a worker that runs full checks needs it. CI builds the worker image the same way and runs the typecheck and tests inside it.
 
 ## Update a worker
 
