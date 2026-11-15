@@ -183,6 +183,14 @@ function finishedSince(open: Array<{ reason: string; createdAt: Date }>, t: { sy
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, background: 2, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, staleWakeMs: 2 * 3_600_000, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
+/** BOS-1555: a finished check's result wake; the agent picks it up before starting anything new. */
+const CHECK_RESULT_REASON = "check_result";
+/** Reasons whose older unstarted copies for one agent and ticket are dropped for the newest (BOS-1555). */
+const SUPERSEDED_REASONS = [CHECK_RESULT_REASON, "check due", "checking an old card"];
+const SUPERSEDED_WAKE_REASON = "replaced by a newer wake for the same ticket";
+/** Wakes that start an agent on a new ticket; they wait while the agent has a check result to pick up (BOS-1555). */
+const NEW_TICKET_REASONS = ["assigned", "idle slot", "idle agents", "spare capacity", "urgent idle"];
+
 export type WakeInput = {
   agentId: string;
   reason: string;
@@ -1684,6 +1692,30 @@ export function schedulerService(
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
       queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a) || a.createdAt.getTime() - b.createdAt.getTime());
 
+      // BOS-1555: of several unstarted wakes of one reason for the same agent and ticket (a check result, a
+      // "check due", a "checking an old card"), only the newest is worth a run: it says what is true now. The older
+      // ones are dropped, so the queue shows real work and one run isn't started per copy.
+      const newestOf = new Map<string, (typeof queue)[number]>();
+      const copyKey = (w: (typeof queue)[number]) => `${w.agentId}|${w.ticketId}|${w.reason}`;
+      const isCopyable = (w: (typeof queue)[number]) => !!w.ticketId && !w.runId && SUPERSEDED_REASONS.includes(w.reason);
+      for (const w of queue) if (isCopyable(w) && (newestOf.get(copyKey(w))?.createdAt.getTime() ?? -1) <= w.createdAt.getTime()) newestOf.set(copyKey(w), w);
+      const older = queue.filter((w) => isCopyable(w) && newestOf.get(copyKey(w))!.id !== w.id);
+      if (older.length) {
+        await db.update(wakes).set({ status: "dropped", statusReason: SUPERSEDED_WAKE_REASON }).where(inArray(wakes.id, older.map((w) => w.id)));
+        result.dropped += older.length;
+        for (const w of older) queue.splice(queue.indexOf(w), 1);
+        if (queue.length === 0) return result;
+      }
+      // BOS-1555: an agent whose own in-progress ticket has a check result waiting finishes that first: its wakes that
+      // would start a new ticket wait until the result wake has started. Only a wake still waiting for a slot counts,
+      // so a result held by a cost cap or the quota never keeps the agent from other work.
+      const resultTickets = queue.filter((w) => w.reason === CHECK_RESULT_REASON && w.ticketId && w.status === "queued" && !w.runId);
+      const resultFor = new Map<string, string>();
+      if (resultTickets.length) {
+        const mine = await db.select({ id: tickets.id, agentId: tickets.assigneeAgentId }).from(tickets).where(and(inArray(tickets.id, resultTickets.map((w) => w.ticketId!)), eq(tickets.systemState, "in_progress")));
+        for (const w of resultTickets) if (mine.some((m) => m.id === w.ticketId && m.agentId === w.agentId)) resultFor.set(w.agentId, w.ticketId!);
+      }
+
       // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
       // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
       // The owner's chat (and the CEO's reply) is the exception (BOS-349): while at least one work run is still
@@ -1823,6 +1855,11 @@ export function schedulerService(
         // A ticketless wake an agent started doesn't take the slot its own assigned ticket is waiting for (BOS-1136).
         if (!w.ticketId && wakeClassOf(w) === "agent" && (await hasWaitingTicket(w.agentId))) {
           await wait("holding while the agent's assigned ticket starts");
+          continue;
+        }
+        // BOS-1555: finish first. A wake that would start the agent on a new ticket waits for its check result.
+        if (NEW_TICKET_REASONS.includes(w.reason) && wakeClassOf(w) !== "waiting" && resultFor.has(w.agentId) && w.ticketId !== resultFor.get(w.agentId)) {
+          await wait("holding while the agent's check result is picked up");
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
@@ -2005,6 +2042,7 @@ export function schedulerService(
           continue;
         }
         result.launched++;
+        if (w.reason === CHECK_RESULT_REASON && resultFor.get(w.agentId) === w.ticketId) resultFor.delete(w.agentId);
         if (isReply) replying.add(w.agentId);
         else if (isChat) chatting.add(w.agentId);
         else {
