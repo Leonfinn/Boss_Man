@@ -50,11 +50,13 @@ The host deployer runs from its own copy of `scripts/host-deployer.sh`, so an up
 cmp scripts/host-deployer.sh $D/host-deployer.sh
 ```
 
-If `cmp` prints nothing, the copies are the same. If it prints a difference, read the new script, then copy it:
+If `cmp` prints nothing, the copies are the same. If it prints a difference, read the new script, then copy it with one command, as root (it keeps the old copy as `host-deployer.sh.old`, sets the owner and mode, and says "already" when there is nothing to do):
 
 ```sh
-cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
+scripts/install-deployer.sh --update-self
 ```
+
+It refuses a script with uncommitted edits in the checkout. The by-hand equivalent is `cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh`.
 
 Do not link to the checkout instead of copying. A link would let a merged change alter what root runs.
 

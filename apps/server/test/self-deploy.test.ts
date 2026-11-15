@@ -1616,7 +1616,7 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect(await cards(c)).toHaveLength(1);
       expect(card!.question).toContain("Your host's deployer script is older than the running version");
       const steps = (card!.context as { steps: string[]; rollback: string }).steps.join("\n");
-      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh");
+      expect(steps).toContain("/srv/bm/src/scripts/install-deployer.sh --update-self");
       expect(steps).toContain('host="nas01" as="root"');
       expect((card!.context as { rollback: string }).rollback).toContain("cp -p /srv/bm/deployer/host-deployer.sh.old /srv/bm/deployer/host-deployer.sh");
     });

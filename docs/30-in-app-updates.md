@@ -14,6 +14,16 @@ It is optional. Without it you update by hand, as [docs/23-updating.md](23-updat
 - **`main` protected on your git host,** so agents can only land reviewed pull requests. On GitHub: the repo's Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
 - The `src` checkout on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one).
 
+## The short way: one script
+
+As root, in the checkout (`<install-dir>/src`), after step 1 below:
+
+```sh
+scripts/install-deployer.sh
+```
+
+It does steps 2, 3, 6 (the `.env` lines) and 7 for you: the folders with the right owners and modes, the script copy, `BOSSMAN_DEPLOYER` and `COMPOSE_FILE` in `.env` (a dated backup of `.env` first), and a one-minute timer (systemd timer, or `/etc/cron.d`; on TrueNAS it prints the Cron Jobs form values). It ends with a trial run of the deployer and tells you the one command that restarts the server so it sees the folders (add `--recreate-server` to run it). A second run changes nothing, so it is safe to repeat. `--dry-run` shows what it would do, `--dir` names an install folder other than the one above the checkout, `--timer cron|systemd|none` picks the timer. Step 4 (the webhook) and step 5 (testing) stay as written, and nothing in the script writes a secret. Later, `scripts/install-deployer.sh --update-self` is the one command for the "deployer script is behind" card. The steps below are what the script does, for anyone who prefers to do them by hand or wants to check its work.
+
 Set two shell variables first. Replace the install folder if yours differs. If you open a new shell, set them again.
 
 ```sh
@@ -176,7 +186,7 @@ The script must run as root once a minute. Every minute matters: an hourly job m
 
 Cron reads files in `/etc/cron.d` by itself. The file must belong to root and must not be writable by others (`chmod 644`). The user field (`root`) is part of this file format. Not tested by the project on every distribution: check after a few minutes, as below.
 
-**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). The project does not give a timer file.
+**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). `scripts/install-deployer.sh --timer systemd` writes `boss-man-deployer.service` and `.timer` for you.
 
 **On TrueNAS,** use its web page instead: see "TrueNAS SCALE" below.
 
