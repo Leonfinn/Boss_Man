@@ -249,6 +249,21 @@ describe("owner setup cards (DR-011)", () => {
     expect(await setupCards(c)).toHaveLength(0);
   });
 
+  it("DR-061 Q5: a merged ticket that is still open is placed in merge order, so a later merge's card waits for its own deploy", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    // A merged first but its ticket is still open; B merged after it and is done with setup steps.
+    const open = await c.work.createTicket(projectId, { title: "Merged, still open", noCode: false });
+    await c.db.update(tickets).set({ mergeCommit: A, mergedAt: new Date("2026-11-03T11:00:00Z") }).where(eq(tickets.id, open.id));
+    await doneTicket(c, projectId, { title: "Later merge", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A); // the server runs A, which is before B
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(1);
+  });
+
   it("raises one card when the live commit includes the merge, with the author's steps", async () => {
     const c = (ctx = await setupApp());
     const { companyId, projectId } = await withReleaseManager(c);

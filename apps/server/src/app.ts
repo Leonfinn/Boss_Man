@@ -104,6 +104,9 @@ import { SecretRejected, secretsService, type LiveValidator } from "./services/s
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkWorkersService } from "./services/check-workers.js";
 import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
+import { checkBundleRoutes } from "./routes/check-bundles.js";
+import { checkBundleStore } from "./services/check-bundles.js";
+import { CheckBundleInfo } from "@boss-man/shared";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -156,6 +159,8 @@ export type AppOptions = {
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
+  /** BOS-1436: where check bundles wait for their worker (else BOSSMAN_CHECK_BUNDLE_DIR, else under the OS temp folder); tests give their own. */
+  checkBundleDir?: string;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
   limits?: Partial<Limits>;
   /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
@@ -323,7 +328,8 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    // Check bundles (BOS-1436) live in the leader's folder only, so a standby refuses their downloads too.
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path.startsWith("/api/check-bundles/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
@@ -336,14 +342,33 @@ export async function buildApp(opts: AppOptions) {
   };
   // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
   const checkWorkersSvc = checkWorkersService(db);
+  // BOS-1436: a worker's code comes as a git bundle the company runner packs and uploads here. Nothing in the folder
+  // outlives a restart usefully (a worker asks again), so it starts empty.
+  const bundleStore = checkBundleStore(opts.checkBundleDir ? { dir: opts.checkBundleDir } : {});
+  bundleStore.clear();
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
       return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
     },
-    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc, isLeader: () => leader.isLeader() });
+    scanList: () => privateDetails.forRunner(),
+    scanListWarning,
+    send: (id, c) => runners.send(id, c),
+    isConnected: (id) => runners.isConnected(id),
+    can: (id) => runners.can(id, "check-jobs"),
+    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    workers: checkWorkersSvc,
+    bundles: {
+      store: bundleStore,
+      canPack: (id) => runners.can(id, "check-bundle"),
+      // A first (full) bundle of a large repo takes a minute or two to pack and upload.
+      pack: async (runnerId, cmd) => CheckBundleInfo.parse(await runners.request<unknown>(runnerId, (requestId) => ({ type: "check.bundle", requestId, ...cmd }), 10 * 60_000)),
+    },
+    isLeader: () => leader.isLeader(),
+  });
   await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  await checkBundleRoutes(app, db, { store: bundleStore, runners, workers: checkWorkersSvc, checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -782,6 +807,8 @@ export async function buildApp(opts: AppOptions) {
     featuresWithoutTickets: async () => {
       let raised = 0;
       for (const companyId of [...new Set((await db.select({ id: featuresTable.companyId }).from(featuresTable)).map((r) => r.id))]) {
+        // BOS-1388: the same pass deletes unconfirmed portal posts whose emailed link ran out.
+        await feedback.purgeUnconfirmed().catch((err) => app.log.error({ err }, "deleting expired unconfirmed portal posts failed"));
         raised += await feedback.raiseFeatureNoTicket(companyId, async (f) => {
           const column = featureHorizon(f);
           const where = column === "now" ? "on the roadmap's Now column" : column === "next" ? "on the roadmap's Next column" : "in progress";
@@ -1122,7 +1149,7 @@ export async function buildApp(opts: AppOptions) {
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
-  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
+  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 
   app.setErrorHandler((err, _req, reply) => {
     // `message` is what the web app shows, so it names the first problem and its field.
@@ -2002,7 +2029,7 @@ export async function buildApp(opts: AppOptions) {
     objectiveRoutes(owner, db, { work, teamCheck });
 
     // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
-    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
+    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl, mailer });
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
@@ -2121,7 +2148,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

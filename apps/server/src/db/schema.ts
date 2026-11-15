@@ -1531,7 +1531,27 @@ export const feedbackSettings = pgTable("feedback_settings", {
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
+  /** BOS-1388: posts, comments and votes count only after the visitor clicks an emailed link. Off by default. */
+  confirmByEmail: boolean("confirm_by_email").notNull().default(false),
+  /** How long an emailed link works, in hours. */
+  confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
+  /** How long a confirmed browser may post without confirming again, in days. */
+  rememberAddressDays: integer("remember_address_days").notNull().default(90),
 });
+
+/** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */
+export const portalConfirmedAddresses = pgTable(
+  "portal_confirmed_addresses",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    emailHash: text("email_hash").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("portal_confirmed_secret").on(t.secretHash), index("portal_confirmed_expires").on(t.expiresAt)],
+);
 
 /** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */
 export const featureDrivers = pgTable("feature_drivers", {
@@ -1629,11 +1649,19 @@ export const feedbackNotes = pgTable(
     portalVoter: text("portal_voter"),
     /** Who the note is, out in the world (BOS-1393): the GitHub watcher's id for an issue, discussion or comment, so a repeat fetch never files it twice. */
     externalId: text("external_id"),
+    /** BOS-1388: set while the visitor has not yet clicked the emailed link (SHA-256 of the link's token). Such a
+     * note is hidden from everyone and counts for nothing; confirming clears it. Null means counted. */
+    confirmTokenHash: text("confirm_token_hash"),
+    confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+    /** The address and name the visitor gave, kept only until they confirm (then they move to the customer, if a name was given). */
+    confirmEmail: text("confirm_email"),
+    confirmName: text("confirm_name"),
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
   (t) => [
     index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt),
+    uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash),
     uniqueIndex("feedback_notes_external_id").on(t.companyId, t.externalId).where(sql`${t.externalId} is not null`),
   ],
 );

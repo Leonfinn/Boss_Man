@@ -1,5 +1,5 @@
 {
-  "id": "490dd52c-5a41-48d1-8747-f8587861a194",
+  "id": "7d076454-2187-4868-96d5-f7a7de632a38",
   "prevId": "e677a483-8243-440e-ae3f-82c7fb7b1b57",
   "version": "7",
   "dialect": "postgresql",
@@ -3874,8 +3874,26 @@
           "primaryKey": false,
           "notNull": false
         },
-        "external_id": {
-          "name": "external_id",
+        "confirm_token_hash": {
+          "name": "confirm_token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirm_expires_at": {
+          "name": "confirm_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirm_email": {
+          "name": "confirm_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "confirm_name": {
+          "name": "confirm_name",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -3922,24 +3940,17 @@
           "method": "btree",
           "with": {}
         },
-        "feedback_notes_external_id": {
-          "name": "feedback_notes_external_id",
+        "feedback_notes_confirm_token": {
+          "name": "feedback_notes_confirm_token",
           "columns": [
             {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "external_id",
+              "expression": "confirm_token_hash",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
           "isUnique": true,
-          "where": "\"feedback_notes\".\"external_id\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -4064,6 +4075,27 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "confirm_by_email": {
+          "name": "confirm_by_email",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "confirm_link_hours": {
+          "name": "confirm_link_hours",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 24
+        },
+        "remember_address_days": {
+          "name": "remember_address_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 90
         }
       },
       "indexes": {},
@@ -4221,163 +4253,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.github_watches": {
-      "name": "github_watches",
-      "schema": "",
-      "columns": {
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "interval_minutes": {
-          "name": "interval_minutes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 60
-        },
-        "watch_issues": {
-          "name": "watch_issues",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "watch_discussions": {
-          "name": "watch_discussions",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "skip_logins": {
-          "name": "skip_logins",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "issues_cursor": {
-          "name": "issues_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "comments_cursor": {
-          "name": "comments_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "discussions_cursor": {
-          "name": "discussions_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'idle'"
-        },
-        "last_error": {
-          "name": "last_error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failures": {
-          "name": "failures",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "backoff_until": {
-          "name": "backoff_until",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_run_at": {
-          "name": "last_run_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_new_notes": {
-          "name": "last_new_notes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "github_watches_project_id_projects_id_fk": {
-          "name": "github_watches_project_id_projects_id_fk",
-          "tableFrom": "github_watches",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "github_watches_company_id_companies_id_fk": {
-          "name": "github_watches_company_id_companies_id_fk",
-          "tableFrom": "github_watches",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -6329,6 +6204,102 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.portal_confirmed_addresses": {
+      "name": "portal_confirmed_addresses",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email_hash": {
+          "name": "email_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "secret_hash": {
+          "name": "secret_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "portal_confirmed_secret": {
+          "name": "portal_confirmed_secret",
+          "columns": [
+            {
+              "expression": "secret_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "portal_confirmed_expires": {
+          "name": "portal_confirmed_expires",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "portal_confirmed_addresses_company_id_companies_id_fk": {
+          "name": "portal_confirmed_addresses_company_id_companies_id_fk",
+          "tableFrom": "portal_confirmed_addresses",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
