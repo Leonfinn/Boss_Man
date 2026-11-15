@@ -344,6 +344,37 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(busy.label).toMatch(/slot 1: APP-1 \(merge check\); slot 2: APP-2/);
     });
 
+    // BOS-1517: a merge waiting for a train seat is not waiting for a check slot, and every row carries one status line.
+    it("says waiting for a train seat (no queue count) for a merge the train holds back, with its status line", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const seat = async () => ({ slots: 2, busy: [{ ref: "APP-1", title: "A", kind: "merge check" }, { ref: "APP-2", title: "B", kind: "merge check" }], mainRed: false, fixRef: null, seatWait: [id] });
+      const row = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 21 }), queueDetail: seat });
+      expect(row).toMatchObject({ state: "waiting_for_seat", label: "waiting for a train seat" });
+      expect(row.label).not.toMatch(/check slot|ahead/);
+      expect(row.statusLine).toMatchObject({ step: "waiting for a train seat", blocker: "Every merge-train seat is taken." });
+      expect(row.statusLine!.next).toMatch(/check then starts by itself/);
+      // A merge not named in seatWait still waits for a slot, and its line names what holds the slots.
+      const other = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 3 }), queueDetail: async () => ({ ...(await seat()), seatWait: [] }) });
+      expect(other.statusLine!.step).toMatch(/^waiting for a check slot \(3 ahead\)$/);
+      expect(other.statusLine!.blocker).toMatch(/Every slot is busy: slot 1: APP-1/);
+    });
+
+    it("gives a running merge the check's own start time, not the landing's", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const landing = new Date(Date.now() - 100 * 60_000);
+      const check = new Date(Date.now() - 5 * 60_000);
+      const service = svc(c, { runningMerges: () => [{ ticketId: id, startedAt: landing.toISOString(), startedBy: "the merge gate", phase: "checking" as const }], runningChecks: async () => [{ ticketId: id, kind: "merge", startedAt: check }] });
+      const [run] = (await service.get(c.company.id)).running;
+      expect(run!.startedAt).toBe(check.toISOString());
+      expect(run!.minutes).toBe(5);
+      expect(run!.overLimit).toBe(false);
+      expect(run!.statusLine).toMatchObject({ step: "slot 1: running the check", since: check.toISOString(), blocker: null });
+      expect(await service.statusLineFor(c.company.id, id)).toEqual(run!.statusLine);
+      expect(await service.statusLineFor(c.company.id, "00000000-0000-4000-8000-000000000000")).toBeNull();
+    });
+
     it("says next in line, not waiting for a slot, when a slot is free", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);
