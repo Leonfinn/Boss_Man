@@ -6,6 +6,7 @@ import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
+import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
 import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
@@ -444,7 +445,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null; workers?: CheckWorkerView[] };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -603,6 +604,7 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>

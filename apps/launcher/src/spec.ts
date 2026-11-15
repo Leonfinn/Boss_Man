@@ -16,6 +16,13 @@ export const MOUNTS = [
   ["claude", "/home/node/.claude"],
   ["opencode", "/home/node/.local/share/opencode"],
 ] as const;
+/**
+ * The Claude pack's named volume, mounted read-only into every runner (DR-050, BOS-972). The installer
+ * (claude-pack.ts) fills it before the runner starts; a runner on an empty/not-ready pack reports Claude
+ * absent. Named, not a company folder, so all runners of a stack share one install and none may write it.
+ */
+export const CLAUDE_PACK_TARGET = "/opt/bossman-claude";
+export const claudePackVolume = (stack?: string) => `${stack ? `boss-man-${stack}` : "boss-man"}-claude-pack`;
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 /** Docker's default weight is 1024; runners get half, so the server and database win on a busy host. */
 export const DEFAULT_CPU_SHARES = 512;
@@ -178,6 +185,8 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
     Env: [
       `BOSSMAN_URL=${cfg.serverUrl}`,
       `BOSSMAN_RUNNER_TOKEN_FILE=${TOKEN_TARGET}`,
+      // The Claude pack (DR-050): the runner reads it read-only and points CLAUDE_CODE_EXECUTABLE at it.
+      `BOSSMAN_CLAUDE_PACK=${CLAUDE_PACK_TARGET}`,
       ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
@@ -186,7 +195,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string,
     ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {
-      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`],
+      Binds: [...MOUNTS.map(([sub, target]) => `${path.join(dir, sub)}:${target}`), `${tokenFile(cfg, slug)}:${TOKEN_TARGET}:ro`, `${claudePackVolume(cfg.stack)}:${CLAUDE_PACK_TARGET}:ro`],
       NetworkMode: cfg.network,
       CapDrop: ["ALL"],
       CapAdd: [],
