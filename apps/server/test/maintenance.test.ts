@@ -7,7 +7,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, notifications, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
+import { checkJobs, companies, decisions, notifications, projects, runners, runs, settings, tickets, wakes } from "../src/db/schema.js";
 import { getHold, HOLD_REASON, WRAP_UP, WRAP_UP_ASKED, WRAP_UP_DURING_UPDATE, WRAP_UP_SETTINGS } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
@@ -193,6 +193,46 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.maint()).toMatchObject({ on: true, runs: 1, companies: 1, chatOpen: true });
   });
 
+  it("waits for a running check job like a run, never swaps mid-check, and holds new checks meanwhile (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" }).onConflictDoNothing();
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [job] = await c.db
+      .insert(checkJobs)
+      .values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() })
+      .returning();
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.maintenance.step();
+    // No agent run is going, but a check is: the runner stays as it is.
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect(c.fake.calls.some((x) => x.endsWith("/recreate"))).toBe(false);
+    // A check queued now is not handed out while the drain is pending.
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "pre_review", scope: "quick", commit: "c2", tree: "t2", state: "queued" });
+    await c.checks.pump();
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.state, "running"))).map((j) => j.id)).toEqual([job!.id]);
+    // The check ends: the swap goes ahead.
+    await c.db.update(checkJobs).set({ state: "passed", endedAt: new Date() }).where(eq(checkJobs.id, job!.id));
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("at the deadline the owner's ask names the checks still running (BOS-1471)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    c.advance(31 * MIN);
+    await c.maintenance.step();
+    const asks = await c.open();
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.question).toMatch(/1 check is still going/);
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+  });
+
   it("a live chat run doesn't stop a busy company's runner swapping", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");
@@ -300,7 +340,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     const waiting = all.filter((n) => n.title === "Runner update is waiting for running work");
     expect(waiting).toHaveLength(1);
     expect(waiting[0]).toMatchObject({ level: "page" });
-    expect(waiting[0]!.body).toContain("app-co still has work runs going");
+    expect(waiting[0]!.body).toContain("app-co still has work runs or checks going");
     expect(waiting[0]!.body).toContain("on purpose");
     expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
   });

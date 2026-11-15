@@ -12,6 +12,8 @@ import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
 import { CHECK_MEMORY_CEILING_BYTES, limitReason } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
+import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
+import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
 import type { reviewService } from "../services/review.js";
@@ -31,9 +33,11 @@ export function settingsLimitsRoutes(
     checks: ReturnType<typeof checkDispatcher>;
     review: ReturnType<typeof reviewService>;
     runners: ReturnType<typeof runnersService>;
+    /** BOS-1435: check workers; absent in older test set-ups, then the panel lists none and the worker routes say so. */
+    checkWorkers?: CheckWorkersService;
   },
 ) {
-  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners } = deps;
+  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, checkWorkers } = deps;
 
   /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
   // With ?companyId the reviewer and sign-off come from that company's review policy.
@@ -101,9 +105,15 @@ export function settingsLimitsRoutes(
           applying: hold?.kind === "settings",
         }
       : null;
+    // BOS-1471: what the runners said they run at once (hello). The server hands out at most the smaller of that and the setting,
+    // so the number that really applies is the least over the connected runners that reported one.
+    const reported = live.map((r) => checks.runnerSlots(r.id)).filter((n): n is number => typeof n === "number");
+    const effectiveSlots = reported.length ? Math.min(slots, ...reported) : slots;
     return {
       mode: await checkQueueSvc.mode(),
       slots,
+      effectiveSlots,
+      runnerSlotsReported: reported.length ? Math.min(...reported) : null,
       runner,
       maxSlots: MAX_CHECK_SLOTS,
       defaultSlots: DEFAULT_CHECK_SLOTS,
@@ -112,6 +122,8 @@ export function settingsLimitsRoutes(
       // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
       train: await checkQueueSvc.train(),
       runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
+      // BOS-1435: check workers, each with per company whether it takes checks and, if not, why.
+      workers: (await checkWorkers?.list()) ?? [],
     };
   };
   owner.get("/api/settings/check-queue", async () => checkQueueView());
@@ -146,6 +158,62 @@ export function settingsLimitsRoutes(
         if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
     if (b.mode === "server") await checks.pump();
     return { ...(await checkQueueView()), cancelled, applying };
+  });
+  // BOS-1435 (DR-060): Settings → Server and runner → Checks → Check workers. Owner only. The token is in the answer to the
+  // add, once; only its hash is kept. Turning a worker off or removing it puts its running checks back in line at once
+  // and closes its socket.
+  const WorkerBody = z.object({
+    name: z.string().trim().min(1).max(80),
+    companyIds: z.array(Uuid).max(200),
+    slots: z.number().int().min(1).max(MAX_CHECK_SLOTS),
+    checkThreads: z.number().int().min(1).max(THREADS_MAX).nullable(),
+    checkMemoryMb: z.number().int().min(MEMORY_MB_MIN).max(MEMORY_MB_MAX).nullable(),
+    enabled: z.boolean(),
+  });
+  const needWorkers = () => {
+    if (!checkWorkers) throw Object.assign(new Error("Check workers are not available on this server."), { statusCode: 404 });
+    return checkWorkers;
+  };
+  const knownCompanies = async (ids: string[]) => {
+    if (!ids.length) return;
+    const found = new Set((await db.select({ id: companies.id }).from(companies)).map((c) => c.id));
+    const missing = ids.filter((id) => !found.has(id));
+    if (missing.length) throw Object.assign(new Error("One of the chosen companies no longer exists."), { statusCode: 400 });
+  };
+  owner.get("/api/settings/check-workers", async () => (await checkWorkers?.list()) ?? []);
+  owner.post("/api/settings/check-workers", async (req) => {
+    const w = needWorkers();
+    const b = WorkerBody.parse(req.body);
+    await knownCompanies(b.companyIds);
+    const { worker, token } = await w.register(b);
+    return { id: worker.id, token };
+  });
+  owner.patch("/api/settings/check-workers/:id", async (req, reply) => {
+    const w = needWorkers();
+    const { id } = z.object({ id: Uuid }).parse(req.params);
+    const b = WorkerBody.partial().parse(req.body);
+    if (b.companyIds) await knownCompanies(b.companyIds);
+    const row = await w.update(id, b);
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    if (!row.enabled) {
+      await checks.onWorkerOff(id, `The owner turned off the check worker "${row.name}", so this check was put back in line.`);
+      w.disconnect(id, WORKER_OFF_CLOSE, "worker off");
+    } else await checks.pump();
+    return (await w.list()).find((x) => x.id === id) ?? null;
+  });
+  owner.delete("/api/settings/check-workers/:id", async (req, reply) => {
+    const w = needWorkers();
+    const { id } = z.object({ id: Uuid }).parse(req.params);
+    const row = await w.get(id);
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    // Off first, so the pump inside onWorkerOff can't hand the re-queued jobs straight back to this worker (they would be
+    // left running with no machine once the row goes). Then back in line, then the row goes (its token with it), then the
+    // socket closes; a redial gets 401.
+    await w.update(id, { enabled: false });
+    await checks.onWorkerOff(id,`The owner removed the check worker "${row.name}", so this check was put back in line.`);
+    await w.remove(id);
+    w.disconnect(id, WORKER_OFF_CLOSE, "worker removed");
+    return { ok: true };
   });
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
