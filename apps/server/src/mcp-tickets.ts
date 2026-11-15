@@ -21,6 +21,7 @@ import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
 import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
+import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
 import { OWNER_WAIT_REFUSAL, ticketHasOpenCard, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
@@ -548,6 +549,17 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         // BOS-1021: the live checks can't be made before the merge is running; closing now would hide that.
         const [w] = await db.select({ wait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
         if (w?.wait) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(w.wait as GoLiveWait)}), so its after-merge checks can't be made. ${w.wait === "own" ? "Your company puts its own work live: once it is, the CEO marks it with update_ticket markLive and you are woken" : "Boss Man wakes you when it is live"}; then report them and close the ticket.`);
+        // BOS-1586: a criterion with a fact clause is settled by the host's newest report taken after go-live, not by a "pass".
+        // A cancel (the CEO's way out) and a repeated move are not held to it.
+        if (!sameState && (outcome ?? "completed") === "completed") {
+          const [live] = await db.select({ liveAt: tickets.liveAt, liveMarkedAt: tickets.liveMarkedAt, mergedAt: tickets.mergedAt }).from(tickets).where(eq(tickets.id, ticketId));
+          if (hostFacts && withCriteria.criteria.some((c) => isAfterMerge(c))) {
+            const refusal = hostFactRefusal(withCriteria.criteria, await hostFacts.sync(), live?.liveAt ?? live?.liveMarkedAt ?? live?.mergedAt ?? null, reported ?? "");
+            if (refusal) return fail(refusal);
+          }
+          const uncited = uncitedCardPasses(withCriteria.criteria, `${withCriteria.current ?? ""}\n${note ?? ""}`, await openCardIds(db, ticketId));
+          if (uncited.length) return fail(CARD_CITE_REFUSAL(uncited));
+        }
       }
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, note, "before") : state === "done" ? unreportedAfterMerge(withCriteria.criteria, reported) : [];
       if (missing.length)

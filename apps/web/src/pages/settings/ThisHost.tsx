@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { api } from "../../api";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { CHECK_OK, CHECK_TROUBLE, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
+import { isFailingCheck, OWNER_FACT_LABELS, STOPPED_CONTAINERS_KEY, problemText, stoppedContainerNames, type HostFactsView } from "../../host-facts-display";
 import { Section, useAction } from "./shared";
 
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
@@ -38,15 +38,7 @@ function reportedProblems(d: HostFactsView): { missing: string[]; failing: strin
     const v = f.value.trim();
     if (!v) { if (!missing.includes(k)) missing.push(k); }
     else if (k.startsWith("addon.") && v.toLowerCase() !== ADDON_RUNNING) addonsDown.push(k.slice("addon.".length));
-    else if (k.startsWith("check.")) {
-      const last = k.slice(k.lastIndexOf(".") + 1);
-      const wrong = CHECK_TROUBLE.test(last)
-        ? v !== "0"
-        : CHECK_OK.test(k)
-          ? !/^(ok|pass|passed|healthy)$/i.test(v)
-          : false;
-      if (wrong) failing.push(k);
-    }
+    else if (isFailingCheck(k, v)) failing.push(k);
   }
   for (const k of d.ownerFacts) if (!d.facts[k]?.value.trim() && !missing.includes(k)) missing.push(k);
   return { missing, failing, addonsDown };
