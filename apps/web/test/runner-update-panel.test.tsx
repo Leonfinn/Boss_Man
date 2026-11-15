@@ -84,6 +84,31 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     expect((screen.getByRole("button", { name: "Reconnect runner" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  // BOS-1486: the Build and update runners button is in the Updates card, which only exists with a host deployer.
+  it("without a host deployer it says in-app updates need one and links to how to set it up", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/api/runner-report")) return json({ live: [live], update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
+      if (url.endsWith("/api/self-deploy")) return json({ enabled: false });
+      return json([]);
+    }));
+    render(<RunnerUpdate />);
+    expect(await screen.findByText(/this install doesn't have one/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "how to set it up" }).getAttribute("href")).toMatch(/self-deploy\.md$/);
+  });
+
+  it("with a host deployer it still points at Build and update runners", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("/api/runner-report")) return json({ live: [live], update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
+      if (url.endsWith("/api/self-deploy")) return json({ enabled: true });
+      return json([]);
+    }));
+    render(<RunnerUpdate />);
+    expect(await screen.findByText(/Build and update runners under Updates/)).toBeTruthy();
+    expect(screen.queryByText(/this install doesn't have one/)).toBeNull();
+  });
+
   it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       if (url.endsWith("/api/runner-report")) return json({ live: [{ ...live, connected: false, swap: { retryAt: null, tries: 0 } }, { ...live, slug: "b", name: "B Co", connected: false, guard: { reason: "guard exited", since: null } }], update: null });

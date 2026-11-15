@@ -513,6 +513,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     connectedSince: (id) => runners.connectedSince(id),
     launcher: (companyId) => launch.status(companyId),
+    launcherOn: () => launch.enabled,
   });
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
@@ -973,6 +974,26 @@ export async function buildApp(opts: AppOptions) {
       return { mode: mode as CheckQueueMode, slots: await checks.capacity(companyId), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
+    // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
+    runnerConnected: async (companyId) => {
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      return !!r && runners.isConnected(r.id);
+    },
+    runnerUpdateOn: async () => {
+      const h = await getHold(db);
+      return !!h && h.kind !== "wrapup";
+    },
+    launcherOn: () => launch.enabled,
+    queueDetail: async (companyId) => {
+      const q = await checkQueueSvc.list(companyId);
+      const fix = q.rows.find((r) => r.fixesMain);
+      return {
+        slots: q.slots,
+        busy: q.rows.filter((r) => r.state === "running").map((r) => ({ ref: r.ref, title: r.title, kind: r.kind === "merge" ? "merge check" : r.kind === "full" ? "full check" : "quick check" })),
+        mainRed: q.rows.some((r) => r.heldByMain),
+        fixRef: fix ? (fix.ref ?? fix.title) : null,
+      };
+    },
     now: opts.now,
   });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
