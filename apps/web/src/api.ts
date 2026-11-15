@@ -263,6 +263,8 @@ export type Ticket = {
   waitingDecisionId?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold. */
   urgent?: boolean;
+  /** BOS-1516: the urgent mark is the owner's "Priority 1" switch. */
+  urgentByOwner?: boolean;
   /** A held wake's reset time and why, when routine work is paused by the quota hold. */
   quotaHeldUntil?: string | null;
   quotaHeldReason?: string | null;
@@ -502,6 +504,8 @@ export type Driver = { id: string; companyId: string; name: string; weight: numb
 export type FeatureArea = { id: string; companyId: string; name: string; position: number };
 export type Feature = {
   id: string;
+  /** BOS-1516: the owner's Priority 1 switch. */
+  priorityOne?: boolean;
   companyId: string;
   areaId: string | null;
   parentId: string | null;

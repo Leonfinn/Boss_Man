@@ -788,7 +788,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               Run now
             </button>
             <button type="button" className="btn" disabled={busy || !!t.urgent} onClick={() => void patch({ urgent: true })}>
-              {t.urgent ? "Marked urgent" : "Mark urgent"}
+              {t.urgent ? "Priority 1 is on" : "Make Priority 1"}
             </button>
           </div>
         </div>
@@ -873,7 +873,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
             <span>
-              Urgent<span className="muted">: runs even when the subscription is close to its limit</span> <code className="mono">quota hold</code>
+              Priority 1<span className="muted">: goes first everywhere (runs past the subscription limit, first in the check queue and the merge line, keeps its place after a send-back) and you get one page when it has merged and is ready to put live</span> <code className="mono">quota hold</code>
             </span>
           </label>
 

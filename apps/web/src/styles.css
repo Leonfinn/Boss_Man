@@ -1477,6 +1477,8 @@ p.dash-line { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0;
 .mq-head .mono { font-size: 12px; color: var(--muted); }
 .mq-wait { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
 .mq-line { margin: 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+/* BOS-1516: a touch screen needs a big enough target for Move to front (BOS-1510). */
+@media (pointer: coarse) { .mq-front .btn { min-height: 44px; } }
 .mq-next { margin: 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .mq-next a { color: var(--accent-ink); }
 
