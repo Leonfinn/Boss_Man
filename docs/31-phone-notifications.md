@@ -102,7 +102,9 @@ iPhones only get instant delivery from a self-hosted server if the server forwar
 
 ## After you restart ntfy (Android)
 
-The Android app does not use Google's push service with a self-hosted server. It keeps its own long connection open to your ntfy address (the "Listening for instant notifications" entry in the notification shade) and only fetches by hand when you open it. Restarting ntfy (an update, or adding `deploy/ntfy-bluegreen.yml`) cuts that connection. If the app does not reconnect by itself, messages wait on the server and show only when you open the app, even though Boss Man reports the push as accepted. This happened on 14 Nov (BOS-1481); fully closing and reopening the app fixed it.
+The Android app does not use Google's push service with a self-hosted server. It keeps its own long connection open to your ntfy address (the "Listening for instant notifications" entry in the notification shade) and only fetches by hand when you open it. Restarting ntfy (an update, or adding `deploy/ntfy-bluegreen.yml`) most likely cuts that connection. If the app does not reconnect by itself, messages wait on the server and show only when you open the app, even though Boss Man reports the push as accepted. This happened on 14 Nov (BOS-1481): fully closing and reopening the app fixed it. That is the only evidence so far. The ntfy server log from that restart was not read, so the cause is not proven; the `deploy/ntfy-bluegreen.yml` file does not change the route from the phone to ntfy. An automatic check is planned in a follow-up (BOS-1481 comments).
+
+The step is the same however ntfy was restarted (the deployer, the blue/green switch, or by hand). An iPhone that uses `NTFY_UPSTREAM_BASE_URL` is woken through ntfy.sh instead, so it should not need it, but the test in step 2 is worth sending there too.
 
 After every ntfy restart:
 1. On the phone, open the ntfy app, then swipe it away from recent apps and open it again.
