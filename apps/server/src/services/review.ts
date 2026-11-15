@@ -22,10 +22,10 @@ import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
-import { lineEvent, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
+import { lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
-import { trainFor, type RestackWhy } from "./merge-train.js";
+import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
@@ -115,6 +115,13 @@ const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Nu
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
 export const MERGE_RETARGET_KEY = "merge_retarget";
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
+/**
+ * BOS-1515 (B2): a ticket waiting in the merge train tries a merge on main (read-only) when main has moved since its last try,
+ * at most once per TRAIN_TRIAL_MIN_MS (each try holds the project's repo lock for a fetch and a merge-tree), and at least every
+ * TRAIN_TRIAL_FALLBACK_MS for merges made outside Boss Man. Tests shorten the first with BOSSMAN_TRAIN_TRIAL_MIN_MS.
+ */
+const TRAIN_TRIAL_MIN_MS = Number(process.env.BOSSMAN_TRAIN_TRIAL_MIN_MS) > 0 ? Number(process.env.BOSSMAN_TRAIN_TRIAL_MIN_MS) : 30_000;
+const TRAIN_TRIAL_FALLBACK_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
@@ -315,6 +322,35 @@ export function reviewService(
       .where(eq(tickets.id, ticketId));
     if (!row || (companyId && row.t.companyId !== companyId)) throw new ReviewError(404, "No such ticket.");
     return row;
+  }
+
+  /**
+   * A read-only trial merge of the ticket's branch on the default branch (the runner's `workspace.clash`: tryMerge on origin's
+   * tip, with the gate's BOS-690 migration renumbering, writing nothing). The clashing files (a real clash with no list is []),
+   * or null when it merges cleanly or can't be told (no runner, an older runner, a timeout, an error). Null must always read as
+   * "carry on": branchClash (BOS-426) and the merge train's waiting trial (BOS-1515) both rely on that.
+   */
+  async function clashOnMain(t: { id: string; companyId: string; projectId: string }, defaultBranch: string): Promise<string[] | null> {
+    try {
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
+      const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
+      if (typeof r?.clashes !== "boolean") return null;
+      return r.clashes ? (Array.isArray(r.files) ? r.files : []) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Tickets by id with their refs (BOS-1515: who a train clash was with), in the order given; unknown ids are left out. */
+  async function namedTickets(ids: string[]): Promise<Array<{ ticketId: string; ref: string | null; title: string }>> {
+    if (!ids.length) return [];
+    const rows = await db.select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, ids));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return ids.flatMap((id) => {
+      const r = byId.get(id);
+      return r ? [{ ticketId: id, ref: ticketRef(r.prefix, r.number), title: r.title }] : [];
+    });
   }
 
   /**
@@ -887,7 +923,10 @@ export function reviewService(
       const row = ready[0]!;
       const who = row.kind === "code" ? input.reviewer : `${input.reviewer}, ${row.kind} review`;
       if (input.verdict === "approved") {
-        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null });
+        // BOS-1528: stamp the head this reviewer approved on their own row, now, not whatever the branch is at when the last
+        // review of the round comes in. A runner that can't say leaves the row unstamped (it never blocks a review).
+        const readHead = await this.diff(ticketId).then((x) => x.head || null, () => null);
+        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null, head: readHead });
         // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
         if (input.hold) await startHold(t, row, input.hold, who);
       } else {
@@ -906,6 +945,27 @@ export function reviewService(
         return { verdict: o.verdict, outcome: "waiting" as const, delivered: `recorded; waiting for the other reviews (${activeRows(rows).map((r) => r.kind).join(", ")})` };
       }
       if (state === "passed") {
+        // BOS-1528: every approval must be on the same code. An earlier reviewer whose head differs from the newest approval's
+        // reads again, unless only clean merges of main came in since (signoffCovers). Unstamped rows can't be compared.
+        const stamped = rows.filter((r) => r.status === "approved" && r.head).sort((a, b) => (a.decidedAt?.getTime() ?? 0) - (b.decidedAt?.getTime() ?? 0));
+        const newest = stamped.at(-1)?.head;
+        if (newest) {
+          const stale: ReviewRow[] = [];
+          for (const r of stamped) {
+            if (r.head === newest) continue;
+            if (!(await this.signoffCovers(t.id, r.head!, newest).catch(() => null))?.covers) stale.push(r);
+          }
+          // Covered rows only saw clean merges of main since: restamp them to the newest head, so the round has one passed
+          // head (passedHead and the merge pin would otherwise see mixed heads and send the ticket back at merge).
+          if (!stale.length) for (const r of stamped) if (r.head !== newest) await db.update(reviewRequests).set({ head: newest }).where(eq(reviewRequests.id, r.id));
+          if (stale.length) {
+            for (const r of stale) await db.update(reviewRequests).set({ status: "pending", head: null, decidedAt: null, notes: null }).where(eq(reviewRequests.id, r.id));
+            await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_reopened", summary: `The branch moved from ${stale.map((r) => r.head!.slice(0, 8)).join(", ")} to ${newest.slice(0, 8)} while the round was open, so ${stale.map((r) => (r.kind === "code" ? "the code" : `the ${r.kind}`)).join(" and ")} review${stale.length > 1 ? "s were" : " was"} reopened to read the newer code.` });
+            const reopened = await latestRows(db, t.id);
+            if (wake) await wakeReviewers(db, t, activeRows(reopened).filter((r) => stale.some((s) => s.id === r.id)), (id, i) => wake!(id, i), [], o.causedByRunId);
+            return { verdict: o.verdict, outcome: "waiting" as const, delivered: `recorded; the branch moved since an earlier approval, so ${stale.length} review${stale.length > 1 ? "s were" : " was"} reopened` };
+          }
+        }
         const names = [...new Set(rows.filter((r) => r.status === "approved").map((r) => r.reviewerAgentId))];
         const label = names.length > 1 ? (await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, names.filter((n): n is string => !!n)))).map((a) => a.name).join(" and ") : o.reviewer;
         return await this.approve(t, { reviewer: label, reviewerAgentId: o.reviewerAgentId, background: o.background, causedByRunId: o.causedByRunId });
@@ -933,10 +993,7 @@ export function reviewService(
         if (x.files.length) await db.update(tickets).set({ diffFiles: x.files.map((f) => f.path).slice(0, 2000) }).where(eq(tickets.id, ticketId)).catch(() => undefined);
         return x.head || null;
       }, () => null);
-      if (head) {
-        const [latest] = await latestRows(db, ticketId);
-        if (latest) await db.update(reviewRequests).set({ head }).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.round, latest.round), eq(reviewRequests.status, "approved"), sql`${reviewRequests.head} is null`));
-      }
+      // BOS-1528: approvals are stamped by submit() with the head each reviewer approved; this read is for the sign-off card only.
       // Where the review policy says the owner signs off, an agent's approval asks them (R48).
       if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
         // One open sign-off card per ticket: this round replaces any older one (BOS-446).
@@ -1240,11 +1297,7 @@ export function reviewService(
       try {
         const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
         if (!repoUrl || !t.branch) return null;
-        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
-        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
-        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
-        if (typeof r?.clashes !== "boolean") return null;
-        return r.clashes ? (r.files ?? []) : null;
+        return await clashOnMain(t, defaultBranch);
       } catch {
         return null;
       }
@@ -1465,7 +1518,7 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal" | "branch_changed"; delivered: string | null; detail?: unknown }> {
-      const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
       // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
       if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
       // BOS-1461: a merge attempt that does not land leaves an attempt_failed row with its reason.
@@ -1519,6 +1572,8 @@ export function reviewService(
             continue;
           }
           if (r.outcome === "merged") {
+            // BOS-1515 (B2): main moved, so tickets waiting in this project's merge train try a merge on main again.
+            if (lineRow) mainMoved(lineRow.projectId);
             void this.retryHeldBy(ticketId).catch(() => undefined);
             // Approved work held on this ticket goes on once it is live too (BOS-1173); the sweep catches a later go-live.
             void this.releaseHolds().catch(() => undefined);
@@ -1841,6 +1896,15 @@ export function reviewService(
       // says main was merged in cleanly (askMerge); otherwise it goes back for review. No stamped head (older rounds): the
       // head read now. A runner without "merge-pin" ignores the pin, so none is sent: it merges as before.
       const reviewedHead = changed?.head ? await this.passedHead(t, await latestRows(db, ticketId)).catch(() => null) : null;
+      // BOS-1528: a round that has stamped approvals but no single passed head (mixed, or some unstamped) pins nothing reviewed:
+      // fail closed instead of pinning the head read now. Rounds with no stamps at all (from before heads were kept) go on as before.
+      if (changed?.head && !reviewedHead) {
+        const approvedNow = (await latestRows(db, ticketId)).filter((r) => r.status === "approved");
+        if (approvedNow.some((r) => r.head)) {
+          const delivered = await sendBack(`The reviews were approved, but on different commits (or one has no commit recorded), so nothing was merged: the branch is at ${changed.head.slice(0, 8)}. Check the work, then move the ticket back to review for a fresh round.`, "approved heads differ");
+          return { outcome: "branch_changed", delivered, detail: { status: "branch_moved", head: changed.head, pinned: "" } };
+        }
+      }
       const pinHead = reviewedHead ?? changed?.head;
       let pin: string | null = pinHead && /^[0-9a-f]{7,64}$/.test(pinHead) && deps.runners.can(runner.id, "merge-pin") ? pinHead : null;
       // Also used for the pull-request push (workspace.push), whose answer carries the same branch_moved status.
@@ -2206,9 +2270,23 @@ export function reviewService(
           return (await inReview()) ? null : { status: "left_review" };
         };
         let headOnly = false;
+        let clash: TrainClash | null = null;
+        // BOS-1515 (B2): while it waits, a read-only merge on main after main moves. A clash there is certain (the gate's own
+        // tryMerge, renumbering included), so it goes back now, not when it gets a seat. Null (can't tell) never sends it back.
+        let triedGen = -1;
+        let triedAt = 0;
+        const trialClash = async (): Promise<string[] | null> => {
+          const gen = mainGen(t.projectId);
+          const nowMs = Date.now();
+          const due = (gen !== triedGen && nowMs - triedAt >= TRAIN_TRIAL_MIN_MS) || nowMs - triedAt >= TRAIN_TRIAL_FALLBACK_MS;
+          if (!due) return null;
+          triedGen = gen;
+          triedAt = nowMs;
+          return clashOnMain(t, defaultBranch);
+        };
         try {
           seat: for (;;) {
-            train.join(ticketId, { ...at, headOnly });
+            train.join(ticketId, { ...at, headOnly, clash });
             let held = false;
             while (!train.seated(ticketId)) {
               if (!held) {
@@ -2219,6 +2297,12 @@ export function reviewService(
               {
                 const stop = await gone();
                 if (stop) return stop;
+              }
+              const onMain = await trialClash();
+              if (onMain) {
+                await lineEvent(db, t, { event: "train_clash", on: "main", with: clash ? await namedTickets(clash.with) : [], files: onMain.slice(0, TRAIN_CLASH_FILES), fileCount: onMain.length, action: "sent_back" });
+                train.leave(ticketId);
+                return { status: "conflicts", files: onMain };
               }
               // The owner turned the train off meanwhile: land the way it did before.
               if (!(await queue.train())) {
@@ -2252,6 +2336,14 @@ export function reviewService(
                   // only. main_moved isn't an answer, so that case waits too (fails safe).
                   const alone = await prepare();
                   if (alone.status !== "prepared" && alone.status !== "main_moved") return alone;
+                  // That was a try on main just now: the waiting trial starts from here.
+                  if (alone.status === "prepared") [triedGen, triedAt] = [mainGen(t.projectId), Date.now()];
+                  // BOS-1515 (B1): say so on the merge line, naming the members ahead (the stacked base holds all of them) and
+                  // the files. Not a passive event, so it closes the seat hold and the land-alone wait below is a hold of its own.
+                  const ahead = train.place(ticketId)?.ahead ?? [];
+                  const files = "files" in prep && Array.isArray(prep.files) ? (prep.files as string[]) : [];
+                  clash = { with: ahead, files: files.slice(0, TRAIN_CLASH_FILES), at: Date.now() };
+                  await lineEvent(db, t, { event: "train_clash", on: "ahead", with: await namedTickets(ahead), files: clash.files, fileCount: files.length, action: "land_alone" });
                   train.leave(ticketId);
                   headOnly = true;
                   continue seat;

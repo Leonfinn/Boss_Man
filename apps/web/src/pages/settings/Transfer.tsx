@@ -231,7 +231,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
               <li key={x}>{x}</li>
             ))}
           </ul>
-          <button type="button" className="btn" onClick={() => go(`settings/${done.companyId}/system`)}>
+          <button type="button" className="btn" onClick={() => go(`settings/${done.companyId}/runner`)}>
             Open {done.name}'s settings
           </button>
         </div>

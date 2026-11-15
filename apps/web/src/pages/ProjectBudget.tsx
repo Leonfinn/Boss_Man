@@ -1,4 +1,6 @@
+import { useState, type FormEvent } from "react";
 import { api, usd, type Project } from "../api";
+import { useAction } from "./settings/shared";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
@@ -8,6 +10,38 @@ type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; t
 const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+/** Add a monthly spending limit for one project (the only screen that calls POST /api/budget-policies, BOS-1564). It then shows under Settings → Funding → Spending limits. */
+export function ProjectLimitForm({ project }: { project: Project }) {
+  const [usdLimit, setUsdLimit] = useState("");
+  const [onLimit, setOnLimit] = useState("ask");
+  const act = useAction();
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      await api("/api/budget-policies", { method: "POST", body: { scopeKind: "project", scopeId: project.id, windowKind: "calendar_month", limitUsd: Number(usdLimit), onLimit } });
+      setUsdLimit("");
+      return "Limit added. It is listed under Settings → Funding → Spending limits.";
+    });
+  };
+  return (
+    <form onSubmit={submit} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12 }}>
+      <label>
+        Spending limit per month (USD)
+        <input type="number" min="0" step="0.01" required value={usdLimit} onChange={(e) => setUsdLimit(e.target.value)} />
+      </label>
+      <label>
+        At the limit
+        <select value={onLimit} onChange={(e) => setOnLimit(e.target.value)}>
+          <option value="ask">Ask me</option>
+          <option value="pause">Pause</option>
+        </select>
+      </label>
+      <button type="submit" disabled={act.busy || usdLimit === ""}>Add limit</button>
+      {act.view}
+    </form>
+  );
+}
 
 /** What a project has cost on API and credit runs (subscription runs aren't in the dollar figures), the month being the UTC calendar month. */
 export function ProjectBudget({ project }: { project: Project }) {
@@ -82,6 +116,8 @@ export function ProjectBudget({ project }: { project: Project }) {
       ) : (
         <p>No spend or priced plan runs on this project's tasks yet.</p>
       )}
+      <h2 style={{ fontSize: 16, marginTop: 24 }}>Spending limit</h2>
+      <ProjectLimitForm project={project} />
     </>
   );
 }

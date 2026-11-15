@@ -360,6 +360,18 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       expect(other.statusLine!.blocker).toMatch(/Every slot is busy: slot 1: APP-1/);
     });
 
+    // BOS-1515 (B1): a merge the train holds to land on main alone says who it clashed with, the files, and what happens next.
+    it("says waiting to land on main alone, with the clash, for a merge the train holds alone", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const detail = async () => ({ slots: 2, busy: [], mainRed: false, fixRef: null, seatWait: [id], heldAlone: [{ ticketId: id, clashWith: ["APP-1471"], files: ["a.ts", "b.ts", "c.ts", "d.ts"], since: "2026-11-14T20:14:35.000Z", holdsLine: true }] });
+      const row = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 1, waiting: 3 }), queueDetail: detail });
+      expect(row).toMatchObject({ state: "waiting_for_seat", label: "waiting to land on main alone: it clashed with APP-1471 in 4 files (a.ts, b.ts, c.ts, …)" });
+      expect(row.heldAlone).toEqual({ clashWith: ["APP-1471"], files: ["a.ts", "b.ts", "c.ts", "d.ts"], since: "2026-11-14T20:14:35.000Z", holdsLine: true });
+      expect(row.statusLine).toMatchObject({ step: row.label, blocker: "The tickets ahead in the merge train haven't landed yet." });
+      expect(row.statusLine!.next).toMatch(/others wait behind it until then\. It is sent back at once if the clash reaches main\./);
+    });
+
     it("gives a running merge the check's own start time, not the landing's", async () => {
       const c = (ctx = await setup());
       const id = await waitingMerge(c);
