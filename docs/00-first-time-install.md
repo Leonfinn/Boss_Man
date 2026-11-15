@@ -1,6 +1,6 @@
 # 00 — First-time install
 
-This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/26-install-from-images.md](26-install-from-images.md). For a worked example on TrueNAS SCALE, with backups, the host deployer and more, see [docs/06-install-truenas.md](06-install-truenas.md).
+This is the short path from nothing to a working Boss Man on a Linux host with Docker, building the images from the source. If you would rather pull ready-made images and need nothing on the host but Docker, use [docs/33-install-from-images.md](33-install-from-images.md). For a worked example on TrueNAS SCALE, with backups, the host deployer and more, see [docs/06-install-truenas.md](06-install-truenas.md).
 
 > **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
 

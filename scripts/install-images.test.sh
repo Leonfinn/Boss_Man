@@ -49,7 +49,7 @@ echo "$cfg" | jq -e '.services.setup.network_mode == "none" and (.services.setup
 echo "$cfg" | jq -e '.services.launcher.cap_add == ["SETGID","SETUID"] or .services.launcher.cap_add == ["SETUID","SETGID"]' >/dev/null && ok "the launcher keeps only SETUID and SETGID" || bad "launcher capabilities"
 # No host tools in the compose file's own steps (comments excluded).
 if grep -v '^[[:space:]]*#' docker-compose.images.yml | grep -Eq '\b(openssl|sudo|chown|stat -c)\b'; then bad "compose file uses host tools"; else ok "no host openssl, chown, stat or sudo"; fi
-[ -f docs/26-install-from-images.md ] && ok "the install guide exists" || bad "docs/26-install-from-images.md is missing"
+[ -f docs/33-install-from-images.md ] && ok "the install guide exists" || bad "docs/33-install-from-images.md is missing"
 
 # ---- The real install ----
 if [ -z "${INSTALL_RELEASE_JSON:-}" ]; then

@@ -20,7 +20,7 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested working with OpenRouter, Ollama, Synthetic so far). The alpha install builds the containers on your server, for the beta release pre-built docker images will be available.
 
-1. With only Docker on the host, install from the ready-made images: [docs/26-install-from-images.md](docs/26-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
+1. With only Docker on the host, install from the ready-made images: [docs/33-install-from-images.md](docs/33-install-from-images.md). To build from the source instead, follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
 2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups and self-updates.
 3. Before you update, read [docs/23-updating.md](docs/23-updating.md).
 
