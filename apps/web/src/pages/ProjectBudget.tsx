@@ -42,7 +42,7 @@ export function ProjectLimitForm({ project }: { project: Project }) {
   );
 }
 
-/** What a project has cost: money only (subscription use isn't counted), the month being the UTC calendar month. */
+/** What a project has cost on API and credit runs (subscription runs aren't in the dollar figures), the month being the UTC calendar month. */
 export function ProjectBudget({ project }: { project: Project }) {
   const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
@@ -51,20 +51,20 @@ export function ProjectBudget({ project }: { project: Project }) {
   return (
     <>
       <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
-        <div><dt className="muted">This month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
-        <div><dt className="muted">All time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
+        <div><dt className="muted">API and credit runs, this month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
+        <div><dt className="muted">API and credit runs, all time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
         <div><dt className="muted">Cap per task</dt><dd style={{ fontSize: 24, margin: 0 }}>{s.ticketCostCapMicros ? usd(s.ticketCostCapMicros) : "None"}</dd></div>
       </dl>
       {s.monthlyCapMicros ? (
         <div>
-          <label htmlFor="month-cap">{usd(s.monthMicros)} of the {usd(s.monthlyCapMicros)} monthly cap</label>
+          <label htmlFor="month-cap">{usd(s.monthMicros)} of the {usd(s.monthlyCapMicros)} monthly cap (API and credit runs only)</label>
           <progress id="month-cap" style={{ display: "block", width: "100%" }} max={s.monthlyCapMicros} value={Math.min(s.monthMicros, s.monthlyCapMicros)} />
           {s.monthMicros >= s.monthlyCapMicros && <small role="status">Cap reached: no new runs start for this project until next month or you raise it.</small>}
         </div>
       ) : (
         <p className="muted">No monthly cap. Set one on the Config tab.</p>
       )}
-      <p className="muted" style={{ fontSize: 13 }}>Money is pay-as-you-go and API credit only: runs paid from a subscription (such as Claude Max) cost nothing extra, so they aren't in these figures and caps don't stop them. The month is the calendar month (UTC). Set the caps on the Config tab.</p>
+      <p className="muted" style={{ fontSize: 13 }}>The dollar figures are list-price estimates for API and credit runs, not a bill and not total spend. Runs paid from a subscription (such as Claude Max) are left out, and the monthly cap does not stop them. The cap per task does count subscription runs, at list prices. Extra usage or top-up bought on a subscription is not seen here. The month is the calendar month (UTC). Set the caps on the Config tab.</p>
       {s.tokens && (
         <>
           <h2 style={{ fontSize: 16, marginTop: 24 }}>Tokens</h2>
@@ -75,7 +75,8 @@ export function ProjectBudget({ project }: { project: Project }) {
           </dl>
         </>
       )}
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Most expensive tasks</h2>
+      <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>API and credit runs only; subscription runs aren't counted.</p>
       {s.topTickets.length ? (
         <ol>
           {s.topTickets.map((t) => (
@@ -85,7 +86,7 @@ export function ProjectBudget({ project }: { project: Project }) {
           ))}
         </ol>
       ) : (
-        <p>No spend on this project's tasks yet.</p>
+        <p>No API or credit spend on this project's tasks yet. Subscription runs don't show here.</p>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Spending limit</h2>
       <ProjectLimitForm project={project} />

@@ -29,8 +29,8 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Costliest tasks
   - Filter tasks
-  - Most expensive tasks
   - Passed, held
   - Project brief
   - Spending limit
@@ -125,6 +125,7 @@ sections:
   - Set up your phone
 reads: 
   - /api/notification-settings
+  - /api/notification-settings/phone-login/:id
   - /api/notifications
   - /api/notifications/pushes
 
@@ -178,8 +179,8 @@ reads: (none)
 ## #/settings/<company>/funding
 sections: 
   - Budgets
+  - Costliest tasks
   - Funding sources
-  - Most expensive tasks
   - Spending limit
   - Spending limits
   - Tokens

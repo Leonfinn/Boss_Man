@@ -76,6 +76,8 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address.
    - Choose **Save**.
 
+   Already saved on the **Notifications** page? The **Create phone login** button under **Set up your phone** makes the `phone-read` user and its read-only access for you and shows the password once, so you can skip the `phone-read` lines in step 4 (it needs `openssl` on the host; the page says if it is missing). If you try the button after making the user by hand, it says the user exists and offers **Reset password**.
+
 6. **Set up the phone.** In the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
 
 7. **Send a test.** On the **Notifications** page, choose **Send a test to my phone** (it only appears after you Save). It should arrive within seconds. A test that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.

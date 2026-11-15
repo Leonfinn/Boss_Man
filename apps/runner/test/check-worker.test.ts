@@ -52,6 +52,13 @@ describe("check worker role (BOS-1435)", () => {
     expect(() => safeWorkerToken({})).toThrow(/BOSSMAN_CHECK_WORKER_TOKEN_FILE/);
   });
 
+  it("names an unreadable token file instead of dying with a bare stack (BOS-1550)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bm-worker-token-"));
+    // A path that cannot be read as a file (a directory, or a missing one) fails like a wrong-owner file does.
+    expect(() => safeWorkerToken({ BOSSMAN_CHECK_WORKER_TOKEN_FILE: dir })).toThrow(/token file .* can't be read \(EISDIR\)/);
+    expect(() => safeWorkerToken({ BOSSMAN_CHECK_WORKER_TOKEN_FILE: path.join(dir, "missing") })).toThrow(/ENOENT.*BOSSMAN_CHECK_WORKER_TOKEN_FILE/);
+  });
+
   it("main.ts hands over to the check worker before any runner start-up when BOSSMAN_ROLE=check-worker", () => {
     const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
     const guard = main.indexOf('process.env.BOSSMAN_ROLE === "check-worker"');

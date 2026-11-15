@@ -34,7 +34,7 @@ function fakeDocker() {
     async inspect(name) {
       calls.push(`inspect ${name}`);
       const c = containers.get(name);
-      return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
+      return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels, Env: (c.spec as { Env?: string[] }).Env }, HostConfig: (c.spec as { HostConfig?: ContainerInfo["HostConfig"] }).HostConfig, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
     },
     async hostInfo() {
       return { dockerVersion: "27.0.1", osType: "linux" };
@@ -327,10 +327,59 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec(config(), "app-co").HostConfig.CapAdd).toEqual([]);
   });
 
-  it("BOS-1152: Checks at once is taken even when the data folder cannot be written (the launcher's root is read-only)", () => {
+  it("BOS-1152: Checks at once is taken even when the data folder cannot be written (the launcher's root is read-only)", async () => {
     const api = launcher({ ...config(), dataRoot: path.join(tmpdir(), "bm-no-such-folder-1152", "nested") }, fakeDocker().docker);
-    expect(api.setChecks(3)).toMatchObject({ requested: 3, slots: 3 });
+    expect(await api.setChecks(3)).toMatchObject({ requested: 3, slots: 3 });
     expect(api.plannedChecks()).toMatchObject({ requested: 3, slots: 3 });
+  });
+
+  describe("BOS-1498: sizing from Agents at once", () => {
+    const GIB = 1024 ** 3;
+    it("a fresh install (no runners yet) follows the formula and keeps nothing", async () => {
+      const cfg = { ...config(), requestedSlots: 1 };
+      const api = launcher(cfg, fakeDocker().docker);
+      expect(await api.setChecks(1, 2)).toMatchObject({ agents: 2, memoryBytes: 7 * GIB, why: "7 GB: 2 agents at once and 1 check." });
+      expect(cfg.kept).toBeUndefined();
+      expect(JSON.parse(readFileSync(path.join(cfg.dataRoot, "launcher-checks.json"), "utf8"))).toEqual({ slots: 1, agents: 2 });
+      await api.put("app-co", TOKEN);
+      expect((await api.checks()).runners).toEqual([{ slug: "app-co", slots: 1, memoryBytes: 7 * GIB }]);
+    });
+
+    it("an upgraded install keeps its runners' memory until a setting is lowered, so nothing is recreated", async () => {
+      const cfg = { ...config(), requestedSlots: 1 };
+      const fake = fakeDocker();
+      const api = launcher(cfg, fake.docker);
+      await api.put("app-co", TOKEN); // made on the old base: 16 GB
+      expect((await api.checks()).runners[0]!.memoryBytes).toBe(16 * GIB);
+      const first = await api.setChecks(1, 6);
+      expect(first).toMatchObject({ memoryBytes: 16 * GIB });
+      expect(first.why).toMatch(/^16 GB: kept from before \(6 agents at once and 1 check need 11 GB\)/);
+      expect(cfg.kept).toEqual({ bytes: 16 * GIB, slots: 1, agents: 6 });
+      const c = await api.checks();
+      expect(c.runners.every((r) => r.memoryBytes === c.memoryBytes && r.slots === c.slots)).toBe(true);
+      // Saved, so a launcher restart (main.ts reads the file) keeps it too.
+      expect(JSON.parse(readFileSync(path.join(cfg.dataRoot, "launcher-checks.json"), "utf8"))).toEqual({ slots: 1, agents: 6, kept: { bytes: 16 * GIB, slots: 1, agents: 6 } });
+      // Raising never goes below what was kept, and adds once the formula passes it.
+      expect(await api.setChecks(2, 6)).toMatchObject({ memoryBytes: 16 * GIB }); // 2 + 6 + 6 = 14
+      expect(await api.setChecks(2, 10)).toMatchObject({ memoryBytes: 18 * GIB, why: "18 GB: 10 agents at once and 2 checks." });
+      expect(await api.setChecks(1, 6)).toMatchObject({ memoryBytes: 16 * GIB });
+      // A later push is not a "first" one: nothing is re-recorded.
+      expect(cfg.kept).toEqual({ bytes: 16 * GIB, slots: 1, agents: 6 });
+      // Lowering one setting moves to the formula, also when raised back.
+      expect(await api.setChecks(1, 4)).toMatchObject({ memoryBytes: 9 * GIB, why: "9 GB: 4 agents at once and 1 check." });
+      expect(cfg.kept).toBeUndefined();
+      expect(await api.setChecks(1, 6)).toMatchObject({ memoryBytes: 11 * GIB });
+    });
+
+    it("PUT /checks takes { slots } (an older server) or { slots, agents }, and nothing else", async () => {
+      const s = await serve();
+      expect(await (await s.call("PUT", "/checks", { slots: 2 })).json()).toMatchObject({ requested: 2, agents: null });
+      expect(await (await s.call("PUT", "/checks", { slots: 1, agents: 3 })).json()).toMatchObject({ requested: 1, agents: 3, memoryBytes: 8 * GIB });
+      // An older server sending { slots } again leaves the agents number alone.
+      expect(await (await s.call("PUT", "/checks", { slots: 1 })).json()).toMatchObject({ agents: 3 });
+      for (const bad of [{ agents: 3 }, { slots: 1, agents: "3" }, { slots: 1, agents: -1 }, { slots: 1, agents: 2.5 }, { slots: 1, agents: 1, extra: 1 }]) expect((await s.call("PUT", "/checks", bad)).status, JSON.stringify(bad)).toBe(400);
+      expect(await (await s.call("GET", "/checks")).json()).toMatchObject({ requested: 1, agents: 3, why: expect.stringMatching(/^8 GB: 3 agents at once and 1 check/) });
+    });
   });
 
   it("BOS-69: a named stack uses its own names, images and labels, and never lists or touches the other stack's runners", async () => {
