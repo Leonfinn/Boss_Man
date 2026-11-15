@@ -434,8 +434,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         }
       }
       if (!h) return last && !last.ok ? { on: false as const, last, healthy } : { on: false as const, last };
-      const active = await activeByCompany(true);
-      const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
+      // BOS-1600 (criterion A): the same runnerBusy result the swap's own drain waits on, so text and swap never disagree.
+      const busyNow = await runnerBusy(db, true);
+      const active = busyNow.runs;
+      const runsTotal = busyNow.runsTotal;
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
       // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
       // A "stop the checks and update now" answer (force) means nothing is waited for any more.
