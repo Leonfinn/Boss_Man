@@ -76,6 +76,11 @@ describe("flattenHostRecord: ntfy section", () => {
     expect(flat["ntfy.container"]).toBe("ntfy");
   });
 
+  it("keeps serverReach, including false (ntfy runs but the server can't reach it)", () => {
+    expect(flattenHostRecord({ ...base(), ntfy: { serverReach: false } })["ntfy.serverReach"]).toBe("false");
+    expect(flattenHostRecord({ ...base(), ntfy: { serverReach: true } })["ntfy.serverReach"]).toBe("true");
+  });
+
   it("gives no ntfy keys when the section reports neither field", () => {
     const flat = flattenHostRecord({ ...base(), ntfy: {} });
     expect(Object.keys(flat).filter((k) => k.startsWith("ntfy."))).toEqual([]);

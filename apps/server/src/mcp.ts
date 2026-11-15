@@ -57,7 +57,7 @@ import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, withNote, type Scope } from "./mcp-common.js";
+import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, stagingTexts, stagingWarning, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, urgentHeldMessage, withNote, type Scope } from "./mcp-common.js";
 import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registerTicketMoves } from "./mcp-tickets.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
@@ -66,6 +66,7 @@ import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
+import { registerPermissionReport } from "./mcp-permission-report.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -98,6 +99,13 @@ async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: str
   const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
   if (restored) return { uncovered: false, message: `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.` };
   return { uncovered: true, message: "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted." };
+}
+const QUOTES_URGENT = z.boolean().optional().describe("CEO only: send a message that uses the word urgent without marking a ticket urgent (it only quotes the word). Without it, a CEO message that calls a ticket urgent while its urgent flag is off is held: set the flag with update_ticket urgent true, or reword.");
+/** The hold text when a CEO's message calls a ticket urgent while its flag is off (BOS-1375); null for anyone else or when nothing is wrong. */
+async function ceoUrgentHold(db: Db, scope: Scope, body: string, ticketId: string | undefined): Promise<string | null> {
+  if (!scope.agentId) return null;
+  const [me] = await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)));
+  return me?.role === "ceo" ? urgentHeldMessage(db, scope.companyId, body, ticketId) : null;
 }
 /** What the CEO is told when a reply asking the owner to act is held (BOS-901). */
 const CEO_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open decision covers it, and the owner doesn't watch tickets, so the ask would be lost. Call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
@@ -207,6 +215,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
+  registerPermissionReport(server, db, scope);
   return server;
 }
 
@@ -294,9 +303,11 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "ticket_reply",
     {
       description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. If you are the CEO, a reply that asks the owner to act is not posted until an open decision covers it; a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
-      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("CEO only: send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a CEO reply that asks the owner to act is held (not posted) until an open decision covers it.") },
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("CEO only: send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a CEO reply that asks the owner to act is held (not posted) until an open decision covers it."), quotesUrgent: QUOTES_URGENT },
     },
-    async ({ ticketId, text: body, notAnAsk }) => {
+    async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
+      const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
+      if (urgentHold) return fail(urgentHold);
       // The CEO's owner-ask is held, not posted, until a card covers it (BOS-901): the hint after posting is too late for them.
       let hint: { uncovered: boolean; message: string } | null = null;
       if (scope.agentId) {
@@ -332,10 +343,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       description: NUDGE_DESCRIPTION,
       inputSchema: NUDGE_INPUT,
     },
-    async ({ agent, ticketId, why }) => {
+    async ({ agent, ticketId, why, quotesUrgent }) => {
       if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
       const out = ticketId ? await outsideTree(ticketId) : null;
       if (out) return fail(out);
+      const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, why, ticketId);
+      if (urgentHold) return fail(urgentHold);
       const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
       return r.ok ? text(`Nudged: ${r.delivered}.${await wipQueuedNote(db, ticketId)}`) : fail(r.error);
     },
@@ -1025,7 +1038,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1342,7 +1355,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
 
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
-const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
+const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500), quotesUrgent: QUOTES_URGENT };
 /** Run tools the owner chat replaces with its own version (BOS-224). */
 const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
 /** The run tools a non-CEO agent's owner chat adds (BOS-1300): replying on a ticket, booking and clearing its own checks, and attaching a picture. */
@@ -1385,8 +1398,10 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.
-  server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {
+  server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why, quotesUrgent }) => {
     if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
+    const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, why, ticketId);
+    if (urgentHold) return fail(urgentHold);
     const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
     return r.ok ? text(`Nudged: ${r.delivered}.${await wipQueuedNote(db, ticketId)}`) : fail(r.error);
   });
@@ -1427,7 +1442,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
         // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
         const thin = input.noCode ? "" : thinTicketWarning(input.body, input.assignee);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${thin}`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(input.acceptanceCriteria, input.body))}${thin}`);
       } catch (err) {
         return workFail(err);
       }

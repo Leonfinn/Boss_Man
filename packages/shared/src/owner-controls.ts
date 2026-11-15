@@ -37,8 +37,8 @@ export const OWNER_CONTROLS = {
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss",
     "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
-    // The runner, credentials, funding and project panels Setup shares with Settings and Projects.
-    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
+    "Save the token", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
@@ -148,6 +148,8 @@ export const OWNER_CONTROLS = {
     "Measuring", "Record this device", "Rename", "Forget",
     // Outgoing email (BOS-1387).
     "Turn off", "Send test email",
+    // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
+    "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -180,7 +182,7 @@ export const OWNER_FIELDS = {
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
-    "Add", "Value", "Name", "Variable name",
+    "Claude setup token", "Add", "Value", "Name", "Variable name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
@@ -258,6 +260,8 @@ export const OWNER_FIELDS = {
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Land approved merges in order (merge train)",
+    // Settings → Checks → Check workers (BOS-1435): one machine's form.
+    "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Workspace disk.
     "Disk cap (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).

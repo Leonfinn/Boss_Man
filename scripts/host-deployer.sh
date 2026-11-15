@@ -726,6 +726,28 @@ host_extra_facts() {
     [[ $ncont =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || ncont=""
   fi
   [[ -n $ncont ]] && nparts+="${nparts:+, }\"container\": $(jstr "$ncont")"
+  # Does the running ntfy container share a Docker network with a running Boss Man server container? The server
+  # publishes to the name "ntfy", which only resolves on a shared network (under blue/green that needs
+  # deploy/ntfy-bluegreen.yml). "running" alone does not prove the server can reach it. Reported only when both are
+  # found; names of networks never leave this function.
+  if [[ -n $ncont ]]; then
+    local sids="" sid snets nnets reach=false n svcname
+    # shellcheck disable=SC2016 # the braces are a Go template for docker, not shell expansion
+    nnets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$ncont")" || nnets=""
+    for svcname in server server-blue server-green; do # label filters are ANDed, so one call each
+      sids+="$(dk ps --filter "label=com.docker.compose.service=$svcname" --format '{{.ID}}' || true) "
+    done
+    if [[ -n $nnets && -n $sids ]]; then
+      for sid in $sids; do
+        # shellcheck disable=SC2016 # Go template for docker
+        snets="$(dk inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$sid")" || snets=""
+        for n in $snets; do
+          [[ " $nnets " == *" $n "* ]] && reach=true
+        done
+      done
+      nparts+="${nparts:+, }\"serverReach\": $reach"
+    fi
+  fi
   [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
   # --- BOS-1004: can this host seal a phone-login password? (openssl is what "Create phone login" needs)
   if command -v openssl >/dev/null 2>&1; then out+="$sep\"phoneLogin\": {\"openssl\": true}"; else out+="$sep\"phoneLogin\": {\"openssl\": false}"; fi

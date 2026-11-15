@@ -53,6 +53,9 @@ const HostRecord = z.object({
     baseUrl: z.string().regex(/^https:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?(\/[A-Za-z0-9._~/-]{0,100})?$/).optional().catch(undefined),
     /** The ntfy container's name on the host, for `docker exec`. */
     container: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/).optional().catch(undefined),
+    /** false: ntfy runs but shares no Docker network with a running server container, so the name "ntfy" can't resolve
+     * for pushes (under blue/green: start ntfy with deploy/ntfy-bluegreen.yml). Absent: not checked. */
+    serverReach: z.boolean().optional().catch(undefined),
   }).optional().catch(undefined),
   /** BOS-1004: whether the host can seal a phone-login password (it needs openssl). Absent: an older deployer, treated as unknown. */
   phoneLogin: z.object({ openssl: z.boolean() }).optional().catch(undefined),
@@ -143,6 +146,7 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
   if (r.ntfy?.baseUrl) o["ntfy.baseUrl"] = r.ntfy.baseUrl;
   if (r.ntfy?.container) o["ntfy.container"] = r.ntfy.container;
   if (r.phoneLogin) o["phoneLogin.openssl"] = String(r.phoneLogin.openssl);
+  if (r.ntfy?.serverReach !== undefined) o["ntfy.serverReach"] = String(r.ntfy.serverReach);
   if (r.memory) { o["memory.totalKb"] = String(r.memory.totalKb); o["memory.availableKb"] = String(r.memory.availableKb); }
   for (const [k, v] of Object.entries(r.addons ?? {})) o[`addon.${k}`] = v;
   for (const [check, fields] of Object.entries(r.checks ?? {}))

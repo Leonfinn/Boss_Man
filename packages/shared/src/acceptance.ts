@@ -237,6 +237,22 @@ export function afterMergeLint(criteria: readonly Criterion[]): string {
   const them = loose.length === 1 ? "it" : "them";
   return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
 }
+/** A real staging environment, not git's "staging area" or "staged changes" (BOS-1473). */
+const STAGING = /\b(?:on|to|in|against|at|via|the)\s+(?:the\s+)?staging\b(?!\s+(?:area|index|changes|files?|directory))|\bstaging\s+(?:environment|server|host|target|deploy(?:ment)?|site|instance)\b/i;
+
+/** Whether a text names a staging environment (as opposed to git's staging area). */
+export const namesStaging = (s: string): boolean => STAGING.test(s);
+
+/**
+ * The warning when a criterion or the ticket text names staging in a project nothing can reach staging in
+ * (BOS-1473). Warning only; empty means nothing to say.
+ */
+export function stagingLint(texts: readonly string[]): string {
+  const hit = texts.filter(namesStaging);
+  if (!hit.length) return "";
+  const names = hit.map((t) => `"${t.length > 80 ? `${t.slice(0, 77)}...` : t}"`).join(", ");
+  return `${names} names staging, but this project has no staging target an agent can reach, so a check there can't be run and the ticket would sit in Blocked. Word it for what can be checked (the merge check, or "on a real host" after merge). This is a warning only.`;
+}
 /**
  * The criteria a stuck review could move to "after the merge" (BOS-422): what the reviewers' words fail, when every one
  * of those reads like a live check (see afterMergeLint) and there is nothing else to fix. Empty when a review has a line

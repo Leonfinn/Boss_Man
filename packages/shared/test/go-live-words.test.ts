@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { GO_LIVE_WAIT_MAX_MS, goLiveWaitWords } from "../src/go-live.js";
+import { GO_LIVE_WAIT_MAX_MS, goLiveWaitWords, touchesRunnerUpdate } from "../src/go-live.js";
+
+describe("touchesRunnerUpdate (BOS-1467)", () => {
+  it("is true only for the runner update script", () => {
+    expect(touchesRunnerUpdate(["README.md", "scripts/update-runner.sh"])).toBe(true);
+    expect(touchesRunnerUpdate(["scripts/update-runner.test.sh", "scripts/update-runner.sh.bak", "apps/server/src/x.ts"])).toBe(false);
+    expect(touchesRunnerUpdate([])).toBe(false);
+  });
+});
 
 describe("goLiveWaitWords: what the board says a merged ticket waits for (BOS-1106)", () => {
   it("gives each wait its own sentence, all starting \"waiting for go-live\"", () => {
