@@ -344,6 +344,30 @@ describe("wiki append, history and restore (BOS-430)", () => {
     expect((await c.wiki.revision(c.company.id, after.revisions[0]!.id)).body).toBe(r.page.body);
   });
 
+  it("append keeps a heading's intro text in place for newest first and bottom (BOS-1288)", async () => {
+    // The release log's intro (standing notes) is text under the top heading and above its first
+    // sub-heading. Newest first must go below it, and bottom must go after the whole section.
+    const c = (ctx = await setup());
+    const intro = "**Standing notes.** Never rewrite this page with write.\n\nThe BOS-1279 note belongs at the top.";
+    const body = ["# Release log", "", intro, "", "## 2026-11-03", "", "- 23:15: shipped v1.2.0", "", "### Detail", "", "older detail", "", "## 2026-11-02", "", "- 12:00: shipped v1.1.8"].join("\n");
+    await c.wiki.write(c.company.id, { title: "Release log", body, agentId: c.worker.id, runId: null });
+
+    const newest = await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 09:00: shipped v1.3.0", heading: "Release log", agentId: c.worker.id, runId: null });
+    expect(newest.page.body).toBe(body.replace("\n\n## 2026-11-03", "\n\n- 09:00: shipped v1.3.0\n\n## 2026-11-03"));
+    expect(newest.page.body.indexOf(intro)).toBeLessThan(newest.page.body.indexOf("- 09:00: shipped v1.3.0"));
+    expect(newest.page.body.indexOf("- 09:00: shipped v1.3.0")).toBeLessThan(newest.page.body.indexOf("## 2026-11-03"));
+
+    // Bottom of a sub-section: after its own text and its sub-headings, before the next section.
+    const sectionBottom = await c.wiki.append(c.company.id, { slug: "release-log", entry: "- 10:00: shipped v1.2.1", heading: "2026-11-03", position: "bottom", agentId: c.worker.id, runId: null });
+    expect(sectionBottom.page.body).toBe(newest.page.body.replace("\n\n## 2026-11-02", "\n\n- 10:00: shipped v1.2.1\n\n## 2026-11-02"));
+    expect(sectionBottom.page.body.indexOf("- 10:00: shipped v1.2.1")).toBeLessThan(sectionBottom.page.body.indexOf("## 2026-11-02"));
+
+    // Bottom of the top section: at the very end, after every entry, with the intro still at the top.
+    const pageBottom = await c.wiki.append(c.company.id, { slug: "release-log", entry: "## 2026-11-01\n\n- 08:00: shipped v1.1.7", heading: "Release log", position: "bottom", agentId: c.worker.id, runId: null });
+    expect(pageBottom.page.body).toBe(`${sectionBottom.page.body}\n\n## 2026-11-01\n\n- 08:00: shipped v1.1.7\n`);
+    expect(pageBottom.page.body.indexOf(intro)).toBeLessThan(pageBottom.page.body.indexOf("## 2026-11-01"));
+  });
+
   it("append at the top or the end, and a clear error for a heading that isn't there", async () => {
     const c = (ctx = await setup());
     await c.wiki.write(c.company.id, { title: "Log", body: log, agentId: c.worker.id, runId: null });
@@ -415,7 +439,8 @@ describe("wiki append, history and restore (BOS-430)", () => {
     const body = "hello\r\n\r\n## A\r\nx\r\n";
     await c.wiki.write(c.company.id, { title: "CRLF", body, agentId: c.worker.id, runId: null });
     const r = await c.wiki.append(c.company.id, { slug: "crlf", entry: "- n", heading: "A", agentId: c.worker.id, runId: null });
-    expect(r.page.body).toContain("## A\r\n- n\r\n");
+    // The heading has intro text ("x"), so newest first goes after it and before the next section.
+    expect(r.page.body).toContain("## A\r\nx\r\n\r\n- n\r\n");
     expect(r.page.body).toContain("hello\r\n");
   });
 
