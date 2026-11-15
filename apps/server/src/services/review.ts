@@ -569,7 +569,7 @@ export function reviewService(
    */
   async function releaseGoLive(t: typeof tickets.$inferSelect, marked: string | null): Promise<boolean> {
     // Claim it first: a second pass (the server update and a runner hello can land together) must not wake twice.
-    const [claimed] = await db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null }).where(and(eq(tickets.id, t.id), isNotNull(tickets.goLiveWait))).returning({ id: tickets.id });
+    const [claimed] = await db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null, liveAt: new Date() }).where(and(eq(tickets.id, t.id), isNotNull(tickets.goLiveWait))).returning({ id: tickets.id });
     if (!claimed) return false;
     const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
     const quoted = left.map((c) => `"${c}"`).join(", ");
@@ -1133,7 +1133,7 @@ export function reviewService(
       if (!t.mergeCommit) throw new ReviewError(409, "This ticket hasn't merged, so there is nothing to mark live.");
       if (await serverIsGoLive(db, companyId)) throw new ReviewError(409, "This company's work goes live with the Boss Man server update, and Boss Man sees that itself when the server runs the merge. Nothing to mark.");
       const at = new Date();
-      await db.update(tickets).set({ liveMarkedAt: at, liveEvidence: evidence }).where(eq(tickets.id, t.id));
+      await db.update(tickets).set({ liveMarkedAt: at, liveEvidence: evidence, liveAt: at }).where(eq(tickets.id, t.id));
       await record(db, { companyId, ticketId: t.id, kind: "go_live_marked", summary: `${input.by} marked the merge ${t.mergeCommit.slice(0, 12)} live. Evidence: ${evidence}` });
       await db.insert(ticketMessages).values({ companyId, ticketId: t.id, author: "system", text: `${input.by} marked this ticket's merge live. Evidence: ${evidence}` });
       const woken = t.goLiveWait ? await releaseGoLive({ ...t, liveMarkedAt: at }, evidence) : false;
