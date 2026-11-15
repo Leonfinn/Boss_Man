@@ -415,6 +415,8 @@ export type NotifySettings = {
   publicUrl: string | null;
   /** Phone Approve buttons (BOS-243): on unless switched off. */
   approveButtons?: boolean;
+  /** The owner's phone type (BOS-1484); null or missing: not said yet. */
+  phoneType?: "android" | "iphone" | "both" | null;
   /** Whether Approve buttons are actually offered, and if not why. */
   approve?: { on: true } | { on: false; why: string };
   /** The ntfy address the phone app must use (the add-on's NTFY_BASE_URL, as the host reports it); null when not known. */

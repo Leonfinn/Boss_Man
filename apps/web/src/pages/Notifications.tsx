@@ -128,6 +128,8 @@ type Form = {
   phonePush: "urgent" | "all";
   publicUrl: string;
   approveButtons: boolean;
+  /** "" = not said yet (shows both phones' steps). */
+  phoneType: "" | "android" | "iphone" | "both";
 };
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -148,6 +150,7 @@ function toForm(s: NotifySettings): Form {
     phonePush: s.phonePush === "all" ? "all" : "urgent",
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
     approveButtons: s.approveButtons !== false,
+    phoneType: s.phoneType ?? "",
   };
 }
 
@@ -198,6 +201,7 @@ function SettingsForm() {
           phonePush: form.phonePush,
           publicUrl: form.publicUrl.trim() || null,
           approveButtons: form.approveButtons,
+          phoneType: form.phoneType || null,
         },
       });
       setSaved(s);
@@ -296,6 +300,15 @@ function SettingsForm() {
               )}
             </div>
             <div className="field" style={{ maxWidth: 360 }}>
+              <label htmlFor="phone-type">My phone</label>
+              <select id="phone-type" value={form.phoneType} onChange={(e) => set({ phoneType: e.target.value === "android" || e.target.value === "iphone" || e.target.value === "both" ? e.target.value : "" })}>
+                <option value="">Not said yet (show both)</option>
+                <option value="android">Android</option>
+                <option value="iphone">iPhone</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            <div className="field" style={{ maxWidth: 360 }}>
               <label htmlFor="phone-push">Send to my phone</label>
               <select id="phone-push" value={form.phonePush} onChange={(e) => set({ phonePush: e.target.value === "all" ? "all" : "urgent" })}>
                 <option value="urgent">Urgent only (default)</option>
@@ -381,7 +394,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "android" && (
         <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
           On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
           <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
@@ -389,7 +402,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </a>
         </p>
       )}
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "iphone" && (
         <p className="muted" data-testid="phone-android-note" style={{ fontSize: 14, margin: 0 }}>
           On Android, urgent pushes only break through Do Not Disturb after you turn on "Override Do Not Disturb" once for ntfy's max-priority channel: ntfy app → Settings → Notifications → the max-priority channel → Override Do Not Disturb. Test once with Do Not Disturb on.
         </p>

@@ -5,7 +5,7 @@ import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReadi
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { heldReadyTickets } from "./agent-wip.js";
-import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 import { CHECK_REUSED_KIND } from "./check-request.js";
@@ -47,13 +47,17 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   const deviceLines = async (hasTicket: boolean) => {
     if (!hasTicket) return [];
     const rows = await db.select().from(deviceProfiles).orderBy(desc(deviceProfiles.reportedAt));
-    return rows
+    // The owner's phone type (BOS-1484), once an ntfy server is set up: so nobody guesses Android or iPhone.
+    const [notif] = await db.select().from(settings).where(eq(settings.key, "notifications"));
+    const nv = notif?.value as { ntfy?: unknown; phoneType?: string | null } | undefined;
+    const phoneLine = nv?.ntfy ? [`- Owner's phone for ntfy pushes: ${nv.phoneType === "android" ? "Android" : nv.phoneType === "iphone" ? "iPhone" : nv.phoneType === "both" ? "both Android and iPhone" : "phone type unknown: ask the owner"}`] : [];
+    return [...phoneLine, ...rows
       .map((r) => ({ label: r.label, browser: r.browser, readings: r.readings }))
       .filter((p) => isRenderableProfile(p) && p.readings.every((x) => DEVICE_UNITS.every((k) => typeof x.units?.[k] === "number")))
       .map((p) => {
         const t = tallestReading(p);
         return `- ${one(p.label, 40)} (${one(p.browser, 20)}): ${t.width}×${t.height} CSS px, ratio ${t.pixelRatio}, ${t.coarsePointer ? "touch" : "mouse"}, ${t.displayMode}; 100vh ${t.units.vh}, 100dvh ${t.units.dvh}, 100svh ${t.units.svh}, 100lvh ${t.units.lvh}, visual ${t.units.visual} px`;
-      });
+      })];
   };
 
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
@@ -161,7 +165,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const relevant = [...new Set([...ids, ...deps.flatMap((d) => [d.blocked, d.blocker])])].filter((x): x is string => !!x);
     body = [
       ...section("My open tickets", capped(myLines, 5)),
-      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(mine.length > 0), 3)),
+      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(mine.length > 0), 4)),
       ...section("Open decisions on my tickets", capped(asked.map((d) => `- "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`), 3)),
       ...section("Changed since my last run", capped((await changes(relevant)).map(changeLine), 10)),
       ...section("In flight elsewhere", capped(await flightLines(), 8)),
