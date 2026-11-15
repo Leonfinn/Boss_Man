@@ -84,7 +84,7 @@ export async function runnerSocketRoutes(
               return;
             }
             queue = queue.then(async () => {
-              const touched = await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit);
+              const touched = await runners.touch(runner, msg.imageVersion, msg.harnessVersions, msg.imageCommit, msg.toolchain);
               if (touched?.imageChanged) void opts.onRebuilt?.(runner.companyId)?.catch((err) => app.log.warn({ err, runnerId: runner.id }, "flagging cards after a runner rebuild failed"));
               if (msg.imageCommit) void opts.onImage?.(runner.companyId)?.catch((err) => app.log.warn({ err, runnerId: runner.id }, "starting go-live checks failed"));
               await runners.bootSeen(runner, msg.bootId, { previousExit: msg.previousExit, hostBootAt: msg.hostBootAt }).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "marking parked checks after a restart failed"));
@@ -99,7 +99,7 @@ export async function runnerSocketRoutes(
               // The runs the runner really has: any other open run of this runner is closed after a short wait (BOS-583).
               if (msg.liveRuns) runners.reconcileLater(runner, msg.liveRuns);
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
-              await opts.checks?.onHello(runner.id, msg.checkJobs).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
+              await opts.checks?.onHello(runner.id, msg.checkJobs, msg.checkSlots).catch((err) => app.log.error({ err, runnerId: runner.id }, "check queue hello failed"));
             });
             return;
           case "event":

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
+import { api, apiOnce, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
@@ -15,6 +15,105 @@ const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> 
   page: { label: "Page", tone: "red", help: "Also the phone: something urgent" },
   ask: { label: "Ask", tone: "amber", help: "Needs an answer" },
 };
+
+type LoginPoll =
+  | { status: "pending" }
+  | { status: "timeout"; message: string }
+  | { status: "done"; result: "created" | "reset"; password: string; user: string }
+  | { status: "done"; result: "exists" | "missing" | "failed" | "rejected" | "unavailable"; message: string };
+type LoginView =
+  | { kind: "idle" }
+  | { kind: "working"; action: "create" | "reset" }
+  | { kind: "shown"; password: string; user: string; action: "create" | "reset" }
+  | { kind: "msg"; ok: boolean; text: string; offer?: "create" | "reset" };
+
+/**
+ * "Create phone login" (BOS-1004): the host makes the phone's read-only ntfy user and the password comes back once.
+ * It is held in this component's state only while the box is open: dismissing the box (or leaving the page) drops it.
+ */
+export function PhoneLoginButton({ available, why, pollMs = 3000 }: { available: boolean; why?: string; pollMs?: number }) {
+  const [view, setView] = useState<LoginView>({ kind: "idle" });
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const run = async (action: "create" | "reset") => {
+    setView({ kind: "working", action });
+    try {
+      // apiOnce, never api: the answer holds a password, and api shares and remembers reads.
+      const { id } = await apiOnce<{ id: string }>("/api/notification-settings/phone-login", { method: "POST", body: { action } });
+      for (let i = 0; i < 130 && alive.current; i++) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        if (!alive.current) return;
+        const r = await apiOnce<LoginPoll>(`/api/notification-settings/phone-login/${id}`);
+        if (r.status === "pending") continue;
+        if (r.status === "timeout") return setView({ kind: "msg", ok: false, text: r.message });
+        if (!("message" in r)) return setView({ kind: "shown", password: r.password, user: r.user, action });
+        if (r.result === "exists") return setView({ kind: "msg", ok: false, text: r.message, offer: "reset" });
+        if (r.result === "missing") return setView({ kind: "msg", ok: false, text: r.message, offer: "create" });
+        return setView({ kind: "msg", ok: false, text: r.message });
+      }
+      if (alive.current) setView({ kind: "msg", ok: false, text: "No answer from the host. Check the host deployer is running, then try again." });
+    } catch (err) {
+      if (alive.current) setView({ kind: "msg", ok: false, text: (err as Error).message });
+    }
+  };
+  const copy = (text: string) => {
+    if (navigator.clipboard) void navigator.clipboard.writeText(text).catch(() => {});
+  };
+  if (!available) return <p className="muted" style={{ fontSize: 14 }}>Boss Man can't make the login for you here: {why ?? "the host has not reported yet."}</p>;
+  return (
+    <div data-testid="phone-login" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {view.kind === "shown" ? (
+        <div role="alert" className="card" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <p style={{ fontSize: 14, margin: 0 }}>
+            {view.action === "create" ? "The phone login is ready." : "The password was changed."} In the ntfy app, use user <code>{view.user}</code> and this password:
+          </p>
+          <code data-testid="phone-login-password" style={{ fontSize: 16, wordBreak: "break-all", userSelect: "all" }}>
+            {view.password}
+          </code>
+          <p className="error" style={{ fontSize: 13, margin: 0 }}>
+            This is the only time it is shown. Copy it into the ntfy app now. If you lose it, press Reset password to get a new one.
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn" type="button" onClick={() => copy(view.password)}>
+              Copy password
+            </button>
+            <button className="btn" type="button" onClick={() => setView({ kind: "idle" })}>
+              I've saved it
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button className="btn" type="button" disabled={view.kind === "working"} onClick={() => void run("create")}>
+            {view.kind === "working" && view.action === "create" ? "Waiting for the host…" : "Create phone login"}
+          </button>
+          <button className="btn" type="button" disabled={view.kind === "working"} onClick={() => void run("reset")}>
+            {view.kind === "working" && view.action === "reset" ? "Waiting for the host…" : "Reset password"}
+          </button>
+        </div>
+      )}
+      {view.kind === "working" && <p className="muted" style={{ fontSize: 13, margin: 0 }}>The host picks this up within a minute.</p>}
+      {view.kind === "msg" && (
+        <p className={view.ok ? "muted" : "error"} role="status" style={{ fontSize: 14, margin: 0 }}>
+          {view.text}
+          {view.offer && (
+            <>
+              {" "}
+              <button className="btn" type="button" onClick={() => void run(view.offer!)}>
+                {view.offer === "reset" ? "Reset password" : "Create phone login"}
+              </button>
+            </>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
 
 type PhonePush = { id: string; title: string; body: string | null; link: string; company: string | null; pushedAt: string; reason: string | null; state: "open" | "with_ceo" | "settled" | "notice"; clearedAt: string | null; clearNote: string | null };
 const PUSH_STATE: Record<PhonePush["state"], string> = { open: "Still open", with_ceo: "Back with the CEO", settled: "Settled", notice: "A notice" };
@@ -101,7 +200,7 @@ function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
             Asked as a {n.requested}, sent as a {n.level}: {n.demotedBy === "cap" ? "the agent was over its hourly cap" : "quiet hours"}.
           </span>
         )}
-        {n.pushedAt && <span className="muted">Sent to your phone.</span>}
+        {n.pushedAt && <span className="muted">Accepted by ntfy at {new Date(n.pushedAt).toLocaleTimeString()}.</span>}
         {n.pushError && <span className="error">Phone push failed: {n.pushError}</span>}
         {!n.readAt && (
           <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => onRead(n.id)}>
@@ -128,6 +227,8 @@ type Form = {
   phonePush: "urgent" | "all";
   publicUrl: string;
   approveButtons: boolean;
+  /** "" = not said yet (shows both phones' steps). */
+  phoneType: "" | "android" | "iphone" | "both";
 };
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -148,6 +249,7 @@ function toForm(s: NotifySettings): Form {
     phonePush: s.phonePush === "all" ? "all" : "urgent",
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
     approveButtons: s.approveButtons !== false,
+    phoneType: s.phoneType ?? "",
   };
 }
 
@@ -198,6 +300,7 @@ function SettingsForm() {
           phonePush: form.phonePush,
           publicUrl: form.publicUrl.trim() || null,
           approveButtons: form.approveButtons,
+          phoneType: form.phoneType || null,
         },
       });
       setSaved(s);
@@ -232,7 +335,7 @@ function SettingsForm() {
       </h2>
       <MoreAbout lead="Choose how loudly Boss Man tells you about things, and whether it reaches your phone.">
         <li>Notes stay in this feed.</li>
-        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" in the sidebar.</li>
+        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" at the top of this page.</li>
         <li>In quiet hours, each notification is one step quieter: pages and asks become flags, and flags become notes.</li>
         <li>Once an agent reaches its hourly number, the rest it sends that hour become notes.</li>
         <li>Nothing is dropped: every notification still lands in this feed.</li>
@@ -296,6 +399,15 @@ function SettingsForm() {
               )}
             </div>
             <div className="field" style={{ maxWidth: 360 }}>
+              <label htmlFor="phone-type">My phone</label>
+              <select id="phone-type" value={form.phoneType} onChange={(e) => set({ phoneType: e.target.value === "android" || e.target.value === "iphone" || e.target.value === "both" ? e.target.value : "" })}>
+                <option value="">Not said yet (show both)</option>
+                <option value="android">Android</option>
+                <option value="iphone">iPhone</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            <div className="field" style={{ maxWidth: 360 }}>
               <label htmlFor="phone-push">Send to my phone</label>
               <select id="phone-push" value={form.phonePush} onChange={(e) => set({ phonePush: e.target.value === "all" ? "all" : "urgent" })}>
                 <option value="urgent">Urgent only (default)</option>
@@ -353,7 +465,11 @@ function SettingsForm() {
             <li>Subscribe to the topic shown above: {form.topic ? <code>{form.topic}</code> : "the Topic"}.</li>
             <li>In the ntfy app, Settings → Users → Add user: Service URL is the address above, Username and Password are the phone's read-only ntfy user (not the publish access token Boss Man uses).</li>
             <li>
-              No phone login yet? Run these on the host that runs ntfy, in a terminal. They are fine as your normal user if it may use Docker; otherwise put <code>sudo</code> in front of each (on TrueNAS, Proxmox and most Linux hosts that means root).
+              No phone login yet? Let Boss Man make it: it creates a read-only ntfy user for the topic above and shows you the password once.
+              <PhoneLoginButton available={saved?.phoneLogin?.available === true} why={saved?.phoneLogin && !saved.phoneLogin.available ? saved.phoneLogin.why : undefined} />
+            </li>
+            <li>
+              Or do it by hand. Run these on the host that runs ntfy, in a terminal. They are fine as your normal user if it may use Docker; otherwise put <code>sudo</code> in front of each (on TrueNAS, Proxmox and most Linux hosts that means root).
               {!saved?.phoneContainer && <> Boss Man can't see the ntfy container's name, so replace <code>NTFY_CONTAINER</code> with the name that <code>docker ps</code> shows for ntfy.</>}
               <pre data-testid="phone-login-commands" style={{ fontSize: 13, overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0" }}>{
 `docker exec -it ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy user add phone-read
@@ -381,7 +497,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "android" && (
         <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
           On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
           <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
@@ -389,7 +505,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </a>
         </p>
       )}
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "iphone" && (
         <p className="muted" data-testid="phone-android-note" style={{ fontSize: 14, margin: 0 }}>
           On Android, urgent pushes only break through Do Not Disturb after you turn on "Override Do Not Disturb" once for ntfy's max-priority channel: ntfy app → Settings → Notifications → the max-priority channel → Override Do Not Disturb. Test once with Do Not Disturb on.
         </p>
@@ -517,7 +633,7 @@ function FilterBar({ filters, companies, counts, set }: { filters: Filters; comp
   );
 }
 
-export function Notifications({ feed, onChanged, companies = null }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null }) {
+export function Notifications({ feed, onChanged, companies = null, browserPermission, onEnableBrowser }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null; browserPermission?: NotificationPermission | "unsupported"; onEnableBrowser?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(readFilters);
   // A remembered company that no longer exists goes back to All companies.
@@ -576,6 +692,16 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      {/* (BOS-1506) This button used to sit in the side menu; it shows here until the owner turns notifications on. */}
+      {browserPermission === "default" && onEnableBrowser && (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", margin: "0 0 12px" }}>
+          <button className="btn" type="button" onClick={onEnableBrowser}>
+            Turn on browser notifications
+          </button>
+          <span className="muted">Shows flags, pages and asks while Boss Man is open in a background tab.</span>
+        </div>
+      )}
+      {browserPermission === "denied" && <p className="muted">Notifications are blocked in this browser.</p>}
       <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} set={setFilters} />}

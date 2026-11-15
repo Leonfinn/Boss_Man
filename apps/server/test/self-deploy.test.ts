@@ -355,7 +355,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
-    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader (or single on a server that runs one copy)") });
+    // No fixed claim about the watchdog (a per-company setting an update never changes) or a vague Reviews look.
+    expect((todo!.context as { check: string }).check).not.toMatch(/watchdog|look as expected/i);
     expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
   });
 
@@ -597,6 +599,36 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // Nothing new yet: the host is asked to look at main on its next tick, in case something has just merged.
     expect(up.json().message).toContain("Looking at main again now");
     expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
+  });
+
+  it("refuses the runner update while a merged fix to the runner update itself is not live, and names the ticket (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    // Merged (C, after the live B) with a change to scripts/update-runner.sh; the server still runs B.
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Fix update-runner.sh", number: 1417, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: true });
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Earlier merge", number: 1400, mergeCommit: B, mergedAt: new Date(Date.now() - 60_000) });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(409);
+    expect(r.json().message).toBe("Waiting for BOS-1417 to go live: it fixes the runner update itself.");
+    // Refused, not queued, and no card raised.
+    expect(await c.open()).toHaveLength(0);
+    // Once the server runs it, the press goes through.
+    await c.db.update(settings).set({ value: { old: B, new: C } }).where(eq(settings.key, `live_release:${co!.id}`));
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
+  });
+
+  it("does not refuse for a merge that never touched the runner update path (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Other fix", number: 1418, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: false });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
   });
 
   it("builds the runners from what is deployed, on request", async () => {
@@ -1402,6 +1434,46 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
     expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
   });
+
+  // BOS-1462: a live fix whose only step is the runner update used to get a silent, routine runner card.
+  it("a runner card carries the heading and pages once when a fixes-live ticket only needs the runners rebuilt", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Runner fix", number: 410, systemState: "done", mergeCommit: B, ownerSetup: "Build and update runners", fixesLive: "server freezes as memory climbs." })
+      .returning();
+    // The server card carries no marked ticket itself; the fix is only in the runner image.
+    await c.available({ runnerChanged: true, commits: [{ sha: B, subject: "Add rate limiting" }] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [runner] = await c.open();
+    expect(runner).toMatchObject({ context: { type: "self_deploy", target: "runner", commit: B } });
+    expect(runner!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(urgentOf(runner!)).toEqual({ heading: HEADING, fixes: [{ ticketId: fix!.id, ref: "BOS-410", symptom: "server freezes as memory climbs." }] });
+    await c.notes.syncDecisions();
+    const sent = await c.db.select().from(notifications);
+    expect(sent.find((n) => n.decisionId === runner!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+
+    // A second runner card for the same fix (the owner said "Not now", then pressed the button) is a repeat: it
+    // keeps the heading text but is routine again, so the owner is not paged twice for one fix.
+    await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Not now" });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const [again] = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
+    expect(again!.id).not.toBe(runner!.id);
+    expect(urgentOf(again!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    const all = await c.db.select().from(notifications);
+    expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
+  });
 });
 
 describe("an approval when main moves on before the host runs it (BOS-753)", () => {
@@ -1682,6 +1754,49 @@ describe("the runner update card only when it can be acted on, and one at a time
     expect(r.statusCode).toBe(200);
     expect(r.json().queued).toBe(true);
     expect(r.json().message).toContain("running now");
+  });
+
+  it("BOS-1469: a waiting request comes first, the refusal before it is only the previous attempt", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: B });
+    // The real last run, then a rate-limit refusal the host kept in its own file.
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T16:40:00Z", ended: "2026-11-14T16:50:00Z" });
+    await writeFile(path.join(c.dir, "outbox", "refused.json"), JSON.stringify({ id: "", target: "runner", result: "rejected", message: "Rejected: only one runner deploy every 10 minutes. Try again in 2 minute(s).", from_commit: B, to_commit: B, started: "2026-11-14T16:57:00Z", ended: "2026-11-14T16:57:00Z", backup: "" }));
+    let o = await c.selfDeploy.overview();
+    expect(o.status?.result).toBe("rejected");
+    expect(o.previousRun?.message).toBe("Image built.");
+    expect(o.active).toBeNull();
+    // Runner refusals get the "press again at" line too: 16:57 + 2 minutes, for the runner kind only.
+    expect(o.deployWait).toEqual({ until: "2026-11-14T16:59:00.000Z", target: "runner" });
+    // The press is accepted: a request now waits in the inbox. The refusal must not read as its answer.
+    await writeFile(path.join(c.dir, "inbox", "request.json"), JSON.stringify({ id: randomUUID(), target: "runner", commit: B }));
+    o = await c.selfDeploy.overview();
+    expect(o.active).toMatchObject({ phase: "waiting", what: "Build and update runners" });
+    expect(o.status?.message).not.toMatch(/Try again in/);
+    expect(o.previousRun?.message).toBe("Image built.");
+    expect(o.runnerImage).toEqual({ running: null, needed: B });
+    expect(o.deployWait).toBeNull(); // a newer accepted request: no "try again" for the old refusal
+  });
+
+  it("BOS-1469: a refusal older than the real run (left over from before a restart) is not the newest word", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: B });
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T17:00:00Z", ended: "2026-11-14T17:05:00Z" });
+    await writeFile(path.join(c.dir, "outbox", "refused.json"), JSON.stringify({ id: "", target: "runner", result: "rejected", message: "Rejected: only one runner deploy every 10 minutes. Try again in 2 minute(s).", from_commit: B, to_commit: B, started: "2026-11-14T16:57:00Z", ended: "2026-11-14T16:57:00Z", backup: "" }));
+    const o = await c.selfDeploy.overview();
+    expect(o.status?.result).toBe("deployed");
+    expect(o.previousRun).toBeNull();
+    expect(o.deployWait).toBeNull();
+  });
+
+  it("BOS-1469: an approval inside the host's 10-minute limit is told so at once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-14T17:00:00Z"));
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T16:55:00Z", ended: "2026-11-14T16:58:00Z" });
+    await expect(c.selfDeploy.check({ type: "self_deploy", target: "runner", commit: B, fromCommit: B } as never)).rejects.toThrow(/one runner deploy every 10 minutes/);
+    // A different kind of deploy has its own limit.
+    await expect(c.selfDeploy.check({ type: "self_deploy", target: "server", commit: B, fromCommit: A } as never)).resolves.not.toThrow();
   });
 
   it("raises no runner card while the host's 'try again in N minutes' wait is on", async () => {

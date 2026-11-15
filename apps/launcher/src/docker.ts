@@ -60,6 +60,12 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       if (r.status === 404) return null;
       return r.status === 200 && r.json ? r.json : fail(r, "Inspecting the container failed");
     },
+    /** The daemon's version and OS type, for the runner's platform fingerprint (DR-049); null if it won't say. */
+    async hostInfo(): Promise<{ dockerVersion: string; osType: string } | null> {
+      const r = await call<{ ServerVersion?: string; OSType?: string }>("GET", "/info");
+      if (r.status !== 200 || !r.json) return null;
+      return { dockerVersion: r.json.ServerVersion ?? "unknown", osType: r.json.OSType ?? "unknown" };
+    },
     /** The id an image tag points at now, or null if there is no such image. */
     async imageId(ref: string): Promise<string | null> {
       const r = await call<{ Id: string }>("GET", `/images/${encodeURIComponent(ref)}/json`);
@@ -69,6 +75,26 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
     async create(name: string, spec: unknown): Promise<string> {
       const r = await call<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
       return r.status === 201 && r.json ? r.json.Id : fail(r, "Creating the runner failed");
+    },
+    /**
+     * Waits for a container to stop and returns how it ended: its exit code, or null when it didn't stop
+     * within `timeoutMs` (the caller then kills it). Used for the one-shot Claude pack installer (BOS-972).
+     *
+     * Polls `GET /containers/{id}/json` rather than `POST /wait`: `/wait` blocks with no bytes until the
+     * container stops, and `call`'s FIXED 60 s socket timeout would destroy the request long before a real
+     * `npm ci` (minutes) finished. Polling each returns at once, so the 60 s timeout never bites and the
+     * caller's own (15-minute) budget is what decides. Waits `pollMs` between looks, not a tight loop.
+     */
+    async wait(id: string, timeoutMs: number): Promise<{ stopped: boolean; exitCode: number | null }> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const r = await call<{ State?: { Running?: boolean; ExitCode?: number } }>("GET", `/containers/${encodeURIComponent(id)}/json`);
+        const state = r.status === 200 ? r.json?.State : undefined;
+        if (state && state.Running === false) return { stopped: true, exitCode: typeof state.ExitCode === "number" ? state.ExitCode : null };
+        const left = deadline - Date.now();
+        if (left <= 0) return { stopped: false, exitCode: null };
+        await new Promise((res) => setTimeout(res, Math.min(pollMs, left)));
+      }
     },
     async start(id: string) {
       const r = await call("POST", `/containers/${encodeURIComponent(id)}/start`);

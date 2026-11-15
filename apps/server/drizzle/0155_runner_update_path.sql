@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "touches_runner_update" boolean;

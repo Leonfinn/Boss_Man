@@ -44,6 +44,21 @@ docker run --rm --cap-add NET_ADMIN --net container:boss-man-runner-<slug> -e NE
 - Published host ports reached through a public address of the host are not blocked (only private ranges are).
 - Not covered: a runner using `network_mode: host` (the launcher refuses it).
 
+## No proven guard, no agent run (DR-049 point 1, BOS-938)
+
+The launcher's `BOSSMAN_NETGUARD=auto` can start a runner without a guard on a host that can't load the rules, and a runner started by hand through Compose never gets one. The server no longer lets that carry on quietly. The scheduler is the one place that launches runs (work, CEO and chat runs), and it holds a wake until the runner's latest report proves both:
+
+- **the fence** works (`partial` or `full`), unless the owner chose to run without it; and
+- **the network guard is on**: the runner's own probe (DR-049 point 2: a connect to its gateway is refused at once) says `on`.
+
+A runner that has not reported yet, or whose last report is older than 15 minutes, proves nothing, so its runs wait too. A held wake shows its reason on the board ("held: this runner can't keep agents off your home network, ..."). The owner's chat with the CEO and the PA have no file or shell tools and still start.
+
+**The owner's choice.** For each missing feature, Settings → Server and runner shows one card with two buttons: **Keep agents stopped** (the default) and **Run agents without the network guard** (or **without the fence**). The same two options arrive as an owner card (once per episode; it goes by itself when the feature is proven). The choice is recorded with the runner's platform fingerprint: kernel version, Docker version and OS type. The runner reports its own kernel; the launcher tells it the daemon's Docker version and OS type (`BOSSMAN_HOST_DOCKER`, `BOSSMAN_HOST_OS`). A runner started by hand has no launcher, so it reports those two as `unknown`. A different host, kernel or Docker version no longer matches, so the owner is asked again. An Off chosen in Settings → Permissions → Agent fence has no fingerprint and stays until changed.
+
+**Per host.** The rule is the same everywhere. Docker Desktop and any hand-run Compose runner will show the card until the owner chooses, because neither can prove the guard. The server's `main.ts` turns the gate on (`requireRunnerProof`); only tests that connect a stand-in runner with no report leave it off.
+
+**Roll back.** Revert the BOS-938 commits. The migration only adds three empty columns to `companies`; nothing needs undoing in the data.
+
 ## When a runner is removed because its guard failed (BOS-467)
 
 "No guard, no runner": if the guard doesn't load its rules (for example 20 s is not enough while a deploy has the host busy), the launcher removes that runner. Before BOS-467 it stayed gone until the owner started it by hand.

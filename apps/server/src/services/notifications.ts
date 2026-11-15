@@ -27,6 +27,10 @@ export const NtfyUrl = z
 export const PHONE_PUSH_MODES = ["urgent", "all"] as const;
 export type PhonePushMode = (typeof PHONE_PUSH_MODES)[number];
 
+/** Which phone the owner uses (BOS-1484), so agents and the Notifications page don't guess. Unset until the owner says. */
+export const PHONE_TYPES = ["android", "iphone", "both"] as const;
+export type PhoneType = (typeof PHONE_TYPES)[number];
+
 export const NotifySettings = z.object({
   quietHours: z
     .object({
@@ -54,6 +58,8 @@ export const NotifySettings = z.object({
   publicUrl: z.string().url().nullable(),
   /** The owner's off switch for phone Approve buttons (BOS-243); on unless set to false. */
   approveButtons: z.boolean().optional(),
+  /** The owner's phone type (BOS-1484): android, iphone or both. Null or missing means the owner hasn't said. */
+  phoneType: z.enum(PHONE_TYPES).nullable().optional(),
 });
 export type NotifySettings = z.infer<typeof NotifySettings>;
 
@@ -430,7 +436,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? "A deploy that carries the fix for a live problem" : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
         // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
         // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
-        const routineRunner = c.type === "self_deploy" && c.target === "runner";
+        // BOS-1462: unless it carries a live fix that pages (urgentFix, not a repeat): then it pages like a server card.
+        const routineRunner = c.type === "self_deploy" && c.target === "runner" && !(urgentFix && !urgentFix.repeat);
         await notify({ companyId: d.companyId, agentId: null, level, ...(urgentReason ? { urgentReason } : {}), title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
       }
       return open.length;

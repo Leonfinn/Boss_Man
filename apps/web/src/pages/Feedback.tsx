@@ -447,12 +447,67 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
         </div>
         <SaveButton dirty saved={false} busy={backBusy} disabled={!!backProblem || !back || (!back.url.trim() && !back.text.trim())} style={{ alignSelf: "flex-start" }} />
       </form>
+      <ConfirmByEmail companyId={companyId} d={d} run={run} />
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
           {note.text}
         </p>
       )}
     </section>
+  );
+}
+
+/** BOS-1388: visitors must click an emailed link before a post, comment or vote counts. Needs outgoing email first. */
+function ConfirmByEmail({ companyId, d, run }: { companyId: string; d: FeedbackSettingsView; run: (p: Promise<unknown>, ok?: string) => unknown }) {
+  // An older server sends neither number: show the defaults rather than "undefined".
+  const savedHours = d.confirmLinkHours ?? 24;
+  const savedDays = d.rememberAddressDays ?? 90;
+  const [hours, setHours] = useState(String(savedHours));
+  const [days, setDays] = useState(String(savedDays));
+  const h = Number(hours);
+  const dy = Number(days);
+  const problem = !Number.isInteger(h) || h < 1 || h > 168 ? "The link must last 1 to 168 hours." : !Number.isInteger(dy) || dy < 1 || dy > 365 ? "Remember a browser for 1 to 365 days." : null;
+  const patch = (body: object, ok: string) => run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body }), ok);
+  const blocked = !d.emailReady || !d.portalUrl;
+  return (
+    <fieldset style={{ border: "1px solid var(--border, #333)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <legend style={{ fontSize: 14, fontWeight: 600, padding: "0 6px" }}>Confirm posts by email</legend>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+        <input type="checkbox" checked={d.confirmByEmail} disabled={blocked && !d.confirmByEmail} aria-describedby="confirm-email-help" onChange={(e) => patch({ confirmByEmail: e.target.checked }, e.target.checked ? "Visitors now confirm by email." : "Visitors no longer need to confirm.")} />
+        Visitors must click a link we email them before a post, comment or vote counts
+      </label>
+      <p id="confirm-email-help" className="muted" style={{ fontSize: 13 }}>
+        {!d.emailReady
+          ? "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it."
+          : !d.portalUrl
+            ? "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)."
+            : "With this on, visitors give an email address. What they send is kept out of sight, and counts for nothing, until they click the emailed link. Unconfirmed posts are deleted when the link runs out."}
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!problem) void patch({ confirmLinkHours: h, rememberAddressDays: dy }, "Saved.");
+        }}
+        style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}
+      >
+        <div className="field">
+          <label htmlFor="confirm-hours">Link works for (hours)</label>
+          <input id="confirm-hours" type="number" min={1} max={168} value={hours} onChange={(e) => setHours(e.target.value)} style={{ width: 90 }} />
+        </div>
+        <div className="field">
+          <label htmlFor="confirm-days">Remember a confirmed browser for (days)</label>
+          <input id="confirm-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} style={{ width: 90 }} />
+        </div>
+        <button className="btn small" type="submit" disabled={!!problem || (h === savedHours && dy === savedDays)}>
+          Save times
+        </button>
+      </form>
+      {problem && (
+        <p role="alert" className="error" style={{ fontSize: 13 }}>
+          {problem}
+        </p>
+      )}
+    </fieldset>
   );
 }
 

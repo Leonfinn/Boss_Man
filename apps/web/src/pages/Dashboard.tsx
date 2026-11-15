@@ -1,11 +1,12 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
-import { api, type Company, type RunRow } from "../api";
+import { api, type Company, type Decision, type DecisionTally, type RunRow } from "../api";
 import { raisedAgo } from "../age";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
-import { FeedItem, LevelTag, feedTitle } from "../components/FeedItem";
+import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
+import { MergesStuckBanner, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -24,7 +25,8 @@ type DashboardData = {
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
-  recentActivity: Array<{ id: string; title: string; body?: string | null; link: string; level: string; agent: string | null; createdAt: string }>;
+  /** The "Right now" lines the server reads (BOS-1507); absent on an older server, so those lines say "not known". */
+  health?: HealthData;
 };
 
 /** "just now", "5 min ago", "3h ago", "2d ago": age.ts's words, so every page agrees. */
@@ -113,14 +115,19 @@ function SuccessChart({ days }: { days: Day[] }) {
   );
 }
 
-export function Dashboard({ company }: { company: Company | undefined }) {
+export function Dashboard({ company, decisions = null, tally = null }: { company: Company | undefined; /** The owner's open items for this company (null until loaded). */ decisions?: Decision[] | null; tally?: DecisionTally | null }) {
   const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
+  // The Merges line and the banner share one read of the Merge queue; a failed read leaves the line "couldn't check".
+  const merges = usePoll((signal) => (company ? api<MergeHealthView>(`/api/companies/${company.id}/merge-queue`, { signal }).catch(() => null) : Promise.resolve(null)), 20_000, `dash-merges-${company?.id ?? "none"}`);
   if (!company) return <p>Create a company on the Kanban first.</p>;
   if (data.error && !away(data.error)) return <p className="error" role="alert">{data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
   const s = d.stats;
   const tokens = s.monthSubscriptionTokens.input + s.monthSubscriptionTokens.output;
+  // While the company is paused nothing moves, so a stuck-merges banner would only be noise.
+  const stuck = merges.data && !company.paused ? stuckSummary(merges.data) : null;
+  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, running: s.running, companyId: company.id });
   return (
     <>
       <header className="page-head">
@@ -129,6 +136,13 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           <h1>Dashboard</h1>
         </div>
       </header>
+
+      <MergesStuckBanner stuck={stuck} companyId={company.id} />
+
+      <div className="dash-lead">
+        <RightNow lines={lines} paused={company.paused} companyId={company.id} />
+        <NeedsYou decisions={decisions} tally={tally} />
+      </div>
 
       <section aria-labelledby="dash-agents">
         <h2 id="dash-agents" className="section-label">
@@ -207,11 +221,6 @@ export function Dashboard({ company }: { company: Company | undefined }) {
             </>
           )}
         </a>
-        <a className="card stat" href="#/decisions">
-          <strong>{s.decisionsWaiting}</strong>
-          <span>Decisions waiting</span>
-          <small className="muted">{s.decisionsWaiting ? "Need your answer" : "Nothing needs you"}</small>
-        </a>
       </section>
 
       <section className="dash-charts" aria-label="Last 14 days">
@@ -242,29 +251,6 @@ export function Dashboard({ company }: { company: Company | undefined }) {
       </section>
 
       <div className="dash-lists">
-        <section aria-labelledby="dash-activity">
-          <h2 id="dash-activity" className="section-label">
-            Recent activity
-          </h2>
-          <ul className="card dash-list">
-            {d.recentActivity.length === 0 && <li className="muted">Nothing yet.</li>}
-            {d.recentActivity.map((n) => (
-              <li key={n.id} className="feed-li">
-                <FeedItem
-                  href={n.link}
-                  title={feedTitle(n.title, n.body)}
-                  small={
-                    <>
-                      <LevelTag level={n.level} />
-                      <span className="muted">{n.agent ? `${n.agent} · ` : ""}</span>
-                      <time className="muted">{ago(n.createdAt)}</time>
-                    </>
-                  }
-                />
-              </li>
-            ))}
-          </ul>
-        </section>
         <section aria-labelledby="dash-tickets">
           <h2 id="dash-tickets" className="section-label">
             Recent tasks
@@ -280,6 +266,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
               </li>
             ))}
           </ul>
+          <p className="muted">What happened recently is in <a href="#/notifications">Notifications</a>.</p>
         </section>
       </div>
     </>

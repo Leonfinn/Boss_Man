@@ -46,7 +46,7 @@ jobs:
           # check: leader.test.ts needs a real Postgres, and dependency or CI changes can differ on GitHub's machines.
           echo "check=$(grep -qE '^(apps/server/src/leader\.ts|apps/server/src/db/|apps/server/drizzle/|apps/server/test/leader\.test\.ts|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
           # images: Docker builds and container tests, which the runner can't do (it has no Docker socket).
-          echo "images=$(grep -qE '(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          echo "images=$(grep -qE '(^|/)Dockerfile|^docker-compose|^deploy/|^scripts/|^skills/|^pnpm-lock\.yaml|^\.github/workflows/|^apps/runner/|check-worker|^packages/shared/src/protocol' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
           # web: the web suite in a real browser (rendered-layout tests skip without one).
           echo "web=$(grep -qE '^(apps/web/|packages/shared/|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.github/workflows/)' <<<"$files" && echo true || echo false)" >>"$GITHUB_OUTPUT"
 
@@ -171,18 +171,23 @@ jobs:
         run: docker build -f apps/launcher/Dockerfile -t boss-man-launcher:current .
       - name: Build the netguard image
         run: docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
-      - name: Runner image has Claude Code, git and the runner
+      - name: Runner image has git, OpenCode and the runner, and NO Anthropic code (DR-050)
         run: |
-          docker run --rm --entrypoint claude boss-man-runner:ci --version
+          # The runner image may be published, so it must carry no Anthropic code: no @anthropic-ai package,
+          # no claude binary, no CLAUDE_CODE_EXECUTABLE pointing at an install. Claude comes from the pack
+          # on first start (apps/runner/claude-pack), installed into a volume, never baked in.
           docker run --rm --entrypoint git boss-man-runner:ci --version
-          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
-      - name: Canary - a Claude session works inside the image, with no network (R52)
+          docker run --rm --entrypoint opencode boss-man-runner:ci --version
+          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000'
+          # The pinned pack source is present (root-owned, read-only) for the installer to read.
+          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -f /opt/bossman-claude-pack/package-lock.json'
+      - name: Canary - OpenCode and Codex sessions work inside the image, with no network (R52)
         run: scripts/image-tests.sh canary
       - name: Landlock fence works in the runner image on this architecture
         run: scripts/image-tests.sh fence
       - name: Network guard blocks a private address it wasn't told to allow (real nftables)
         run: scripts/image-tests.sh netguard
-      - name: Runner image holds no Anthropic code (expected to fail until the Claude pack lands, BOS-935)
+      - name: Runner image holds no Anthropic code (DR-050)
         run: scripts/image-tests.sh no-anthropic
       - name: Server image ships the separate migrate step
         run: docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f dist/migrate.js && DATABASE_URL= node dist/migrate.js 2>&1 | grep -q "DATABASE_URL is required"'
@@ -313,6 +318,45 @@ jobs:
           path: ${{ runner.temp }}/img/images-${{ matrix.arch }}.tar.gz
           retention-days: 1
           compression-level: 0
+
+  # DR-060 / BOS-1437: the check worker image is the runner image built without Claude Code and OpenCode
+  # (WITH_HARNESS=0). This job proves the project's own tests and typecheck pass inside it with neither binary
+  # present, so a check on a worker host gives the same answer as on the runner. Nothing is pushed.
+  check-worker-image:
+    needs: changes
+    if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.images == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the check worker image (no Claude Code, no OpenCode)
+        run: docker build -f apps/runner/Dockerfile --build-arg WITH_HARNESS=0 --build-arg RUNNER_ADDONS=agent-browser --build-arg BOSSMAN_IMAGE_VERSION=ci --build-arg BOSSMAN_IMAGE_COMMIT=${{ github.sha }} -t boss-man-check-worker:ci .
+      - name: The image has git, pnpm and no agent binaries, and runs as the non-root user
+        run: |
+          docker run --rm --entrypoint sh boss-man-check-worker:ci -c '
+            git --version && pnpm --version && test "$(id -u)" = 1000
+            if command -v claude || command -v opencode; then echo "an agent binary is in the worker image"; exit 1; fi'
+      - name: A worker refuses to start without a token file
+        run: |
+          if docker run --rm -e BOSSMAN_ROLE=check-worker -e BOSSMAN_URL=wss://example.com/api/check-worker/connect boss-man-check-worker:ci 2> err.txt; then echo "expected failure"; exit 1; fi
+          grep -q "BOSSMAN_CHECK_WORKER_TOKEN_FILE" err.txt
+      - name: The project's typecheck and tests inside the worker image (no skips hidden)
+        run: |
+          # A copy owned by the image's user (uid 1000); the checkout belongs to the CI user.
+          work="$RUNNER_TEMP/work"
+          mkdir -p "$work" && cp -a . "$work/repo" && sudo chown -R 1000:1000 "$work"
+          # The log is kept in a file and its tail is repeated as an error annotation, which anyone can read through the
+          # public check-runs API (the raw job log needs a login). BOS-1553: the first failure here left no trace.
+          set +e
+          docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
+            -e CI=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+              pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
+              pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != 0 ]; then
+            echo "::error title=check worker image typecheck/tests failed::$(grep -E 'FAIL|Error|error TS|✗|×' "$RUNNER_TEMP/worker-check.log" | head -15 | tr '\n' '|' | cut -c1-1500)"
+          fi
+          exit "$rc"
 
   # Joins the two architectures into one multi-arch image per name with `docker buildx imagetools create`,
   # in a throwaway registry on this CI machine. Nothing leaves it: publishing is a later ticket (BOS-935).

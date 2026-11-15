@@ -8,6 +8,7 @@ import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { Loader } from "../components/Loader";
+import { statusLineText, type StatusLine } from "./MergeQueue";
 import { usePoll } from "../hooks";
 import { DRAFT_CHANGED, clearDraft, readDraftJson, saveFormDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
@@ -537,7 +538,7 @@ function DoneTitle({ id, title }: { id: string; title: string }) {
 
 type BoardTicket = BoardData["columns"][number]["tickets"][number];
 
-function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow }: { t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
+function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRunNow, mergeLine }: { mergeLine?: StatusLine; t: BoardTicket; mine: boolean; merging: boolean; who: Company["agents"][number] | undefined; name: string; prefix: string | null | undefined; tiers: RiskTiers; numberOf: (id: string) => number | null | undefined; onRunNow: (id: string) => void }) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   const titleRef = useRef<HTMLAnchorElement>(null);
@@ -638,7 +639,14 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
         </span>
       )}
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
-      {merging && t.mergeNote && <span className="note">{t.mergeNote}</span>}
+      {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
+      {mergeLine && <span className="note" data-testid="board-merge-line">{statusLineText(mergeLine)}</span>}
+      {t.goLiveNote && (
+        <span className="note" data-testid="board-go-live-note">
+          {t.goLiveNote.text}{" "}
+          {t.goLiveNote.cardId && <a href={`#/decisions/${t.goLiveNote.cardId}`}>Open the card</a>}
+        </span>
+      )}
       {!!t.working?.length && (
         <span className="working" role="status">
           <span className="pulse-dot" aria-hidden="true" />
@@ -672,6 +680,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // An archived project opens only by its own link.
   const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.find((p) => !p.archivedAt);
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  // BOS-1546: the merge queue's own status line for each approved ticket (place in line, check running since, the ticket it waits for). Asked only when the board has such a ticket.
+  const inMergeLine = (board.data?.columns ?? []).some((c) => c.tickets.some((t) => t.reviewStage === "merging" || t.reviewStage === "held"));
+  const mergeLines = usePoll(
+    (signal) => (current && inMergeLine ? api<{ running: Array<{ ticketId: string; statusLine?: StatusLine }>; waiting: Array<{ ticketId: string; statusLine?: StatusLine }> }>(`/api/companies/${current.companyId}/merge-queue`, { signal }) : Promise.resolve(null)),
+    20_000,
+    `board-mq-${current?.companyId ?? "none"}-${inMergeLine}`,
+  );
+  const mergeLineOf = (id: string) => [...(mergeLines.data?.running ?? []), ...(mergeLines.data?.waiting ?? [])].find((r) => r.ticketId === id)?.statusLine;
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const goals = usePoll((signal) => (current ? api<Tree>(`/api/companies/${current.companyId}/objectives`, { signal }) : Promise.resolve(null)), 120_000, `board-goals-${current?.companyId ?? "none"}`);
   const [view, setView] = useState<"all" | "features" | "tasks">("all");
@@ -1111,6 +1127,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       tiers={tiers}
                       numberOf={(id) => (board.data?.columns ?? []).flatMap((c) => c.tickets).find((x) => x.id === id)?.number}
                       onRunNow={(id) => void runNow(id)}
+                      mergeLine={t.reviewStage === "merging" || t.reviewStage === "held" ? mergeLineOf(t.id) : undefined}
                     />
                   ))
                 )}
