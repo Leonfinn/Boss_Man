@@ -29,8 +29,8 @@ reads:
 ## #/board
 sections: 
   - Approved, merging
+  - Costliest tasks
   - Filter tasks
-  - Most expensive tasks
   - Passed, held
   - Project brief
   - Tokens
@@ -177,8 +177,8 @@ reads: (none)
 ## #/settings/<company>/funding
 sections: 
   - Budgets
+  - Costliest tasks
   - Funding sources
-  - Most expensive tasks
   - Spending limits
   - Tokens
 reads: 
