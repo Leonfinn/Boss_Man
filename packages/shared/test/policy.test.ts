@@ -1048,7 +1048,7 @@ describe("automatic temp-file cleanup allow (BOS-1453)", () => {
     for (const c of [
       "rm -rf /tmp/a",
       "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
-      "rm -rf -- /tmp/.hidden-dir",
+      "rm -rf -- /tmp/hidden.dir",
       "rm -f /tmp/x && rmdir /tmp/y",
       "rm -rf /tmp/a; echo done",
       "rm -rf /tmp/rv86 && ls /tmp > /dev/null 2>&1",
@@ -1106,6 +1106,71 @@ describe("automatic temp-file cleanup allow (BOS-1453)", () => {
       expect(route(c), c).not.toMatchObject({ outcome: "allow" });
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_AUTO_RULE);
     }
+  });
+
+  // BOS-1523: /tmp is shared by every run, so a /tmp entry that belongs to Boss Man, the harness, the system or another
+  // run's check keeps today's CEO-first route. Each row is a name the code really uses (see RESERVED_TMP_ENTRY).
+  describe("keeps shared /tmp entries that aren't the agent's with the CEO (BOS-1523)", () => {
+    const reserved: Array<[string, string]> = [
+      ["the skills root of every live run", "/tmp/bossman-skills"],
+      ["a check slot lock", "/tmp/bossman-check-all.slot.1"],
+      ["a check slot holder", "/tmp/bossman-check-all.holder.1"],
+      ["the check slot log", "/tmp/bossman-check-all.slotlog"],
+      ["a check slot's private folder", "/tmp/bossman-check-all.slot.held.Ab12Cd"],
+      ["check-quick's scratch log", "/tmp/bossman-scratch-1234"],
+      ["the check bundles folder", "/tmp/bossman-check-bundles"],
+      ["an MCP token folder", "/tmp/bossman-mcp-Ab12Cd"],
+      ["a runner temp folder", "/tmp/bm-rebase-Ab12Cd"],
+      ["a runner check folder", "/tmp/bm-check-Ab12Cd"],
+      ["ci-launcher's guard-conn", "/tmp/guard-conn"],
+      ["ci-launcher's guard-conn-open", "/tmp/guard-conn-open"],
+      ["ci-launcher's guard-probe", "/tmp/guard-probe"],
+      ["the harness temp folder", "/tmp/claude-1000"],
+      ["a mktemp -d folder (a running check's HOME)", "/tmp/tmp.Ab12Cd34Ef"],
+      ["the X11 socket folder", "/tmp/.X11-unix"],
+      ["the ICE socket folder", "/tmp/.ICE-unix"],
+    ];
+    const forms = (p: string) => [
+      `rm -rf ${p}`,
+      `rm -f ${p}`,
+      `rm -rf -- ${p}`,
+      // Not here: rmdir, unlink and rm with no -r/-f. DESTRUCTIVE doesn't count them, so they never reach the temp-cleanup
+      // rules; the general shell rule decides them, as it did before BOS-1453 (follow-up ticket filed from BOS-1523).
+      `rm -rf /tmp/mine ${p}`,
+      `rm -rf ${p} /tmp/mine 2>/dev/null`,
+      `rm -rf /tmp/mine && rm -f ${p}`,
+      `rm -rf /tmp/mine; rm -f ${p}`,
+      `rm -rf /tmp/mine\nrm -rf ${p}`,
+      `echo done; rm -rf ${p}`,
+      // Mixed case in the entry name: a different file on Linux, but close enough to fail closed.
+      `rm -rf /tmp/${p.slice(5).replace(/[a-z]/g, (c, i: number) => (i % 2 ? c.toUpperCase() : c))}`,
+    ];
+    for (const [what, p] of reserved) {
+      it(`${what} (${p}) goes to the CEO in every form`, () => {
+        for (const c of forms(p)) {
+          expect(autoTempCleanup(c), c).toBe(false);
+          expect(route(c), c).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+        }
+      });
+    }
+
+    it("still allows the agent's own scratch, including names that only look like reserved ones", () => {
+      for (const c of [
+        "rm -rf /tmp/geoffrey-1523",
+        "rm -rf /tmp/rv86 /tmp/rv86-install.log",
+        "rm -rf /tmp/xbossman",
+        "rm -rf /tmp/my-bossman-copy",
+        "rm -rf /tmp/bmx",
+        "rm -rf /tmp/guard",
+        "rm -rf /tmp/a.claude",
+        "rm -rf /tmp/tmpfile",
+        "rm -rf /tmp/hidden.",
+        "rm -rf /tmp/a && ls /tmp/bossman-skills > /dev/null",
+      ]) {
+        expect(autoTempCleanup(c), c).toBe(true);
+        expect(route(c), c).toMatchObject({ outcome: "allow", rule: TEMP_CLEANUP_AUTO_RULE });
+      }
+    });
   });
 
   it("doesn't allow the same words as an argv array, or as another tool kind", () => {
