@@ -61,6 +61,22 @@ describe("move rules ratchet: Q1 has this blocker finished", () => {
     expect(bad).toEqual([]);
   });
 
+  // Q3 ("is this agent busy?", DR-061 / BOS-1534): the busy rule lives in services/agent-wip.ts.
+  it("Q3: nobody re-spells the busy rule or reads the hold by truthiness", () => {
+    const wipFile = "services/agent-wip.ts";
+    const rel = (f: string) => relative(SRC, f).split("\\").join("/");
+    const all = files(SRC).map((f) => ({ rel: rel(f), text: readFileSync(f, "utf8") }));
+    // No private "busy agents" function: ask agentBusy / busyAgentIds (the queued-wake spelling is used elsewhere for wake handling, so it is not matched).
+    const privateBusy = all.filter((f) => f.rel !== wipFile && /(?:async function|const) busyAgents\s*(?:=\s*(?:async\s*)?\(\)\s*=>\s*\{|\()/.test(f.text)).map((f) => f.rel);
+    expect(privateBusy, "ask agentBusy / busyAgentIds (services/agent-wip.ts)").toEqual([]);
+    // The old name for "the ticket to carry on with" included tickets nobody can work on.
+    expect(all.filter((f) => /\boldestInProgress\b/.test(f.text)).map((f) => f.rel)).toEqual([]);
+    // Start gates ask holdBlocksStarts; a drain past its deadline must not freeze the sweeps.
+    const gates = ["services/sweeps.ts", "services/scheduler.ts", "services/watchdog.ts"];
+    const truthy = all.filter((f) => gates.includes(f.rel) && /\(await getHold\(db\)\)\s*(\)|return|\|\|)|if \(await getHold\(db\)\)/.test(f.text)).map((f) => f.rel);
+    expect(truthy).toEqual([]);
+  });
+
   it("no one re-spells the finished test outside the canonical module", () => {
     // The old spelling: a blocker ticket "not done" with an until-merged exception, written out by hand in SQL.
     const re = /system_state <> 'done' and not \(\w+\.until = 'merged'/;
