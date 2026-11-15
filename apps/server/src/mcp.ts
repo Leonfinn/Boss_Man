@@ -33,6 +33,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
+import { openReviewLines } from "./services/review-kinds.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
@@ -1168,6 +1169,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
       const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
+      const openReviews = t.systemState === "review" ? await openReviewLines(db, t) : [];
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       const liveLine = await goLiveLine(db, t);
       // One page covers the whole thing, description through conversation, so a long owner message is
@@ -1180,6 +1182,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(signoffLog ? [signoffLog] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(holdLine ? [holdLine] : []),
+        ...openReviews,
         ...(ciLine ? [ciLine] : []),
         ...(liveLine ? [liveLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),

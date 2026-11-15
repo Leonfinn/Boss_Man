@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { usePoll } from "../hooks";
 
-export type TicketReview = { id: string; kind: string; round: number; seq: number; status: string; reviewer: string | null; notes: string | null; overruleReason: string | null; waitingOn?: string | null; createdAt?: string; decidedAt?: string | null };
+export type TicketReview = { id: string; kind: string; round: number; seq: number; status: string; reviewer: string | null; notes: string | null; overruleReason: string | null; waitingOn?: string | null; standIn?: string | null; createdAt?: string; decidedAt?: string | null };
 
 /** The reviews' names joined for a sentence: "Ada", "Ada and Sam". */
 export const names = (rs: TicketReview[]) => [...new Set(rs.map((r) => r.reviewer ?? "a reviewer"))].join(" and ");
@@ -41,14 +41,15 @@ export function TicketReviews({ reviews }: { reviews: TicketReview[] | null }) {
               <strong style={{ textTransform: "capitalize" }}>{r.kind}</strong> review by {r.reviewer ?? "you (no agent can review it)"} · round {r.round} · <span className={`tag ${TONE[r.status] ?? ""}`}>{r.status === "pending" ? `Waiting for ${r.reviewer ?? "you"}` : (STATUS[r.status] ?? r.status)}</span>
             </>
           );
-          const hasBody = r.waitingOn || r.notes || r.overruleReason;
+          const hasBody = r.standIn || r.waitingOn || r.notes || r.overruleReason;
           return (
             <li key={r.id} style={{ opacity: r.round === latest ? 1 : 0.7 }}>
               {hasBody ? (
                 <details open={all || undefined}>
                   <summary style={{ cursor: "pointer" }}>{line}</summary>
                   <div style={{ paddingLeft: 18 }}>
-                    {r.waitingOn && <div className="muted" style={{ fontSize: 14 }}>{r.waitingOn}</div>}
+                    {r.standIn && <div className="muted" style={{ fontSize: 14 }}>Stand-in reviewer: {r.standIn}.</div>}
+                    {r.waitingOn &&<div className="muted" style={{ fontSize: 14 }}>{r.waitingOn}</div>}
                     {r.notes && <div className="muted" style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{r.notes}</div>}
                     {r.overruleReason && <div style={{ fontSize: 14 }}>Overruled by the CEO: {r.overruleReason}</div>}
                   </div>

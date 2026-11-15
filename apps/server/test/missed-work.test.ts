@@ -21,7 +21,7 @@ async function setup(leader?: Leader) {
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, leader });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
@@ -205,6 +205,32 @@ describe("stalled review sweep", () => {
     await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, r!.id));
     ctx.advance(30 * HOUR);
     expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 0 } });
+  });
+});
+
+describe("stalled review sweep: a review that fell back to the CEO (BOS-1526)", () => {
+  it("chases the busy stand-in with the reason, then raises a card after an hour", async () => {
+    ctx = await setup();
+    const policy = (await ctx.req("GET", `/api/companies/${ctx.company.id}/review-policy`)).json() as { medium: object };
+    // The only listed infra reviewer is the ticket's own author, so the review falls back to the CEO.
+    expect((await ctx.req("PUT", `/api/companies/${ctx.company.id}/review-policy`, { ...policy, medium: { ...policy.medium, kinds: { infra: [ctx.worker.id] } } })).statusCode).toBe(200);
+    const [ceo] = await ctx.db.select().from(agents).where(and(eq(agents.companyId, ctx.company.id), eq(agents.role, "ceo")));
+    const id = await ctx.forgotten("Build the worker", { systemState: "review", risk: "medium" });
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "infra", reviewerAgentId: ceo!.id, round: 1, createdAt: new Date(Date.now() - 31 * 60_000) });
+    // The CEO is busy: a queued wake for something else.
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ceo!.id, reason: "assigned", status: "queued", note: "busy elsewhere" });
+    const reviewWakes = () => ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ceo!.id), eq(wakes.reason, REVIEW_REASON)));
+
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 1 } });
+    const [w] = await reviewWakes();
+    expect(w!.note).toContain("as a stand-in");
+    expect(w!.note).toContain("Engineer worked on it");
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.reason, REVIEW_REASON));
+
+    ctx.advance(30 * 60_000);
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 1 } });
+    const cards = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "review-stall:%"));
+    expect(cards).toHaveLength(1);
   });
 });
 

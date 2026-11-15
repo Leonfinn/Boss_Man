@@ -22,7 +22,7 @@ import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
 import { heldTicketIds, wakeReadyHolds } from "./review-holds.js";
-import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
+import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
@@ -574,7 +574,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (heldIds.has(ticket.id)) continue;
       for (const r of activeRows(await latestRows(db, ticket.id))) {
         const agentId = r.reviewerAgentId;
-        if (!agentId || busy.has(agentId) || done.has(agentId)) continue;
+        if (!agentId || done.has(agentId)) continue;
+        // A review held by a stand-in (nobody else could take it) is chased even when its holder is busy:
+        // the CEO almost always is, and nothing else would ever ask again (BOS-1526).
+        const standIn = await fallbackReason(db, ticket, r);
+        if (busy.has(agentId) && !standIn) continue;
         const [reviewer] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, agentId));
         if (!reviewer || reviewer.paused || reviewer.retiredAt) continue;
         // A run that ended after the request counts as the reviewer having looked; give it the usual
@@ -583,7 +587,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const roundStart = (await roundStartedAt(db, ticket.id)) ?? r.createdAt;
         const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(and(eq(runs.agentId, agentId), endedNormallySql(runs.outcome)));
         const lastActive = later(roundStart, last?.at)!;
-        if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
+        // A stand-in's other runs don't count as having looked at this review: only the round's age does.
+        if (t.getTime() - (standIn ? roundStart : lastActive).getTime() < limits.missedAfterMs) continue;
         // "Leave it another hour" holds this review for another quiet period, starting from the answer,
         // so the CEO's choice isn't re-asked within a minute (BOS-426, BOS-433 fix B).
         const waited = await reviewWaitedSince(db, r.id);
@@ -628,7 +633,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
             continue;
           }
         }
-        if (recent.length > MISSED_NUDGES_PER_DAY) {
+        // A stand-in's review gets the card after an hour (the first wake, then one chase at 30 minutes), not after three nudges.
+        if (recent.length > MISSED_NUDGES_PER_DAY || (standIn && recent.length >= 1 && t.getTime() - roundStart.getTime() >= 2 * limits.missedAfterMs)) {
           // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
           // should only see this if the CEO doesn't settle it (BOS-119). Real actions on the review,
           // not "Got it": the CEO can take it over, give it to another reviewer, send it back to the
@@ -652,7 +658,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           agentId,
           reason: REVIEW_REASON,
           priority: 3,
-          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.${standIn ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${standIn}.` : ""}\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
         });
         done.add(agentId);
         result.woken++;
