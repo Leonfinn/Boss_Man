@@ -1,6 +1,6 @@
 ---
 title: Outgoing email
-description: Let Boss Man send email through Proton Mail or Cloudflare Email Service, with the SPF, DKIM and DMARC records that keep it out of spam.
+description: Let Boss Man send email through Proton Mail or Cloudflare Email Service, with the SPF, DKIM and DMARC records that keep it out of spam, then have feedback portal visitors confirm their posts by email.
 group: Set it up your way
 order: 14
 lead: Boss Man can send email through any mail service that offers authenticated SMTP. This guide sets it up with Proton Mail or Cloudflare Email Service, adds the DNS records that keep the mail out of spam, and sends a test.
@@ -167,4 +167,72 @@ Because Email Routing already receives for `example.com`, Proton cannot take ove
 
 ## What uses outgoing email
 
-Nothing in Boss Man needs outgoing email yet. The feedback portal's email confirmation will use it once that feature is released, and this guide will gain a section on it then.
+The feedback portal uses it for one thing: **Confirm posts by email**. Nothing else in Boss Man sends mail yet.
+
+## Confirm posts by email on the portal
+
+With this on, a visitor to your feedback portal gives an email address with each post, comment or vote. It counts only after they click a link Boss Man emails them. This stops people voting many times or posting in someone else's name.
+
+:::note Before you start
+- Outgoing email works: [Send a test email](#send-a-test-email) arrived.
+- The portal's public address is set in `BOSSMAN_PORTAL_URL` on the server. The emailed links point there. Setting it is in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), section 11, "Feedback portal".
+:::
+
+### Turn it on
+
+1. In Boss Man, open **Feedback** and choose **Feedback portal**.
+2. Under **Confirm posts by email**, tick **Visitors must click a link we email them before a post, comment or vote counts**.
+
+:::worked
+Boss Man says "Visitors now confirm by email."
+:::
+
+The tick box stays greyed out until both prerequisites are met, and the text under it says which one is missing:
+
+- "Set up outgoing email first (Settings → Server and runner → Outgoing email): the links are sent from it." Fill in [Boss Man's settings](#fill-in-boss-man-s-settings) and save.
+- "The links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide)." Set it as the install guide says, then recreate the server.
+
+To turn it off, clear the tick. Boss Man says "Visitors no longer need to confirm."
+
+### The two times
+
+| Field | Default | Allowed | What it does |
+|---|---|---|---|
+| **Link works for (hours)** | 24 | 1 to 168 | How long the emailed link works. An unconfirmed post is deleted when its link runs out. |
+| **Remember a confirmed browser for (days)** | 90 | 1 to 365 | After a visitor confirms, that browser can post with the same address without confirming again for this long. |
+
+Change either number and choose **Save times**. Boss Man says "Saved."
+
+### What a visitor sees
+
+1. The email box on the portal is required. Next to it: "We ask for your email only to send you a link that confirms it's you. It counts once you click it. Nobody else ever sees it."
+2. After they send, the portal says "Check your email: we sent you a link. It counts once you click it."
+3. The email's subject is "Please confirm your vote on …" (or comment, or idea), followed by the portal's heading. It names what they sent and how long the link works.
+4. Clicking the link opens a page that says "Thank you, that's confirmed". The post, comment or vote now counts and reaches you as feedback.
+
+A link that was already used, or has run out, opens "This link doesn't work any more". The visitor sends their post again to get a new link.
+
+If one address asks for more than 3 links in an hour, Boss Man stops sending and saves nothing, but the visitor sees the same "Check your email" message. That way the form cannot be used to flood someone's inbox or to find out which addresses get mail.
+
+If no email arrives, check the visitor's spam folder, then send yourself a test from **Settings → Server and runner → Outgoing email**. A failed send is not logged, so the test is the way to see the mail server's answer.
+
+## A portal behind a reverse proxy
+
+Read this if visitors reach your portal through a reverse proxy, such as Nginx Proxy Manager, Caddy, Traefik or Cloudflare.
+
+The portal limits how much each visitor can send, counted by their address (120 page loads a minute, and 40 posts, comments or votes an hour). Behind a proxy, every visitor seems to come from the proxy's address, so they all share one limit. Two server settings fix that:
+
+| Setting | What to put in it |
+|---|---|
+| `BOSSMAN_PORTAL_TRUSTED_PROXY` | The proxy's **own** addresses or ranges, separated by commas. For example `192.168.1.20` for a proxy on that address, or the range of the Docker network a proxy container runs on. Empty (the default) means no proxy. |
+| `BOSSMAN_PORTAL_CLIENT_HEADER` | Which header names the visitor. Leave it empty for `X-Forwarded-For`, which most proxies set. Set `cf-connecting-ip` only when Cloudflare is the proxy that connects to the portal. |
+
+- **List only the proxy.** A connection from a listed address may say who the visitor is. Never list a range that takes in the internet. A `/0` range is refused.
+- **Use `cf-connecting-ip` only for Cloudflare.** Cloudflare sets that header and removes any copy a visitor sent. Nginx Proxy Manager, Caddy and Traefik pass a visitor's copy through unchanged, so with them a visitor could pick their own address.
+- **Keep the portal's port reachable only through the proxy.**
+
+These settings only change how the limits count. They do not affect logins or permissions.
+
+The steps for setting them in `.env` and recreating the server are in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), section 11, "Behind a reverse proxy". How the portal handles security is in [`docs/07-feature-requests.md`](@repo/blob/main/docs/07-feature-requests.md), "The portal and security".
+
+If the server's log shows `BOSSMAN_PORTAL_TRUSTED_PROXY: ignoring …` or `BOSSMAN_PORTAL_CLIENT_HEADER: … is not x-forwarded-for or cf-connecting-ip`, the setting has a typo. Boss Man ignores the bad entry and carries on, so fix it and recreate the server.

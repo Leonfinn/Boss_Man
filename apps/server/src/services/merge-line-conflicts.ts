@@ -19,6 +19,10 @@ type Ticket = typeof tickets.$inferSelect;
 /** State names as the merge line uses them: "in the line" is in progress, in review or blocked after a sign-off. */
 const OPEN_STATES = ["in_progress", "blocked", "review"] as const;
 
+const PLAN_CHARS = 20_000;
+const LINE_CHARS = 2_000;
+const MAX_PATH = 240;
+
 /**
  * The plans' "Files" list, as the plan writes it. A plan names its files in one of a few shapes:
  * "## Files" (or "**Files:**") followed by bullets or a separated list, or "Files: a.ts, b.ts". Only the file
@@ -27,21 +31,26 @@ const OPEN_STATES = ["in_progress", "blocked", "review"] as const;
  */
 export function planFiles(plan: string | null | undefined): string[] {
   if (!plan?.trim()) return [];
-  const lines = plan.split(/\r?\n/);
+  // Bounded input (BOS-1529): the regexes below slow with the square of a long run of text with no separators, and
+  // this runs on the server's main thread. Read the first PLAN_CHARS of the plan and the first LINE_CHARS of each line.
+  const lines = plan.slice(0, PLAN_CHARS).split(/\r?\n/).map((l) => l.slice(0, LINE_CHARS));
   const out: string[] = [];
   const takes = (text: string) => {
     for (const raw of text.split(/,|;|\s{2,}|\s+[-–—]\s+|\s+(?:and)\s+/)) {
+      // A real path is at most 240 chars (checked again below); skip a longer segment before the regex runs on it.
+      if (raw.length > MAX_PATH + 2) continue;
       const m = /`?([\w./-]*[\w-]\.[A-Za-z0-9]{1,10})`?/.exec(raw.trim());
       if (!m) continue;
       // A path in this repo, not a sentence: no spaces, and not a URL or a version.
       const p = m[1]!.replace(/^\.\//, "").replace(/^\/+/, "");
-      if (/\s/.test(p) || /^https?:/i.test(raw.trim()) || !p.includes(".") || p.length > 240) continue;
+      if (/\s/.test(p) || /^https?:/i.test(raw.trim()) || !p.includes(".") || p.length > MAX_PATH) continue;
       if (!out.includes(p)) out.push(p);
     }
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const heading = /^\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*(?:the\s+)?files\s*:?\s*(?:\*\*|__)?\s*:?\s*(.*)$/i.exec(line);
+    // One character class on each side (no adjacent `\s*` groups), so a whitespace-only line stays linear.
+    const heading = /^[\s#*_]*(?:the\s+)?files[\s:*_]*(.*)$/i.exec(line);
     if (!heading) continue;
     const inline = heading[1]!.trim();
     if (inline) {

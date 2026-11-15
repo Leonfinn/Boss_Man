@@ -24,7 +24,7 @@ describe("Checks in Settings", () => {
       }),
     );
     render(<CheckQueueSetting />);
-    const legacy = (await screen.findByRole("radio", { name: /Agents run their own/ })) as HTMLInputElement;
+    const legacy = (await screen.findByRole("radio", { name: /Each agent runs its own/ })) as HTMLInputElement;
     const server = screen.getByRole("radio", { name: /Boss Man runs them/ }) as HTMLInputElement;
     expect(legacy.checked).toBe(true);
     expect(server.parentElement!.textContent).toContain("woken with the result");

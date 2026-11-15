@@ -15,13 +15,13 @@ type WatchdogStatus = {
 };
 type Backtest = { from: string; to: string; flags: Array<{ ticketId: string; ref: string; title: string; rule: WatchdogRule; firstAt: string; handOffs: number; verdict: string }>; scrumMasterWakes: number; busiestHourWakes: number; wouldTripCap: boolean; caveats: string[] };
 
-/** The limits the owner edits, with their labels and units. */
-const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit: string }> = [
+/** The limits the owner edits, with their labels and units; `term` is the technical name, shown small after the plain label (BOS-1494). */
+const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit: string; term?: string }> = [
   { key: "inProgressHours", label: "No movement in progress", unit: "hours" },
   { key: "reviewHours", label: "No movement in review", unit: "hours" },
   { key: "blockedHours", label: "Blocked with no movement", unit: "hours" },
   { key: "unassignedMinutes", label: "Unassigned work", unit: "minutes" },
-  { key: "blockedUntilGraceHours", label: "Grace after 'blocked until'", unit: "hours" },
+  { key: "blockedUntilGraceHours", label: "Wait after a 'blocked until' time has passed", unit: "hours", term: "grace" },
   { key: "ownerDecisionHours", label: "Remind me about a decision after", unit: "hours" },
   { key: "reviewBounces", label: "Review loop after more than", unit: "send-backs" },
   { key: "maxSmRunsPerHour", label: "Most Scrum Master runs per hour", unit: "runs" },
@@ -30,8 +30,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
   { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
   { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
-  { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
-  { key: "idleAgentMinutes", label: "Re-wake an agent whose in-progress work has no run for", unit: "minutes" },
+  { key: "unprovenHours", label: "Flag a cause nobody has proved after", unit: "hours", term: "likely" },
+  { key: "idleAgentMinutes", label: "Wake an agent again when its in-progress work has had no run for", unit: "minutes" },
   { key: "spareCapacityMinutes", label: "Tell the CEO the company is under-used after", unit: "minutes" },
 ];
 
@@ -101,7 +101,15 @@ export function Watchdog({ company }: { company: Company }) {
       <div className="wd-limits">
         {WATCHDOG_LIMITS.map((l) => (
           <div key={l.key} style={{ display: "contents" }}>
-            <label htmlFor={`wd-${l.key}`}>{l.label}</label>
+            <label htmlFor={`wd-${l.key}`}>
+              {l.label}
+              {l.term && (
+                <>
+                  {" "}
+                  <code className="mono">{l.term}</code>
+                </>
+              )}
+            </label>
             <input id={`wd-${l.key}`} type="number" min={0} value={draft[l.key] ?? ""} onChange={(e) => setDraft({ ...draft, [l.key]: e.target.value })} />
             <span className="muted">{l.unit}</span>
           </div>

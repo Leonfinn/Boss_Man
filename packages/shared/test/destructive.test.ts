@@ -843,6 +843,14 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -pC/ -i.bak -e s/a/b/ x.rb",
     "ruby -i -pC/ -e s/a/b/ x.rb",
     "ruby -x/ -i -pe s/a/b/ x.rb",
+    // ruby -X[dir] is another spelling of -C[dir] (from ruby's documented -X[directory]; no ruby on the runner).
+    "ruby -X/ -i -pe s/a/b/ etc/hosts",
+    "ruby -X /srv -i -pe s/a/b/ x.rb",
+    "ruby -X /srv -i.bak -pe s/a/b/ f",
+    "ruby -pX/ -i -e s/a/b/ x.rb",
+    "ruby -pX / -i -e s/a/b/ x.rb",
+    "ruby -i -pX/ -e s/a/b/ x.rb",
+    "ruby -0X/ -i -pe s/a/b/ x.rb",
     "ruby -px/ -i -e s/a/b/ x.rb",
     "ruby -x/srv -i.bak -pe s/a/b/ f",
     "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
@@ -896,6 +904,11 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -pC/ -e 'p 1' x.rb",
     "ruby -px -i -e s/a/b/ x.rb",
     "ruby -x script.rb",
+    // -X without -i only reads a script from another folder; ruby edits inside the checkout stay routine.
+    "ruby -X /srv script.rb",
+    "ruby -pX/ -e 'p 1' x.rb",
+    "ruby -i -pe s/a/b/ x.rb",
+    "ruby -pi -e s/a/b/ src/a.rb lib/b.rb",
     // -0 and -l bundles without a directory (BOS-1441); perl's hex separator is unchanged.
     "ruby -0777 -pi -e s/a/b/ x.rb",
     "ruby -0pi -e s/a/b/ x.rb",

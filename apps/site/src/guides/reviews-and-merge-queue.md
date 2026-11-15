@@ -90,7 +90,7 @@ When nothing is queued, the tab says "No checks queued" and how many slots are f
 
 The line at the top says how many check slots are in use. You set the number under **Settings > Server and runner > Checks**, in **Checks at once**. The tab is read-only.
 
-The full list needs **Boss Man runs them (server queue)** under **Who runs agents' checks** in the same place. With **Agents run their own (legacy)**, the tab shows only the checks Boss Man already knows about.
+The full list needs **Boss Man runs them** under **Who runs the checks** in the same place. With **Each agent runs its own**, the tab shows only the checks Boss Man already knows about.
 
 ## When the check fails
 

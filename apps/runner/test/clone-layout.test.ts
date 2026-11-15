@@ -120,6 +120,64 @@ describe("per-ticket clones (BOS-323)", () => {
     await expect(ws.merge(spec(ids.a), "main", "Merge")).rejects.toThrow(/Couldn't bring ticket .* branch over from its copy/);
   });
 
+  it("diff() brings a commit made mid-turn into the shared repo, so a check of head can open its work area (BOS-1544)", async () => {
+    const { ws, a, spec, repo } = await twoTickets();
+    // Committed during the turn: no checkpoint has synced it yet, so only the clone has it.
+    writeFileSync(path.join(a.path, "work.txt"), "work\n");
+    git(a.path, "add", ".");
+    git(a.path, "commit", "-qm", "work");
+    const head = git(a.path, "rev-parse", "HEAD");
+    expect(() => execFileSync("git", ["cat-file", "-e", head], { cwd: repo, stdio: "ignore" })).toThrow();
+
+    const d = await ws.diff(spec(ids.a));
+    expect(d.head).toBe(head);
+    expect(d.unsynced).toBeUndefined();
+    expect(git(repo, "rev-parse", `refs/heads/${branchFor(ids.a)}`)).toBe(head);
+    // What the check job does next: a detached worktree of head, from the shared repo.
+    const job = await ws.runCommitCheck({ projectId: ids.project, jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", commit: head }, "test -f work.txt", 60_000);
+    expect(job.ok).toBe(true);
+  });
+
+  it("diff() says why head isn't in the shared repo when the sync fails, and the check job names the cause (BOS-1544)", async () => {
+    const { ws, a, spec } = await twoTickets();
+    // A clone whose branch can't be read (HEAD detached, branch gone): the sync fails, and the new commit stays in the clone.
+    git(a.path, "checkout", "-q", "--detach");
+    git(a.path, "branch", "-D", branchFor(ids.a));
+    writeFileSync(path.join(a.path, "work.txt"), "work\n");
+    git(a.path, "add", ".");
+    git(a.path, "commit", "-qm", "work");
+    const head = git(a.path, "rev-parse", "HEAD");
+
+    const d = await ws.diff(spec(ids.a));
+    expect(d.head).toBe(head);
+    expect(d.unsynced).toMatch(new RegExp(`commit ${head.slice(0, 12)} isn't in the runner's shared repo: the copy's HEAD is detached.*git branch -f ${branchFor(ids.a)} HEAD`));
+    await expect(ws.runCommitCheck({ projectId: ids.project, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit: head }, "true", 60_000)).rejects.toThrow(
+      new RegExp(`commit ${head.slice(0, 12)} isn't in this runner's shared repo`),
+    );
+  });
+
+  it("diff() names the branch when the copy commits on another branch name: the BOS-1496 case (BOS-1544)", async () => {
+    const { ws, a, spec, repo } = await twoTickets();
+    // The agent switched to another ticket's branch name in its own copy and committed there; the ticket's branch stays at base.
+    git(a.path, "switch", "-q", "-c", branchFor(ids.b));
+    writeFileSync(path.join(a.path, "work.txt"), "work\n");
+    git(a.path, "add", ".");
+    git(a.path, "commit", "-qm", "work");
+    const head = git(a.path, "rev-parse", "HEAD");
+    // An after-turn checkpoint syncs fine and still doesn't bring the commit over: that was BOS-1496.
+    await ws.checkpoint(spec(ids.a), "after a turn");
+    expect(() => execFileSync("git", ["cat-file", "-e", head], { cwd: repo, stdio: "ignore" })).toThrow();
+
+    const d = await ws.diff(spec(ids.a));
+    expect(d.unsynced).toContain(`the copy is on branch ${branchFor(ids.b)}, not the ticket's branch ${branchFor(ids.a)}`);
+    // The fix it names works.
+    git(a.path, "branch", "-f", branchFor(ids.a), "HEAD");
+    git(a.path, "switch", "-q", branchFor(ids.a));
+    const fixed = await ws.diff(spec(ids.a));
+    expect(fixed.unsynced).toBeUndefined();
+    expect(git(repo, "rev-parse", `refs/heads/${branchFor(ids.a)}`)).toBe(head);
+  });
+
   it("clears out a clone whose shared repo has gone, but not a live one", async () => {
     const { ws, a, b } = await twoTickets();
     writeFileSync(path.join(b.path, ".git", "objects", "info", "alternates"), "/nonexistent/repos/x.git/objects\n");

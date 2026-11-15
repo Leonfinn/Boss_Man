@@ -518,6 +518,38 @@ export function tempCleanup(command: string): boolean {
   return Boolean(scope && !scope.workingCopy.length);
 }
 
+/** Words that change nothing, so they may sit beside a delete in an automatic temp cleanup. */
+const NO_WRITE_WORDS = new Set(["true", "echo", "pwd", "ls", "date", "sleep"]);
+const DEVNULL_REDIRECT = /(?:(?<=^|\s)[12&])?>>?\s*\/dev\/null|2>&1/g;
+/**
+ * /tmp entries that belong to Boss Man, the harness, the system or another run's check, not to the asking agent
+ * (BOS-1523). /tmp is shared by every run and all run as one user, so the sticky bit doesn't keep them apart:
+ * bossman* (the skills root of every live run, check slots and holders, scratch logs, MCP token folders),
+ * bm-* (runner temp folders), guard-* (ci-launcher), claude* (the harness's /tmp/claude-<uid>, BOS-1067),
+ * tmp.* (mktemp -d folders, such as a running check's HOME) and dot names (.X11-unix and other sockets).
+ * A delete naming one keeps today's CEO-first route. Prefixes, case-insensitive: a lookalike goes to the CEO too.
+ */
+const RESERVED_TMP_ENTRY = /^\/tmp\/(?:bossman|bm-|guard-|claude|tmp\.|\.)/i;
+
+/**
+ * Whether a command is a temp cleanup that Boss Man may allow without asking anyone (BOS-1453). Narrower than
+ * tempCleanup, on purpose: every segment is a plain rm/rmdir/unlink of entries directly in /tmp (TEMP_DELETE:
+ * no "..", variables, globs, trailing slash or deeper path, which a symlink at the entry could carry out of /tmp,
+ * BOS-150 and BOS-165) or a word that changes nothing, with output only to /dev/null. No cd, mkdir, git or install:
+ * those can write or run code, so they keep going to the CEO. cleanupScope has already refused pushes, a working-copy
+ * path and any destructive word it can't account for.
+ */
+export function autoTempCleanup(command: string): boolean {
+  const scope = cleanupScope(command);
+  if (!scope || scope.workingCopy.length || !scope.tmp.length) return false;
+  return segments(command).every((s) => {
+    // Checked on the segment's own words, so every path the delete names is seen, whatever cleanupScope collected.
+    if (TEMP_DELETE.test(s)) return !s.split(/\s+/).some((w) => RESERVED_TMP_ENTRY.test(w));
+    const rest = s.replace(DEVNULL_REDIRECT, " ").trim();
+    return !/[<>&]/.test(rest) && NO_WRITE_WORDS.has(rest.split(/\s+/)[0] ?? "");
+  });
+}
+
 /**
  * The subcommand a package-manager segment runs (BOS-165 security round 4, simplified in round 6):
  * the word right after the program, and only that word. `pnpm --silent dlx rimraf …` reads

@@ -399,6 +399,12 @@ export function phoneApproveService(
     }
     await release();
     const after = await loadDecision(d.id);
+    if (after?.status === "withdrawn") {
+      // answer() closed a card that had died since the link went out (DR-061 Q4): the link no longer works.
+      await revoke();
+      await tell.dead();
+      return reply(200, "no_longer_works");
+    }
     if (after?.status === "answered") {
       await tell.answered(after);
       return reply(200, "already_answered");
