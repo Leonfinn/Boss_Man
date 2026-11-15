@@ -392,7 +392,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "workflow" ? (
           <Workflow company={current} />
         ) : page === "notifications" ? (
-          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
+          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} browserPermission={permission} onEnableBrowser={() => void Notification.requestPermission().then(setPermission)} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
