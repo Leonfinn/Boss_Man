@@ -77,7 +77,7 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
  * up and that Boss Man has no record for yet (`newHost`, DR-046), the card's options, and the machine's own update
  * card for R15 (DR-036) with the drain in progress (`selfDeploy.hold`, for R16, DR-046 part 2). Each may be absent,
  * and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
+export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** Sites (siteKey) whose docs misled the owner → when (ISO), for R19b; absent when the caller has no record to give. */ mismatchedSites?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
 
 /**
  * The drain state R16 needs (DR-046 part 2): a runner image update or setting change that is waiting for runs to
@@ -510,6 +510,56 @@ function outsideSite(prose: string, serverHost: string | null | undefined): stri
   return OUTSIDE_VENDORS.exec(text)?.[0] ?? null;
 }
 
+// R19b: once a vendor's docs have misled the owner, the next card for that vendor is written from their screenshot.
+const COUNTRY_SECOND_LEVEL = new Set(["co", "com", "org", "net", "ac", "gov", "edu"]);
+const SITE_ALIASES: Record<string, string> = { amazon: "aws", amazonaws: "aws" };
+/** One key for a vendor however it is written: "dash.cloudflare.com" and "Cloudflare" are both "cloudflare". */
+export function siteKey(hostOrVendor: string): string {
+  const v = hostOrVendor.toLowerCase().trim().replace(/:\d+$/, "");
+  if (!v.includes(".")) {
+    const first = v.split(/\s+/)[0]!;
+    return SITE_ALIASES[first] ?? first;
+  }
+  const labels = v.split(".");
+  const sld = labels.length >= 3 && labels[labels.length - 1]!.length === 2 && COUNTRY_SECOND_LEVEL.has(labels[labels.length - 2]!) ? labels[labels.length - 3]! : labels[labels.length - 2]!;
+  return SITE_ALIASES[sld] ?? sld;
+}
+/** Every outside site a step sends the owner to (URLs not on this server and vendors named in words), as `siteKey`s. */
+export function outsideSiteKeys(prose: string, serverHost: string | null | undefined): string[] {
+  const text = prose.replace(new RegExp(NOT_SEEN_MARK.source, "gi"), " ");
+  const keys: string[] = [];
+  for (const m of text.matchAll(/https?:\/\/([^\s/?#)>\]`'"]+)/gi)) if (!ownHost(m[1]!, serverHost)) keys.push(siteKey(m[1]!));
+  for (const m of text.matchAll(new RegExp(OUTSIDE_VENDORS.source, "gi"))) keys.push(siteKey(m[0]));
+  return [...new Set(keys)];
+}
+/** The refusal for a `not seen` step on a site whose docs misled the owner within SEEN_MAX_DAYS, or null. */
+function mismatchRefusal(prose: string, facts: LintFacts, now: Date): string | null {
+  if (!facts.mismatchedSites) return null;
+  for (const key of outsideSiteKeys(prose, facts.serverHost)) {
+    const at = facts.mismatchedSites[key];
+    if (at === undefined) continue;
+    const ageDays = (now.getTime() - Date.parse(at)) / 86_400_000;
+    if (!(ageDays <= SEEN_MAX_DAYS)) continue;
+    return `reads ${key}'s docs, but on ${at.slice(0, 10)} ${key}'s docs didn't match the owner's screen, so for ${SEEN_MAX_DAYS} days after that a step there needs "seen: <ticket image id>" from the owner's own screenshot (under ${SEEN_MAX_DAYS} days old), not "not seen:": ask the owner for one screenshot of their starting page first, attach it (attach_image), and write the steps from it`;
+  }
+  return null;
+}
+
+/** A checkpoint step: says what the owner should see before going on. */
+const CHECKPOINT = /\byou should see\b|\bcheck that\b[^\n]*?\b(?:is|are) (?:listed|shown|visible)\b/i;
+/** Something the owner can match on their screen: a quoted or backticked name, or a domain name. */
+const CONCRETE_NAME = /["“`][^"”`\n]{2,}["”`]|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b/i;
+/** R19c: a card with outside-site steps opens with a checkpoint that names something concrete, and offers the stop. */
+function checkpointFinding(first: string | undefined, options: readonly string[]): string | null {
+  // The raw step, not `pieces().prose`: that takes out backticked text, which is a fine way to name what the owner sees.
+  const prose = first ?? "";
+  const m = CHECKPOINT.exec(prose);
+  if (!m) return `is the first step of a card that sends the owner to someone else's website, so it must open with a checkpoint: say what they should see there ("You should see "<a project, domain or repo name they will recognise>" listed"), and offer the option "${SCREEN_DIFFERENT_OPTION}" as the stop if they don't`;
+  if (!CONCRETE_NAME.test(prose.slice(m.index))) return `is a checkpoint that names nothing concrete. Name something the owner will see on their screen, in quotes or backticks (a project, domain or repo name), not "your account" or "the dashboard"`;
+  if (!options.some((o) => SCREEN_DIFFERENT.test(o))) return `is a checkpoint with no stop: the card must offer the option "${SCREEN_DIFFERENT_OPTION}" for when the owner doesn't see what it names`;
+  return null;
+}
+
 /**
  * R19: per step. Returns whether the step is "not seen" (explicitly, or because its image is older than SEEN_MAX_DAYS),
  * which the card-level option check needs. `images` maps ticket image ids to their created-at; with none given an
@@ -529,6 +579,11 @@ function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refu
     }
     const ageDays = created === undefined ? 0 : (now.getTime() - Date.parse(created)) / 86_400_000;
     if (ageDays <= SEEN_MAX_DAYS) return false;
+    const stale = mismatchRefusal(prose, facts, now);
+    if (stale) {
+      refuse.push({ step, rule: "R19", problem: `says "seen: ${seen[1]}", but that screenshot is ${Math.floor(ageDays)} days old, and it ${stale}` });
+      return true;
+    }
     refuse.push({ step, rule: "R19", problem: `says "seen: ${seen[1]}", but that screenshot is ${Math.floor(ageDays)} days old (more than ${SEEN_MAX_DAYS}), so it counts as not seen. Attach a newer screenshot, or write "not seen: <doc URL>, <YYYY-MM-DD>" and offer the option "${SCREEN_DIFFERENT_OPTION}"` });
     return true;
   }
@@ -536,6 +591,8 @@ function outsideSiteFindings(step: number, prose: string, facts: LintFacts, refu
     if (Number.isNaN(Date.parse(notSeen[2]!)) || Date.parse(notSeen[2]!) > now.getTime() + 86_400_000) {
       refuse.push({ step, rule: "R19", problem: `has "not seen: …, ${notSeen[2]}", which is not a real past date. Write the date you read the doc as YYYY-MM-DD` });
     }
+    const misled = mismatchRefusal(prose, facts, now);
+    if (misled) refuse.push({ step, rule: "R19", problem: misled });
     return true;
   }
   refuse.push({ step, rule: "R19", problem: `sends the owner to ${site}, a site Boss Man can't see, and doesn't say where its clicks came from. Add "seen: <ticket image id>" if you have a screenshot of that screen (attach_image first, and it must be under ${SEEN_MAX_DAYS} days old), or "not seen: <doc URL>, <YYYY-MM-DD>" if you only read a doc${ANY_SEEN_WORD.test(prose) ? " (the mark you wrote isn't in that form)" : ""}. A card with a not-seen step must also offer the option "${SCREEN_DIFFERENT_OPTION}"` });
@@ -761,6 +818,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   const staged = new Map<string, Set<string>>();
   let hostStep = 0;
   let notSeenStep = 0;
+  let anyOutside = false;
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -814,6 +872,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (given.addons) addonFindings(step, text, given.addons, given.setsUp, refuse, warn);
     vagueHostFindings(step, prose, blocks, refuse);
     if (outsideSiteFindings(step, prose, given, refuse) && !notSeenStep) notSeenStep = step;
+    if (!anyOutside && outsideSite(prose, given.serverHost)) anyOutside = true;
     for (const c of code) {
       const hit = INTERACTIVE.find(([re]) => re.test(c));
       if (hit) refuse.push({ step, rule: "R10", problem: `has a command that ${hit[1]}, which the owner would have to answer by typing: ${c.slice(0, 120)}. Give the value in the command, or for a secret an editor step naming the exact line (TS_AUTHKEY= in .env) or Boss Man's Secrets screen` });
@@ -836,6 +895,12 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   // the caller gave the card's options (a setup-steps check has none).
   if (notSeenStep && given.options && !given.options.some((o) => SCREEN_DIFFERENT.test(o))) {
     refuse.push({ step: notSeenStep, rule: "R19", problem: `is a "not seen" step on someone else's website, so the card must offer the option "${SCREEN_DIFFERENT_OPTION}" for when the owner's screen doesn't match` });
+  }
+  // R19c: a card that sends the owner to an outside site opens with a checkpoint they can match on screen. Only when
+  // the caller gave the card's options (a setup-steps check has none, so no stop to offer).
+  if (anyOutside && given.options) {
+    const problem = checkpointFinding(steps[0], given.options);
+    if (problem) refuse.push({ step: 1, rule: "R19", problem });
   }
   // R18 (DR-057): a step on one of Boss Man's own forms gives every value. Read over the whole card, as one visit to
   // a form can take two steps; only the sentences, as a command block is never a form.
