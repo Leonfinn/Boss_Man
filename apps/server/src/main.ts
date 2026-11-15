@@ -7,7 +7,7 @@ import { buildPortalApp } from "./portal.js";
 import { parseClientHeader, parseTrustedProxies } from "./portal-ip.js";
 import { failureSignaturesDays, pruneFailureSignatures, pruneRunnerEvents, runnerEventsDays } from "./services/housekeeping.js";
 import { providerLiveValidator } from "./services/secrets.js";
-import { checkLimitReconciler } from "./services/check-limit.js";
+import { checkLimitReconciler, readRunnerAgents } from "./services/check-limit.js";
 import { checkQueue } from "./services/check-queue.js";
 import { getHold } from "./services/maintenance.js";
 import { recordTakeover, takeoverCause } from "./services/merge-line.js";
@@ -56,6 +56,7 @@ const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefU
 const checkQueueSvc = checkQueue(db);
 const checkLimit = checkLimitReconciler({
   slots: () => checkQueueSvc.slots(),
+  agents: () => readRunnerAgents(db, scheduler.limits),
   launch: launcher,
   holdActive: async () => !!(await getHold(db)),
   startDrain: () => maintenance.start({ kind: "settings" }),
