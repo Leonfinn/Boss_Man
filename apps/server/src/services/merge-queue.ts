@@ -9,7 +9,7 @@ import type { Db } from "../db/client.js";
 import { agents, checkResults, companies, decisions, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { evaluate } from "./review-kinds.js";
 import { softHold } from "./deploy-wait-hold.js";
-import { heldTicketIds, holdView } from "./review-holds.js";
+import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 
 /** How many recently finished items the screen shows. */
@@ -480,7 +480,6 @@ export function mergeQueueService(
       const sinceOf = new Map<string, string>();
       const blockerOf = new Map<string, string>();
       const stepOf = new Map<string, string>();
-      const heldIds = await heldTicketIds(db, ids);
       for (const r of inReview) {
         if (runningIds.has(r.id)) continue;
         const card = cards.get(r.id);
@@ -493,7 +492,9 @@ export function mergeQueueService(
         const overAnHour = waitedMs > WAITING_LIMIT_MS;
         const base = { ticketId: r.id, ref: ticketRef(prefix, r.number), title: r.title, minutes: mins(waitedMs), risk: riskOf(r.risk), urgent: r.urgent, failedCheck };
         // A reviewer's hold (BOS-808): held on purpose, so never "stuck" and never waiting for a slot.
-        const hold = heldIds.has(r.id) ? await holdView(db, r.id, t) : null;
+        // DR-061 Q2b: the one merge-hold answer (mergeHolds), the same one the merge paths refuse on.
+        const holds = await mergeHolds(db, r.id);
+        const hold = holds.some((h) => h.kind === "hold") ? await holdView(db, r.id, t) : null;
         if (hold) {
           // Boss Man's own hold (BOS-1173): approved work waiting on a fix; it releases itself once the fix is merged and live.
           if (hold.system) waiting.push({ ...base, state: "held", label: `approved, held by Boss Man: ${hold.label}`, stuck: false, next: "It merges by itself once what it waits on is merged and live. Nobody needs to review it again.", actor: "agent", decisionId: null });
@@ -530,6 +531,11 @@ export function mergeQueueService(
             card: view(merge ? "merge" : "hold", hint),
             signedOffAt,
           });
+          continue;
+        }
+        // A wait on another ticket (mergeWaits): the merge gate refuses it, so the screen must not say "next in line".
+        if (holds.some((h) => h.kind === "waits")) {
+          waiting.push({ ...base, state: "waiting_for_other_ticket", label: "waiting for another ticket to be merged and live", stuck: false, next: "It merges by itself once what it waits on is merged and live.", actor: "system", decisionId: null });
           continue;
         }
         if (r.pullRequestUrl && r.pullRequestNote) {

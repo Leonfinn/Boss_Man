@@ -8,7 +8,8 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
-import { ticketBlockerFinished } from "./ticket-links.js";
+import { openSignoffCard } from "./signoff.js";
+import { openHoldingCard, ticketBlockerFinished } from "./ticket-links.js";
 
 export type ReviewHold = typeof reviewHolds.$inferSelect;
 export const HOLD_WAKE_REASON = "review hold ready";
@@ -160,6 +161,35 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
   const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...gate.map((g) => ({ id: g.id, until: "merged" as const }))].filter((w) => w.id !== t.id);
   const out: string[] = [];
   for (const w of waits) if (!out.includes(w.id) && !(await ticketInForce(db, w.id, w.until))) out.push(w.id);
+  return out;
+}
+
+/** One thing that holds an approved ticket's merge (DR-061 Q2b). */
+export type MergeHold =
+  | { kind: "signoff"; id: string }
+  | { kind: "hold"; id: string }
+  | { kind: "card"; id: string }
+  | { kind: "waits"; ids: string[] };
+
+/**
+ * Everything that holds this ticket's merge, in the order the merge paths refuse it (DR-061 Q2b): the owner's open
+ * sign-off card, a reviewer's or Boss Man's open hold, an open card that holds the merge (holdsMergeSql), and waits on
+ * tickets not yet in force (mergeWaits). Empty: nothing holds it. A read only: it records nothing and raises nothing.
+ * The one answer startLanding, land, approvedAndWaiting, the unmerged-approvals sweep and the Merge queue use.
+ */
+export async function mergeHolds(db: Db, ticketId: string): Promise<MergeHold[]> {
+  const out: MergeHold[] = [];
+  const signoff = await openSignoffCard(db, ticketId);
+  if (signoff) out.push({ kind: "signoff", id: signoff });
+  const hold = await openHold(db, ticketId);
+  if (hold) out.push({ kind: "hold", id: hold.id });
+  const card = await openHoldingCard(db, ticketId);
+  if (card) out.push({ kind: "card", id: card });
+  const [t] = await db.select({ id: tickets.id, projectId: tickets.projectId, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  if (t) {
+    const ids = await mergeWaits(db, t);
+    if (ids.length) out.push({ kind: "waits", ids });
+  }
   return out;
 }
 

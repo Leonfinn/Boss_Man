@@ -22,7 +22,7 @@ import { blockedHolds, openBlockers, ticketBlockerOpenSql } from "./ticket-links
 import { checkPriority } from "./check-gate.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
-import { heldTicketIds, wakeReadyHolds } from "./review-holds.js";
+import { heldTicketIds, mergeHolds, wakeReadyHolds } from "./review-holds.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
@@ -685,20 +685,23 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
     const out: Array<(typeof stuck)[number] & { approvedAt: number }> = [];
-    // A reviewer's hold (BOS-808): neither a merge retry nor a merge-stuck card for a ticket that is held on purpose.
-    const heldIds = await heldTicketIds(db, stuck.map((s) => s.id));
     for (const ticket of stuck) {
-      if (heldIds.has(ticket.id)) continue;
       const rows = await latestRows(db, ticket.id);
       if (!rows.length || evaluate(rows) !== "passed") continue;
       // A merge that is alive holds the sweep back. Chat, chases and note refreshes on the ticket don't count (BOS-362).
       if (opts.landingActive?.(ticket.id)) continue;
-      const [signoff] = await db
+      // Held at the merge gate (DR-061 Q2b, mergeHolds): the owner's sign-off, a reviewer's hold (BOS-808), a card that
+      // holds the merge or a wait on another ticket. Neither a merge retry nor a merge-stuck card for a ticket held on
+      // purpose. A plain question linked to the ticket holds nothing, so it no longer stops the sweep.
+      if ((await mergeHolds(db, ticket.id)).length) continue;
+      // The carried-work card ("merge that one first") is left out of mergeHolds on purpose (BOS-733), but the sweep still
+      // waits for it: the merge starts again by itself once the carried ticket lands.
+      const [carriedCard] = await db
         .select({ id: decisions.id })
         .from(ticketDependencies)
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
-      if (signoff) continue;
+        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'carried'`));
+      if (carriedCard) continue;
       // Owed the owner's sign-off, card or not: never retried as a merge; the sign-off sweep raises a lost card (BOS-503, DR-021).
       const [full] = await db.select().from(tickets).where(eq(tickets.id, ticket.id));
       if (!full) continue;

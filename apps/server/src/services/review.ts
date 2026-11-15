@@ -26,7 +26,7 @@ import { lineEvent, type CheckWay, type FailReason, type HoldReason } from "./me
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
 import { trainFor, type RestackWhy } from "./merge-train.js";
-import { closeHold, createHold, ensureSystemHold, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
+import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -394,9 +394,9 @@ export function reviewService(
     if (so !== "not_needed" && so !== "signed_off") return false;
     const rows = await latestRows(db, ticketId);
     if (!rows.length || evaluate(rows) !== "passed") return false;
-    if (await openHold(db, ticketId)) return false;
-    // Only a card that really holds the merge counts (BOS-1078): the sign-off, or a card marked as holding it.
-    return !(await openSignoffCard(db, ticketId)) && !(await openHoldingCard(db, ticketId));
+    // The one "held at the merge gate" answer (DR-061 Q2b): the sign-off card, a hold, a card marked as holding the
+    // merge (BOS-1078) and waits on tickets not yet in force (BOS-1173).
+    return (await mergeHolds(db, ticketId)).length === 0;
   }
 
   /**
@@ -705,6 +705,20 @@ export function reviewService(
   /** True while the owner's "Merge it, or send it back?" sign-off card for this ticket is open (BOS-471). */
   async function ownerSignoffOpen(ticketId: string): Promise<boolean> {
     return !!(await openSignoffCard(db, ticketId));
+  }
+
+  /**
+   * Throws the refusal for whatever holds this ticket's merge (DR-061 Q2b, mergeHolds): the owner's sign-off card,
+   * then a hold, then a holding card, then a wait on another ticket (which also puts it in "Passed, held").
+   */
+  async function refuseIfHeld(ticketId: string): Promise<void> {
+    const [first] = await mergeHolds(db, ticketId);
+    if (!first) return;
+    if (first.kind === "signoff") throw new SignoffPendingError();
+    if (first.kind === "hold") throw new ReviewHeldError();
+    if (first.kind === "card") throw cardHeld(first.id);
+    const waiting = await holdForWaits(ticketId);
+    if (waiting) throw waiting;
   }
 
   return {
@@ -1346,17 +1360,10 @@ export function reviewService(
 
     /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
     async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
-      // Nothing can merge while the owner's sign-off card is open (BOS-471): refuse before claiming the
-      // landing, so a press cannot leave a retry marker or a retry card behind for a ticket that is simply
-      // waiting on one answer.
-      if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
-      // Nor while a reviewer holds the merge (BOS-808): a normal wait, no marker and no card.
-      if (await openHold(db, ticketId)) throw new ReviewHeldError();
-      const card = await openHoldingCard(db, ticketId);
-      if (card) throw cardHeld(card);
-      // Nor while it waits on another ticket, a fix to the merge check above all (BOS-1173): held, not checked.
-      const waiting = await holdForWaits(ticketId);
-      if (waiting) throw waiting;
+      // Nothing can merge while the owner's sign-off card is open (BOS-471), a reviewer holds the merge (BOS-808), a
+      // card holds it or it waits on another ticket (BOS-1173): refuse before claiming the landing, so a press cannot
+      // leave a retry marker or a retry card behind for a ticket that is simply waiting.
+      await refuseIfHeld(ticketId);
       const startedAt = await this.claimLanding(ticketId, reviewer);
       let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
       try {
@@ -1730,17 +1737,10 @@ export function reviewService(
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
       // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
       // card is still open, this ticket waits for the owner, whatever answered the merge card.
-      if (await ownerSignoffOpen(ticketId)) throw new SignoffPendingError();
-      // Nor past a reviewer's hold (BOS-808); every merge path comes through here, so this fails them all closed.
-      if (await openHold(db, ticketId)) throw new ReviewHeldError();
-      // Nor past an open card raised on the ticket (BOS-919): a card no longer moves a ticket in review to blocked,
-      // so this is what keeps the merge waiting for the answer.
-      const card = await openHoldingCard(db, ticketId);
-      if (card) throw cardHeld(card);
-      // Nor while it waits on another ticket (BOS-1173): every merge path comes through here, so none runs a check it
-      // is known to fail for a reason the branch didn't cause.
-      const waiting = await holdForWaits(ticketId);
-      if (waiting) throw waiting;
+      // Nor past a reviewer's hold (BOS-808), an open card raised on the ticket (BOS-919) or a wait on another ticket
+      // (BOS-1173); every merge path comes through here, so this fails them all closed and none runs a check it is
+      // known to fail for a reason the branch didn't cause.
+      await refuseIfHeld(ticketId);
       // Nor past a sign-off that isn't recorded (BOS-503, DR-021): a lost card used to let the unmerged-approvals
       // retry and carried-work landing merge a high-risk ticket the owner never saw. Every path into a merge comes
       // through here, so this one check fails them all closed. A card that went missing is raised again.
