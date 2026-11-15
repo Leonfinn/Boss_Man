@@ -3,15 +3,9 @@ import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewerRef, type ReviewKind
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
 import { Loader } from "./Loader";
-
-// Mirrors the server's defaults (packages/shared/src/review-policy.ts) for "Reset to defaults".
-const DEFAULTS: ReviewPolicy = {
-  trivial: { planApprover: "none", reviewer: "ceo", ownerSignoff: false },
-  low: { planApprover: "ceo", reviewer: "ceo", ownerSignoff: false },
-  medium: { planApprover: "ceo", reviewer: "senior-dev", ownerSignoff: false },
-  high: { planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true },
-  critical: { planApprover: "owner", reviewer: "senior-dev", ownerSignoff: true },
-};
+import { Advanced, PresetCards } from "./PresetCards";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
+import { matchPreset, REVIEW_PRESETS } from "../lib/presets";
 
 const cap = (r: string) => r[0]!.toUpperCase() + r.slice(1);
 /** Each review kind's column name in plain words, and a line of help where the name alone doesn't say it (BOS-1494). */
@@ -157,12 +151,16 @@ export function CompanyReviews({ companyId, agents }: { companyId: string; agent
     }
   };
   if (!form) return <Loader label="Loading the review policy" />;
+  const preset = matchPreset(form, REVIEW_PRESETS);
   return (
     <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <ReviewPolicyTable value={form} onChange={setForm} agents={agents} idPrefix="co" />
+      <PresetCards label="Review preset" presets={REVIEW_PRESETS} active={preset} onPick={(p) => setForm(p.values)} />
+      <Advanced storeKey="reviews" forceOpen={!preset} summary={preset ? `The full table behind ${preset.name}.` : "Your own values: edit the table or pick a card."}>
+        <ReviewPolicyTable value={form} onChange={setForm} agents={agents} idPrefix="co" />
+      </Advanced>
       <div style={{ display: "flex", gap: 8 }}>
         <SaveButton {...sv} busy={busy} />
-        <button type="button" className="btn" onClick={() => setForm(DEFAULTS)}>
+        <button type="button" className="btn" onClick={() => setForm(DEFAULT_REVIEW_POLICY as ReviewPolicy)}>
           Reset to defaults
         </button>
       </div>

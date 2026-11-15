@@ -22,8 +22,14 @@ export type SelfDeployView = {
   lateAfterMinutes?: number;
   /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
   trial?: { endsAt: string; seconds: number } | null;
+  /** BOS-1469: a request waiting for the host or running; it comes first, and the last result moves below it as the previous attempt. */
+  active?: { phase: "waiting" | "running"; what: string; since: string } | null;
+  /** BOS-1469: the last real run when a refusal came after it (a refusal never replaces it). */
+  previousRun?: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
+  /** BOS-1469: the runner image's version next to the one the live server needs. */
+  runnerImage?: { running: string | null; needed: string | null };
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
-  deployWait?: { until: string } | null;
+  deployWait?: { until: string; target?: string } | null;
   /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
   runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
   /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
@@ -150,7 +156,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   if (!view) return { tone: "grey", tag: "Checking…", say: "Checking…", more: "", next: null, primary: null, normal: [] };
   const s = view.status;
   const offered = !!(view.available && view.available.tip && view.available.tip !== view.available.deployed && !(s?.result === "deployed" && s.to_commit === view.available.tip));
-  const rateLimited = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  // Each kind of deploy has its own 10-minute limit: a refused runner press must not grey the server buttons (BOS-1469).
+  const waitOn = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  const rateLimited = waitOn && view.deployWait?.target !== "runner";
+  const runnerAgain = waitOn && view.deployWait?.target === "runner" ? `Runner update: press Build and update runners again from ${atTime(view.deployWait!.until)}. ` : "";
   const w = wait && wait.on ? wait : null;
   const wrap = maint && maint.on && ((maint as WrapUpStatus).wrapAsked || maint.kind === "wrapup") ? (maint as WrapUpStatus) : null;
   const queueNormal = view.runnerQueue ? [{ id: "cancel-queue" as const, label: "Cancel queued runner update" }] : [];
@@ -158,7 +167,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 1. Update failed: the last report was a failure and nothing newer has deployed.
   const failed = !!s && (s.result === "failed" || s.result === "rolled_back" || s.result === "rejected");
   const ignorable = !!s && s.result === "rejected" && (isReplaced(s.message) || s.target === "runner" || rateLimited);
-  if (s && failed && !ignorable) {
+  if (s && failed && !ignorable && !view.active) {
     const what = s.target === "runner" ? "runner update" : s.target === "restart" ? "restart" : "update";
     const earlier = s.target === "runner" ? "the earlier runner image" : "the earlier version";
     const more = [`Why: ${plainReason(s.message)}.`, view.queueCancelled?.why].filter(Boolean).join(" ");
@@ -224,8 +233,16 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
     return { tone: "amber", tag: "Approved, waiting", say: w.origin === "hand" ? "The machine is being made ready for your hand-applied update." : "Your update is approved and waiting for a quiet machine.", more: waitLine(w), next: null, primary: null, normal: [{ id: "cancel-wait", label: waitCancelLabel(w) }] };
 
   // 4. Updating.
-  if (view.pending || s?.result === "running" || (w && w.phase === "sent"))
-    return { tone: "blue", tag: "Updating", say: "The update is going in now. Pages keep working.", more: "This takes about 5 minutes.", next: view.pending ? "A request is waiting for the host (it checks every minute)." : null, primary: null, normal: w && w.phase === "sent" ? [{ id: "cancel-wait", label: waitCancelLabel(w) }] : [] };
+  if (view.active || view.pending || s?.result === "running" || (w && w.phase === "sent")) {
+    // BOS-1469: the waiting/running request comes first; the last real result sits below it as the previous attempt.
+    const a = view.active;
+    const prev = view.previousRun ?? s;
+    const prevLine = a && prev && prev.result !== "running" ? `Previous attempt: ${prev.result.replace(/_/g, " ")}, ${prev.target} ${prev.to_commit.slice(0, 8)}, ${when(prev.ended || prev.started)}. ${prev.message}` : "";
+    const say = a
+      ? `${a.what}, pressed ${when(a.since)}: ${a.phase === "waiting" ? "waiting for the host, it checks every minute." : `running since ${when(a.since)}.`}`
+      : "The update is going in now. Pages keep working.";
+    return { tone: "blue", tag: "Updating", say, more: [a ? "" : "This takes about 5 minutes.", prevLine].filter(Boolean).join(" "), next: !a && view.pending ? "A request is waiting for the host (it checks every minute)." : null, primary: null, normal: w && w.phase === "sent" ? [{ id: "cancel-wait", label: waitCancelLabel(w) }] : [] };
+  }
 
   // 5. In trial.
   const trialOn = !!view.trial && Date.parse(view.trial.endsAt) > now;
@@ -271,11 +288,13 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 8. Up to date.
   const server = s && s.target === "server" && s.result === "deployed" ? `Server updated ${when(s.ended || s.started)}. ` : "";
   const runners = extras.runnersAt ? `Runners updated ${when(extras.runnersAt)}. ` : "";
+  const ri = view.runnerImage;
+  const image = ri?.needed ? `Runner image: ${ri.running ? ri.running.slice(0, 8) : "version not recorded"}; the live server needs ${ri.needed.slice(0, 8)}${ri.running ? (ri.running === ri.needed ? " (match). " : " (a runner update may still be needed). ") : ". "}` : "";
   return {
     tone: "green",
     tag: "Up to date",
     say: "Boss Man is up to date.",
-    more: `${server}${runners}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
+    more: `${server}${runners}${image}${runnerAgain}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
     next: null,
     primary: { id: "check-now", label: "Check for updates now", blue: false },
     normal: queueNormal,
@@ -291,8 +310,21 @@ export function deployerLine(v: SelfDeployView): string {
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
-/** Recent updates: the tag for one history row. A rejected-as-stale update is REPLACED (grey), not a failure. */
-export function historyTag(r: HistoryRow): { tag: string; tone: StatusTone } {
+/** How far the runner swap has got (BOS-1558): the newest image any runner reports is the new one; the rest are still waiting. */
+export type RunnerProgress = { inProgress: boolean; done: number; total: number; newest: string | null };
+export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined): RunnerProgress {
+  const runners = (live ?? []).filter((l) => l.registered);
+  const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
+  const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
+  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
+  const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup";
+  return { inProgress: held, done, total: runners.length, newest };
+}
+
+/** Recent updates: the tag for one history row. A rejected-as-stale update is REPLACED (grey), not a failure. `swap`: only for the newest runner row. */
+export function historyTag(r: HistoryRow, swap?: RunnerProgress | null): { tag: string; tone: StatusTone } {
+  if (r.result === "deployed" && r.target === "runner" && swap?.inProgress) return { tag: swap.total > 0 ? `Swapping (${swap.done} of ${plural(swap.total, "company", "companies")} done)` : "Swapping", tone: "amber" };
   if (r.result === "deployed") return { tag: r.target === "runner" ? "Done" : "Live", tone: "green" };
   if (r.result === "rolled_back") return { tag: "Switched back", tone: "red" };
   if (r.result === "failed") return { tag: "Failed", tone: "red" };
@@ -303,12 +335,15 @@ export function historyTag(r: HistoryRow): { tag: string; tone: StatusTone } {
 export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.changes ? `Server, ${plural(r.changes, "change", "changes")}` : "Server");
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
-export function LiveState({ r }: { r: LiveRow }) {
+export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {
   const connected = r.registered && r.connected;
+  const old = !!progress?.inProgress && connected && !!r.imageVersion && !!progress.newest && r.imageVersion < progress.newest;
   return (
     <li style={{ listStyle: "none" }}>
       <strong>{r.name}</strong>{" "}
-      {connected ? (
+      {old ? (
+        <span className="tag amber">Waiting for runs to finish</span>
+      ) : connected ? (
         <span className="tag green">Connected</span>
       ) : r.swap ? (
         <span className="tag amber">Updating</span>
@@ -321,7 +356,7 @@ export function LiveState({ r }: { r: LiveRow }) {
       )}{" "}
       <span className="muted">
         {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
-        {connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
+        {old ? ` · waiting for runs to finish, old image ${r.imageVersion}` : connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
         {r.fault ? ` · ${r.fault}` : ""}
         {!connected && r.swapFailed ? ` · ${r.swapFailed}` : ""}
         {!connected && !r.swap && !r.swapFailed && r.guard ? ` · ${r.guard.reason}` : ""}

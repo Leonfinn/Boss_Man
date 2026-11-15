@@ -717,7 +717,7 @@ export class SessionManager {
                 command.type === "workspace.detect"
                   ? ws.detect({ projectId: command.projectId, repoUrl: command.repoUrl, baseRef: command.baseRef }, secrets)
                   : command.type === "workspace.push"
-                    ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
+                    ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets, command.pin)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
                       : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null, command.pin),

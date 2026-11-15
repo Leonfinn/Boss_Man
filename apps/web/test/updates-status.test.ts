@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REASON, PLAIN_REASONS, plainReason, updateStatus, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
 
@@ -155,6 +158,36 @@ describe("plain failure reasons", () => {
     expect(DEFAULT_REASON).toBe("the update stopped with an error");
   });
 
+  // BOS-1469: a press that waits comes first; the earlier refusal is only "Previous attempt", never "Try again in N minutes".
+  describe("a waiting request and an older rejected result (BOS-1469)", () => {
+    const refusal = st({ result: "rejected", target: "runner", message: "Rejected: only one runner deploy every 10 minutes.", ended: iso(-3), started: iso(-3) });
+    const real = st({ result: "deployed", target: "runner", message: "Image built.", ended: iso(-12), started: iso(-15) });
+
+    it("says what was pressed and that it waits for the host, with the previous result below", () => {
+      const s = updateStatus(base({ status: refusal, previousRun: real, active: { phase: "waiting", what: "Build and update runners", since: iso(-1) } }), null, null, NOW);
+      expect(s.tag).toBe("Updating");
+      expect(s.say).toBe(`Build and update runners, pressed ${when(iso(-1))}: waiting for the host, it checks every minute.`);
+      expect(s.more).toBe(`Previous attempt: deployed, runner aaaaaaa1, ${when(real.ended)}. Image built.`);
+      expect(s.more).not.toMatch(/Try again/);
+      expect(s.primary).toBeNull();
+    });
+
+    it("says running since when the host has started it", () => {
+      const s = updateStatus(base({ status: refusal, previousRun: real, active: { phase: "running", what: "Build and update runners", since: iso(-1) } }), null, null, NOW);
+      expect(s.say).toBe(`Build and update runners, pressed ${when(iso(-1))}: running since ${when(iso(-1))}.`);
+    });
+
+    it("a refused runner press shows when to press again, and does not grey the server button", () => {
+      const view = offered({ status: refusal, deployWait: { until: iso(2), target: "runner" } });
+      const s = updateStatus(view, null, null, NOW);
+      expect(s.tag).toBe("Update ready");
+      expect(s.primary?.disabled).toBeFalsy();
+      const upToDate = updateStatus(base({ status: refusal, deployWait: { until: iso(2), target: "runner" }, runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" } }), null, null, NOW);
+      expect(upToDate.more).toContain("Runner update: press Build and update runners again from ");
+      expect(upToDate.more).toContain("Runner image: aaaaaaa1; the live server needs bbbbbbb2 (a runner update may still be needed).");
+    });
+  });
+
   // BOS-1238 open question 3: every failure message the host can write gets a reason, so a new one falls back to the
   // default and never shows nothing. The messages are read from the script itself, so a new one is covered here.
   it("every failure message in host-deployer.sh yields a non-empty plain reason", () => {
@@ -166,5 +199,32 @@ describe("plain failure reasons", () => {
       expect(reason, m).toBeTruthy();
       expect(reason.endsWith("."), m).toBe(false);
     }
+  });
+});
+
+describe("runner swap in progress: every part of the page agrees (BOS-1558)", () => {
+  const row = (slug: string, imageVersion: string, over: Record<string, unknown> = {}) => ({ slug, name: slug, registered: true, connected: true, at: iso(-1), imageVersion, fault: null, ...over }) as unknown as LiveRow;
+  const hist = { id: "h1", target: "runner", commit: "abc", changes: 0, result: "deployed", message: null, at: iso(-5) } as HistoryRow;
+  const view = base({ status: st({ target: "runner", result: "deployed" }) });
+
+  it("image built, one company swapped, one still waiting: all say still in progress", () => {
+    const live = [row("a", "202611151140"), row("b", "202611151017")];
+    const m = maintUpdate({ runs: 0 });
+    const p = runnerProgress(live, m);
+    expect(p).toMatchObject({ inProgress: true, done: 1, total: 2 });
+    expect(historyTag(hist, p).tag).toBe("Swapping (1 of 2 companies done)");
+    expect(updateStatus(view, m, null, NOW).tag).toBe("Updating");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).toContain("waiting for runs to finish, old image 202611151017");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[0]!, progress: p }))).not.toContain("old image");
+  });
+
+  it("all swapped and the hold is off: all say done", () => {
+    const live = [row("a", "202611151140"), row("b", "202611151140")];
+    const m = { on: false } as MaintenanceView;
+    const p = runnerProgress(live, m);
+    expect(p.inProgress).toBe(false);
+    expect(historyTag(hist, p).tag).toBe("Done");
+    expect(updateStatus(view, m, null, NOW).tag).not.toBe("Updating");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).not.toContain("old image");
   });
 });

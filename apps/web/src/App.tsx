@@ -26,6 +26,7 @@ import { Workflow } from "./pages/Workflow";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
+import { MergesStuckBannerFor } from "./components/MergesStuckBanner";
 import { Skills } from "./pages/Skills";
 import { Agents } from "./pages/Agents";
 import { Features } from "./pages/Features";
@@ -405,7 +406,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "workflow" ? (
           <Workflow company={current} />
         ) : page === "notifications" ? (
-          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
+          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} browserPermission={permission} onEnableBrowser={() => void Notification.requestPermission().then(setPermission)} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
@@ -417,9 +418,9 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <SetupChecklist companyId={current?.id} go={go} folded={folded} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} closedNotices={(closedNotices.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={() => { decisions.reload(); decisionsTally.reload(); }} tally={decisionsTally.data} banner={(folded: boolean) => <><MergesStuckBannerFor companyId={current?.id} /><SetupChecklist companyId={current?.id} go={go} folded={folded} /></>} />
         ) : (
-          <Dashboard company={current} />
+          <Dashboard company={current} decisions={decisions.data === null ? null : decisions.data.filter((d) => !current || d.companyId === current.id)} tally={decisionsTally.data} />
         )}
         </PageGuard>
       </main>

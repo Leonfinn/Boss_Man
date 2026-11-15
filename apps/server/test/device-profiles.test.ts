@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { agents, companies, deviceProfiles, owners, projects, tickets } from "../src/db/schema.js";
+import { agents, companies, deviceProfiles, owners, projects, settings, tickets } from "../src/db/schema.js";
 import { buildBrief } from "../src/services/brief.js";
 import { deviceProfilesService, DEVICE_PROFILES_MAX } from "../src/services/device-profiles.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
@@ -88,6 +88,17 @@ describe("deviceProfilesService", () => {
     expect(brief).toContain("Your devices");
     expect(brief).toContain("100dvh 800");
     expect(brief).toContain("840×900");
+  });
+
+  it("names the owner's phone type in the devices section once ntfy is set up, and says unknown while unset (BOS-1484)", async () => {
+    const { companyId, agentId } = await workerWithTicket();
+    const brief = () => buildBrief(t.db, { companyId, agentId, role: "worker", since: null, now: new Date() });
+    expect(await brief()).not.toContain("Owner's phone");
+    const ntfy = { url: "https://ntfy.example", topic: "bm", tokenSecretId: null };
+    await t.db.insert(settings).values({ key: "notifications", value: { quietHours: null, agentHourlyCap: 6, ntfy, publicUrl: null } });
+    expect(await brief()).toContain("phone type unknown: ask the owner");
+    await t.db.update(settings).set({ value: { quietHours: null, agentHourlyCap: 6, ntfy, publicUrl: null, phoneType: "android" } }).where(eq(settings.key, "notifications"));
+    expect(await brief()).toContain("Owner's phone for ntfy pushes: Android");
   });
 
   it("leaves the device query and its section out when the agent has no open ticket to be a layout ticket", async () => {

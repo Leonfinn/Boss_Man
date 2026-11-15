@@ -1,0 +1,67 @@
+# A Boss Man check worker (DR-060): one container on ANY Docker host that takes check jobs from your Boss Man server.
+# This is the whole setup: paste this file, change the marked values (CHANGE THIS), run `docker compose up -d` next to it
+# (or paste it into a TrueNAS custom app, Portainer or Dockge). Steps: docs/34-check-workers.md.
+# Needs Docker Compose 2.23.1 or newer (`docker compose version`).
+#
+# It dials OUT only; no port is published. It holds no GitHub, AI or deploy credentials, only its worker token.
+# Boss Man's Settings > Server and runner > Checks > Add a check worker shows this file already filled in: copy that one.
+
+name: boss-man-check-worker
+
+services:
+  check-worker:
+    # No image to download or build by hand: Compose builds it from Boss Man's source at the commit below. It is the
+    # runner image without Claude Code and OpenCode, because a worker never runs an agent. `pull_policy: build` makes
+    # every `up -d` look at the commit again; when it has not changed, Docker reuses its cache and rebuilds nothing.
+    build:
+      # CHANGE THIS (commit, 1 of 2): the 40-character commit your Boss Man runner is built from.
+      context: https://github.com/Leonfinn/Boss_Man.git#0000000000000000000000000000000000000000
+      dockerfile: apps/runner/Dockerfile
+      args:
+        WITH_HARNESS: "0"
+        # A web browser (Chromium) in the image: the project's own tests need one and fail, not skip, in a full check without it.
+        RUNNER_ADDONS: agent-browser
+        # CHANGE THIS (commit, 2 of 2): the same 40 characters. A worker takes jobs only when it matches your runner.
+        BOSSMAN_IMAGE_COMMIT: "0000000000000000000000000000000000000000"
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      BOSSMAN_ROLE: check-worker
+      # CHANGE THIS (address): your Boss Man server's address; it must end in /api/check-worker/connect.
+      BOSSMAN_URL: wss://boss.example.com/api/check-worker/connect
+      # Checks at once on this machine. Boss Man's per-worker setting can lower this, never raise it.
+      BOSSMAN_CHECK_SLOTS: "2"
+      # Where the token file appears inside the container (see `configs` below). The token itself is never in the environment.
+      BOSSMAN_CHECK_WORKER_TOKEN_FILE: /run/check-worker-token
+    # Compose copies the token into the container as a file anyone inside it can read, so no owner or mode can go wrong
+    # (a file saved by hand with the wrong owner was the usual way a worker failed to start).
+    configs:
+      - source: check_worker_token
+        target: /run/check-worker-token
+    # Same hardening as the runner: no extra privileges, never the Docker socket.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 8g
+    memswap_limit: 8g
+    # If the host runs out of memory, the worker goes first, not the host's other services.
+    oom_score_adj: 500
+    pids_limit: 4096
+    # Optional: pin to CPU threads (test tools then size to them), or cap CPUs. Remove the # to use one.
+    # cpuset: "8-15"
+    # cpus: 4
+    init: true
+    # Named Docker volumes, not host folders: Docker owns their permissions and a reset is one command.
+    volumes:
+      - check-worker-repos:/home/node/workspaces
+      - check-worker-data:/home/node/runner-data
+    # No `ports:` on purpose.
+
+configs:
+  check_worker_token:
+    # CHANGE THIS (token): the token from Add a check worker, between the quotes. Compose writes it to a file inside the
+    # container (never into the environment, where a check could read it). Treat this whole file as a secret.
+    content: "PASTE-THE-WORKER-TOKEN-HERE"
+
+volumes:
+  check-worker-repos:
+  check-worker-data:

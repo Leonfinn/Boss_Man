@@ -404,30 +404,47 @@ export function mergeQueueService(
     });
   }
 
+  /**
+   * Running now: this process's merges (the same markers the ticket page shows), with their phase.
+   * In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
+   * after a restart is only queued until the check queue starts it. Slots are numbered by start order among
+   * the running checks, so each is unique and never past the limit.
+   */
+  async function liveMerges(companyId: string) {
+    let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const slotOf = new Map<string, number>();
+    const restarted = new Set<string>();
+    // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
+    // wait for a seat and earlier attempts.
+    const checkStart = new Map<string, Date>();
+    const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
+    if (deps.runningChecks && queueMode?.mode === "server") {
+      const held = await deps.runningChecks(companyId);
+      held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
+      for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
+      live = live.filter((l) => slotOf.has(l.ticketId));
+    }
+    return { live, slotOf, restarted, checkStart };
+  }
+
   return {
+    /**
+     * How many approved tickets wait in the merge line, not counting running merges: the same figure as `get(...).waitingCount`
+     * (the screen's rows are exactly these), without building the rest of the view. BOS-1489's start hold reads it.
+     */
+    async waitingCount(companyId: string): Promise<number> {
+      const { live } = await liveMerges(companyId);
+      const running = new Set(live.map((l) => l.ticketId));
+      const approved = await approvedOnly(await mergeQueueQueries.inReview(db, companyId));
+      return approved.filter((r) => !running.has(r.id)).length;
+    },
     async get(companyId: string): Promise<MergeQueueView> {
       const t = now();
       const [company] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
       const prefix = company?.prefix ?? null;
 
-      // Running now: this process's merges (the same markers the ticket page shows), with their phase.
-      let live = deps.runningMerges().sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      const { live, slotOf, restarted, checkStart } = await liveMerges(companyId);
       const limit = await deps.limit();
-      // In server mode only a check that holds a slot is "running" (BOS-1287): a merge the server started again
-      // after a restart is only queued until the check queue starts it. Slots are numbered by start order among
-      // the running checks, so each is unique and never past the limit.
-      const slotOf = new Map<string, number>();
-      const restarted = new Set<string>();
-      // BOS-1517: when each running check itself began. The landing's start (runningMerges) can be hours older: it covers the
-      // wait for a seat and earlier attempts.
-      const checkStart = new Map<string, Date>();
-      const queueMode = deps.runningChecks ? await deps.queueStatus?.(companyId).catch(() => null) : null;
-      if (deps.runningChecks && queueMode?.mode === "server") {
-        const held = await deps.runningChecks(companyId);
-        held.forEach((j, i) => { if (j.kind === "merge" && !slotOf.has(j.ticketId)) { slotOf.set(j.ticketId, i + 1); if (j.startedAt) checkStart.set(j.ticketId, j.startedAt); } });
-        for (const l of live) if (!slotOf.has(l.ticketId) && /restarted/i.test(l.startedBy)) restarted.add(l.ticketId);
-        live = live.filter((l) => slotOf.has(l.ticketId));
-      }
       const liveIds = live.map((l) => l.ticketId);
       const liveTitles = liveIds.length
         ? new Map((await db.select({ id: tickets.id, title: tickets.title, number: tickets.number }).from(tickets).where(inArray(tickets.id, liveIds))).map((r) => [r.id, r]))

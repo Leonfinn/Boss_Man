@@ -22,6 +22,9 @@
 //                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
 //                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
 //   left           it left review without merging (to: the state it moved to)
+//   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
+//                  company per takeover, with ticket_id null, written whether or not a merge is waiting; the
+//                  "attempt" rows it causes follow it in time (BOS-1399).
 //
 // The hold's reason is in `hold`, not `reason`: wake-classes.test reads every `reason: "..."` in the source
 // as a wake reason.
@@ -32,7 +35,7 @@
 // readers that count an agent's activity never see them; the brief also skips the kind outright.
 import { and, desc, eq, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { activity } from "../db/schema.js";
+import { activity, companies, settings } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const MERGE_LINE_KIND = "merge_line";
@@ -56,7 +59,52 @@ export type MergeLineEvent =
   | { event: "merged"; commit: string | null }
   /** BOS-1461: a merge attempt that did not land, with why (`reason`) and the check job it was about, when there is one. */
   | { event: "attempt_failed"; reason: FailReason; jobId?: string; note?: string }
-  | { event: "left"; to: string };
+  | { event: "left"; to: string }
+  | { event: "takeover"; by: TakeoverCause; commit: string | null };
+
+/**
+ * Why a server took charge of the merge line (BOS-1399). A restart and a crash look the same from inside, so
+ * both are "restart".
+ *   deploy             first start of this process, on a different commit from the one that last took charge
+ *   restart            first start of this process, on the same commit (plain restart or crash recovery)
+ *   deployer_switch    the host deployer promoted a standby copy (SIGUSR2)
+ *   standby_promotion  the lock came free and this copy, already running, won it
+ */
+export type TakeoverCause = "deploy" | "restart" | "deployer_switch" | "standby_promotion";
+
+const LAST_COMMIT_KEY = "merge_line_last_takeover_commit";
+
+/**
+ * Works out the cause from what the process knows, and remembers the commit for the next takeover. `first` is
+ * true for this process's first promotion, `signalled` when SIGUSR2 (the deployer's switch) asked for it.
+ */
+export async function takeoverCause(db: Db, p: { first: boolean; signalled: boolean; commit: string | null }): Promise<TakeoverCause> {
+  let before: unknown = null;
+  try {
+    before = (await db.select({ value: settings.value }).from(settings).where(eq(settings.key, LAST_COMMIT_KEY)))[0]?.value ?? null;
+    await db.insert(settings).values({ key: LAST_COMMIT_KEY, value: p.commit }).onConflictDoUpdate({ target: settings.key, set: { value: p.commit } });
+  } catch {
+    // The cause is a note; never stop a takeover for it.
+  }
+  if (p.signalled) return "deployer_switch";
+  if (!p.first) return "standby_promotion";
+  return before !== null && p.commit !== null && before !== p.commit ? "deploy" : "restart";
+}
+
+/**
+ * Writes one "takeover" row for each company, with no ticket, so a takeover shows in the records even when no
+ * merge is waiting. Never throws: a record of the line must never stop the line.
+ */
+export async function recordTakeover(db: Db, t: { cause: TakeoverCause; commit: string | null }, at: Date = new Date()): Promise<void> {
+  try {
+    const e: MergeLineEvent = { event: "takeover", by: t.cause, commit: t.commit };
+    for (const c of await db.select({ id: companies.id }).from(companies)) {
+      await record(db, { companyId: c.id, ticketId: null, kind: MERGE_LINE_KIND, summary: summaryOf(e), detail: e as unknown as Record<string, unknown>, at });
+    }
+  } catch {
+    // see above
+  }
+}
 
 /** Why a merge attempt did not land (BOS-1461). */
 export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
@@ -87,12 +135,13 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
   attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
+  takeover: (e) => `Merge line: a server took charge (${e.by}${e.commit ? `, ${e.commit.slice(0, 12)}` : ""})`,
 };
 
 const summaryOf = (e: MergeLineEvent) => (SUMMARY[e.event] as (x: MergeLineEvent) => string)(e);
 
 /** Events that say the line is still where it was: a retry or a repeat approval while held does not end the hold. */
-const PASSIVE = ["approved", "attempt"];
+const PASSIVE = ["approved", "attempt", "takeover"];
 
 /** The ticket's last merge_line row (or its last one that isn't passive), through the partial index on (ticket_id, at). */
 async function lastEvent(db: Db, ticketId: string, skipPassive = false): Promise<{ at: Date; detail: MergeLineEvent } | null> {

@@ -139,7 +139,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
             <input id={`monthly-${p.id}`} type="number" min="0.01" step="0.01" placeholder="No cap" value={form.monthlyUsd} onChange={(e) => setForm({ ...form, monthlyUsd: e.target.value })} />
           </div>
           <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
-            At the monthly cap, no new runs start for this project until next month (UTC) or you raise it. Both caps count money only: runs paid from a subscription (such as Claude Max) cost nothing extra, so they don't count and a cap never stops them; the Budget tab shows their tokens.
+            At the monthly cap, no new runs start for this project until next month (UTC) or you raise it. The monthly cap counts API and credit runs only: runs paid from a subscription (such as Claude Max) are left out and it never stops them. The cap per task does count subscription runs, at list prices. Neither cap sees extra usage or top-up bought on a subscription. The Budget tab shows subscription runs' tokens.
           </p>
         </>
       )}

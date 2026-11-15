@@ -74,7 +74,7 @@ export function ClaudeStep({ company, onChanged, onTokenSaved }: { company: Comp
   );
 }
 
-type RunnerState = { registered: boolean; connected?: boolean; launcher?: unknown };
+type RunnerState = { registered: boolean; connected?: boolean; launcher?: unknown; memoryLine?: string | null };
 
 /** Runner step: connected or not, and if not the one thing to do. The full panel is Settings → Runner. */
 export function RunnerStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -103,6 +103,12 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </>
         )}
       </p>
+      {/* BOS-1498: what the runner is given and why ("11 GB: 6 agents at once and 1 check, on a 16 GB machine."). */}
+      {s.memoryLine && (
+        <p className="muted" style={{ margin: 0, fontSize: 14 }} data-testid="setup-runner-memory">
+          Memory: {s.memoryLine}
+        </p>
+      )}
       {!connected &&
         (s.launcher ? (
           <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy} onClick={start}>
@@ -110,7 +116,7 @@ export function RunnerStep({ company, onChanged }: { company: Company; onChanged
           </button>
         ) : (
           <p style={{ margin: 0 }}>
-            To connect it, open <a href={`#/settings/${company.id}/system`}>Settings → Server and runner</a> and follow the steps there.
+            To connect it, open <a href={`#/settings/${company.id}/runner`}>Settings → Server and runner</a> and follow the steps there.
           </p>
         ))}
       {act.view}

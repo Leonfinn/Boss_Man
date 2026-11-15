@@ -130,7 +130,17 @@ describe("addonsService", () => {
     const withTest = addonsService(db, { trustedProxies: [], notifySettings: async () => ({ ...DEFAULT_NOTIFY_SETTINGS, ntfy: NTFY }), phoneTest: async () => ({ sentAt: "2026-11-05T10:05:00.000Z", confirmedAt: "2026-11-05T10:05:09.000Z" }) });
     expect((await withTest.facts()).ntfy.phone).toEqual({ testSentAt: "2026-11-05T10:05:00.000Z", confirmedAt: "2026-11-05T10:05:09.000Z" });
     await db.insert(notifications).values({ ...row, createdAt: new Date("2026-11-05T11:00:00Z"), pushError: "ntfy answered 401" });
-    expect((await svc.facts()).ntfy).toEqual({ state: "stopped", since: "2026-11-05T11:00:00.000Z", source: "the last phone push failed", detail: "ntfy answered 401", phone: { testSentAt: null, confirmedAt: null } });
+    expect((await svc.facts()).ntfy).toEqual({ state: "stopped", since: "2026-11-05T11:00:00.000Z", source: "the last phone push failed", detail: "ntfy answered 401", phone: { testSentAt: null, confirmedAt: null }, phoneType: "unknown", phoneTypeNote: "phone type unknown: ask the owner" });
+  });
+
+  it("reports the owner's phone type for ntfy, and says unknown rather than guessing (BOS-1484)", async () => {
+    const { db } = await make([], NTFY);
+    const withType = (phoneType: "android" | "iphone" | "both" | null) =>
+      addonsService(db, { trustedProxies: [], notifySettings: async () => ({ ...DEFAULT_NOTIFY_SETTINGS, ntfy: NTFY, phoneType }) });
+    expect((await withType("android").facts()).ntfy).toMatchObject({ phoneType: "android" });
+    expect((await withType("android").facts()).ntfy.phoneTypeNote).toBeUndefined();
+    expect((await withType("both").facts()).ntfy.phoneType).toBe("both");
+    expect((await withType(null).facts()).ntfy).toMatchObject({ phoneType: "unknown", phoneTypeNote: "phone type unknown: ask the owner" });
   });
 });
 
