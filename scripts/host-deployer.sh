@@ -131,6 +131,7 @@ if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run hold
 else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
+REFUSAL=0 # 1 while a rate-limit refusal is recorded: write_status then leaves status.json alone (BOS-1469)
 RESTART=0 # 1 while a "restart" request runs the blue/green swap: same commit, different messages, no rollback record
 HEALTH_KV=() # the latest whole-stack checklist as key=value pairs (stack, check_*), merged into the status file
 REQ_KV=()    # what the request asked for when it differs from what runs (BOS-753): requested_commit, runner_changed
@@ -142,10 +143,13 @@ write_status() { # result message [backup]
   [[ $1 == running ]] || ended="$(now)"
   local soak=0 # the standby window this host really uses (BOS-401): the server holds the runner update for it
   if bluegreen_enabled; then soak="$SOAK_SECONDS"; fi
-  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/status.json.tmp"
-  chmod 644 "$OUTBOX/status.json.tmp"
-  mv "$OUTBOX/status.json.tmp" "$OUTBOX/status.json"
-  [[ $1 == running ]] || cat "$OUTBOX/status.json" >>"$OUTBOX/history.jsonl"
+  # BOS-1469: a rate-limit refusal goes to refused.json, never over status.json, so it can't replace the result of the run that really happened.
+  local out=status.json
+  ((REFUSAL)) && out=refused.json
+  json id="$REQ_ID" target="$TARGET" result="$1" message="$2" from_commit="$FROM" to_commit="$COMMIT" started="$STARTED" ended="$ended" at="${ended:-$STARTED}" backup="${3:-}" soak_seconds="$soak" ${REQ_KV[@]+"${REQ_KV[@]}"} ${HEALTH_KV[@]+"${HEALTH_KV[@]}"} >"$OUTBOX/$out.tmp"
+  chmod 644 "$OUTBOX/$out.tmp"
+  mv "$OUTBOX/$out.tmp" "$OUTBOX/$out"
+  [[ $1 == running ]] || cat "$OUTBOX/$out" >>"$OUTBOX/history.jsonl"
 }
 
 post_webhook() { # result message
@@ -1578,6 +1582,7 @@ main() {
   last="$(cat "$STATE/last-$slot" 2>/dev/null || echo 0)"
   wait=$((last + RATE_LIMIT_SECONDS - $(date +%s)))
   if ((wait > 0)); then
+    REFUSAL=1
     [[ $TARGET != restart ]] || finish rejected "Rejected: nothing was restarted. The server was updated or restarted less than $((RATE_LIMIT_SECONDS / 60)) minutes ago. Try again in $(((wait + 59) / 60)) minute(s)."
     finish rejected "Rejected: only one $TARGET deploy every $((RATE_LIMIT_SECONDS / 60)) minutes. Try again in $(((wait + 59) / 60)) minute(s)."
   fi
