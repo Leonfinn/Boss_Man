@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions } from "../src/db/schema.js";
+import { agents, decisions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { formatPermissionReport, groupCards, permissionReport, routeOf, type CardRow } from "../src/services/permission-report.js";
 
@@ -105,5 +105,46 @@ describe("permissionReport", () => {
     expect(r.total).toBe(1);
     expect(r.groups[0]!.example.company).toBe("Other Co");
     await c.close();
+  });
+
+  const callAs = async (agentId: string | null) => {
+    const token = await issueRunToken(ctx.db, { companyId: ctx.a.company.id, agentId, runId: randomUUID() });
+    const c = new Client({ name: "t", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://${ctx.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    try {
+      return (await c.callTool({ name: "permission_report", arguments: { format: "json" } })) as { isError?: boolean; content: Array<{ text: string }> };
+    } finally {
+      await c.close();
+    }
+  };
+
+  it("refuses a non-CEO agent token and a token with no agent, and returns no data", async () => {
+    await card(ctx.b.company.id);
+    const [worker] = await ctx.db.insert(agents).values({ companyId: ctx.a.company.id, name: "Wes", role: "worker", agentKind: "claude" } as never).returning();
+    for (const who of [worker!.id, null]) {
+      const out = await callAs(who);
+      expect(out.isError).toBe(true);
+      expect(out.content[0]!.text).toContain("Only the CEO reads the permission report.");
+      expect(out.content[0]!.text).not.toContain("Other Co");
+      expect(out.content[0]!.text).not.toContain("groups");
+    }
+  });
+
+  it("keeps secret input, reason and command from the card context out of the JSON and text output", async () => {
+    await card(ctx.b.company.id, {}, {
+      input: { command: "SECRET_INPUT_CMD" },
+      toolInput: "SECRET_TOOL_INPUT",
+      reason: "SECRET_REASON",
+      command: "SECRET_COMMAND",
+      explain: { title: "Ann wants to run a command", summary: "Deletes files.", ownerWhy: "Sent to you because X.", command: "SECRET_EXPLAIN_CMD", reason: "SECRET_EXPLAIN_REASON" },
+    });
+    const r = await permissionReport(ctx.db);
+    const both = JSON.stringify(r) + formatPermissionReport(r);
+    expect(r.total).toBe(1);
+    expect(both).toContain("Deletes files.");
+    expect(both).not.toContain("SECRET_");
+    const viaTool = await callAs(ctx.a.ceo.id);
+    expect(viaTool.isError).toBeFalsy();
+    expect(viaTool.content[0]!.text).not.toContain("SECRET_");
   });
 });

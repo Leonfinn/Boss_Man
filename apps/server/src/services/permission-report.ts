@@ -66,7 +66,12 @@ export interface CardRow {
 
 type Ctx = { rule?: string; ladder?: { hops?: Array<{ to?: string; why?: string }> }; explain?: { title?: string; summary?: string; ownerWhy?: string } };
 
-/** How the card came to the owner, read from its ladder; "direct" when it never went to the CEO. */
+/**
+ * How the card came to the owner, read from its ladder; "direct" when it never went to the CEO.
+ * The wording matched here is the ladder hops' free-text `why`, written in services/decisions.ts (for example
+ * "the CEO's wake was dropped (...)") and services/alert-ladder.ts. A reworded hop falls through to
+ * "ceo_escalated"; the routeOf test in test/permission-report.test.ts pins the strings.
+ */
 export function routeOf(ctx: Ctx): Route {
   const hops = ctx.ladder?.hops;
   if (!hops?.length) return "direct";
