@@ -101,7 +101,7 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
   const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
@@ -130,7 +130,7 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
       )}
       {wait && (
         <p className={waitOver ? "muted" : "error"} role="status" data-testid="deploy-wait" style={{ fontSize: 14 }}>
-          {waitOver ? "You can deploy now." : `A server deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
+          {waitOver ? "You can deploy now." : `A ${wait.target === "runner" ? "runner" : "server"} deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
         </p>
       )}
     </>

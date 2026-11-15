@@ -908,12 +908,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * `until` and, once it has passed, says the owner can deploy now (a later result replaces the line). Null when the
    * last status is not a rate-limit refusal.
    */
-  function deployWait(s: DeployStatus | null): { until: string } | null {
-    if (!s || s.result !== "rejected" || s.target === "runner") return null;
+  function deployWait(s: DeployStatus | null): { until: string; target: string } | null {
+    if (!s || s.result !== "rejected") return null;
     const mins = s.message.match(/Try again in (\d+) minute\(s\)/i)?.[1];
     const ended = Date.parse(s.ended || s.started);
     if (!mins || !Number.isFinite(ended)) return null;
-    return { until: new Date(ended + Number(mins) * 60_000).toISOString() };
+    // BOS-1469: runner refusals count too; `target` tells the panel whose buttons wait (each kind has its own limit).
+    return { until: new Date(ended + Number(mins) * 60_000).toISOString(), target: s.target };
   }
 
   /**

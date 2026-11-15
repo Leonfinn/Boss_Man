@@ -29,7 +29,7 @@ export type SelfDeployView = {
   /** BOS-1469: the runner image's version next to the one the live server needs. */
   runnerImage?: { running: string | null; needed: string | null };
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
-  deployWait?: { until: string } | null;
+  deployWait?: { until: string; target?: string } | null;
   /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
   runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
   /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
@@ -156,7 +156,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   if (!view) return { tone: "grey", tag: "Checking…", say: "Checking…", more: "", next: null, primary: null, normal: [] };
   const s = view.status;
   const offered = !!(view.available && view.available.tip && view.available.tip !== view.available.deployed && !(s?.result === "deployed" && s.to_commit === view.available.tip));
-  const rateLimited = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  // Each kind of deploy has its own 10-minute limit: a refused runner press must not grey the server buttons (BOS-1469).
+  const waitOn = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  const rateLimited = waitOn && view.deployWait?.target !== "runner";
+  const runnerAgain = waitOn && view.deployWait?.target === "runner" ? `Runner update: press Build and update runners again from ${atTime(view.deployWait!.until)}. ` : "";
   const w = wait && wait.on ? wait : null;
   const wrap = maint && maint.on && ((maint as WrapUpStatus).wrapAsked || maint.kind === "wrapup") ? (maint as WrapUpStatus) : null;
   const queueNormal = view.runnerQueue ? [{ id: "cancel-queue" as const, label: "Cancel queued runner update" }] : [];
@@ -291,7 +294,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
     tone: "green",
     tag: "Up to date",
     say: "Boss Man is up to date.",
-    more: `${server}${runners}${image}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
+    more: `${server}${runners}${image}${runnerAgain}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
     next: null,
     primary: { id: "check-now", label: "Check for updates now", blue: false },
     normal: queueNormal,
