@@ -310,8 +310,21 @@ export function deployerLine(v: SelfDeployView): string {
   return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
-/** Recent updates: the tag for one history row. A rejected-as-stale update is REPLACED (grey), not a failure. */
-export function historyTag(r: HistoryRow): { tag: string; tone: StatusTone } {
+/** How far the runner swap has got (BOS-1558): the newest image any runner reports is the new one; the rest are still waiting. */
+export type RunnerProgress = { inProgress: boolean; done: number; total: number; newest: string | null };
+export function runnerProgress(live: LiveRow[] | null | undefined, maint: MaintenanceView | null | undefined): RunnerProgress {
+  const runners = (live ?? []).filter((l) => l.registered);
+  const stamps = runners.map((l) => l.imageVersion).filter((v): v is string => !!v);
+  const newest = stamps.length ? stamps.reduce((a, b) => (b > a ? b : a)) : null;
+  const done = runners.filter((l) => l.connected && !l.swap && l.imageVersion === newest).length;
+  // A runner update's hold (not a setting change or a wrap-up) is on, so the swap is not finished whatever the images say.
+  const held = !!maint && maint.on && maint.kind !== "settings" && maint.kind !== "wrapup";
+  return { inProgress: held, done, total: runners.length, newest };
+}
+
+/** Recent updates: the tag for one history row. A rejected-as-stale update is REPLACED (grey), not a failure. `swap`: only for the newest runner row. */
+export function historyTag(r: HistoryRow, swap?: RunnerProgress | null): { tag: string; tone: StatusTone } {
+  if (r.result === "deployed" && r.target === "runner" && swap?.inProgress) return { tag: swap.total > 0 ? `Swapping (${swap.done} of ${plural(swap.total, "company", "companies")} done)` : "Swapping", tone: "amber" };
   if (r.result === "deployed") return { tag: r.target === "runner" ? "Done" : "Live", tone: "green" };
   if (r.result === "rolled_back") return { tag: "Switched back", tone: "red" };
   if (r.result === "failed") return { tag: "Failed", tone: "red" };
@@ -322,12 +335,15 @@ export function historyTag(r: HistoryRow): { tag: string; tone: StatusTone } {
 export const historyWhat = (r: HistoryRow) => (r.target === "runner" ? "Runners, all companies" : r.result === "rejected" && isReplaced(r.message) ? "Server: not sent, a newer update replaced it" : r.changes ? `Server, ${plural(r.changes, "change", "changes")}` : "Server");
 
 /** The live state of one company's runner, leading the panel: connected or not, and since when. */
-export function LiveState({ r }: { r: LiveRow }) {
+export function LiveState({ r, progress }: { r: LiveRow; progress?: RunnerProgress | null }) {
   const connected = r.registered && r.connected;
+  const old = !!progress?.inProgress && connected && !!r.imageVersion && !!progress.newest && r.imageVersion < progress.newest;
   return (
     <li style={{ listStyle: "none" }}>
       <strong>{r.name}</strong>{" "}
-      {connected ? (
+      {old ? (
+        <span className="tag amber">Waiting for runs to finish</span>
+      ) : connected ? (
         <span className="tag green">Connected</span>
       ) : r.swap ? (
         <span className="tag amber">Updating</span>
@@ -340,7 +356,7 @@ export function LiveState({ r }: { r: LiveRow }) {
       )}{" "}
       <span className="muted">
         {connected ? "since" : r.at ? "last seen" : ""} {r.at ? when(r.at) : ""}
-        {connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
+        {old ? ` · waiting for runs to finish, old image ${r.imageVersion}` : connected && r.imageVersion ? ` · image ${r.imageVersion}` : ""}
         {r.fault ? ` · ${r.fault}` : ""}
         {!connected && r.swapFailed ? ` · ${r.swapFailed}` : ""}
         {!connected && !r.swap && !r.swapFailed && r.guard ? ` · ${r.guard.reason}` : ""}
