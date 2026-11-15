@@ -4,7 +4,7 @@
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
+import { addsUsabilityCriterion, REAL_USE_ASK, USABILITY_ADDED_NOTE, withUsabilityCriterion, goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
 import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
@@ -23,7 +23,7 @@ import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, plan
 import { conflictNote } from "./services/merge-line-conflicts.js";
 import { CARD_CITE_REFUSAL, hostFactRefusal, uncitedCardPasses } from "./services/host-fact-gate.js";
 import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
-import { OWNER_WAIT_REFUSAL, ticketHasOpenCard, waitsOnOwnerNote } from "./services/owner-todo.js";
+import { OWNER_WAIT_REFUSAL, WAIT_LINK_REFUSAL, ticketHasOpenCard, waitsForNote, waitsOnOwnerNote } from "./services/owner-todo.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, unlinkedOrderWarning, type Scope } from "./mcp-common.js";
@@ -145,7 +145,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
         assignee: z.string().optional(),
         waitsOn: z.union([z.string().uuid(), z.array(z.string().uuid()).min(1).max(10)]).optional().describe("One ticket id, or a list of ids, this ticket waits on. If the text says it comes after BOS-n, link BOS-n here."),
         waitsOnUntil: z.enum(["merged", "done"]).optional().describe("With waitsOn: when each wait ends, the other ticket's merge on main (merged, the default) or its done state (done)."),
-        acceptanceCriteria: acceptanceCriteriaSchema.optional(),
+        acceptanceCriteria: acceptanceCriteriaSchema.optional().describe("What done looks like, as checks someone could run: a string each (checked before merge), or {text, after: \"merge\"} for a check only a live host can settle; up to 10. A feature's ticket, or one with ownerSetup, gets a built-in \"Usability gate\" criterion added (does it deliver its value in real use without the owner on hand: day 1, after routine updates and restarts, a week on); don't write your own."),
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
         ownerSetup: z.string().max(4000).optional().describe(`What the owner has to do once this change is live (a setting, a secret, a button), in plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps only when the change goes live, not at merge. Leave it off when there is nothing for them to do. ${SETUP_HELP}`),
         lintOverride: LINT_OVERRIDE,
@@ -220,9 +220,13 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
           );
         if (same) return text(`Ticket ${same.id} already exists in ${p.name}; no new ticket was created.`);
       }
+      // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate without anyone remembering it.
+      const gate = { featureId, ownerSetup, noCode };
+      const gateAdded = addsUsabilityCriterion(acceptanceCriteria ?? [], gate);
+      const criteria = withUsabilityCriterion(acceptanceCriteria ?? [], gate);
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(criteria.length ? { acceptanceCriteria: criteria } : {}), ...(noCode ? { noCode } : {}), ...(ownerSetup?.trim() ? { ownerSetup: ownerSetup.trim(), ownerSetupOverride: setup.override } : {}), ...(fixesLive?.trim() ? { fixesLive: fixesLive.trim() } : {}) })
         .returning({ id: tickets.id });
       // Held through moveTicket (DR-047 point 5, BOS-922): the column and the history line follow, not a blocked insert.
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
@@ -234,7 +238,7 @@ export function registerTicketAdmin(server: McpServer, db: Db, { work, engagemen
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
       const thin = noCode ? "" : thinTicketWarning(body, assignee);
-      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}${unlinkedOrderWarning([title, body], new Set(blockers.flatMap((b) => (b.number === null ? [] : [b.number]))))}`);
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.${gateAdded ? ` ${USABILITY_ADDED_NOTE}` : ""}${await wipQueuedNote(db, t!.id)}${criteriaWarning(acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(acceptanceCriteria, body))}${thin}${unlinkedOrderWarning([title, body], new Set(blockers.flatMap((b) => (b.number === null ? [] : [b.number]))))}`);
     },
   );
 }
@@ -325,6 +329,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         ceoPlanDeadline: z.string().datetime({ offset: true }).nullable().optional().describe("When the plan should be done (ISO 8601 with a time zone, in the future, within 30 days). Required with ceoPlan."),
         waitsOn: z.object({
           add: z.array(z.string().min(1).max(40)).max(10).optional().describe("Tickets (BOS-12 or id) this ticket should wait on."),
+          addCards: z.array(z.string().uuid()).max(10).optional().describe("Ids of open question cards (decisions) this ticket waits on, for a wait that the owner's answer settles. When the card is answered, this ticket is released and its assignee woken with the answer, so use this rather than raising a second card or only writing the wait in a note (BOS-1591)."),
           remove: z.array(z.string().min(1).max(40)).max(10).optional().describe("Tickets (BOS-12 or id) this ticket should stop waiting on."),
           until: z.enum(["merged", "done"]).optional().describe("When the wait on the tickets in add ends: their merge on main (merged, the default) or their done state (done)."),
         }).optional().describe("Add or remove \"waits on\" links on this ticket. When the point in until is reached (merge commit on main, or done), this ticket's assignee is woken. On approved work in review, the link also holds the merge: it waits as \"Passed, held\" with its approvals kept and merges by itself once the linked ticket is merged and live. Besides the CEO and managers, the ticket's own assignee may use this on their own ticket."),
@@ -375,7 +380,13 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
       if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && ownerSetup === undefined && urgent === undefined && fixesLive === undefined && size === undefined && acceptanceCriteria === undefined && waitsOn === undefined && fixesMergeCheck === undefined && !planGiven) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode, ownerSetup, urgent, fixesLive, size, fixesMergeCheck, acceptanceCriteria, waitsOn or ceoPlan.");
-      if (waitsOn !== undefined && !waitsOn.add?.length && !waitsOn.remove?.length) return fail("waitsOn needs add or remove: tickets (BOS-12 or id).");
+      if (waitsOn !== undefined && !waitsOn.add?.length && !waitsOn.remove?.length && !waitsOn.addCards?.length) return fail("waitsOn needs add, addCards or remove: tickets (BOS-12 or id) or open card ids.");
+      for (const cardId of waitsOn?.addCards ?? []) {
+        const [card] = await db.select({ status: decisionsTable.status, kind: decisionsTable.kind }).from(decisionsTable).where(and(eq(decisionsTable.id, cardId), eq(decisionsTable.companyId, scope.companyId)));
+        if (!card) return fail(`waitsOn addCards: no card ${cardId} in your company.`);
+        if (card.status !== "open") return fail(`waitsOn addCards: card ${cardId} is already answered or closed, so there is nothing to wait for. Read its answer (decisions read) and act on it.`);
+        if (card.kind !== "question") return fail(`waitsOn addCards: card ${cardId} is not a question card; only a question the owner answers can release a ticket.`);
+      }
       if (waitsOn?.until && !waitsOn.add?.length) return fail("waitsOn until goes with add.");
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
@@ -430,6 +441,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         for (const id of waitIds.add) {
           const dep = await work.addDependency(ticketId, { ticketId: id, until: waitsOn?.until ?? "merged" }, scope.agentId);
           waitsLines.push(`waits on ${id} until ${dep.until}`);
+        }
+        for (const cardId of waitsOn?.addCards ?? []) {
+          const [has] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerDecisionId, cardId))).limit(1);
+          if (!has) await addTicketDependency(db, { companyId: scope.companyId, blockedTicketId: ticketId, blockerDecisionId: cardId, actor: { type: "agent", agentId: scope.agentId ?? null }, hold: true });
+          waitsLines.push(`waits on card ${cardId}`);
         }
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${!planGiven ? "" : ceoPlan ? ` (plan set, due ${ceoPlanDeadline})` : " (plan cleared)"}${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${fixesLive === undefined ? "" : fixesLive?.trim() ? ` (fixes live: ${fixesLive.trim()})` : " (no longer marked fixes live)"}${fixesMergeCheck === undefined ? "" : fixesMergeCheck ? " (marked as fixing the merge check: approved work in the project waits on it in Passed, held)" : " (no longer marked as fixing the merge check)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}${ownerSetup === undefined ? "" : ownerSetup?.trim() ? " (owner setup steps changed)" : " (owner setup steps cleared)"}${acceptanceCriteria === undefined ? "" : ` (acceptance criteria replaced: ${acceptanceCriteria.length ? acceptanceCriteria.map((c, i) => `${i + 1}. ${criteriaText([c])}`).join(" ") : "none now"})`}${waitsLines.length ? ` (${waitsLines.join("; ")})` : ""}: ${reason}` });
@@ -509,10 +525,14 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
       const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId })
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!withCriteria) return fail("No ticket with that ID in your company.");
+      // BOS-1571 backstop: a gated ticket made by a path that didn't add the usability criterion (or before it existed)
+      // gets it on the move to review, so its author reports it like any other; it is stored with the move.
+      const gateAdded = state === "review" && withCriteria.prev !== "review" && addsUsabilityCriterion(withCriteria.criteria, { featureId: withCriteria.featureId, ownerSetup: ownerSetup ?? withCriteria.ownerSetup, noCode: withCriteria.noCode });
+      if (gateAdded) withCriteria.criteria = withUsabilityCriterion(withCriteria.criteria, { featureId: withCriteria.featureId, ownerSetup: ownerSetup ?? withCriteria.ownerSetup, noCode: withCriteria.noCode });
       // A merged ticket's setup steps are the ones review saw: only the owner changes them (BOS-443).
       if (ownerSetup !== undefined) {
         const [mergedNow] = await db.select({ mergeCommit: tickets.mergeCommit, ownerSetup: tickets.ownerSetup }).from(tickets).where(eq(tickets.id, ticketId));
@@ -566,7 +586,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
         return fail(
           state === "done"
             ? `This ticket's work is merged, and its after-merge acceptance criteria aren't reported yet. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. If one can only be checked by the owner, put a card in front of them (raise_decision with blocksTicketId set to this ticket, and criterion set to that check's number): their answer records the check's pass or fail, so you can close it once they have. A fail still closes this ticket: Boss Man opens the follow-up for it, assigned to this ticket's assignee.`
-            : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}`,
+            : `This ticket has acceptance criteria to report before it merges, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".${withCriteria.criteria.some(isAfterMerge) ? " The after-merge criteria don't need a verdict at review." : ""}${gateAdded ? ` The last one, "Usability gate", is built in for feature tickets and tickets with owner setup steps (criterion ${withCriteria.criteria.length}): ${REAL_USE_ASK}` : ""}`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
@@ -577,6 +597,8 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       }
       // BOS-1576: a note that says the ticket waits on the owner needs a card in their queue, in any state.
       if (state !== "done" && waitsOnOwnerNote(summary) && !(await ticketHasOpenCard(db, ticketId))) return fail(OWNER_WAIT_REFUSAL);
+      // BOS-1591 (R21): a ticket parked in Backlog, Ready or Blocked for something needs a link to what settles it (a ticket, a card, an engagement or a date).
+      if ((state === "backlog" || state === "ready" || state === "blocked") && waitsForNote(summary) && !(await blockedHolds(db, ticketId, { blockedUntil: until ?? null })).length) return fail(WAIT_LINK_REFUSAL);
       // BOS-1509: finished, reviewed work whose only wait is another ticket's merge stays in review ("Passed, held").
       let waitsOnMergeOnly = false;
       if (state === "blocked" && !sameState && !until && (withCriteria.prev === "review" || withCriteria.prev === "in_progress")) {
@@ -598,7 +620,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
           note: summary,
           blockedUntil: state === "blocked" ? until : undefined,
           blockedUntilReason: blocked_reason?.trim() || null,
-          fields: { ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
+          fields: { ...(gateAdded ? { acceptanceCriteria: withCriteria.criteria } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}), ...(ownerSetup !== undefined ? { ownerSetup: ownerSetup.trim() || null, ownerSetupOverride: setup?.error === null && ownerSetup.trim() ? setup.override : null } : {}), ...(fixesLive !== undefined ? { fixesLive: fixesLive.trim() || null } : {}) },
           hooks: {
             onDone: () => hooks.onTicketDone?.(ticketId, scope.runId),
             onReview: () => hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId),

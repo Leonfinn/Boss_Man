@@ -8,6 +8,7 @@ import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { workerComposeFile, workerSocketUrl } from "./check-worker-compose";
 import { useAction } from "./shared";
+import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type MachineTakes, type SlotPolicy } from "./SlotSplit";
 
 export type CheckWorkerView = {
   id: string;
@@ -17,6 +18,9 @@ export type CheckWorkerView = {
   slots: number;
   reportedSlots: number | null;
   limit: number;
+  /** BOS-1602; absent from a server older than this page. */
+  takes?: MachineTakes;
+  mergeKept?: number;
   checkThreads: number | null;
   checkMemoryMb: number | null;
   imageCommit: string | null;
@@ -26,8 +30,8 @@ export type CheckWorkerView = {
   reason: string | null;
 };
 
-type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string };
-const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "" };
+type Draft = { name: string; companyIds: string[]; slots: string; threads: string; memoryGb: string; policy: SlotPolicy };
+const blank: Draft = { name: "", companyIds: [], slots: "1", threads: "", memoryGb: "", policy: DEFAULT_POLICY };
 
 const toBody = (d: Draft) => ({
   name: d.name.trim(),
@@ -35,11 +39,13 @@ const toBody = (d: Draft) => ({
   slots: Number(d.slots),
   checkThreads: d.threads.trim() ? Number(d.threads) : null,
   checkMemoryMb: d.memoryGb.trim() ? Math.round(Number(d.memoryGb) * 1024) : null,
+  takes: d.policy.takes,
+  mergeKept: d.policy.takes === "both" ? d.policy.mergeKept : 0,
 });
 
 function valid(d: Draft, maxSlots: number) {
   const b = toBody(d);
-  return !!b.name && Number.isInteger(b.slots) && b.slots >= 1 && b.slots <= maxSlots && (b.checkThreads === null || (Number.isInteger(b.checkThreads) && b.checkThreads >= 1 && b.checkThreads <= 256)) && (b.checkMemoryMb === null || (b.checkMemoryMb >= 256 && b.checkMemoryMb <= 1_048_576));
+  return !!b.name && Number.isInteger(b.slots) && b.slots >= 1 && b.slots <= maxSlots && (b.checkThreads === null || (Number.isInteger(b.checkThreads) && b.checkThreads >= 1 && b.checkThreads <= 256)) && (b.checkMemoryMb === null || (b.checkMemoryMb >= 256 && b.checkMemoryMb <= 1_048_576)) && policyValid(d.policy, b.slots);
 }
 
 function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix }: { draft: Draft; setDraft: (d: Draft) => void; companies: Company[]; maxSlots: number; idPrefix: string }) {
@@ -62,6 +68,7 @@ function WorkerForm({ draft, setDraft, companies, maxSlots, idPrefix }: { draft:
       </fieldset>
       <label htmlFor={`${idPrefix}-slots`}>Checks at once on this machine (1 to {maxSlots})</label>
       <input id={`${idPrefix}-slots`} type="number" min={1} max={maxSlots} value={draft.slots} onChange={(e) => setDraft({ ...draft, slots: e.target.value })} style={{ width: 80 }} />
+      <SlotSplitFields value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} slots={Number(draft.slots) || 1} idPrefix={idPrefix} />
       <label htmlFor={`${idPrefix}-threads`}>Test threads per check (optional)</label>
       <input id={`${idPrefix}-threads`} type="number" min={1} max={256} value={draft.threads} onChange={(e) => setDraft({ ...draft, threads: e.target.value })} style={{ width: 80 }} />
       <label htmlFor={`${idPrefix}-memory`}>Memory per check, in GB (optional)</label>
@@ -85,7 +92,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
       <h3 style={{ margin: "8px 0 0" }}>Check workers</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
+        Other machines that take checks when the runner's slots are full. A check worker runs checks only: merge checks (the full test run before a ticket lands) and quick checks (before review). It gets no secrets and runs no agents, and code only ever goes onto main from your main Boss Man server, never from a worker. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (
@@ -95,6 +102,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
             {!w.enabled ? <span className="tag">Off</span> : w.connected ? <span className="tag">Connected</span> : <span className="tag red">Offline</span>}
             <span className="muted" style={{ fontSize: 14 }}>
               {w.limit} check{w.limit === 1 ? "" : "s"} at once{w.reportedSlots !== null && w.reportedSlots < w.slots ? ` (the machine says it can run ${w.reportedSlots})` : ""}
+              <span data-testid="check-worker-split">{` · ${policyLine({ takes: w.takes ?? "both", mergeKept: w.mergeKept ?? 0 }, w.limit)}`}</span>
               {w.lastSeenAt ? ` · last seen ${when(w.lastSeenAt)}` : ""}
               {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
@@ -142,7 +150,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               <button
                 type="button"
                 className="btn"
-                onClick={() => setEditing({ id: w.id, draft: { name: w.name, companyIds: w.companies.map((c) => c.id), slots: String(w.slots), threads: w.checkThreads ? String(w.checkThreads) : "", memoryGb: w.checkMemoryMb ? String(w.checkMemoryMb / 1024) : "" } })}
+                onClick={() => setEditing({ id: w.id, draft: { name: w.name, companyIds: w.companies.map((c) => c.id), slots: String(w.slots), threads: w.checkThreads ? String(w.checkThreads) : "", memoryGb: w.checkMemoryMb ? String(w.checkMemoryMb / 1024) : "", policy: { takes: w.takes ?? "both", mergeKept: w.mergeKept ?? 0 } } })}
               >
                 Change
               </button>

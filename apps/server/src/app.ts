@@ -1008,7 +1008,8 @@ export async function buildApp(opts: AppOptions) {
     scanListWarning,
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
-    checkCapacity: (companyId) => checks.capacity(companyId),
+    // BOS-1602: train seats count only slots that can run a merge check.
+    checkCapacity: (companyId) => checks.mergeCapacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
@@ -1944,7 +1945,7 @@ export async function buildApp(opts: AppOptions) {
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
-      return checkQueueSvc.list(id, new Date(), await checks.capacity(id));
+      return checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {

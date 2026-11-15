@@ -7,7 +7,7 @@
 // ```sh host="nas01" as="login". That line is not part of what the owner pastes; the web app reads it and shows
 // "On nas01, as the logged-in account." above the command. A block with neither is refused (R6).
 
-import { HOST_NAME, OWNER_CONTROLS, parseStep, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
+import { HOST_NAME, OWNER_CONTROLS, parseStep, recurringDutyHits, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
@@ -890,6 +890,9 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     if (blocks.length > 1) warn.push({ step, rule: "warn", problem: `has ${blocks.length} commands; one per step is easier to follow` });
     const hedge = code.length ? HEDGES.exec(prose) : null;
     if (hedge) warn.push({ step, rule: "warn", problem: `hedges ("${hedge[0]}") next to a command` });
+    // BOS-1571 usability gate: a duty the owner repeats is a cost that grows with every update; name how often, or automate it.
+    const duty = recurringDutyHits(prose)[0];
+    if (duty) warn.push({ step, rule: "warn", problem: `reads as something the owner must repeat ("${duty.slice(0, 80)}"); say how often, or make Boss Man do it so the owner needn't` });
   });
   // R19: a card built on a doc nobody saw on a screen must let the owner say the screen differs. Only checked when
   // the caller gave the card's options (a setup-steps check has none).

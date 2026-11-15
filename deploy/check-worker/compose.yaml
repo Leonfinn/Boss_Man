@@ -1,6 +1,6 @@
 # A Boss Man check worker (DR-060): one container on ANY Docker host that takes check jobs from your Boss Man server.
 # This is the whole setup: paste this file, change the marked values (CHANGE THIS), run `docker compose up -d` next to it
-# (or paste it into a TrueNAS custom app, Portainer or Dockge). Steps: docs/26-check-workers.md.
+# (or paste it into a TrueNAS custom app, Portainer or Dockge). Steps: docs/34-check-workers.md.
 # Needs Docker Compose 2.23.1 or newer (`docker compose version`).
 #
 # It dials OUT only; no port is published. It holds no GitHub, AI or deploy credentials, only its worker token.

@@ -4,7 +4,7 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
-import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
+import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -30,7 +30,7 @@ import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
-import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
+import { answeredBefore, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
@@ -375,6 +375,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
         recommended: z.string(),
         blocksTicketId: z.string().uuid().optional(),
+        // BOS-1591: every other ticket that waits on this same answer is held by this one card, so one answer releases them all.
+        alsoBlocks: z.array(z.string().uuid()).max(10).optional().describe("Other tickets (ids) that wait on this same answer. The card holds them too, and the owner's one answer releases and wakes every one. Use it instead of a second card, and instead of a note that says a ticket waits for this."),
         // BOS-1078: the card holds blocksTicketId's merge until it is answered. Without it, an approved ticket merges past it.
         holdsMerge: z.boolean().optional(),
         triedFirst: z.string().max(1000),
@@ -409,7 +411,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -440,6 +442,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }
+      const alsoIds = [...new Set(alsoBlocks ?? [])].filter((id) => id !== blocksTicketId);
+      if (alsoIds.length) {
+        if (!blocksTicketId) return fail("alsoBlocks goes with blocksTicketId: name the first ticket there and the others in alsoBlocks.");
+        if (holdsMerge || criterion !== undefined) return fail("alsoBlocks can't be used with holdsMerge or criterion: those settle one ticket's merge or check. Raise a card per ticket for that.");
+        for (const id of alsoIds) {
+          const [o] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId)));
+          if (!o) return fail(`alsoBlocks: no ticket ${id} in your company.`);
+          const refused = await reviewTicketWriteRefusal(db, scope.companyId, id, scope.agentId);
+          if (refused) return fail(`alsoBlocks ${id}: ${refused}`);
+        }
+      }
       // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
       // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.
       let criterionIndexes: number[] | undefined;
@@ -465,16 +478,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
       // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
-      if (blocksTicketId) {
-        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
-        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question });
-        if (earlier && !stillNeeded?.trim()) {
+      // BOS-1591: looks at every owner answer in the company from the last 30 days, not only this ticket's own.
+      if (!stillNeeded?.trim()) {
+        const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: blocksTicketId, question });
+        if (earlier) {
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -497,10 +510,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
     },
     async ({ ticketId, plan }) => {
-      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode, acceptanceCriteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
       if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      // BOS-1571: the approver sees how the owner lives with it before any code is written.
+      if (usabilityGated(t) && !realUseWalkthrough(plan)) return fail(PLAN_REAL_USE_REFUSAL);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
       let d: { id: string };
@@ -802,8 +817,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // Don't tell the owner they still must act on something they have already answered (BOS-123).
         const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
         if (asks && !input.stillNeeded?.trim()) {
-          const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
-          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: `${input.title} ${input.body ?? ""}` });
+          const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: input.ticketId, question: `${input.title} ${input.body ?? ""}` });
           if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
         }
       }
@@ -1234,7 +1248,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it; pass offset to page further back when a page has a long history) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. A page of 40,000 characters or more can only be shortened by passing both replace: true and confirmReplace set to the page's slug; never do that to a log. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default, or position \"oldest\" at the end of that section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it; pass offset to page further back when a page has a long history) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. A page of 40,000 characters or more can only be shortened by passing both replace: true and confirmReplace set to the page's slug; never do that to a log. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default after the heading's intro text, or position \"oldest\" at the end of that heading's own text, or bottom at the end of the whole section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
         action: z.enum(["list", "read", "write", "append", "history", "restore", "attach"]),
         q: z.string().max(200).optional(),

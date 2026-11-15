@@ -451,7 +451,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(body).toContain("Check workers are not swapped by this update");
     expect(body).toContain("second-host");
     expect(body).not.toContain("turned-off-host");
-    expect(body).toContain("docs/26-check-workers.md");
+    expect(body).toContain("docs/34-check-workers.md");
   });
 
   it("tries a failed swap again by itself, and needs nobody when a later try works", async () => {

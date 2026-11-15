@@ -15,7 +15,7 @@ import { PROTOCOL_VERSION, toolchainDifferences, type CheckLimits, type WorkerCo
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
-import { MAX_CHECK_SLOTS } from "./check-queue.js";
+import { MACHINE_TAKES, MAX_CHECK_SLOTS, readPolicy, type MachineTakes, type SlotPolicy } from "./check-queue.js";
 
 type Tc = { fingerprint: string; tools: Record<string, string> };
 
@@ -30,8 +30,12 @@ export const THREADS_MAX = 256;
 export const MEMORY_MB_MIN = 256;
 export const MEMORY_MB_MAX = 1_048_576;
 
-export type WorkerSettings = { name: string; companyIds: string[]; slots: number; checkThreads: number | null; checkMemoryMb: number | null; enabled: boolean };
-export type Eligible = { id: string; name: string; limit: number; limits?: CheckLimits };
+/** `takes` and `mergeKept` (BOS-1602) are optional: left out, a new worker takes both kinds with no slot kept, as before. */
+export type WorkerSettings = { name: string; companyIds: string[]; slots: number; checkThreads: number | null; checkMemoryMb: number | null; enabled: boolean; takes?: MachineTakes; mergeKept?: number };
+export type Eligible = { id: string; name: string; limit: number; limits?: CheckLimits; policy?: SlotPolicy };
+
+/** BOS-1602: the worker's split as the queue reads it. */
+export const workerPolicy = (w: Pick<CheckWorker, "takes" | "mergeKept">): SlotPolicy => readPolicy({ takes: w.takes, mergeKept: w.mergeKept });
 export type Readiness = { ok: true; limit: number } | { ok: false; reason: string };
 
 /** How many checks a worker may run at once: the owner's number, never more than the worker says it can run. */
@@ -45,7 +49,12 @@ function validate(s: Partial<WorkerSettings>) {
   if (s.slots !== undefined && (!Number.isInteger(s.slots) || s.slots < 1 || s.slots > MAX_CHECK_SLOTS)) throw new Error(`Slots must be a whole number from 1 to ${MAX_CHECK_SLOTS}.`);
   if (s.checkThreads != null && (!Number.isInteger(s.checkThreads) || s.checkThreads < 1 || s.checkThreads > THREADS_MAX)) throw new Error(`Test threads must be a whole number from 1 to ${THREADS_MAX}.`);
   if (s.checkMemoryMb != null && (!Number.isInteger(s.checkMemoryMb) || s.checkMemoryMb < MEMORY_MB_MIN || s.checkMemoryMb > MEMORY_MB_MAX)) throw new Error(`Memory per check must be from ${MEMORY_MB_MIN} to ${MEMORY_MB_MAX} MB.`);
+  if (s.takes !== undefined && !MACHINE_TAKES.includes(s.takes)) throw new Error("Takes must be merges and quick checks, merges only, or quick checks only.");
+  if (s.mergeKept !== undefined && (!Number.isInteger(s.mergeKept) || s.mergeKept < 0 || s.mergeKept > MAX_CHECK_SLOTS)) throw new Error(`Kept for merges must be a whole number from 0 to ${MAX_CHECK_SLOTS}.`);
 }
+
+/** Kept slots only mean something when the machine takes both kinds; stored as 0 otherwise, so the panel never shows a stale number. */
+const keptFor = (takes: MachineTakes | undefined, kept: number | undefined) => (takes !== undefined && takes !== "both" ? 0 : kept);
 
 export function checkWorkersService(db: Db) {
   // shortcut: live sockets on this process (only the leader holds any); lost on restart, harmless because a worker redials, like a runner.
@@ -116,7 +125,7 @@ export function checkWorkersService(db: Db) {
       const token = `bmw_${randomBytes(32).toString("base64url")}`;
       const [worker] = await db
         .insert(checkWorkers)
-        .values({ name: s.name.trim(), companyIds: [...new Set(s.companyIds)], slots: s.slots, checkThreads: s.checkThreads, checkMemoryMb: s.checkMemoryMb, enabled: s.enabled, tokenHash: hashToken(token) })
+        .values({ name: s.name.trim(), companyIds: [...new Set(s.companyIds)], slots: s.slots, checkThreads: s.checkThreads, checkMemoryMb: s.checkMemoryMb, enabled: s.enabled, takes: s.takes ?? "both", mergeKept: keptFor(s.takes, s.mergeKept) ?? 0, tokenHash: hashToken(token) })
         .returning();
       return { worker: worker!, token };
     },
@@ -137,7 +146,8 @@ export function checkWorkersService(db: Db) {
 
     async update(id: string, s: Partial<WorkerSettings>): Promise<CheckWorker | null> {
       validate(s);
-      const set = { ...s, ...(s.name !== undefined ? { name: s.name.trim() } : {}), ...(s.companyIds ? { companyIds: [...new Set(s.companyIds)] } : {}) };
+      const kept = keptFor(s.takes, s.mergeKept);
+      const set = { ...s, ...(s.name !== undefined ? { name: s.name.trim() } : {}), ...(s.companyIds ? { companyIds: [...new Set(s.companyIds)] } : {}), ...(kept !== undefined ? { mergeKept: kept } : {}) };
       const [row] = await db.update(checkWorkers).set(set).where(eq(checkWorkers.id, id)).returning();
       return row ?? null;
     },
@@ -197,7 +207,7 @@ export function checkWorkersService(db: Db) {
       const out: Eligible[] = [];
       for (const w of all) {
         const r = readiness(w, companyId, image.commit, image.toolchain);
-        if (r.ok) out.push({ id: w.id, name: w.name, limit: r.limit, limits: limitsOf(w) });
+        if (r.ok) out.push({ id: w.id, name: w.name, limit: r.limit, limits: limitsOf(w), policy: workerPolicy(w) });
       }
       return out;
     },
@@ -215,6 +225,8 @@ export function checkWorkersService(db: Db) {
         slots: w.slots,
         reportedSlots: w.reportedSlots,
         limit: workerLimit(w),
+        takes: workerPolicy(w).takes,
+        mergeKept: workerPolicy(w).mergeKept,
         checkThreads: w.checkThreads,
         checkMemoryMb: w.checkMemoryMb,
         imageCommit: w.imageCommit,
