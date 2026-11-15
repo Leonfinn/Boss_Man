@@ -107,7 +107,7 @@ const SHOTS = [
 const SCREENS = [
   { name: "board", hash: "#board/p1", wait: ".board-scroll .ticket h3" },
   { name: "roadmap", hash: "#roadmap/features", wait: "text=Milestones" },
-  { name: "budgets", hash: "#settings/c1/funding", wait: "text=Most expensive tasks" },
+  { name: "budgets", hash: "#settings/c1/funding", wait: "text=Costliest tasks" },
   { name: "ticket", hash: `#tickets/${TICKET}`, wait: ".props-toggle" },
 ];
 
@@ -182,10 +182,10 @@ describe.skipIf(!can)("UI quick wins 4 layout (BOS-1126)", () => {
     }
   });
 
-  it("Q14: Budgets gives the Tokens and Most expensive tasks sub-headings the usual 24 px gap above", async () => {
-    const page = await open("#settings/c1/funding", SHOTS[0]!, "text=Most expensive tasks");
+  it("Q14: Budgets gives the Tokens and Costliest tasks sub-headings the usual 24 px gap above", async () => {
+    const page = await open("#settings/c1/funding", SHOTS[0]!, "text=Costliest tasks");
     try {
-      for (const name of ["Tokens", "Most expensive tasks"]) {
+      for (const name of ["Tokens", "Costliest tasks"]) {
         const top = await page.getByRole("heading", { name, exact: true }).evaluate((el: Element) => parseFloat(getComputedStyle(el).marginTop));
         expect(top, `${name} gap above`).toBe(24);
       }
