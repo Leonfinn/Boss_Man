@@ -18,7 +18,7 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
-import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
+import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
@@ -2062,7 +2062,8 @@ export function schedulerService(
     async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
-      if ((await openBlockers(db, ticketId)).length) return false;
+      // A Blocked ticket uses the one "held in Blocked" rule (DR-061 Q2a, BOS-1532); a date still ahead is left to the parked branch below, which tells the assignee.
+      if (cur.systemState === "blocked" ? (await blockedHolds(db, ticketId, { now: now() })).some((h) => h.kind !== "date") : (await openBlockers(db, ticketId)).length) return false;
       // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
       // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
       // blocker; a later blocker that frees has a newer time and is news.

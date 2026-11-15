@@ -12,7 +12,7 @@ const CANONICAL = "services/ticket-links.ts";
 
 /** A join from the dependency row to its blocker ticket, in query-builder or raw SQL form. */
 const JOIN_RE = /(?:left|inner)Join\(tickets, eq\(tickets\.id, ticketDependencies\.blockerTicketId\)\)|join tickets \w+ on \w+\.id = \w+\.blocker_ticket_id/g;
-const CANONICAL_RE = /ticketBlockerFinished|openBlockers|ticketBlockerOpenSql|ticketInForce/;
+const CANONICAL_RE = /ticketBlockerFinished|openBlockers|ticketBlockerOpenSql|ticketInForce|blockedHolds/;
 
 /** Joins that do not decide "finished" (display, ordering, a fingerprint, a note about what finished) or that already use the canonical answer. */
 const KNOWN_JOINS: Record<string, number> = {
@@ -33,6 +33,29 @@ function files(dir: string): string[] {
     return statSync(p).isDirectory() ? files(p) : p.endsWith(".ts") ? [p] : [];
   });
 }
+
+describe("move rules ratchet: Q2a is this ticket held in Blocked (BOS-1532)", () => {
+  const read = (rel: string) => readFileSync(join(SRC, rel), "utf8");
+
+  it("Blocked's entry and every release path ask blockedHolds", () => {
+    for (const rel of ["mcp-tickets.ts", "services/decisions.ts", "services/sweeps.ts", "services/scheduler.ts"]) {
+      expect(read(rel), rel).toMatch(/blockedHolds\(/);
+    }
+  });
+
+  it("the hold parts are defined once, in the canonical module", () => {
+    const re = /(?:async )?function (?:openCardIds|mergedAwaitingChecks|hasOpenCard|hasOpenBlocker)\b/;
+    const offenders = files(SRC)
+      .filter((f) => relative(SRC, f).split("\\").join("/") !== CANONICAL)
+      .filter((f) => re.test(readFileSync(f, "utf8")))
+      .map((f) => relative(SRC, f));
+    expect(offenders).toEqual([]);
+  });
+
+  it("the stranded sweep no longer reads its own holds out of SQL", () => {
+    expect(read("services/sweeps.ts")).not.toMatch(/isNull\(tickets\.blockedUntil\), isNull\(tickets\.goLiveWait\)/);
+  });
+});
 
 describe("move rules ratchet: Q1 has this blocker finished", () => {
   const found = new Map<string, { joins: number; canonical: boolean }>();

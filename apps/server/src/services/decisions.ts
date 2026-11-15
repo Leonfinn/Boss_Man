@@ -63,7 +63,7 @@ import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, 
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
-import { addTicketDependency, openBlockers } from "./ticket-links.js";
+import { addTicketDependency, blockedHolds } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -1299,7 +1299,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
-    if ((await openBlockers(db, ticketId)).length) return null;
+    // DR-061 Q2a: the same "held in Blocked" rule Blocked is accepted by (a date ahead, an open blocker, another open card, unreported after-merge checks, a go-live wait).
+    if ((await blockedHolds(db, ticketId, { now: now() })).length) return null;
     const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;

@@ -20,7 +20,7 @@ import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
 import { conflictNote } from "./services/merge-line-conflicts.js";
-import { addTicketDependency, openBlockers } from "./services/ticket-links.js";
+import { addTicketDependency, blockedHolds, openBlockers, openCardIds } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
 import { criteriaWarning, delegateTarget, findProject, fail, FINISHED_STAYS_IN_REVIEW, FIXES_LIVE_HELP, FIXES_MERGE_CHECK_HELP, managerIn, planningIn, REF, stagingTexts, stagingWarning, STATES, waitsOnAdvice, text, thinTicketWarning, treeRefusal, unlinkedOrderWarning, type Scope } from "./mcp-common.js";
@@ -558,7 +558,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // tickets are marked "no code" and are not held to this.
       if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
-      if (state === "blocked" && !until && !(await hasOpenBlocker(db, ticketId)) && !(await hasOpenCard(db, ticketId)) && !(await mergedAwaitingChecks(db, ticketId))) {
+      if (state === "blocked" && !(await blockedHolds(db, ticketId, { blockedUntil: until ?? null })).length) {
         return fail(BLOCKED_REFUSAL);
       }
       // The move itself is moveTicket's (DR-047): the column, the WIP limit, the field rules, the history line,
@@ -652,32 +652,8 @@ async function conflictWarning(review: Services["review"], ticketId: string): Pr
 
 /** What Blocked accepts (BOS-1171); the refusal names every kind. Blocked tickets never count toward the in-progress limits. */
 export const BLOCKED_REFUSAL =
-  "Blocked is for a ticket that only waits. It is accepted when the ticket: (1) waits on another ticket, a decision or an engagement (update_ticket waitsOn, or create_ticket with parent set to this ticket); (2) has an open card on it, a plan card included (raise_decision with blocksTicketId, or a plan waiting for approval); (3) waits for a known time: pass blocked_until (a future ISO 8601 time within 30 days) with blocked_reason; or (4) is merged and has after-merge acceptance criteria not yet reported. If you need the owner, call raise_decision with blocksTicketId first: a note in the summary does not reach them. Once blocked you can still use schedule_check to re-check later.";
+  "Blocked is for a ticket that only waits. It is accepted when the ticket: (1) waits on another ticket, a decision or an engagement (update_ticket waitsOn, or create_ticket with parent set to this ticket); (2) has an open card on it, a plan card included (raise_decision with blocksTicketId, or a plan waiting for approval); (3) waits for a known time: pass blocked_until (a future ISO 8601 time within 30 days) with blocked_reason; or (4) is merged and has after-merge acceptance criteria not yet reported, or waits for its merge to go live. If you need the owner, call raise_decision with blocksTicketId first: a note in the summary does not reach them. Once blocked you can still use schedule_check to re-check later.";
 
-/** True when an open card names this ticket (a plan card, a permission card or a question), linked or not. */
-export async function hasOpenCard(db: Db, ticketId: string) {
-  return (await openCardIds(db, ticketId)).length > 0;
-}
-
-/** The open cards that name this ticket: the one definition of "an open card holds it" for accepting Blocked and for releasing it. */
-export async function openCardIds(db: Db, ticketId: string): Promise<string[]> {
-  const rows = await db
-    .select({ id: decisionsTable.id })
-    .from(decisionsTable)
-    .where(and(eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->>'ticketId' = ${ticketId}`));
-  return rows.map((r) => r.id);
-}
-
-/** True when the ticket has merged and still has after-merge criteria without a reported pass or fail. */
-export async function mergedAwaitingChecks(db: Db, ticketId: string) {
-  const [t] = await db.select({ mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
-  return !!t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0;
-}
-
-/** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */
-async function hasOpenBlocker(db: Db, ticketId: string) {
-  return (await openBlockers(db, ticketId)).length > 0;
-}
 
 /**
  * A worker moves only its own tickets (BOS-73): assigned to it, a sub-task of one assigned to it, or one it

@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
@@ -18,7 +18,7 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
 import { agentWipHold, canStartNow, cantMoveFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
-import { openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
+import { blockedHolds, openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
@@ -889,15 +889,14 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function releaseStrandedBlocked(t: Date) {
     const rows = await db
-      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote })
+      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "blocked"), isNull(tickets.blockedUntil), isNull(tickets.goLiveWait), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
-        sql`not exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`,
-        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`));
+      .where(and(eq(tickets.systemState, "blocked"), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000))));
     let released = 0;
     for (const r of rows) {
-      if (r.mergeCommit && unreportedAfterMerge(r.criteria, r.note).length > 0) continue;
+      // The one "held in Blocked" rule (DR-061 Q2a, BOS-1532), the same one Blocked is accepted by.
+      if ((await blockedHolds(db, r.id, { now: t })).length) continue;
       const [name] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.assigneeAgentId ?? ""));
       const moved = await systemMoveTicket(db, { ticketId: r.id, from: ["blocked"], to: "ready", reason: "Boss Man: nothing holds it any more", now: t, stateNote: `Ready: nothing is holding it any more. Starts when ${name?.name ?? "its assignee"} has a free slot.` });
       if (!moved) continue;
