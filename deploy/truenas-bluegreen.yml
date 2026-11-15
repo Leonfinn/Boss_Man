@@ -159,8 +159,18 @@ services:
       retries: 6
       start_period: 10s
 
-  runner-app-co:
+  # The parked "server" no longer exists in this project, and compose refuses a service that depends on it, so both
+  # services that waited on it wait on the proxy (which owns the name "server" now). The runner keeps waiting for the
+  # Claude pack installer to finish, as in docker-compose.yml.
+  claude-pack:
     depends_on: !override [proxy]
+
+  runner-app-co:
+    depends_on: !override
+      proxy:
+        condition: service_started
+      claude-pack:
+        condition: service_completed_successfully
 
 networks:
   # Proxy and the two colours only: no runners, no Tailscale, no internet. Fixed proxy address, colours from the range.

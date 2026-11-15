@@ -227,14 +227,16 @@ const entryLines = (entry: string) =>
 /** Space between an entry and the text around it: a blank line, or just the list's own break when both are list items. */
 const GLUE = "\n\n";
 
-/** Where an appended entry goes: under a named heading (newest first by default), or at the top/bottom of the page. */
+/** Where an appended entry goes: under a named heading (newest first by default, or oldest/bottom within it), or at the top/bottom of the page. */
 export type AppendPosition = "top" | "bottom" | "oldest";
 
 /**
  * A page body with `entry` added (BOS-430), leaving every other character as it was. Under a heading,
- * the entry sits just below the heading line (newest first) or at the end of that heading's own text
- * (oldest). With no heading, it goes at the very top or the very bottom of the page. Throws when the
- * heading isn't on the page, so an append never silently lands somewhere unexpected.
+ * the entry sits after the heading's own intro text and before its first sub-heading (newest first),
+ * at the end of that heading's own text (oldest), or at the end of the whole section (bottom). A
+ * section whose own text is only a list still takes a newest-first entry at the top of the list. With
+ * no heading, it goes at the very top or the very bottom of the page. Throws when the heading isn't on
+ * the page, so an append never silently lands somewhere unexpected.
  */
 export function appendToBody(body: string, entry: string, heading: string | undefined, position: AppendPosition): string {
   // Use the page's own line ending for the entry and the glue, so a Windows (CRLF) page gains no mixed
@@ -292,9 +294,27 @@ export function appendToBody(body: string, entry: string, heading: string | unde
     const joins = isList(lines[0]) && isList(lastLine(before));
     return `${before}${joins ? nl : glue}${text}${nl}${after ? `${nl}${after}` : ""}`;
   }
-  // Newest first: the entry goes first at the top of the section, keeping the heading's own blank line above it.
+  // Bottom: the end of the whole section, after its sub-headings, so an entry never lands inside one.
+  if (position === "bottom") {
+    const before = body.slice(0, s.end).trimEnd();
+    const after = stripLead(body.slice(s.end));
+    const joins = isList(lines[0]) && isList(lastLine(before));
+    return `${before}${joins ? nl : glue}${text}${nl}${after ? `${nl}${after}` : ""}`;
+  }
   const headingLineEnd = body.indexOf("\n", s.start);
   if (headingLineEnd === -1) return `${body}${glue}${text}${nl}`;
+  // The heading's own text runs from after its line to its first sub-heading (s.ownEnd). Newest first
+  // keeps that intro in place: the entry goes after it and before the first sub-heading. A section whose
+  // own text is only a list is the exception: its entry still goes at the top of the list (BOS-1288).
+  const ownText = stripLead(body.slice(headingLineEnd + 1, s.ownEnd));
+  const firstOwn = ownText.split("\n")[0];
+  if (!isList(firstOwn)) {
+    const before = body.slice(0, s.ownEnd).trimEnd();
+    const after = stripLead(body.slice(s.ownEnd));
+    const joins = isList(lines[0]) && isList(lastLine(before));
+    return `${before}${joins ? nl : glue}${text}${nl}${after ? `${nl}${after}` : ""}`;
+  }
+  // Newest first in a list section: the entry goes first at the top of the section, keeping the heading's own blank line above it.
   const lineEnd = (s.end > s.start ? body.lastIndexOf("\n", s.end - 1) : -1) + 1 || body.length;
   // headingLine keeps the heading text only; the gap supplies the line ending, so a CRLF heading doesn't double its "\r".
   const headingLine = body.slice(s.start, headingLineEnd).replace(/\r$/, "");

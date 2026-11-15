@@ -4,6 +4,7 @@
 // message tells the author exactly what to write, and what it cannot tie to a criterion counts
 // as missing. Shared so the server's review gate and the web's checklist agree exactly.
 import { z } from "zod";
+import { factClauses, namesHostFact } from "./host-facts.js";
 
 /** A criterion as stored: a plain string, checked before merge (old rows stay strings), or the
  * `{ text, after: "merge" }` form for a check only a real host can settle (DR-024 #5). */
@@ -232,11 +233,23 @@ const LIVE = /\b(after (the )?merg(?:e|ing)|once (it'?s |it is )?(merged|live|de
  */
 export function afterMergeLint(criteria: readonly Criterion[]): string {
   const loose = criteria.filter((c) => !isAfterMerge(c) && LIVE.test(criterionText(c)));
-  if (!loose.length) return "";
-  const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
-  const them = loose.length === 1 ? "it" : "them";
-  return `${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`;
+  const parts: string[] = [];
+  if (loose.length) {
+    const names = loose.map((c) => `"${criterionText(c)}"`).join(", ");
+    const them = loose.length === 1 ? "it" : "them";
+    parts.push(`${names} can only be checked once the work is live: mark ${them} "on a real host" so reviewers don't fail the ticket on ${them}. This is a warning only.`);
+  }
+  // BOS-1586: an after-merge criterion about something the host reports needs the clause the server checks.
+  const unclaused = criteria.filter((c) => isAfterMerge(c) && namesHostFact(criterionText(c)) && !factClauses(criterionText(c)).length);
+  if (unclaused.length) {
+    const names = unclaused.map((c) => `"${criterionText(c)}"`).join(", ");
+    parts.push(`${names} names something the host reports, but has no fact clause, so the ticket could close on a "pass" while the host still shows it failing. Add one to the criterion, e.g. "(fact: repo.probe = ok)" or "(fact: no failing check)": the ticket then closes only when the host's newest report taken after it went live agrees. This is a warning only.`);
+  }
+  return parts.join("\n");
 }
+
+/** A criterion that lets a raised card stand in for the check ("... or names one ... with a card raised for it"). */
+export const allowsCardInstead = (text: string): boolean => /\bor\b[^.]*\bcard\b/i.test(text.replace(/\(\s*fact\s*:[^)]*\)/gi, ""));
 /** A real staging environment, not git's "staging area" or "staged changes" (BOS-1473). */
 const STAGING = /\b(?:on|to|in|against|at|via|the)\s+(?:the\s+)?staging\b(?!\s+(?:area|index|changes|files?|directory))|\bstaging\s+(?:environment|server|host|target|deploy(?:ment)?|site|instance)\b/i;
 

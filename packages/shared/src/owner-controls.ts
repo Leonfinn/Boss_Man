@@ -277,6 +277,8 @@ export const OWNER_FIELDS = {
     "Merge approved work in the order it was approved",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
+    // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).
+    "Takes", "Kept for merge checks (0 to",
     // Workspace disk.
     "Most disk to use (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).
