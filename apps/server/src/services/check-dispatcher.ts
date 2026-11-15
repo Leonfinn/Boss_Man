@@ -3,10 +3,11 @@
 // and wakes the agent that asked for a check when the job ends, for whatever reason.
 // BOS-1435 (DR-060): check workers on other machines take jobs the company runner has no free slot for. The runner is
 // always filled first; each ready worker then claims with its own limit. With no ready worker every path is as before.
-import { and, eq, lt } from "drizzle-orm";
-import { fullLogPointer, HEARTBEAT_MS, type CheckLimits, type RunnerCommand, type WorkerCommand } from "@boss-man/shared";
+import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
+import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, type RunnerCommand, type WorkerCommand, type WorkerRepos } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
+import type { CheckBundleStore } from "./check-bundles.js";
 import { checkQueue, type CheckJob } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
@@ -33,6 +34,16 @@ export type CheckDispatcherDeps = {
     send: (workerId: string, command: WorkerCommand) => boolean;
     isConnected: (workerId: string) => boolean;
   };
+  /**
+   * BOS-1436: how a worker gets the code. The company runner packs the job's commit as a git bundle and uploads it; the
+   * worker downloads it. Absent, or a runner without the "check-bundle" feature: no worker gets a job (it couldn't check
+   * anything), and every path is as before.
+   */
+  bundles?: {
+    store: Pick<CheckBundleStore, "remove" | "sweep">;
+    canPack: (runnerId: string) => boolean;
+    pack: (runnerId: string, cmd: { projectId: string; jobId: string; commit: string; haves: string[]; full: boolean }) => Promise<CheckBundleInfo>;
+  };
   /** How long a dropped worker has to come back before its jobs go back in line (default three heartbeats). */
   workerGraceMs?: number;
   /** Only the leader re-queues a dropped worker's jobs (a standby closed the socket itself). Absent: always the leader. */
@@ -56,6 +67,87 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   // shortcut: a dropped worker's pending re-queue, cancelled if it says hello again in time; lost on restart, harmless because
   // a worker that comes back re-syncs in its hello (onWorkerHello), and one that never does is ended by the no-output sweep, as for a runner.
   const graceTimers = new Map<string, NodeJS.Timeout>();
+
+  // BOS-1436, all in memory: a restart re-queues every running job anyway, and the bundle folder is cleared at start-up.
+  // shortcut: what each worker last said it holds, per project (the next bundle's base); lost on restart, harmless because
+  // a worker sends its repos again in its hello.
+  const haves = new Map<string, Map<string, string[]>>();
+  // shortcut: the job a runner may upload a bundle for right now, and which runner (the upload route asks); lost on restart,
+  // harmless because the pack request dies with the process and the job is re-queued.
+  const uploading = new Map<string, string>();
+  // shortcut: each worker job getting its code, and whether the full history was already sent; lost on restart, harmless
+  // because the job is re-queued and starts over.
+  const fetching = new Map<string, { job: CheckJob; worker: Eligible; list: string | null | undefined; full: boolean }>();
+  // shortcut: workers that couldn't get a job's code, so the job goes elsewhere instead of looping back to them; lost on restart,
+  // harmless because at worst the job is offered to that worker once more and fails over again.
+  const noCodeOn = new Map<string, Set<string>>();
+
+  // shortcut: code being packed for a worker right now (not awaited by pump); settled() waits for them, for tests and shutdown.
+  // Lost on restart, harmless because the promises die with the process.
+  const inFlight = new Set<Promise<unknown>>();
+  const track = (p: Promise<unknown>) => {
+    const t = p.catch(() => {}).finally(() => inFlight.delete(t));
+    inFlight.add(t);
+  };
+
+  /** The company runner, when it is up and can pack code for workers; null means no worker can get any job's code. */
+  async function packerFor(companyId: string): Promise<string | null> {
+    if (!deps.bundles) return null;
+    const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
+    return runner && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
+  }
+
+  /** A job ended, was cancelled or went back in line: its bundle and its fetch state go. */
+  function forgetCode(jobId: string, alsoExclusions: boolean) {
+    deps.bundles?.store.remove(jobId);
+    fetching.delete(jobId);
+    uploading.delete(jobId);
+    if (alsoExclusions) noCodeOn.delete(jobId);
+  }
+
+  const stillOn = async (jobId: string, workerId: string) =>
+    (await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), eq(checkJobs.workerId, workerId)))).length > 0;
+
+  /**
+   * The worker couldn't get the code: the job goes back in line (not a failed check, so no ticket bounces) and this worker
+   * is left out for it, so the runner or another worker takes it.
+   */
+  async function noCode(jobId: string, w: { id: string; name: string }, why: string) {
+    const out = noCodeOn.get(jobId) ?? new Set<string>();
+    out.add(w.id);
+    noCodeOn.set(jobId, out);
+    forgetCode(jobId, false);
+    await queue.requeue(jobId, `Couldn't get the code to the check worker "${w.name}" (${why.slice(0, 300)}), so the check went back in line.`, { workerId: w.id });
+    await pump();
+  }
+
+  /** Has the company runner pack the job's code for the worker, then sends the worker the job with it. Never throws. */
+  async function codeFor(job: CheckJob, w: Eligible, list: string | null | undefined, runnerId: string, full: boolean) {
+    fetching.set(job.id, { job, worker: w, list, full });
+    uploading.set(job.id, runnerId);
+    // Also resets the no-output clock: a first full bundle can take a minute or two to pack and upload.
+    await queue.progress(job.id, { workerId: w.id }, "Getting the code to the check worker.").catch(() => {});
+    let info: CheckBundleInfo;
+    try {
+      info = await deps.bundles!.pack(runnerId, { projectId: job.projectId, jobId: job.id, commit: job.commit, haves: full ? [] : (haves.get(w.id)?.get(job.projectId) ?? []), full });
+    } catch (err) {
+      uploading.delete(job.id);
+      if (await stillOn(job.id, w.id)) await noCode(job.id, w, `the company runner couldn't pack it: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
+      return;
+    }
+    uploading.delete(job.id);
+    // Cancelled, re-queued or ended while the runner packed: the bundle has nobody to go to.
+    if (!(await stillOn(job.id, w.id))) {
+      forgetCode(job.id, false);
+      return;
+    }
+    const sent = deps.workers!.send(w.id, { ...runCommand(job, list, w.limits), bundle: info });
+    if (!sent) {
+      forgetCode(job.id, false);
+      await queue.requeue(job.id, `The check worker "${w.name}" could not be reached when the check was due to start, so it went back in line.`, { workerId: w.id });
+      await pump();
+    }
+  }
 
   async function ended(job: CheckJob) {
     if (job.requestedBy && deps.wake) {
@@ -100,7 +192,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     for (const { companyId } of queuedCompanies) {
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       const runnerUp = !!runner && deps.isConnected(runner.id) && deps.can(runner.id);
-      const workers = (await deps.workers?.eligible(companyId)) ?? [];
+      // BOS-1436: a worker gets the code only through the company runner, so with no runner able to pack it, no worker is used.
+      const packer = runner && deps.bundles && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
+      const workers = packer ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
       if (!runnerUp && !workers.length) continue;
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
@@ -113,11 +207,10 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         }
       // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
       // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
+      // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
+      // never holds up the line); a job this worker couldn't get the code for is left to the others.
       for (const w of workers)
-        for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId)) {
-          const sent = deps.workers!.send(w.id, runCommand(job, list, w.limits));
-          if (!sent) await queue.requeue(job.id, `The check worker "${w.name}" could not be reached when the check was due to start, so it went back in line.`);
-        }
+        for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id))) track(codeFor(job, w, list, packer!, false));
     }
   }
 
@@ -126,7 +219,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
    * train seats one member per slot (DR-059), so its seats grow with the machines; with no worker this is the slots setting.
    */
   async function capacity(companyId: string): Promise<number> {
-    const workers = (await deps.workers?.eligible(companyId)) ?? [];
+    const workers = (await packerFor(companyId)) ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
     return (await queue.slots()) + workers.reduce((n, w) => n + w.limit, 0);
   }
 
@@ -136,6 +229,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     const ack = { type: "check.ack" as const, jobId: msg.jobId };
     if (typeof machine === "string") deps.send(machine, ack);
     else deps.workers?.send(machine.workerId, ack);
+    if (job) forgetCode(job.id, true);
     if (job) await ended(job);
     await pump();
   }
@@ -143,6 +237,11 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   return {
     pump,
     capacity,
+
+    /** Resolves once no worker's code is being packed (it keeps waiting while new ones start). */
+    async settled() {
+      while (inFlight.size) await Promise.all([...inFlight]);
+    },
 
     onDone: (runnerId: string, msg: Parameters<typeof done>[1]) => done(runnerId, msg),
 
@@ -176,10 +275,11 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
      * `helloAt` is when the hello arrived, taken before the worker was marked connected: a pump in between may already have
      * sent it a job its hello couldn't list, and that job (started at or after `helloAt`) must not be re-queued.
      */
-    async onWorkerHello(workerId: string, running: string[] | undefined, helloAt = new Date()) {
+    async onWorkerHello(workerId: string, running: string[] | undefined, helloAt = new Date(), repos?: WorkerRepos) {
       const t = graceTimers.get(workerId);
       if (t) clearTimeout(t);
       graceTimers.delete(workerId);
+      if (repos) haves.set(workerId, new Map(repos.map((r) => [r.projectId, r.haves])));
       const mine = new Set(
         (
           await db
@@ -189,7 +289,12 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         ).map((r) => r.id),
       );
       const alive = new Set(running ?? []);
-      for (const id of mine) if (!alive.has(id)) await queue.requeue(id, "The check worker restarted or lost this check, so it was put back in line.");
+      // A job whose code the runner is still packing hasn't been sent to the worker yet, so it isn't in its list: it stays.
+      for (const id of mine)
+        if (!alive.has(id) && !uploading.has(id)) {
+          forgetCode(id, false);
+          await queue.requeue(id, "The check worker restarted or lost this check, so it was put back in line.");
+        }
       for (const id of alive) if (!mine.has(id)) deps.workers?.send(workerId, { type: "check.cancel", jobId: id });
       await pump();
     },
@@ -207,7 +312,10 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
         if (deps.workers?.isConnected(workerId) || (deps.isLeader && !deps.isLeader())) return;
         void queue
           .requeueWorker(workerId, "The check worker running this check went offline, so it was put back in line.")
-          .then(() => pump())
+          .then((jobs) => {
+            for (const j of jobs) forgetCode(j.id, false);
+            return pump();
+          })
           .catch(() => {});
       }, graceMs);
       t.unref?.();
@@ -220,9 +328,42 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       if (t) clearTimeout(t);
       graceTimers.delete(workerId);
       const jobs = await queue.requeueWorker(workerId, why);
-      for (const j of jobs) deps.workers?.send(workerId, { type: "check.cancel", jobId: j.id });
+      for (const j of jobs) {
+        forgetCode(j.id, false);
+        deps.workers?.send(workerId, { type: "check.cancel", jobId: j.id });
+      }
+      haves.delete(workerId);
       await pump();
       return jobs;
+    },
+
+    /** BOS-1436: the worker lacks a thin bundle's base. It gets the full history once; a second ask gives up on it. */
+    async onWorkerNeedCode(workerId: string, jobId: string) {
+      const f = fetching.get(jobId);
+      if (!f || f.worker.id !== workerId || !(await stillOn(jobId, workerId))) return;
+      if (f.full) return noCode(jobId, f.worker, "the full history didn't work either");
+      const packer = await packerFor(f.job.companyId);
+      if (!packer) return noCode(jobId, f.worker, "the company runner is offline");
+      await codeFor(f.job, f.worker, f.list, packer, true);
+    },
+
+    /** BOS-1436: the worker couldn't get the code at all: back in line, not a failed check. */
+    async onWorkerNoCode(workerId: string, jobId: string, reason: string) {
+      if (!(await stillOn(jobId, workerId))) return;
+      await noCode(jobId, { id: workerId, name: fetching.get(jobId)?.worker.name ?? "worker" }, reason);
+    },
+
+    /** BOS-1436: what the worker holds now (after a fetch); its job is under way, so its bundle can go. */
+    onWorkerRepos(workerId: string, repos: WorkerRepos) {
+      haves.set(workerId, new Map(repos.map((r) => [r.projectId, r.haves])));
+    },
+
+    /** BOS-1436: whether this runner may upload a bundle for this job now (only while the server is waiting on it to). */
+    acceptsUpload: (jobId: string, runnerId: string) => uploading.get(jobId) === runnerId,
+
+    /** BOS-1436: the worker has its code (a whole download): the bundle has done its job. */
+    delivered(jobId: string) {
+      deps.bundles?.store.remove(jobId);
     },
 
     /** Periodic: running jobs with no output for too long become stuck (and are stopped on the runner); everyone is told why. */
@@ -231,7 +372,18 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       const stuck = await queue.sweepStuck(now);
       for (const job of stuck) {
         stopOn(job);
+        forgetCode(job.id, true);
         await ended(job);
+      }
+      // BOS-1436: bundles whose job no longer runs on a worker (ended, re-queued, or left by a crash) go.
+      if (deps.bundles) {
+        const live = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), isNotNull(checkJobs.workerId)));
+        deps.bundles.store.sweep(new Set(live.map((r) => r.id)));
+        // Exclusions only matter while the job still waits; drop those of jobs that ended.
+        if (noCodeOn.size) {
+          const open = new Set((await db.select({ id: checkJobs.id }).from(checkJobs).where(inArray(checkJobs.state, ["queued", "running"]))).map((r) => r.id));
+          for (const id of noCodeOn.keys()) if (!open.has(id)) noCodeOn.delete(id);
+        }
       }
       await pump();
       return stuck;
@@ -242,6 +394,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       const [before] = await db.select().from(checkJobs).where(eq(checkJobs.id, jobId));
       const job = await queue.cancel(jobId, reason);
       if (job) {
+        forgetCode(jobId, true);
         if (before?.state === "running") stopOn(before);
         await ended(job);
         await pump();

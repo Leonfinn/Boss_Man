@@ -2162,7 +2162,8 @@ export function reviewService(
        * members ahead, checked, and landed only as the head, with finish's expectBase = the base it was prepared on. The runner
        * refuses any other push, so a wrong train costs checks, never main. Notes on the rules:
        * - a stacked prepare that isn't clean (a clash with a member ahead that may never land) is not sent back: the ticket
-       *   re-joins as head only and gets the real answer on main alone;
+       *   re-joins as head only and gets the real answer on main alone, unless it already clashes with main alone (asked at
+       *   once, BOS-1518), which sends it back without waiting;
        * - a failed check counts only once every member ahead has passed (attribution); a stale member restacks instead, uncharged;
        * - a failure that stands runs once more on the same tree (a flaky test then costs one check, no restarts behind);
        *   killed, timed-out or unanswered checks keep today's handling;
@@ -2242,7 +2243,12 @@ export function reviewService(
               badBase = null;
               if (prep.status !== "prepared") {
                 if (b.base && prep.status !== "uncommitted") {
-                  // Not clean on the tickets ahead: maybe theirs, not this ticket's. Its own answer comes on main alone.
+                  // Not clean on the tickets ahead: maybe theirs, not this ticket's. BOS-1518: ask main alone now (a merge-tree,
+                  // no check job, the same call the head makes). A clash with main itself is the real answer, so it goes back at
+                  // once instead of holding the line until the train drains; only a clash with the tickets ahead waits as head
+                  // only. main_moved isn't an answer, so that case waits too (fails safe).
+                  const alone = await prepare();
+                  if (alone.status !== "prepared" && alone.status !== "main_moved") return alone;
                   train.leave(ticketId);
                   headOnly = true;
                   continue seat;
