@@ -22,7 +22,7 @@ const KNOWN_JOINS: Record<string, number> = {
   "services/planning.ts": 0,
   "services/priority-watch.ts": 1, // uses ticketBlockerFinished
   "services/scheduler.ts": 4, // stoppedTree uses ticketBlockerFinished; the watch report lines, fingerprint and parked-note time only describe
-  "services/sweeps.ts": 2, // release sweep: one uses ticketBlockerOpenSql, one reads the finish time
+  "services/sweeps.ts": 3, // release sweep: two use ticketBlockerOpenSql (incl. the stranded-Blocked prefilter, blockedHolds judges), one reads the finish time
   "services/watchdog.ts": 1, // uses ticketBlockerFinished
   "services/agent-wip.ts": 1, // uses ticketBlockerOpenSql
 };

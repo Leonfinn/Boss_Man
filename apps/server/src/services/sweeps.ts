@@ -892,7 +892,14 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "blocked"), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000))));
+      .where(and(eq(tickets.systemState, "blocked"), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
+        // Cheap prefilter so the per-ticket rule below only runs for tickets that might be free (BOS-409: reads must not
+        // grow with live dependencies). Each line is a hold blockedHolds also finds; it stays the one judge.
+        or(isNull(tickets.blockedUntil), lte(tickets.blockedUntil, t)),
+        isNull(tickets.goLiveWait),
+        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`,
+        sql`not exists (select 1 from ticket_dependencies td left join tickets b on b.id = td.blocker_ticket_id left join engagements e on e.id = td.blocker_engagement_id left join decisions dd on dd.id = td.blocker_decision_id
+          where td.blocked_ticket_id = ${tickets.id} and ((b.id is not null and ${ticketBlockerOpenSql("td", "b")}) or (e.id is not null and e.status <> 'signed_off') or dd.status = 'open'))`));
     let released = 0;
     for (const r of rows) {
       // The one "held in Blocked" rule (DR-061 Q2a, BOS-1532), the same one Blocked is accepted by.
