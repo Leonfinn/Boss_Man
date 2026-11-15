@@ -11,6 +11,24 @@ The full install was not re-run on a fresh machine for this guide, so the exact 
 
 ![What you install: the Boss Man server, its database, a launcher and one runner per company. Runners connect out to the server, so nothing needs an open port.](/img/what-you-install.svg =1160x800 narrow=/img/what-you-install-narrow.svg:360x1530 "What you are installing. Everything runs on one machine, and the runners dial out, so you open no ports for them.")
 
+## What machine do I need
+
+Plan on 16 GB of memory for one company with Boss Man's default settings. 8 GB can work if you let fewer agents run at once. These sizes are estimates: they come from Boss Man's settings and one measured install, not from a sizing test.
+
+| | Minimum (estimate) | Comfortable (estimate) |
+|---|---|---|
+| Memory | 8 GB, with 1 agent at once | 16 GB for one company with the default settings |
+| Disk | 100 GB free, on an SSD | 250 GB or more, on an SSD or NVMe drive |
+| CPU | 4 cores, 64-bit (x86) | 8 cores or more |
+
+**How memory is shared.** Each company gets one runner, the container its agents work in. Boss Man gives each runner 2 GB, plus 1 GB for each agent that may run at once, plus 3 GB for each check. With the defaults (6 agents and 1 check) that is 11 GB. Boss Man always leaves 2 GB of the machine for its server and database, so on a smaller machine the runner gets less. If the runner gets under 4 GB, Boss Man warns you to run fewer agents. You set both numbers in **Settings → Server and runner → Limits and checks**, under **Agents at once** and **Checks at once**, and the **Checks** section there shows what the runner gets and why.
+
+**More than one company.** Each runner is sized from the whole machine, but a runner with no work uses almost no memory. Add memory for the companies that will be busy at the same time.
+
+**Disk.** Each task gets its own copy of the code, and each company's copies are capped at 20 GB by default. Boss Man also builds its images on your machine during the install and each update, which takes space and CPU time. Ready-made images come after the alpha.
+
+**Fastest win.** An SSD matters more than a faster CPU, because tests and installs touch many small files.
+
 ## What you need
 
 - a 64-bit Linux machine with Docker Engine and Docker Compose v2 (check with `docker compose version`)
@@ -22,8 +40,6 @@ The full install was not re-run on a fresh machine for this guide, so the exact 
 Boss Man needs Linux because two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine. Docker Desktop on Mac and Windows isn't supported yet. Both safety features should work on Docker Desktop 4.60 or newer, and we're testing it.
 
 The commands are for a root shell. On a normal Linux machine, run them as root or put `sudo` in front.
-
-Each runner is limited to 4 GB of memory by default.
 
 ## 1. Choose a folder
 
