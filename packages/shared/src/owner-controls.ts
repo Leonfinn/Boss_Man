@@ -201,7 +201,7 @@ export const OWNER_FIELDS = {
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
-    "Offer an Approve button on simple agent questions",
+    "Offer an Approve button on simple agent questions", "My phone",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
