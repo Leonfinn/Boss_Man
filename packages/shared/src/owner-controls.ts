@@ -50,7 +50,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -260,6 +260,9 @@ export const OWNER_FIELDS = {
     // Settings → Server and runner → Agents at once (BOS-1029).
     "Tickets in progress per agent (leave empty for no limit)",
     "Tickets in progress, whole company (leave empty for no limit)",
+    // Settings → Server and runner → Tickets in progress: the start hold (BOS-1489).
+    "Hold new starts while this many merges are waiting (leave empty for off)",
+    "Hold new starts while this many quick checks are queued (leave empty for off)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).

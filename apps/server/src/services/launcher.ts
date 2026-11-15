@@ -26,7 +26,17 @@ export class LauncherError extends Error {
 }
 
 /** What the launcher says about the check slots and memory a runner gets (BOS-993). */
-export type LauncherChecks = { requested: number | null; slots: number; memoryBytes: number; reason: string | null; runners: { slug: string; slots: number; memoryBytes: number }[] };
+export type LauncherChecks = {
+  requested: number | null;
+  slots: number;
+  memoryBytes: number;
+  reason: string | null;
+  runners: { slug: string; slots: number; memoryBytes: number }[];
+  /** BOS-1498: the agents number the launcher sizes runners from (null before it has been sent one). Absent from a launcher too old to take it. */
+  agents?: number | null;
+  /** BOS-1498: the launcher's one line on what a runner made now is given and why. Absent from an older launcher. */
+  why?: string;
+};
 
 const SLUG_KEY = "runner-slug:";
 
@@ -321,8 +331,16 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     },
 
     /** BOS-993: tells the launcher the owner's "Checks at once", so runners it makes from now on get that many slots and the memory to match. */
-    async setChecks(slots: number): Promise<void> {
-      await call("PUT", "/checks", { slots });
+    // BOS-1498: with the agents number (Agents at once) too, which sizes the runner's memory. A launcher from before BOS-1498
+    // refuses any body but { slots } (it answers 400, seen here as 502), so on a refusal the slots alone are sent again.
+    async setChecks(slots: number, agents?: number): Promise<void> {
+      if (agents === undefined) return void (await call("PUT", "/checks", { slots }));
+      try {
+        await call("PUT", "/checks", { slots, agents });
+      } catch (e) {
+        if (!(e instanceof LauncherError) || e.status !== 502) throw e;
+        await call("PUT", "/checks", { slots });
+      }
     },
 
     /** BOS-993: the limit the launcher would give a runner now (and why it is below the setting), and what each running runner has. Null when the launcher is off, can't be reached, or is older. */
@@ -331,7 +349,15 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       try {
         const r = await call<Partial<LauncherChecks>>("GET", "/checks");
         if (typeof r?.slots !== "number" || typeof r.memoryBytes !== "number" || !Array.isArray(r.runners)) return null;
-        return { requested: typeof r.requested === "number" ? r.requested : null, slots: r.slots, memoryBytes: r.memoryBytes, reason: typeof r.reason === "string" ? r.reason : null, runners: r.runners };
+        return {
+          requested: typeof r.requested === "number" ? r.requested : null,
+          slots: r.slots,
+          memoryBytes: r.memoryBytes,
+          reason: typeof r.reason === "string" ? r.reason : null,
+          runners: r.runners,
+          ...(typeof r.agents === "number" || r.agents === null ? { agents: r.agents } : {}),
+          ...(typeof r.why === "string" ? { why: r.why } : {}),
+        };
       } catch {
         return null;
       }

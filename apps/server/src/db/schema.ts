@@ -64,6 +64,10 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Most minutes one run may go before the server stops it (BOS-846); null means no limit. */
   maxRunMinutes: integer("max_run_minutes"),
+  /** BOS-1489: hold new starts (a Ready ticket is not started) while this many approved merges wait in the merge line; null is off. */
+  holdStartsMergesWaiting: integer("hold_starts_merges_waiting"),
+  /** BOS-1489: ...while this many quick checks are queued in the check queue; null is off. */
+  holdStartsQuickChecksQueued: integer("hold_starts_quick_checks_queued"),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** Company-wide rules every agent reads at the start of every run (BOS-353); set by the owner or the CEO, capped in code. */

@@ -2,7 +2,7 @@
 //   BOSSMAN_DATA           host folder for company data, mounted at the same path here
 //   BOSSMAN_RUNNER_NETWORK the compose network runners join (default boss-man_default)
 //   BOSSMAN_RUNNER_URL     where runners reach the server (default ws://server:3100/api/runner/connect)
-//   BOSSMAN_RUNNER_MEMORY  optional upper bound on a runner's memory, e.g. 8g. Normally unset: "Checks at once" in Settings sizes it (BOS-993)
+//   BOSSMAN_RUNNER_MEMORY  optional runner memory, e.g. 8g: an upper bound until the server sends Agents at once, then the size itself. Normally unset: "Agents at once" and "Checks at once" in Settings size it (BOS-993, BOS-1498)
 //   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         optional upper bound on the full checks a runner may run at once. Normally unset: "Checks at once" in Settings decides (BOS-993)
@@ -22,7 +22,7 @@ import { allowedThreads, formatCpuList, parseReservedThreads, planReserve, sibli
 import { dockerClient } from "./docker.js";
 import { watchGuardEvents } from "./guard-events.js";
 import { CHECKS_FILE, launcher, launcherServer } from "./launcher.js";
-import { listLabel, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
+import { listLabel, MAX_AGENTS, type KeptMemory, parseAllow, parseCheckSlots, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parseOpencodeSessionDays, parsePids, parsePnpmStoreDir, parseStack, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 const dataRoot = env.BOSSMAN_DATA;
@@ -39,15 +39,22 @@ function hostMemoryBytes(): number | undefined {
     return undefined;
   }
 }
-/** The "Checks at once" the server last sent, kept in a file under the data folder (BOS-993). */
-function savedSlots(): number | undefined {
+/** What the server last sent, kept in a file under the data folder: "Checks at once" (BOS-993), the agents number and the kept memory (BOS-1498). */
+function saved(): { slots?: number; agents?: number; kept?: KeptMemory } {
   try {
-    const n = Number((JSON.parse(readFileSync(path.join(dataRoot!, CHECKS_FILE), "utf8")) as { slots?: unknown }).slots);
-    return Number.isInteger(n) && n >= 1 && n <= 16 ? n : undefined;
+    const v = JSON.parse(readFileSync(path.join(dataRoot!, CHECKS_FILE), "utf8")) as { slots?: unknown; agents?: unknown; kept?: { bytes?: unknown; slots?: unknown; agents?: unknown } };
+    const whole = (x: unknown, lo: number, hi: number) => (typeof x === "number" && Number.isInteger(x) && x >= lo && x <= hi ? x : undefined);
+    const slots = whole(v.slots, 1, 16);
+    const agents = whole(v.agents, 0, MAX_AGENTS);
+    const k = v.kept;
+    const kept = k && whole(k.bytes, 1, Number.MAX_SAFE_INTEGER) !== undefined && whole(k.slots, 1, 16) !== undefined && whole(k.agents, 0, MAX_AGENTS) !== undefined ? (k as KeptMemory) : undefined;
+    return { ...(slots ? { slots } : {}), ...(agents !== undefined ? { agents } : {}), ...(kept ? { kept } : {}) };
   } catch {
-    return undefined;
+    return {};
   }
 }
+const savedChecks = saved();
+const savedSlots = () => savedChecks.slots;
 const cpuPlan = planReserve(parseReservedThreads(env.BOSSMAN_RESERVED_THREADS), allowedThreads(), siblingsFromSysfs);
 console.log(JSON.stringify({ at: new Date().toISOString(), msg: "cpu reserve", on: cpuPlan.on, reason: cpuPlan.reason }));
 const cfg: LauncherConfig = {
@@ -68,6 +75,9 @@ const cfg: LauncherConfig = {
   // Nothing saved yet: the default setting (1) sizes the runner when the host has no .env slot or memory value (the cleaned-up
   // state), so a runner made before the server's first push is not left on the old 4 GB. With .env values, they apply as before.
   ...(savedSlots() ? { requestedSlots: savedSlots() } : env.BOSSMAN_CHECK_SLOTS?.trim() || env.BOSSMAN_RUNNER_MEMORY?.trim() ? {} : { requestedSlots: 1 }),
+  // BOS-1498: the agents number and kept memory come only with saved slots, so a stray file can't size a runner on its own.
+  ...(savedSlots() && savedChecks.agents !== undefined ? { requestedAgents: savedChecks.agents } : {}),
+  ...(savedSlots() && savedChecks.kept ? { kept: savedChecks.kept } : {}),
   opencodeSessionDays: parseOpencodeSessionDays(env.BOSSMAN_OPENCODE_SESSION_DAYS),
   pnpmStoreDir: parsePnpmStoreDir(env.PNPM_STORE_DIR),
   cpus: parseCpus(env.BOSSMAN_RUNNER_CPUS),

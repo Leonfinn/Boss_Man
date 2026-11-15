@@ -14,7 +14,7 @@ Boss Man mounts the Docker socket and starts runner containers that run agent co
 ## What to give the VM
 
 The repo does not state a minimum. As a guide from the code:
-- **Memory:** each runner is sized at 16 GB for one check slot (13 GB for the agents plus 3 GB per slot), and Boss Man keeps it within the host's memory less 2 GB for the server. A smaller VM gets a smaller runner. More on this in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md#memory-limits).
+- **Memory:** each runner is sized from "Agents at once" and "Checks at once" (2 GB, plus 1 GB per agent, plus 3 GB per check: 11 GB with the defaults), and Boss Man keeps it within the host's memory less 2 GB for the server. A smaller VM gets a smaller runner. More on this in [docs/29-tune-and-troubleshoot.md](29-tune-and-troubleshoot.md#memory-limits).
 - **CPU threads:** the optional reserved threads setting needs 6 or more threads to do anything.
 - **Disk:** each company has a 20 GB workspace cap by default, plus the database, images and backups.
 
