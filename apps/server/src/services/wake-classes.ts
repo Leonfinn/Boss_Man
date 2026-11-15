@@ -25,6 +25,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "ceo reply": "waiting",
   // Priority watch (BOS-1514): the CEO is told an urgent ticket has no next step under way. Never dropped.
   "priority watch": "waiting",
+  // Merge stall (BOS-1515): the CEO is told the merge train has an empty seat or no landing while tickets wait. Never dropped.
+  "merge line stalled": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",

@@ -11,6 +11,7 @@ import { evaluate } from "./review-kinds.js";
 import { softHold } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
+import { clashWords } from "./merge-line.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -85,7 +86,12 @@ export type WaitingRow = {
   signedOffAt?: string | null;
   /** BOS-1517: the one status line (step, since, next, what is in the way). */
   statusLine?: StatusLine;
+  /** BOS-1515: held by the merge train to land on main alone: who it clashed with (refs), the files, since when. */
+  heldAlone?: { clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean } | null;
 };
+
+/** BOS-1515: a ticket the merge train holds to land on main alone (merge-stall.ts mergeTrainStatus). */
+export type HeldAloneView = { ticketId: string; clashWith: string[]; files: string[]; since: string | null; holdsLine: boolean };
 
 /** The card a waiting merge is held by, in the owner's words (BOS-1078). */
 export type HoldingCardView = {
@@ -273,7 +279,7 @@ export function mergeQueueService(
     /** BOS-1486: whether the launcher is on, so the screen may point at Start runner in Settings. */
     launcherOn?: () => boolean;
     /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
-    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[] }>;
+    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[]; /** BOS-1515: tickets held to land on main alone, with the clash (refs and files). */ heldAlone?: HeldAloneView[] }>;
     now?: () => Date;
   },
 ) {
@@ -585,6 +591,25 @@ export function mergeQueueService(
         }
         // BOS-1517: a merge waiting for a seat in the merge train has no check to wait for yet: its check starts once it is
         // seated. Saying "waiting for a check slot (21 ahead)" here counted the whole queue and named the wrong thing.
+        const alone = detail?.heldAlone?.find((h) => h.ticketId === r.id);
+        if (alone) {
+          // BOS-1515: held to land on main alone. Say who it clashed with and in which files, and what happens next.
+          const clash = clashWords(alone.clashWith, alone.files);
+          blockerOf.set(r.id, "The tickets ahead in the merge train haven't landed yet.");
+          waiting.push({
+            ...base,
+            state: "waiting_for_seat",
+            label: `waiting to land on main alone: it clashed with ${clash}${why}`,
+            stuck: overAnHour,
+            next: alone.holdsLine
+              ? "It goes next, once the tickets ahead have landed; others wait behind it until then. It is sent back at once if the clash reaches main."
+              : "It goes once the tickets ahead have landed. It is sent back at once if the clash reaches main.",
+            actor: "system",
+            decisionId: null,
+            heldAlone: { clashWith: alone.clashWith, files: alone.files, since: alone.since, holdsLine: alone.holdsLine },
+          });
+          continue;
+        }
         if (detail?.seatWait?.includes(r.id)) {
           blockerOf.set(r.id, "Every merge-train seat is taken.");
           waiting.push({ ...base, state: "waiting_for_seat", label: `waiting for a train seat${why}`, stuck: overAnHour, next: "It takes a seat as soon as one frees; its check then starts by itself.", actor: "system", decisionId: null });

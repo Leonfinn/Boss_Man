@@ -54,13 +54,16 @@ describe("merge_line_records", () => {
     await row(ctx.mine, "2026-11-08T21:00:00Z", "merge_line", { event: "approved", by: "Jane" });
     await row(ctx.mine, "2026-11-08T21:30:00Z", "merge_line", { event: "check_ended", check: "gate", passed: false, way: "gate", jobId: "j1", why: "private why" });
     await row(ctx.mine, "2026-11-09T01:00:00Z", "merge_line", { event: "hold_ended", hold: "card", since: "x", heldMs: 1234, note: "private note" });
+    // BOS-1515: a train clash exports who it clashed with (ids only, never titles) and the files.
+    await row(ctx.mine, "2026-11-09T02:00:00Z", "merge_line", { event: "train_clash", on: "ahead", action: "land_alone", with: [{ ticketId: "t-1", ref: "APP-1", title: "private title" }, { ticketId: "t-2", ref: null, title: "x" }], files: ["src/a.ts", "src/b.ts"] });
     const c = await asCeo(ctx.mine);
     const out = JSON.parse(textOf(await call(c, { since: "2026-11-08T21:22:00Z" }))) as { rows: Array<Record<string, unknown>> };
-    expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended"]);
-    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null });
+    expect(out.rows.map((r) => r.event)).toEqual(["check_ended", "hold_ended", "train_clash"]);
+    expect(out.rows[0]).toEqual({ ticket_id: ctx.mine.ticket.id, at: "2026-11-08T21:30:00.000Z", event: "check_ended", hold: null, heldMs: null, check: "gate", passed: false, by: null, with: null, files: null });
     expect(out.rows[1]).toMatchObject({ hold: "card", heldMs: 1234 });
+    expect(out.rows[2]).toMatchObject({ with: "t-1 t-2", files: "src/a.ts,src/b.ts" });
     const all = textOf(await call(c, { since: "2026-11-01T00:00:00Z", format: "csv" }));
-    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by");
+    expect(all.split("\n")[0]).toBe("ticket_id,at,event,hold,heldMs,check,passed,by,with,files");
     for (const leak of ["private", "secret summary", "jobId", "j1"]) expect(all).not.toContain(leak);
     expect(textOf(await call(c, { since: "2026-11-01T00:00:00Z", until: "2026-11-08T21:10:00Z" }))).toContain('"event":"approved"');
     await c.close();

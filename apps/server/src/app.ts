@@ -82,6 +82,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
+import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -581,6 +582,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    mergeTrain: (id) => mergeTrainStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -793,6 +795,7 @@ export async function buildApp(opts: AppOptions) {
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
     priorityWatch: () => priorityWatch.run(),
+    mergeStall: () => mergeStall.run(),
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
       const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
@@ -1039,6 +1042,8 @@ export async function buildApp(opts: AppOptions) {
         mainRed: q.rows.some((r) => r.heldByMain),
         fixRef: fix ? (fix.ref ?? fix.title) : null,
         seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
+        // BOS-1515: tickets the train holds to land on main alone, with the clash.
+        heldAlone: (await mergeTrainStatus(db, companyId).catch(() => [])).flatMap((p) => p.heldAlone),
       };
     },
     now: opts.now,
@@ -1089,6 +1094,15 @@ export async function buildApp(opts: AppOptions) {
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
+    now: opts.now,
+  });
+  // Merge stall alarm (BOS-1515): an empty train seat or no landing while tickets wait; the CEO first, the owner as in fix A.
+  const mergeStall = mergeStallService(db, {
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note });
     },
     notify: (input) => notes.notify(input),
     now: opts.now,

@@ -22,10 +22,10 @@ import { checkQueue, SUPERSEDED_TEXT } from "./check-queue.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
-import { lineEvent, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
+import { lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
-import { trainFor, type RestackWhy } from "./merge-train.js";
+import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
 import type { notificationsService } from "./notifications.js";
@@ -115,6 +115,13 @@ const MERGE_RETARGET_MS = Number(process.env.BOSSMAN_MERGE_RETARGET_MS) > 0 ? Nu
 /** The owner's off switch for refreshing a waiting merge (setting merge_retarget; on unless set to false). */
 export const MERGE_RETARGET_KEY = "merge_retarget";
 const CHECK_JOB_POLL_MS = Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) > 0 ? Number(process.env.BOSSMAN_CHECK_JOB_POLL_MS) : 3000;
+/**
+ * BOS-1515 (B2): a ticket waiting in the merge train tries a merge on main (read-only) when main has moved since its last try,
+ * at most once per TRAIN_TRIAL_MIN_MS (each try holds the project's repo lock for a fetch and a merge-tree), and at least every
+ * TRAIN_TRIAL_FALLBACK_MS for merges made outside Boss Man. Tests shorten the first with BOSSMAN_TRAIN_TRIAL_MIN_MS.
+ */
+const TRAIN_TRIAL_MIN_MS = Number(process.env.BOSSMAN_TRAIN_TRIAL_MIN_MS) > 0 ? Number(process.env.BOSSMAN_TRAIN_TRIAL_MIN_MS) : 30_000;
+const TRAIN_TRIAL_FALLBACK_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
@@ -315,6 +322,35 @@ export function reviewService(
       .where(eq(tickets.id, ticketId));
     if (!row || (companyId && row.t.companyId !== companyId)) throw new ReviewError(404, "No such ticket.");
     return row;
+  }
+
+  /**
+   * A read-only trial merge of the ticket's branch on the default branch (the runner's `workspace.clash`: tryMerge on origin's
+   * tip, with the gate's BOS-690 migration renumbering, writing nothing). The clashing files (a real clash with no list is []),
+   * or null when it merges cleanly or can't be told (no runner, an older runner, a timeout, an error). Null must always read as
+   * "carry on": branchClash (BOS-426) and the merge train's waiting trial (BOS-1515) both rely on that.
+   */
+  async function clashOnMain(t: { id: string; companyId: string; projectId: string }, defaultBranch: string): Promise<string[] | null> {
+    try {
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
+      const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
+      if (typeof r?.clashes !== "boolean") return null;
+      return r.clashes ? (Array.isArray(r.files) ? r.files : []) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Tickets by id with their refs (BOS-1515: who a train clash was with), in the order given; unknown ids are left out. */
+  async function namedTickets(ids: string[]): Promise<Array<{ ticketId: string; ref: string | null; title: string }>> {
+    if (!ids.length) return [];
+    const rows = await db.select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, ids));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return ids.flatMap((id) => {
+      const r = byId.get(id);
+      return r ? [{ ticketId: id, ref: ticketRef(r.prefix, r.number), title: r.title }] : [];
+    });
   }
 
   /**
@@ -1240,11 +1276,7 @@ export function reviewService(
       try {
         const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
         if (!repoUrl || !t.branch) return null;
-        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
-        if (!runner || !deps.runners.isConnected(runner.id) || !deps.runners.can(runner.id, "clash-check")) return null;
-        const r = await deps.runners.request<{ clashes?: boolean; files?: string[] }>(runner.id, (requestId) => ({ type: "workspace.clash", requestId, projectId: t.projectId, ticketId: t.id, target: defaultBranch }), 15_000);
-        if (typeof r?.clashes !== "boolean") return null;
-        return r.clashes ? (r.files ?? []) : null;
+        return await clashOnMain(t, defaultBranch);
       } catch {
         return null;
       }
@@ -1465,7 +1497,7 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal" | "branch_changed"; delivered: string | null; detail?: unknown }> {
-      const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      const [lineRow] = await db.select({ id: tickets.id, companyId: tickets.companyId, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
       // An adopted merge (BOS-1371) carries on a check already running: it is not a new attempt.
       if (lineRow && !opts?.adopt) await lineEvent(db, lineRow, { event: "attempt", by: reviewer.slice(0, 200) });
       // BOS-1461: a merge attempt that does not land leaves an attempt_failed row with its reason.
@@ -1519,6 +1551,8 @@ export function reviewService(
             continue;
           }
           if (r.outcome === "merged") {
+            // BOS-1515 (B2): main moved, so tickets waiting in this project's merge train try a merge on main again.
+            if (lineRow) mainMoved(lineRow.projectId);
             void this.retryHeldBy(ticketId).catch(() => undefined);
             // Approved work held on this ticket goes on once it is live too (BOS-1173); the sweep catches a later go-live.
             void this.releaseHolds().catch(() => undefined);
@@ -2203,9 +2237,23 @@ export function reviewService(
           return (await inReview()) ? null : { status: "left_review" };
         };
         let headOnly = false;
+        let clash: TrainClash | null = null;
+        // BOS-1515 (B2): while it waits, a read-only merge on main after main moves. A clash there is certain (the gate's own
+        // tryMerge, renumbering included), so it goes back now, not when it gets a seat. Null (can't tell) never sends it back.
+        let triedGen = -1;
+        let triedAt = 0;
+        const trialClash = async (): Promise<string[] | null> => {
+          const gen = mainGen(t.projectId);
+          const nowMs = Date.now();
+          const due = (gen !== triedGen && nowMs - triedAt >= TRAIN_TRIAL_MIN_MS) || nowMs - triedAt >= TRAIN_TRIAL_FALLBACK_MS;
+          if (!due) return null;
+          triedGen = gen;
+          triedAt = nowMs;
+          return clashOnMain(t, defaultBranch);
+        };
         try {
           seat: for (;;) {
-            train.join(ticketId, { ...at, headOnly });
+            train.join(ticketId, { ...at, headOnly, clash });
             let held = false;
             while (!train.seated(ticketId)) {
               if (!held) {
@@ -2216,6 +2264,12 @@ export function reviewService(
               {
                 const stop = await gone();
                 if (stop) return stop;
+              }
+              const onMain = await trialClash();
+              if (onMain) {
+                await lineEvent(db, t, { event: "train_clash", on: "main", with: clash ? await namedTickets(clash.with) : [], files: onMain.slice(0, TRAIN_CLASH_FILES), fileCount: onMain.length, action: "sent_back" });
+                train.leave(ticketId);
+                return { status: "conflicts", files: onMain };
               }
               // The owner turned the train off meanwhile: land the way it did before.
               if (!(await queue.train())) {
@@ -2249,6 +2303,14 @@ export function reviewService(
                   // only. main_moved isn't an answer, so that case waits too (fails safe).
                   const alone = await prepare();
                   if (alone.status !== "prepared" && alone.status !== "main_moved") return alone;
+                  // That was a try on main just now: the waiting trial starts from here.
+                  if (alone.status === "prepared") [triedGen, triedAt] = [mainGen(t.projectId), Date.now()];
+                  // BOS-1515 (B1): say so on the merge line, naming the members ahead (the stacked base holds all of them) and
+                  // the files. Not a passive event, so it closes the seat hold and the land-alone wait below is a hold of its own.
+                  const ahead = train.place(ticketId)?.ahead ?? [];
+                  const files = "files" in prep && Array.isArray(prep.files) ? (prep.files as string[]) : [];
+                  clash = { with: ahead, files: files.slice(0, TRAIN_CLASH_FILES), at: Date.now() };
+                  await lineEvent(db, t, { event: "train_clash", on: "ahead", with: await namedTickets(ahead), files: clash.files, fileCount: files.length, action: "land_alone" });
                   train.leave(ticketId);
                   headOnly = true;
                   continue seat;
