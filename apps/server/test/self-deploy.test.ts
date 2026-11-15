@@ -601,6 +601,36 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
   });
 
+  it("refuses the runner update while a merged fix to the runner update itself is not live, and names the ticket (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    // Merged (C, after the live B) with a change to scripts/update-runner.sh; the server still runs B.
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Fix update-runner.sh", number: 1417, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: true });
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Earlier merge", number: 1400, mergeCommit: B, mergedAt: new Date(Date.now() - 60_000) });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(409);
+    expect(r.json().message).toBe("Waiting for BOS-1417 to go live: it fixes the runner update itself.");
+    // Refused, not queued, and no card raised.
+    expect(await c.open()).toHaveLength(0);
+    // Once the server runs it, the press goes through.
+    await c.db.update(settings).set({ value: { old: B, new: C } }).where(eq(settings.key, `live_release:${co!.id}`));
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
+  });
+
+  it("does not refuse for a merge that never touched the runner update path (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Other fix", number: 1418, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: false });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
+  });
+
   it("builds the runners from what is deployed, on request", async () => {
     const c = (ctx = await setup());
     await c.available({ deployed: B });

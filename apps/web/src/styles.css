@@ -1534,3 +1534,27 @@ details.pushes[open] > summary { margin-bottom: 8px; }
   .nf-bar::-webkit-scrollbar { display: none; }
   details.pushes > summary { min-height: 44px; }
 }
+
+/* Updates panel (BOS-1238, design BOS-1214): one status box, at most one blue main button, then detail and Other actions. */
+.upd-status { display: flex; gap: 12px; align-items: flex-start; min-height: 96px; padding: 14px 16px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 10px; background: var(--card); }
+.upd-status.red { border-left-color: var(--red-ink); }
+.upd-status.amber { border-left-color: var(--amber-ink); }
+.upd-status.green { border-left-color: var(--green-ink); }
+.upd-status.blue { border-left-color: var(--accent); }
+.upd-status.grey { border-left-color: var(--line-strong); }
+.upd-status > .tag { flex: none; margin-top: 2px; }
+.upd-status-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.upd-say { margin: 0; font-size: 16px; font-weight: 600; min-height: 1.4em; overflow-wrap: anywhere; }
+.upd-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.upd-bar > span { display: block; height: 100%; background: var(--accent); }
+.upd-main { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; }
+.upd-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; margin-top: 8px; }
+.upd-col { min-width: 0; }
+.upd-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline; }
+.upd-other { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .upd-cols { grid-template-columns: minmax(0, 1fr); }
+  .upd-status { flex-direction: column; gap: 8px; }
+  .upd-main .btn, .upd-other .btn { min-height: 44px; }
+  .upd-main .btn.primary, .upd-main .btn[data-testid="update-main"] { width: 100%; }
+}

@@ -251,7 +251,7 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
           </Section>
           <Section id="projects-h" title={`Projects (${projects.data?.filter((p) => !p.archivedAt).length ?? 0})`}>
             <p className="muted" style={{ fontSize: 14 }}>
-              With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
+              With a repo, each task gets its own branch and its own copy of the code to work in. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
             </p>
             {projects.data?.length
               ? projects.data.filter((p) => !p.archivedAt).map((p) => (

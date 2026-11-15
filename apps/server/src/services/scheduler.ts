@@ -18,7 +18,7 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
-import { ticketBlockerFinished } from "./ticket-links.js";
+import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
@@ -266,16 +266,9 @@ export function schedulerService(
   async function startTicket(ticketId: string): Promise<boolean> {
     const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "backlog" && t?.state !== "ready") return false;
-    const waits = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
     // A launch starts a ticket handed to it; the start check's backlog rule asks about a wake nobody
     // handed over, which a launch always is.
-    const waiting = waits.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
-    if (waiting.length) return false;
+    if ((await openBlockers(db, ticketId)).some((b) => b.kind !== "decision")) return false;
     // The agent's WIP limit may hold the start: the ticket then waits in Ready and nothing starts (BOS-1029).
     const moved = await systemMoveTicket(db, { ticketId, from: ["backlog", "ready"], to: "in_progress", reason: "Boss Man: started on the wake", now: now() });
     if (moved?.systemState !== "in_progress") return false;
@@ -300,15 +293,9 @@ export function schedulerService(
   async function startRefusalFor(ticketId: string): Promise<string | null> {
     const held = await wipHeldRefusal(ticketId);
     if (held) return held;
-    const deps = await db
-      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    const waiting = deps.filter((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    const waiting = (await openBlockers(db, ticketId)).filter((b) => b.kind !== "decision");
     if (!waiting.length) return null;
-    const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
+    const names = waiting.map((d) => (d.title ? `"${d.title}"` : "another ticket"));
     return `it still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished.`;
   }
 
@@ -626,14 +613,14 @@ export function schedulerService(
     const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), ne(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
     if (busyRun || busyWake) return null;
     const deps = await db
-      .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, decision: decisions.status, engagement: engagements.status })
+      .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, decision: decisions.status, engagement: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(inArray(ticketDependencies.blockedTicketId, ids));
     if (deps.some((d) => d.decision === "open" || (d.engagement && d.engagement !== "signed_off"))) return null;
-    const waits = (id: string) => deps.filter((d) => d.blocked === id && d.ticket && d.ticketState !== "done").map((d) => `${d.ticket} (${d.ticketState})`).sort();
+    const waits = (id: string) => deps.filter((d) => d.blocked === id && d.ticket && !ticketBlockerFinished(d)).map((d) => `${d.ticket} (${d.ticketState})`).sort();
     const items = tree.map((x) => ({ title: x.t.title, state: x.t.systemState, assignee: x.assignee ?? (x.t.assignedToOwner ? "the owner" : "nobody"), waits: waits(x.t.id), key: [x.t.id, x.t.systemState, x.t.assigneeAgentId, x.t.version, waits(x.t.id).join(",")].join("|") }));
     return { items, fp: createHash("sha256").update(items.map((i) => i.key).join("\n")).digest("hex") };
   }
@@ -971,6 +958,8 @@ export function schedulerService(
    */
   async function staleAgentWake(w: typeof wakes.$inferSelect): Promise<string | null> {
     if (w.ticketId || wakeClassOf(w) !== "agent") return null;
+    // Work put back after an account limit refused its run (BOS-1438, limit-requeue.ts) waits for the reset, which can be days: it is not stale.
+    if (w.statusReason?.startsWith("subscription limit hit:")) return null;
     const waited = now().getTime() - w.createdAt.getTime();
     if (waited > limits.staleWakeMs) return `it waited ${Math.round(waited / 3_600_000)} hours, so it is out of date`;
     if (!w.note) return null;
@@ -2073,14 +2062,7 @@ export function schedulerService(
     async releaseIfUnblocked(ticketId: string, causedByRunId?: string | null): Promise<boolean> {
       const [cur] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!cur || (cur.systemState !== "backlog" && cur.systemState !== "blocked")) return false;
-      const deps = await db
-        .select({ ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status, decisionStatus: decisions.status })
-        .from(ticketDependencies)
-        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(eq(ticketDependencies.blockedTicketId, ticketId));
-      if (deps.some((d) => (d.ticketState && !ticketBlockerFinished(d)) || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return false;
+      if ((await openBlockers(db, ticketId)).length) return false;
       // Parked on purpose (BOS-742): hold it back, but tell the assignee, once per freeing event. The activity
       // row is keyed on the newest blocker's finish, so the next sweep doesn't tell them again for the same
       // blocker; a later blocker that frees has a newer time and is news.
@@ -2105,7 +2087,8 @@ export function schedulerService(
         return true;
       }
       if (!cur.assigneeAgentId) {
-        if (!deps.length) return false;
+        const [anyLink] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId)).limit(1);
+        if (!anyLink) return false;
         // A blocked ticket has always gone to ready here, assignee or not; keep that.
         if (cur.systemState === "blocked") {
           await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now() });

@@ -33,6 +33,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
+import { openReviewLines } from "./services/review-kinds.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
@@ -57,7 +58,7 @@ import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, urgentHeldMessage, withNote, type Scope } from "./mcp-common.js";
+import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, stagingTexts, stagingWarning, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, urgentHeldMessage, withNote, type Scope } from "./mcp-common.js";
 import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registerTicketMoves } from "./mcp-tickets.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
@@ -66,6 +67,7 @@ import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
+import { registerPermissionReport } from "./mcp-permission-report.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -214,6 +216,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
+  registerPermissionReport(server, db, scope);
   return server;
 }
 
@@ -237,7 +240,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     return me?.role === "ceo" || me?.role === "manager";
   }
 
-  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts }, scope);
+  registerTicketAdmin(server, db, { work, engagements, feedback, hostFacts, review }, scope);
 
   server.registerTool(
     "sizing_guide",
@@ -1036,7 +1039,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1168,6 +1171,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       const mergeState = t.systemState === "review" ? await review.mergeState(ticketId) : null;
       const hv = t.systemState === "review" ? await holdView(db, ticketId) : null;
       const holdLine = hv ? `Merge held by ${hv.reviewer ?? "a reviewer"} (${hv.label}): ${hv.reason}.${hv.ready ? " What it waited for is done; the reviewer re-checks and releases it." : ""}` : null;
+      const openReviews = t.systemState === "review" ? await openReviewLines(db, t) : [];
       const ciLine = await review.branchChecksLine(ticketId, scope.companyId);
       const liveLine = await goLiveLine(db, t);
       // One page covers the whole thing, description through conversation, so a long owner message is
@@ -1180,6 +1184,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         ...(signoffLog ? [signoffLog] : []),
         ...(mergeState ? [`Merge state: ${mergeState}.`] : []),
         ...(holdLine ? [holdLine] : []),
+        ...openReviews,
         ...(ciLine ? [ciLine] : []),
         ...(liveLine ? [liveLine] : []),
         ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
@@ -1440,7 +1445,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
         // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
         const thin = input.noCode ? "" : thinTicketWarning(input.body, input.assignee);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${thin}`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(input.acceptanceCriteria, input.body))}${thin}`);
       } catch (err) {
         return workFail(err);
       }

@@ -64,6 +64,7 @@ import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
+import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
 import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
@@ -306,7 +307,7 @@ export async function buildApp(opts: AppOptions) {
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
-  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
+  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), phoneTest: () => notes.testStatus(), now: opts.now });
   // The host deployer's add-on report (BOS-419) is merged in; the worse state wins when the two disagree.
   const addonFacts = async () => {
     const own = await addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
@@ -489,6 +490,8 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
+    cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
       const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
       for (const r of live) {
@@ -536,6 +539,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     connectedSince: (id) => runners.connectedSince(id),
     launcher: (companyId) => launch.status(companyId),
+    launcherOn: () => launch.enabled,
   });
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
@@ -723,7 +727,21 @@ export async function buildApp(opts: AppOptions) {
           if (!event.error || event.interrupted) return;
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
+          // A run the account refused for a usage limit goes back in the queue, held to the real reset, once per window (BOS-1438).
+          // A second refusal in the same window is the account card instead.
+          const requeued = await limitRequeues.afterRun(event.runId);
+          if (run && requeued.outcome === "second_refusal") {
+            await alerts.raise({
+              companyId: run.companyId,
+              kind: "account_limit",
+              question: `${requeued.account}: a run was refused again on ${requeued.window} after its work was already put back to wait for the reset.`,
+              ticketId: run.ticketId,
+              about: [run.agentId],
+              cause: { account: { fundingSourceId: requeued.fundingSourceId, name: requeued.account, window: requeued.window }, agents: [run.agentId] },
+            });
+          }
         })
+        .then(() => limitRequeues.releaseReady())
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -869,6 +887,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
+  const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
@@ -978,7 +997,7 @@ export async function buildApp(opts: AppOptions) {
     limit: () => checkGate(db).limit(),
     runningChecks: (companyId) =>
       db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
         .orderBy(asc(checkJobs.startedAt)),
@@ -996,6 +1015,27 @@ export async function buildApp(opts: AppOptions) {
       return { mode: mode as CheckQueueMode, slots: await checks.capacity(companyId), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
+    // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
+    runnerConnected: async (companyId) => {
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      return !!r && runners.isConnected(r.id);
+    },
+    runnerUpdateOn: async () => {
+      const h = await getHold(db);
+      return !!h && h.kind !== "wrapup";
+    },
+    launcherOn: () => launch.enabled,
+    queueDetail: async (companyId) => {
+      const q = await checkQueueSvc.list(companyId);
+      const fix = q.rows.find((r) => r.fixesMain);
+      return {
+        slots: q.slots,
+        busy: q.rows.filter((r) => r.state === "running").map((r) => ({ ref: r.ref, title: r.title, kind: r.kind === "merge" ? "merge check" : r.kind === "full" ? "full check" : "quick check" })),
+        mainRed: q.rows.some((r) => r.heldByMain),
+        fixRef: fix ? (fix.ref ?? fix.title) : null,
+        seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
+      };
+    },
     now: opts.now,
   });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
@@ -1836,6 +1876,11 @@ export async function buildApp(opts: AppOptions) {
       const id = IdParam.parse(req.params).id;
       return checkQueueSvc.list(id, new Date(), await checks.capacity(id));
     });
+    // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
+    owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
+      const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
+      return { statusLine: await mergeQueue.statusLineFor(id, ticketId) };
+    });
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
       const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
@@ -2089,7 +2134,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

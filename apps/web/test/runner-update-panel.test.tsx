@@ -2,7 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
-import { Runner, RunnerUpdate } from "../src/pages/Settings";
+import { Runner, SelfDeploy } from "../src/pages/Settings";
 
 afterEach(() => {
   cleanup();
@@ -15,47 +15,43 @@ const company: Company = { id: "c1", name: "Boss Man Co", mission: null, paused:
 const live = { slug: "boss-man-co", name: "Boss Man Co", registered: true, connected: true, at: "2026-11-04T16:23:00.000Z", imageVersion: "202611040849", fault: null };
 const problem = { at: "2026-11-04T08:50:00.000Z", title: "Runner update finished with problems", body: "boss-man-co: has not reconnected", todo: "A runner hasn't connected since: start it again from Settings → Runner." };
 
-describe("Settings → Runner update: the live state first, a past problem as history (BOS-465)", () => {
-  it("shows the runner connected now, and an old problem as grey Resolved rather than red", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-      if (url.endsWith("/api/runner-report")) return json({ live: [live], update: { ...problem, state: "resolved" } });
-      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
-      return json([]);
-    }));
-    render(<RunnerUpdate />);
+const selfDeploy = { enabled: true, pending: false, status: null, available: { tip: "a1", deployed: "a1", checkedAt: new Date().toISOString(), commits: [] }, deployer: { reportedAt: new Date().toISOString(), late: false } };
+/** The Updates card with the given runner report; the card's Now running list replaced the old Runner update box (BOS-1238). */
+const updatesCard = (report: unknown) => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/self-deploy")) return json(selfDeploy);
+    if (url.endsWith("/api/runner-report")) return json(report);
+    if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
+    if (url.includes("/api/self-deploy/wait")) return json({ on: false });
+    return json([]);
+  }));
+  render(<SelfDeploy go={() => {}} />);
+};
+
+describe("Settings → Updates → Now running: the live state first (BOS-465, BOS-1238)", () => {
+  it("shows the runner connected now, and the runner's last update line is gone", async () => {
+    updatesCard({ live: [live], update: { ...problem, state: "resolved" } });
     const now = await screen.findByTestId("runner-live");
+    await vi.waitFor(() => expect(now.textContent).toContain("Connected"));
     expect(now.textContent).toContain("Boss Man Co");
-    expect(now.textContent).toContain("Connected");
     expect(now.textContent).toContain("image 202611040849");
-    const history = screen.getByTestId("update-history");
-    expect(history.textContent).toContain("Resolved");
-    expect(history.textContent).not.toContain("PROBLEM");
     expect(screen.queryByText("PROBLEM")).toBeNull();
   });
 
-  it("shows red with what to do only when something is wrong now", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-      if (url.endsWith("/api/runner-report")) return json({ live: [{ ...live, connected: false, at: "2026-11-04T08:00:00.000Z" }], update: { ...problem, state: "problem" } });
-      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
-      return json([]);
-    }));
-    render(<RunnerUpdate />);
+  it("shows Not connected for a runner that is down", async () => {
+    updatesCard({ live: [{ ...live, connected: false, at: "2026-11-04T08:00:00.000Z" }], update: { ...problem, state: "problem" } });
     expect(await screen.findByText("Not connected")).toBeTruthy();
-    const history = await screen.findByTestId("update-history");
-    expect(history.textContent).toContain("PROBLEM");
-    expect(history.textContent).toContain("start it again");
   });
 
-  it("per company: the same rule, leading with the live state", async () => {
+  it("per company: the Runner box leads with the live state and drops its Last update line", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       if (url.includes("/runner")) return json({ registered: true, runnerId: "r1", connected: true, lastSeenAt: live.at, imageVersion: live.imageVersion, diskUsedBytes: null, addons: null, report: { live: { ok: true, text: "Runner connected since 16:23 · image 202611040849" }, last: { ...problem, state: "resolved" } } });
       return json([]);
     }));
     render(<Runner company={company} />);
     expect(await screen.findByText("Runner connected since 16:23 · image 202611040849")).toBeTruthy();
-    const history = await screen.findByTestId("company-update-history");
-    expect(history.textContent).toContain("Resolved");
-    expect(history.textContent).not.toContain("PROBLEM");
+    expect(screen.queryByTestId("company-update-history")).toBeNull();
+    expect(screen.queryByText(/Last update/)).toBeNull();
   });
 });
 
@@ -84,15 +80,24 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     expect((screen.getByRole("button", { name: "Reconnect runner" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {
+  // BOS-1486: the Build and update runners button is in the Updates card, which only exists with a host deployer.
+  it("without a host deployer it says in-app updates need one and links to how to set it up", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-      if (url.endsWith("/api/runner-report")) return json({ live: [{ ...live, connected: false, swap: { retryAt: null, tries: 0 } }, { ...live, slug: "b", name: "B Co", connected: false, guard: { reason: "guard exited", since: null } }], update: null });
-      if (url.endsWith("/api/maintenance")) return json({ on: true, deadline: "2026-11-06T12:30:00.000Z", runs: 0, companies: 0 });
+      if (url.endsWith("/api/runner-report")) return json({ live: [live], update: null });
+      if (url.endsWith("/api/maintenance")) return json({ on: false, last: null });
+      if (url.endsWith("/api/self-deploy")) return json({ enabled: false });
       return json([]);
     }));
-    render(<RunnerUpdate />);
+    render(<SelfDeploy go={() => {}} />);
+    expect(await screen.findByText(/this install doesn't have one/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Update runners (finish runs first)" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "how to set it up" }).getAttribute("href")).toMatch(/self-deploy\.md$/);
+  });
+
+  it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {
+    updatesCard({ live: [{ ...live, connected: false, swap: { retryAt: null, tries: 0 } }, { ...live, slug: "b", name: "B Co", connected: false, guard: { reason: "guard exited", since: null } }], update: null });
     const now = await screen.findByTestId("runner-live");
-    expect(now.textContent).toContain("Updating");
+    await vi.waitFor(() => expect(now.textContent).toContain("Updating"));
     expect(now.textContent).toContain("Paused: network guard");
     expect(now.textContent).toContain("guard exited");
     expect(now.textContent).not.toContain("Not connected");
