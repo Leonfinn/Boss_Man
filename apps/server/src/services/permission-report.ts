@@ -80,6 +80,7 @@ const hourStart = (d: Date) => new Date(Math.floor(d.getTime() / 3_600_000) * 3_
 
 /** Pure: groups the rows (newest example per group). Exported for tests. */
 export function groupCards(rows: CardRow[], from: Date, to: Date, hours: number): PermissionReport {
+  // not state: a local built and dropped within this one call
   const groups = new Map<string, { rule: string; route: Route; rows: CardRow[] }>();
   for (const row of rows) {
     const ctx = (row.context ?? {}) as Ctx;
