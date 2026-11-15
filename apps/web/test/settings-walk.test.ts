@@ -37,7 +37,8 @@ function answer(p: string): unknown {
   if (p === "/api/run-limits") return { instance: 8, company: 4, background: 2, defaults: { instance: 8, company: 4, background: 2 } };
   if (p === "/api/settings/check-queue") return { mode: "legacy", slots: 1, maxSlots: 4, defaultSlots: 1, runnersTooOld: [] };
   if (p === "/api/private-details") return { total: 0, counts: {} };
-  if (p === "/api/netguard-allow") return { report: null };
+  // The Network guard section only shows once a runner has reported (the panel hides itself with no report), so the walk gives it one.
+  if (p === "/api/netguard-allow") return { report: { mode: "on", entries: [], lineCanGo: false, automatic: [], env: { lines: [], reportedAt: now(), envFound: true }, warnings: [] } };
   if (p === "/api/host-facts") return { hostName: "host", reportedAt: now(), ownerFacts: [], facts: {} };
   if (p === "/api/companies/c1/projects") return [{ id: "p1", companyId: "c1", name: "Boss Man", starred: false }];
   if (p === "/api/policy-rules") return { company: [], global: [], defaults: [], shadowedIds: [] };
