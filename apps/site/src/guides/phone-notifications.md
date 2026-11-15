@@ -19,7 +19,7 @@ You get a page when, for example, a runner goes offline or a runner update is st
 
 ## Browser notifications
 
-Choose **Turn on browser notifications** in the sidebar. They show while Boss Man is open in a browser tab, including a background tab.
+Choose **Turn on browser notifications** at the top of the Notifications page. They show while Boss Man is open in a browser tab, including a background tab.
 
 ## Quiet hours and limits
 

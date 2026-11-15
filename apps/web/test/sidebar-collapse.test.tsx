@@ -71,6 +71,9 @@ describe("collapsed icons still work", () => {
 
   it("keeps the Feedback and Notifications badges with a readable count", () => {
     show({ collapsed: true });
+    // Feedback sits in the Product group (BOS-1506): the strip's row carries its count, the panel the page.
+    expect(within(screen.getByRole("button", { name: /^Product/ })).getByLabelText("2 to process").textContent).toBe("2");
+    fireEvent.click(screen.getByRole("button", { name: /^Product/ }));
     const feedback = screen.getByRole("link", { name: /^Feedback/ });
     expect(within(feedback).getByLabelText("2 to process").textContent).toBe("2");
     const notifications = screen.getByRole("link", { name: /^Notifications/ });

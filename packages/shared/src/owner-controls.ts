@@ -20,7 +20,7 @@ export const OWNER_CONTROLS = {
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
     "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
-    "Switch company", "Create", "New company", "Close menu", "Menu …", "Turn on browser notifications", "Log out",
+    "Switch company", "Create", "New company", "Close menu", "Menu …", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
     "Send as a .txt file", "Sending",
@@ -50,7 +50,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -310,8 +310,8 @@ export const OWNER_FIELDS = {
 
 /** The side menu, in order (Sidebar.tsx). */
 export const OWNER_MENU = [
-  "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Merge queue", "Plan", "Wiki", "Features",
-  "Feedback", "Agents", "Skills", "Runs", "Scrum Master log", "Workflow report", "Engagements", "Settings",
+  "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Features", "Feedback", "Plan", "Merge queue",
+  "Wiki", "Agents", "Skills", "Engagements", "Runs", "Scrum Master log", "Workflow report", "Settings",
 ] as const;
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
