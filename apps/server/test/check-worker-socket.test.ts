@@ -71,6 +71,13 @@ function workerConn(token: string, commands: unknown[] = [], features: readonly 
 }
 
 describe("check worker socket (BOS-1435)", () => {
+  it("BOS-1550: adding a worker answers the commit its chosen company's runner is built from, so the compose file can be filled in", async () => {
+    expect((await ctx.addWorker() as { commit?: string | null }).commit).toBeNull();
+    await ctx.db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, ctx.reg.runnerId));
+    expect((await ctx.addWorker() as { commit?: string | null }).commit).toBe(COMMIT);
+    expect((await ctx.addWorker({ companyIds: [] }) as { commit?: string | null }).commit).toBeNull();
+  });
+
   it("owner-only routes: no session gets 401; the token is answered once and only its hash is kept", async () => {
     expect((await ctx.app.inject({ method: "GET", url: "/api/settings/check-workers" })).statusCode).toBe(401);
     expect((await ctx.app.inject({ method: "POST", url: "/api/settings/check-workers", payload: { name: "x", companyIds: [], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true } })).statusCode).toBe(401);
