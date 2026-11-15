@@ -4,7 +4,7 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
-import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
+import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -494,10 +494,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
     },
     async ({ ticketId, plan }) => {
-      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode, acceptanceCriteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
       if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      // BOS-1571: the approver sees how the owner lives with it before any code is written.
+      if (usabilityGated(t) && !realUseWalkthrough(plan)) return fail(PLAN_REAL_USE_REFUSAL);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
       let d: { id: string };

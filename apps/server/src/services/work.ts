@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { addsUsabilityCriterion, withUsabilityCriterion, columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
@@ -458,6 +458,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
+      // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate from the start.
+      const criteria = withUsabilityCriterion(input.acceptanceCriteria ?? [], { featureId, ownerSetup: input.ownerSetup, noCode: input.noCode });
       const [t] = await db
         .insert(tickets)
         .values({
@@ -474,7 +476,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           keyResultId: input.keyResultId ?? null,
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
-          acceptanceCriteria: input.acceptanceCriteria ?? [],
+          acceptanceCriteria: criteria,
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
           fixesLive: input.fixesLive?.trim() || null,
@@ -682,6 +684,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
         if (bad) throw new WorkError(400, bad);
         fields.fixesLive = patch.fixesLive?.trim() || null;
+      }
+      // BOS-1571: a ticket that joins a feature, gains owner setup steps or has its criteria replaced keeps the
+      // usability gate; the write that makes it due adds it, so nobody has to remember it.
+      if (!t.mergeCommit && (fields.featureId !== undefined || fields.ownerSetup !== undefined || fields.acceptanceCriteria !== undefined || fields.noCode !== undefined)) {
+        const criteria = fields.acceptanceCriteria ?? readCriteria(t.acceptanceCriteria);
+        const gate = { featureId: fields.featureId !== undefined ? fields.featureId : t.featureId, ownerSetup: fields.ownerSetup !== undefined ? fields.ownerSetup : t.ownerSetup, noCode: fields.noCode ?? t.noCode };
+        if (addsUsabilityCriterion(criteria, gate)) fields.acceptanceCriteria = withUsabilityCriterion(criteria, gate);
       }
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
