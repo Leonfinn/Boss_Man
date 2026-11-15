@@ -16,9 +16,8 @@ export function dropToUnprivileged(socket: string, ids: Ids = { getuid: () => pr
   const st = stat(socket);
   const gid = st.gid;
   // The group must be able to read and write the socket; never fall back to staying root (Dougal's note, BOS-1188).
-  if (st.mode !== undefined && (st.mode & 0o060) !== 0o060) {
-    throw new Error(`The Docker socket (${socket}) is not read-write for its group (mode ${(st.mode & 0o777).toString(8)}), so the launcher cannot use it as a non-root user. Allow the socket's group to read and write it.`);
-  }
+  const problem = socketModeProblem(socket, st);
+  if (problem) throw new Error(problem);
   // Group 0 (Docker Desktop) is allowed: uid 1000 with group 0 added is not root. Any other group is joined as an extra group.
   ids.setgroups([gid]);
   ids.setgid(gid === 0 ? 0 : uid);
@@ -26,6 +25,23 @@ export function dropToUnprivileged(socket: string, ids: Ids = { getuid: () => pr
   const euid = ids.geteuid ? ids.geteuid() : uid;
   if (ids.getuid() !== uid || euid !== uid) throw new Error(`Could not drop to uid ${uid} (now uid ${ids.getuid()}, euid ${euid}); stopping instead of running as root.`);
   return gid === 0 ? `socket group is root (0), running as uid ${uid} with that group` : `dropped to uid ${uid}, socket group ${gid}`;
+}
+
+/** A plain-words problem if the socket's group cannot read and write it, else null. Setup and the launcher both use it. */
+export function socketModeProblem(socket: string, st: { mode?: number }): string | null {
+  if (st.mode === undefined || (st.mode & 0o060) === 0o060) return null;
+  return `The Docker socket (${socket}) is not read-write for its group (mode ${(st.mode & 0o777).toString(8)}), so the launcher cannot use it as a non-root user. Allow the socket's group to read and write it.`;
+}
+
+/**
+ * Remembers which group the Docker socket had at this start in `file`, and says so when it differs from the last start
+ * (for example after a Docker reinstall), so a "permission denied" later has a visible cause. Returns the log line, or null.
+ */
+export function noteSocketGroup(file: string, gid: number, read: (f: string) => string | null, write: (f: string, body: string) => void): string | null {
+  const before = read(file)?.trim();
+  write(file, `${gid}\n`);
+  if (before === undefined || before === "" || before === String(gid)) return null;
+  return `socket group changed from ${before} to ${gid} since the last start; the launcher joins the group it sees now`;
 }
 
 /**

@@ -2,9 +2,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runSetup } from "../src/setup.js";
+import { checkSocket, runSetup } from "../src/setup.js";
 import { containerSpec, netguardSpec, parseImageRef, type LauncherConfig } from "../src/spec.js";
-import { dropToUnprivileged, hostPathOfMount } from "../src/startup.js";
+import { dropToUnprivileged, hostPathOfMount, noteSocketGroup } from "../src/startup.js";
 
 const dirs: string[] = [];
 const tmp = () => {
@@ -85,6 +85,34 @@ describe("dropToUnprivileged", () => {
     const f = fake(0);
     expect(() => dropToUnprivileged("/s", f.ids, () => ({ gid: 998, mode: 0o600 }))).toThrow(/not read-write for its group/);
     expect(f.calls).toEqual([]);
+  });
+});
+
+describe("socket mode and group notes", () => {
+  it("setup reports a socket its group cannot use, and skips when none is mounted", () => {
+    const here = tmp();
+    expect(checkSocket(undefined)).toBeNull();
+    expect(checkSocket(path.join(here, "nope"))).toBeNull();
+    const f = path.join(here, "sock");
+    writeFileSync(f, "");
+    expect(checkSocket(f, () => ({ mode: 0o660 }))).toBeNull();
+    expect(checkSocket(f, () => ({ mode: 0o600 }))).toMatch(/not read-write for its group/);
+  });
+  it("says nothing on the first start or an unchanged group, and names both groups when it changed", () => {
+    let stored: string | null = null;
+    const read = () => stored;
+    const write = (_f: string, b: string) => { stored = b; };
+    expect(noteSocketGroup("f", 998, read, write)).toBeNull();
+    expect(noteSocketGroup("f", 998, read, write)).toBeNull();
+    expect(noteSocketGroup("f", 0, read, write)).toBe("socket group changed from 998 to 0 since the last start; the launcher joins the group it sees now");
+    expect(stored).toBe("0\n");
+  });
+  it("the launcher image build fails if group 0 could write a file it ships", () => {
+    const df = readFileSync(path.join(__dirname, "../Dockerfile"), "utf8");
+    expect(df).toMatch(/find \/app \/NOTICE \/run\/launcher \/data \/config ! -type l -group 0 -perm -g\+w/);
+    // The check must come after every step that creates or changes files, and before the container starts.
+    expect(df.indexOf("-group 0 -perm -g+w")).toBeGreaterThan(df.indexOf("chown 1000:1000 /data"));
+    expect(df.indexOf("-group 0 -perm -g+w")).toBeLessThan(df.indexOf("CMD"));
   });
 });
 

@@ -3,6 +3,7 @@
 import { chownSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync, writeSync } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { socketModeProblem } from "./startup.js";
 
 /** The user the server runs as; it must be able to read what it is given. */
 const SERVER_UID = 1000;
@@ -51,8 +52,19 @@ export function runSetup(dir: string, dbDir: string, chown: Chown = chownSync, r
   return result;
 }
 
+/**
+ * Optional: if the Docker socket is mounted into setup at `socket` (it is not, by default: root in this container should not get it),
+ * say now whether its group can read and write it, rather than at the launcher's first start. Returns the problem, or null.
+ */
+export function checkSocket(socket: string | undefined, stat: (p: string) => { mode: number } = statSync): string | null {
+  if (!socket || !existsSync(socket)) return null;
+  return socketModeProblem(socket, stat(socket));
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   try {
+    const problem = checkSocket(process.env.BOSSMAN_SETUP_SOCKET);
+    if (problem) throw new Error(problem);
     const r = runSetup(process.env.BOSSMAN_CONFIG_DIR ?? "/config", process.env.BOSSMAN_DB_SECRET_DIR ?? "/db-secret");
     for (const f of r.created) console.log(`Created ${f}`);
     for (const f of r.kept) console.log(`Kept ${f} (already there; not changed)`);
