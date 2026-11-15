@@ -1,5 +1,5 @@
 {
-  "id": "56f63f98-3aa3-4106-968f-16652601e9b2",
+  "id": "4a418ce9-efc7-4556-97ca-8761ad926014",
   "prevId": "598f9fa4-315e-4feb-b1e3-3f17ce81a932",
   "version": "7",
   "dialect": "postgresql",
@@ -1980,13 +1980,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'watch'"
-        },
-        "auto_temp_cleanup": {
-          "name": "auto_temp_cleanup",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
         },
         "fence_mode": {
           "name": "fence_mode",
@@ -9629,6 +9622,12 @@
         },
         "touches_runner": {
           "name": "touches_runner",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "touches_runner_update": {
+          "name": "touches_runner_update",
           "type": "boolean",
           "primaryKey": false,
           "notNull": false

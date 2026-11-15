@@ -151,7 +151,7 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  system: ["Updates", "Stop all work", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
   transfer: ["Import a company"],
 };
 const SIZES = [

@@ -143,7 +143,7 @@ The launcher reads `.env` only when it is recreated. Recreate it, then recreate 
 docker compose up -d launcher && scripts/update-runner.sh --settings
 ```
 
-Settings → Server and runner lists the entries the launcher is using. How the guard works, and how to turn it off, is in [docs/20-netguard.md](20-netguard.md).
+Settings → Server and runner lists the entries the launcher is using. How the guard works, and how to turn it off, is in [docs/27-netguard.md](27-netguard.md).
 
 ## Where release notes are
 

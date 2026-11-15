@@ -16,6 +16,7 @@ import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { heldTicketIds } from "./review-holds.js";
 import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
+import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
@@ -348,6 +349,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         dep: ticketDependencies,
         holderState: tickets.systemState,
         holderStateChangedAt: tickets.stateChangedAt,
+        holderMergeCommit: tickets.mergeCommit,
         engagementStatus: engagements.status,
         decisionStatus: decisions.status,
         decisionCreatedAt: decisions.createdAt,
@@ -358,9 +360,9 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .where(inArray(ticketDependencies.blockedTicketId, ids));
-    const holds: SnapHold[] = depRows.map(({ dep, holderState, engagementStatus, decisionStatus, decisionCreatedAt }) =>
+    const holds: SnapHold[] = depRows.map(({ dep, holderState, holderMergeCommit, engagementStatus, decisionStatus, decisionCreatedAt }) =>
       dep.blockerTicketId
-        ? { blockedTicketId: dep.blockedTicketId, kind: "ticket", holderTicketId: dep.blockerTicketId, resolved: holderState === "done" }
+        ? { blockedTicketId: dep.blockedTicketId, kind: "ticket", holderTicketId: dep.blockerTicketId, resolved: ticketBlockerFinished({ ticketState: holderState, mergeCommit: holderMergeCommit, until: dep.until }) }
         : dep.blockerEngagementId
           ? { blockedTicketId: dep.blockedTicketId, kind: "engagement", resolved: engagementStatus === "signed_off" }
           : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionCreatedAt ?? new Date(0) },
@@ -371,7 +373,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     for (const dep of depRows) {
       const at = dep.dep.blockerDecisionId
         ? (dep.decisionStatus !== "open" ? (dep.decisionAnsweredAt ?? dep.decisionCreatedAt) : null)
-        : (dep.holderState === "done" ? dep.holderStateChangedAt : null);
+        : (ticketBlockerFinished({ ticketState: dep.holderState, mergeCommit: dep.holderMergeCommit, until: dep.dep.until }) ? dep.holderStateChangedAt : null);
       if (at && (!freedAt.has(dep.dep.blockedTicketId) || at.getTime() > freedAt.get(dep.dep.blockedTicketId)!.getTime())) freedAt.set(dep.dep.blockedTicketId, at);
     }
     // When a ticket that had blockers became free of them (BOS-659): its last blocker's answer/finish, floored
@@ -1445,14 +1447,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
           const [t] = await db.select().from(tickets).where(eq(tickets.id, a.ticketId!));
-          const left = await db
-            .select({ ticket: tickets.systemState, decision: decisions.status, engagement: engagements.status })
-            .from(ticketDependencies)
-            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-            .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-            .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-            .where(eq(ticketDependencies.blockedTicketId, a.ticketId!));
-          const held = left.some((x) => (x.ticket && x.ticket !== "done") || x.decision === "open" || (x.engagement && x.engagement !== "signed_off"));
+          const held = (await openBlockers(db, a.ticketId!)).length > 0;
           if (t?.systemState === "blocked" && !held && before.state && before.state !== "blocked") await deps.restoreState(t.id, before.state);
           what = "withdrew the decision";
           break;

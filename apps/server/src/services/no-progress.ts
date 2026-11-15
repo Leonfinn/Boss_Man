@@ -36,7 +36,7 @@ const DELIBERATE_HOLDS = ["company paused", "agent paused", "quiet hours", HOLD_
  * run that only reads cards (origin "decision") doesn't count, or reading this card would hide it.
  * Same test as the card's closer (alert-clearing.ts companyRanOk).
  */
-const cleanEndSql = sql`${runs.endedAt} is not null and ${runs.origin} is distinct from 'decision' and coalesce(${runs.outcome}, '') not like 'error:%' and coalesce(${runs.outcome}, '') not like 'lost:%' and coalesce(${runs.outcome}, '') <> 'interrupted' and coalesce(${runs.outcome}, '') <> 'cancelled' and coalesce(${runs.outcome}, '') not like 'stopped%'`;
+export const cleanEndSql = sql`${runs.endedAt} is not null and ${runs.origin} is distinct from 'decision' and coalesce(${runs.outcome}, '') not like 'error:%' and coalesce(${runs.outcome}, '') not like 'lost:%' and coalesce(${runs.outcome}, '') <> 'interrupted' and coalesce(${runs.outcome}, '') <> 'cancelled' and coalesce(${runs.outcome}, '') not like 'stopped%'`;
 
 /** Network failures as the agent's tools report them: what the network guard's refusal looks like from inside a run. */
 const NETWORK_ERROR = /(network guard|netguard|connection refused|econnrefused|could not resolve host|enotfound|network is unreachable|no route to host|ehostunreach|failed to connect to|connection timed out|etimedout)/i;
