@@ -66,6 +66,7 @@ import { traceCalls } from "./mcp-trace.js";
 import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, registerRoadmap } from "./mcp-board.js";
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
+import { registerPermissionReport } from "./mcp-permission-report.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -214,6 +215,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerRequestNote(server, db, scope, hooks);
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
+  registerPermissionReport(server, db, scope);
   return server;
 }
 
