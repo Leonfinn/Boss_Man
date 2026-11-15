@@ -49,7 +49,7 @@ export function TicketReviews({ reviews }: { reviews: TicketReview[] | null }) {
                   <summary style={{ cursor: "pointer" }}>{line}</summary>
                   <div style={{ paddingLeft: 18 }}>
                     {r.standIn && <div className="muted" style={{ fontSize: 14 }}>Stand-in reviewer: {r.standIn}.</div>}
-                    {r.waitingOn &&<div className="muted" style={{ fontSize: 14 }}>{r.waitingOn}</div>}
+                    {r.waitingOn && <div className="muted" style={{ fontSize: 14 }}>{r.waitingOn}</div>}
                     {r.notes && <div className="muted" style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{r.notes}</div>}
                     {r.overruleReason && <div style={{ fontSize: 14 }}>Overruled by the CEO: {r.overruleReason}</div>}
                   </div>

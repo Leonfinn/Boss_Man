@@ -5,6 +5,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import { openReviewLines, requestReviews, wakeReviewers } from "../src/services/review-kinds.js";
 import type { Leader } from "../src/leader.js";
 
 const HOUR = 3_600_000;
@@ -227,10 +228,41 @@ describe("stalled review sweep: a review that fell back to the CEO (BOS-1526)", 
     expect(w!.note).toContain("Engineer worked on it");
     await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.reason, REVIEW_REASON));
 
+    // The wake above came at 31 minutes (the 30-minute chase); thirty more makes 61, so the card is due.
     ctx.advance(30 * 60_000);
     expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 1 } });
     const cards = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "review-stall:%"));
     expect(cards).toHaveLength(1);
+  });
+
+  it("names the kind and reason on the first wake, and lists the open reviews on the ticket read", async () => {
+    ctx = await setup();
+    const policy = (await ctx.req("GET", `/api/companies/${ctx.company.id}/review-policy`)).json() as { medium: object };
+    expect((await ctx.req("PUT", `/api/companies/${ctx.company.id}/review-policy`, { ...policy, medium: { ...policy.medium, kinds: { infra: [ctx.worker.id] } } })).statusCode).toBe(200);
+    const [ceo] = await ctx.db.select().from(agents).where(and(eq(agents.companyId, ctx.company.id), eq(agents.role, "ceo")));
+    const id = await ctx.forgotten("Build the worker", { risk: "medium" });
+    const get = async () => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
+
+    // Outside the review state nothing is listed.
+    expect(await openReviewLines(ctx.db, await get())).toEqual([]);
+
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, id));
+    const t = await get();
+    const rows = await requestReviews(ctx.db, t);
+    const sent: Array<{ agentId: string; note: string }> = [];
+    await wakeReviewers(ctx.db, t, rows, async (agentId, w) => { sent.push({ agentId, note: w.note ?? "" }); });
+
+    const infra = sent.find((s) => s.agentId === ceo!.id);
+    expect(infra!.note).toContain("You hold the infra review as a stand-in");
+    expect(infra!.note).toContain("Engineer worked on it");
+
+    const lines = await openReviewLines(ctx.db, t);
+    expect(lines[0]).toBe("Open reviews:");
+    expect(lines.some((l) => l.startsWith("- infra: held by") && l.includes("(stand-in: ") && l.includes("Engineer worked on it"))).toBe(true);
+    // A normal reviewer's line has no stand-in text.
+    const code = lines.find((l) => l.startsWith("- code:"));
+    expect(code).toBeDefined();
+    expect(code).not.toContain("stand-in");
   });
 });
 
