@@ -174,6 +174,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>ExportCompany": "Import and export",
   "pages/Settings.tsx>ToolServers": "Tools and deploys",
   "pages/Settings.tsx>DeployTargets": "Tools and deploys",
+  "pages/Settings.tsx>PenpotSettings": "Tools and deploys",
   "pages/Settings.tsx>Funding": "Funding",
   "pages/Settings.tsx>ProjectBudgets": "Funding",
   "pages/Settings.tsx>FundingCards": "Funding",
