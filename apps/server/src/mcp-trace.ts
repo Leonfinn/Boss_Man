@@ -22,7 +22,7 @@ export function forgetRunTrace(runId: string) {
  * silently: it is either a read (add it here) or a change (add a case in changeTrace).
  */
 export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  "agent_instructions", "board", "devices", "features", "list_my_work", "model_options", "open_attachment",
+  "agent_instructions", "board", "devices", "features", "list_my_work", "model_options", "open_attachment", "owner_answers",
   "server_status", "sizing_guide", "tickets", "whats_new",
 ]);
 

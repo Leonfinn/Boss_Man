@@ -71,6 +71,7 @@ import { registerBoard, registerListMyWork, registerNotes, registerRequestNote, 
 import { registerDecisionTools } from "./mcp-decisions.js";
 import { registerMergeLineExport } from "./mcp-merge-line.js";
 import { registerPermissionReport } from "./mcp-permission-report.js";
+import { registerOwnerAnswers } from "./mcp-owner-answers.js";
 
 export { TREE_REASON, TREE_ROOT_LINE };
 
@@ -216,6 +217,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   registerListMyWork(server, db, scope);
   registerMergeLineExport(server, db, scope);
   registerPermissionReport(server, db, scope);
+  registerOwnerAnswers(server, db, scope);
   return server;
 }
 
@@ -1390,6 +1392,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
   registerRequestNote(server, db, scope, hooks);
   registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
+  registerOwnerAnswers(server, db, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
     if (err instanceof WorkError) return fail(err.message);
