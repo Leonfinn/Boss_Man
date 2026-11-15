@@ -218,7 +218,10 @@ describe("review kinds", () => {
       expect((await c.rows()).find((r) => r.kind === "code")?.readHead).toBe(DIFF.head);
       branch.head = NEW_HEAD;
       expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("moved since you read it");
-      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "pending", head: null, readHead: null });
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "pending", head: null, readHead: DIFF.head });
+      // A retry with no fresh diff is refused again.
+      expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("moved since you read it");
+      expect((await c.rows()).find((r) => r.kind === "code")?.status).toBe("pending");
       await c.call(c.senior.id, { action: "diff" });
       expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("waiting");
       expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: NEW_HEAD });

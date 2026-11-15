@@ -960,7 +960,7 @@ export function reviewService(
         if (row.readHead && nowHead && row.readHead !== nowHead) {
           const covered = (await this.signoffCovers(ticketId, row.readHead, nowHead).catch(() => null))?.covers === true;
           if (!covered) {
-            await db.update(reviewRequests).set({ readHead: null }).where(eq(reviewRequests.id, row.id));
+            // readHead stays: a retry without a fresh `review diff` is refused again (only a new diff replaces it).
             throw new ReviewError(409, `The branch moved since you read it (you read ${row.readHead.slice(0, 8)}, it is now ${nowHead.slice(0, 8)}). Read the diff again, then submit.`);
           }
           // Covered: the verdict on readHead carries over to nowHead. Stamping the older head would make it settle()'s
