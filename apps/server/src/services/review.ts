@@ -779,6 +779,25 @@ export function reviewService(
     },
 
     /**
+     * BOS-1567: remember the head a reviewer's `review diff` served, on every review they still hold open in the latest round.
+     * submit() compares it with the branch as it is then, so an approval is never stamped with a head the reviewer didn't read.
+     * Returns the head stored before (null when none), so the caller can tell a later page was read on another head.
+     * Never throws: a failed stamp must not block a diff.
+     */
+    async noteRead(ticketId: string, reviewerAgentId: string | null | undefined, head: string | null | undefined): Promise<string | null> {
+      if (!reviewerAgentId) return null;
+      try {
+        const mine = (await latestRows(db, ticketId)).filter((r) => r.reviewerAgentId === reviewerAgentId && r.status === "pending");
+        if (!mine.length) return null;
+        const before = mine.find((r) => r.readHead)?.readHead ?? null;
+        await db.update(reviewRequests).set({ readHead: head || null }).where(inArray(reviewRequests.id, mine.map((r) => r.id)));
+        return before;
+      } catch {
+        return null;
+      }
+    },
+
+    /**
      * Whether the ticket's new migration numbers are free (BOS-219). The review-time warning
      * (withOthers false) compares only against the default branch: a clash with another open
      * branch isn't the agent's to fix, since that branch may never merge, and advising a rename
@@ -925,8 +944,20 @@ export function reviewService(
       if (input.verdict === "approved") {
         // BOS-1528: stamp the head this reviewer approved on their own row, now, not whatever the branch is at when the last
         // review of the round comes in. A runner that can't say leaves the row unstamped (it never blocks a review).
-        const readHead = await this.diff(ticketId).then((x) => x.head || null, () => null);
-        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null, head: readHead });
+        const nowHead = await this.diff(ticketId).then((x) => x.head || null, () => null);
+        // BOS-1567: stamp the head the reviewer READ (their last `review diff`). If the branch moved since, only clean merges of
+        // main (signoffCovers) may have come in; any other move refuses the approval, and the reviewer reads again. No diff read
+        // (null), or a runner that can't say now: the submit-time head, as before.
+        let approvedHead = nowHead;
+        if (row.readHead && nowHead && row.readHead !== nowHead) {
+          const covered = (await this.signoffCovers(ticketId, row.readHead, nowHead).catch(() => null))?.covers === true;
+          if (!covered) {
+            await db.update(reviewRequests).set({ readHead: null }).where(eq(reviewRequests.id, row.id));
+            throw new ReviewError(409, `The branch moved since you read it (you read ${row.readHead.slice(0, 8)}, it is now ${nowHead.slice(0, 8)}). Read the diff again, then submit.`);
+          }
+          approvedHead = row.readHead;
+        }
+        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null, head: approvedHead, readHead: approvedHead });
         // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
         if (input.hold) await startHold(t, row, input.hold, who);
       } else {
@@ -959,7 +990,7 @@ export function reviewService(
           // head (passedHead and the merge pin would otherwise see mixed heads and send the ticket back at merge).
           if (!stale.length) for (const r of stamped) if (r.head !== newest) await db.update(reviewRequests).set({ head: newest }).where(eq(reviewRequests.id, r.id));
           if (stale.length) {
-            for (const r of stale) await db.update(reviewRequests).set({ status: "pending", head: null, decidedAt: null, notes: null }).where(eq(reviewRequests.id, r.id));
+            for (const r of stale) await db.update(reviewRequests).set({ status: "pending", head: null, readHead: null, decidedAt: null, notes: null }).where(eq(reviewRequests.id, r.id));
             await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_reopened", summary: `The branch moved from ${stale.map((r) => r.head!.slice(0, 8)).join(", ")} to ${newest.slice(0, 8)} while the round was open, so ${stale.map((r) => (r.kind === "code" ? "the code" : `the ${r.kind}`)).join(" and ")} review${stale.length > 1 ? "s were" : " was"} reopened to read the newer code.` });
             const reopened = await latestRows(db, t.id);
             if (wake) await wakeReviewers(db, t, activeRows(reopened).filter((r) => stale.some((s) => s.id === r.id)), (id, i) => wake!(id, i), [], o.causedByRunId);

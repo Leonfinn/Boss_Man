@@ -971,6 +971,8 @@ export const reviewRequests = pgTable(
     overruleReason: text("overrule_reason"),
     /** The branch head the verdict was given on (BOS-1173), so a return to review on that same head keeps the pass. Null when the runner couldn't say, and on rows from before. */
     head: text("head"),
+    /** The branch head this reviewer's last `review diff` served (BOS-1567). Submit refuses an approval if the branch moved since, so the stamped head is one the reviewer read. Null: no diff read yet, or rows from before. */
+    readHead: text("read_head"),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
