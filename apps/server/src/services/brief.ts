@@ -116,6 +116,17 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     ];
     const done = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(10);
     const unassigned = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNull(tickets.assigneeAgentId), eq(tickets.assignedToOwner, false))).orderBy(asc(tickets.createdAt));
+    // Sign-off cards whose owner sees a real conflict with a branch ahead in the merge line (BOS-1411): the same
+    // line the owner reads, so the CEO can order the two tickets. A warning only; nothing is linked.
+    const conflictCards = await db
+      .select({ question: decisions.question, context: decisions.context })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'conflictsBecause' is not null`));
+    const conflictLines = conflictCards.map((x) => {
+      const c = x.context as { ticketId?: string; conflictsBecause?: string };
+      const t = needs.find((n) => n.t.id === c.ticketId)?.t;
+      return `- ${t ? `"${one(t.title, 60)}" (${t.id})` : c.ticketId}: ${c.conflictsBecause ?? ""}`;
+    });
     const recent = await changes(null);
     // A sample of what the PA told the owner, for the CEO to mark right or wrong (R87).
     const audit = await db.select().from(paAnswers).where(and(eq(paAnswers.companyId, companyId), eq(paAnswers.sampled, true), isNull(paAnswers.verdict))).orderBy(asc(paAnswers.createdAt));
@@ -127,6 +138,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
       ...(companyRefused ? [`At company limit: ${companyRefused} Ready ticket${companyRefused === 1 ? "" : "s"} refused. Agents may sit idle until one in-progress ticket finishes or the owner raises the limit in Settings.`] : []),
       ...section("Needs you", capped(needLines, 8)),
+      ...section("Merge-line conflicts (warnings, nothing linked)", capped(conflictLines, 6)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),
       ...section("In flight", capped(await flightLines(), 8)),
       ...section("Last done", [...done.map((t) => `- "${one(t.title, 60)}" (${t.outcome ?? "done"}, ${age(t.lastActivityAt)} ago).${noteOf(t)}`), ...(n("done") > done.length ? [MORE(n("done") - done.length)] : [])]),
