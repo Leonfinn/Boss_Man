@@ -566,7 +566,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       let waitsOnMergeOnly = false;
       if (state === "blocked" && !sameState && !until && (withCriteria.prev === "review" || withCriteria.prev === "in_progress")) {
         const open = await openBlockers(db, ticketId);
-        waitsOnMergeOnly = open.length > 0 && open.every((b) => b.kind === "ticket") && !(await hasOpenCard(db, ticketId)) && !(await mergedAwaitingChecks(db, ticketId));
+        waitsOnMergeOnly = open.length > 0 && open.every((b) => b.kind === "ticket") && (await blockedHolds(db, ticketId)).every((h) => h.kind === "blocker");
         if (waitsOnMergeOnly && withCriteria.prev === "review") return fail(REVIEW_BLOCKED_REFUSAL);
       }
       // The move itself is moveTicket's (DR-047): the column, the WIP limit, the field rules, the history line,
