@@ -23,6 +23,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "deploy approved": "waiting",
   "deploy rejected": "waiting",
   "ceo reply": "waiting",
+  // Priority watch (BOS-1514): the CEO is told an urgent ticket has no next step under way. Never dropped.
+  "priority watch": "waiting",
   // Scheduled by Boss Man.
   "ticket watch": "scheduled",
   "tree stopped": "scheduled",

@@ -247,6 +247,14 @@ export function mergeQueueService(
     queueStatus?: (companyId: string) => Promise<{ mode: "legacy" | "server"; slots: number; running: number; waiting: number } | null>;
     /** BOS-1384: each queued merge's place in the check queue's serving order, and why it is ahead (urgent, moved to front). */
     places?: (companyId: string) => Promise<Map<string, { place: number; why: string | null }>>;
+    /** BOS-1486: whether this company's runner is connected right now (a waiting merge can't start without one). */
+    runnerConnected?: (companyId: string) => Promise<boolean>;
+    /** BOS-1486: a runner update is holding the line (a wrap-up hold is not one). */
+    runnerUpdateOn?: () => Promise<boolean>;
+    /** BOS-1486: whether the launcher is on, so the screen may point at Start runner in Settings. */
+    launcherOn?: () => boolean;
+    /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
+    queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null }>;
     now?: () => Date;
   },
 ) {
@@ -431,6 +439,10 @@ export function mergeQueueService(
       const queue = deps.queueStatus ? await deps.queueStatus(companyId).catch(() => null) : null;
       // A server update waiting for a quiet machine parks new checks (BOS-420): say so rather than "waiting for a slot".
       const held = (await softHold(db, t).catch(() => ({ on: false as const }))).on;
+      // BOS-1486: live state for the reason a merge waits. Absent deps (older callers, tests) mean "unknown", never a reason.
+      const runnerUp = deps.runnerConnected ? await deps.runnerConnected(companyId).catch(() => null) : null;
+      const runnerUpdateOn = deps.runnerUpdateOn ? await deps.runnerUpdateOn().catch(() => false) : false;
+      const detail = deps.queueDetail && queue?.mode === "server" ? await deps.queueDetail(companyId).catch(() => null) : null;
 
       const waiting: WaitingRow[] = [];
       const heldIds = await heldTicketIds(db, ids);
@@ -512,15 +524,35 @@ export function mergeQueueService(
           continue;
         }
         const why = restarted.has(r.id) ? "; the server restarted during this merge, so it is starting again" : "";
+        // BOS-1486: the reason is worked out from live state, in this order: no runner; an update holding the line;
+        // a red main; every slot busy (naming what is in each); otherwise next in line.
+        if (runnerUp === false) {
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting: no runner is connected${why}`, stuck: overAnHour, next: deps.launcherOn?.() ? "Start the runner in Settings → Server and runner → Runner. Boss Man checks it as soon as the runner connects." : "Start the runner container on your host; it connects by itself, and Boss Man checks this as soon as it does.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (runnerUpdateOn) {
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the runner update${why}`, stuck: false, next: "New checks start once the runner update is done (runs in progress finish first, then each runner is swapped).", actor: "system", decisionId: null });
+          continue;
+        }
         if (held) {
           waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for the server update${why}`, stuck: false, next: "New checks start once the server update is done (it waits for a quiet machine, then its standby window).", actor: "system", decisionId: null });
           continue;
         }
-        if (queue?.mode === "server" && queue.waiting > 0) {
-          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue.waiting} ahead)${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+        if (detail?.mainRed) {
+          waiting.push({ ...base, state: "waiting_for_slot", label: `waiting: main is failing its check${why}`, stuck: false, next: detail.fixRef ? `New checks wait until the fix (${detail.fixRef}) merges.` : "New checks wait until main is fixed.", actor: "system", decisionId: null });
           continue;
         }
-        waiting.push({ ...base, state: "waiting_for_slot", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+        if (detail && detail.busy.length >= detail.slots) {
+          const names = detail.busy.map((b, i) => `slot ${i + 1}: ${b.ref ?? b.title} (${b.kind})`).join("; ");
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot (${queue?.waiting ?? 0} ahead). Every slot is busy: ${names}${why}`, stuck: overAnHour, next: "Boss Man starts it as soon as a slot frees.", actor: "system", decisionId: null });
+          continue;
+        }
+        if (!detail) {
+          // Legacy check-queue mode, or the detail lookup failed: slot use is not known, so don't claim a slot is free.
+          waiting.push({ ...base, state: "waiting_for_check_capacity", label: `waiting for a check slot${why}`, stuck: overAnHour, next: "Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
+          continue;
+        }
+        waiting.push({ ...base, state: "waiting_for_check_capacity", label: `next in line for a check${why}`, stuck: overAnHour, next: "A slot is free; Boss Man checks and merges it by itself.", actor: "system", decisionId: null });
       }
       // BOS-1384: the order the check queue will serve them in (a fix for main, a move to front, urgent, then oldest), with why.
       const places = deps.places ? await deps.places(companyId).catch(() => null) : null;

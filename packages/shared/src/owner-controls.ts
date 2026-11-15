@@ -37,8 +37,8 @@ export const OWNER_CONTROLS = {
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss",
     "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
-    // The runner, credentials, funding and project panels Setup shares with Settings and Projects.
-    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
+    "Save the token", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
   ],
   Decisions: [
@@ -182,7 +182,7 @@ export const OWNER_FIELDS = {
   Setup: [
     "Company name", "What it's for", "Project name", "The CEO", "Title", "Description", "Give it to",
     // The credentials, funding and project panels Setup shares with Secrets, Access and funding, and Projects.
-    "Add", "Value", "Name", "Variable name",
+    "Claude setup token", "Add", "Value", "Name", "Variable name",
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
     "Reviews for this project", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",

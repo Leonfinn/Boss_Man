@@ -300,9 +300,67 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     await job(c, t.id, "queued", "d".repeat(40));
     const data = await queue(c);
     const row = data.waiting.find((r: { ticketId: string }) => r.ticketId === t.id);
-    expect(row).toMatchObject({ state: "waiting_for_check_capacity" });
-    // Its own check is the only one queued, so it is next up (BOS-1405: the label is its place, not the queue length).
-    expect(row.label).toMatch(/waiting for a check slot \(next up\)/);
+    expect(row).toMatchObject({ state: "waiting_for_slot" });
+    // BOS-1486: no runner is connected here, so that is the reason, never "waiting for a check slot".
+    expect(row.label).toMatch(/no runner is connected/);
+    expect(row.label).not.toMatch(/check slot/);
+  });
+
+  // BOS-1486: the reason a merge waits comes from live state, in a fixed order.
+  describe("the reason a merge waits (BOS-1486)", () => {
+    const waitingMerge = async (c: Awaited<ReturnType<typeof setup>>) => {
+      const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Approved work" })).json() as { id: string };
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+      return t.id;
+    };
+    const detail = (busy: number, mainRed = false) => async () => ({ slots: 2, busy: Array.from({ length: busy }, (_, i) => ({ ref: `APP-${i + 1}`, title: `Busy ${i + 1}`, kind: "merge check" })), mainRed, fixRef: mainRed ? "APP-9" : null });
+    const svc = (c: Awaited<ReturnType<typeof setup>>, over: Partial<Parameters<typeof mergeQueueService>[1]>) =>
+      mergeQueueService(c.db, { runningMerges: () => [], limit: async () => 2, queueStatus: async () => ({ mode: "server", slots: 2, running: 0, waiting: 0 }), runnerConnected: async () => true, ...over });
+    const labelOf = async (c: Awaited<ReturnType<typeof setup>>, id: string, over: Partial<Parameters<typeof mergeQueueService>[1]>) => (await svc(c, over).get(c.company.id)).waiting.find((w) => w.ticketId === id)!;
+
+    it("says no runner is connected before anything else, even with every slot busy", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const row = await labelOf(c, id, { runnerConnected: async () => false, runnerUpdateOn: async () => true, launcherOn: () => true, queueDetail: detail(2, true) });
+      expect(row.label).toMatch(/no runner is connected/);
+      expect(row.next).toMatch(/Start the runner in Settings → Server and runner → Runner/);
+      expect(row.label).not.toMatch(/check slot/);
+      // No launcher: there is no Start button to point at.
+      const bare = await labelOf(c, id, { runnerConnected: async () => false, launcherOn: () => false });
+      expect(bare.next).toMatch(/on your host/);
+      expect(bare.next).not.toMatch(/Settings/);
+    });
+
+    it("then a runner update, then a red main, then busy slots naming each ticket", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      expect((await labelOf(c, id, { runnerUpdateOn: async () => true, queueDetail: detail(2, true) })).label).toMatch(/waiting for the runner update/);
+      const red = await labelOf(c, id, { queueDetail: detail(2, true) });
+      expect(red.label).toMatch(/main is failing its check/);
+      expect(red.next).toMatch(/APP-9/);
+      const busy = await labelOf(c, id, { queueDetail: detail(2) });
+      expect(busy.label).toMatch(/waiting for a check slot/);
+      expect(busy.label).toMatch(/slot 1: APP-1 \(merge check\); slot 2: APP-2/);
+    });
+
+    it("says next in line, not waiting for a slot, when a slot is free", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const row = await labelOf(c, id, { queueStatus: async () => ({ mode: "server", slots: 2, running: 1, waiting: 1 }), queueDetail: detail(1) });
+      expect(row.label).toMatch(/^next in line for a check/);
+      expect(row.label).not.toMatch(/waiting for a check slot/);
+    });
+
+    it("does not claim a slot is free when slot use is unknown (legacy mode, or the lookup fails)", async () => {
+      const c = (ctx = await setup());
+      const id = await waitingMerge(c);
+      const legacy = await labelOf(c, id, { queueStatus: async () => ({ mode: "legacy", slots: 2, running: 2, waiting: 1 }), queueDetail: detail(2) });
+      expect(legacy.label).toMatch(/^waiting for a check slot/);
+      expect(`${legacy.label} ${legacy.next}`).not.toMatch(/slot is free|next in line/);
+      const failed = await labelOf(c, id, { queueDetail: async () => { throw new Error("boom"); } });
+      expect(`${failed.label} ${failed.next}`).not.toMatch(/slot is free|next in line/);
+    });
   });
 
   it("gives each waiting merge its own place in the label, not the queue length (BOS-1405)", async () => {
@@ -320,22 +378,26 @@ describe("merge queue screen in server mode (BOS-597)", () => {
       runningMerges: () => [],
       limit: async () => 2,
       queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 6 }),
+      runnerConnected: async () => true,
+      queueDetail: async () => ({ slots: 2, busy: [{ ref: "APP-1", title: "A", kind: "merge check" }, { ref: "APP-2", title: "B", kind: "merge check" }], mainRed: false, fixRef: null }),
       // Two other checks wait ahead of these merges, so their places are 3, 4, 5, 6.
       places: async () => new Map(ids.map((id, i) => [id, { place: i + 3, why: null }])),
     });
     const data = await service.get(c.company.id);
     const labels = ids.map((id) => data.waiting.find((w) => w.ticketId === id)!.label);
-    expect(labels).toEqual(["waiting for a check slot (2 ahead)", "waiting for a check slot (3 ahead)", "waiting for a check slot (4 ahead)", "waiting for a check slot (5 ahead)"]);
+    expect(labels.map((l) => l.replace(/\. Every slot is busy.*$/, ""))).toEqual(["waiting for a check slot (2 ahead)", "waiting for a check slot (3 ahead)", "waiting for a check slot (4 ahead)", "waiting for a check slot (5 ahead)"]);
     // The first in line reads "next up".
     const first = mergeQueueService(c.db, {
       runningMerges: () => [],
       limit: async () => 2,
       queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 4 }),
+      runnerConnected: async () => true,
+      queueDetail: async () => ({ slots: 2, busy: [{ ref: "APP-1", title: "A", kind: "merge check" }, { ref: "APP-2", title: "B", kind: "merge check" }], mainRed: false, fixRef: null }),
       places: async () => new Map(ids.map((id, i) => [id, { place: i + 1, why: null }])),
     });
     const d2 = await first.get(c.company.id);
-    expect(d2.waiting.find((w) => w.ticketId === ids[0])!.label).toBe("waiting for a check slot (next up)");
-    expect(d2.waiting.find((w) => w.ticketId === ids[1])!.label).toBe("waiting for a check slot (1 ahead)");
+    expect(d2.waiting.find((w) => w.ticketId === ids[0])!.label).toMatch(/^waiting for a check slot \(next up\)/);
+    expect(d2.waiting.find((w) => w.ticketId === ids[1])!.label).toMatch(/^waiting for a check slot \(1 ahead\)/);
   });
 
   it("keeps a plain wait with an empty queue, and counts only this company's jobs", async () => {

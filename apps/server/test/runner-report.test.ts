@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -80,7 +81,7 @@ describe("Settings → Runner: the live state first, a past problem as history (
 
     const dev = (await c.req("GET", "/api/runner-report")).json() as { update: { state: string; todo: string | null } };
     expect(dev.update.state).toBe("problem");
-    expect(dev.update.todo).toMatch(/start it again/i);
+    expect(dev.update.todo).toMatch(/press Start runner in Settings → Server and runner → Runner/);
   });
 
   it("a removal that raced another is not a problem once the runner is back on its image", async () => {
@@ -117,7 +118,7 @@ describe("Settings → Runner: the live state first, a past problem as history (
     const r = (await c.req("GET", `/api/companies/${id}/runner`)).json() as { report: { live: { ok: boolean; text: string } } };
     expect(r.report.live.ok).toBe(false);
     expect(r.report.live.text).toMatch(/Not connected/);
-    expect(r.report.live.text).toMatch(/start it again/i);
+    expect(r.report.live.text).toMatch(/press Start runner in Settings → Server and runner → Runner/);
   });
 });
 
@@ -217,6 +218,53 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     const back = judgeUpdate({ ...base, body: "app-co: the new runner would not start (3 tries: Creating the runner failed: boom), so it was put back on the previous runner image and is running that" }, away);
     expect(back?.todo).toMatch(/previous version/);
     const stuck = judgeUpdate({ ...base, body: "app-co: the new runner would not start (3 tries: Creating the runner failed: boom), and going back to the previous runner image failed too (gone). Press Start runner in Settings > Runner" }, away);
-    expect(stuck?.todo).toMatch(/press Start runner/);
+    expect(stuck?.todo).toMatch(/press Start runner in Settings → Server and runner → Runner/);
+  });
+
+  // BOS-1486: without the launcher the Runner panel has no Start or Restart button, so no message may name one.
+  it("without the launcher no message points at Start runner or Restart", () => {
+    const away = { "app-co": { registered: true, connected: false, at: since, imageVersion: "1", fault: null } };
+    const down = describeLive(away["app-co"], false);
+    expect(down.text).toMatch(/on your host/);
+    expect(down.text).not.toMatch(/Start runner|Restart/);
+    for (const body of ["app-co: has not reconnected", "app-co: Creating the runner failed: boom", "app-co: network guard is down"]) {
+      const j = judgeUpdate({ at: since, startedAt: null, ok: false, title: "Runner update finished with problems", body }, away, false);
+      expect(j?.todo).toMatch(/on your host/);
+      expect(j?.todo).not.toMatch(/press (Start runner|Restart)/);
+    }
+    // With the launcher the button is named, with the real path to it.
+    expect(describeLive(away["app-co"], true).text).toMatch(/press Start runner in Settings → Server and runner → Runner/);
+  });
+
+  // BOS-1486: one table of every instruction (each judgeUpdate rule and each describeLive state) and the button it names.
+  // Launcher on: the message names that button and the Runner panel really renders it. Launcher off: no button is named.
+  it("every instruction names a button the Runner panel renders, and none when the launcher is off", async () => {
+    const panel = await readFile(fileURLToPath(new URL("../../web/src/pages/settings/Runner.tsx", import.meta.url)), "utf8");
+    const away = { registered: true, connected: false, at: since, imageVersion: "1", fault: null };
+    type Row = { name: string; button: string | null; text: (launcherOn: boolean) => string };
+    const rule = (name: string, body: string, button: string | null): Row => ({
+      name,
+      button,
+      text: (on) => judgeUpdate({ at: since, startedAt: null, ok: false, title: "Runner update finished with problems", body }, { "app-co": away }, on)!.todo!,
+    });
+    const rows: Row[] = [
+      // The launcher itself is down: starting it is on the host even with a launcher configured, then Start runner.
+      rule("reach the launcher", "app-co: could not reach the launcher", "Start runner"),
+      rule("put back failed", "app-co: the new runner would not start (3 tries: Creating the runner failed: boom), and going back to the previous runner image failed too (gone)", "Start runner"),
+      rule("network guard", "app-co: network guard is down", "Restart"),
+      rule("replace failed", "app-co: Creating the runner failed: boom", "Start runner"),
+      rule("still not connected", "app-co: still not connected", "Start runner"),
+      { name: "live: not connected", button: "Start runner", text: (on) => describeLive(away, on).text },
+      { name: "live: update failed", button: "Start runner", text: (on) => describeLive({ ...away, swapFailed: "Creating the runner failed: boom" }, on).text },
+      { name: "live: paused by the guard", button: "Restart", text: (on) => describeLive({ ...away, guard: { reason: "guard container exited", since } }, on).text },
+    ];
+    for (const row of rows) {
+      const on = row.text(true);
+      const off = row.text(false);
+      expect(on, row.name).toContain(row.button!);
+      expect(panel, `${row.name}: the Runner panel renders "${row.button}"`).toContain(row.button!);
+      expect(off, row.name).not.toMatch(/Start runner|Restart(?! the)|press /i);
+      expect(off, row.name).toMatch(/on your host/);
+    }
   });
 });
