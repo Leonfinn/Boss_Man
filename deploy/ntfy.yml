@@ -27,9 +27,32 @@
 # relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
 
 services:
+  # BOS-1581: hands the data folder to ntfy's user before ntfy starts, so nobody runs chown by hand on any host. Docker
+  # makes a missing folder owned by root, which ntfy (uid 1000) cannot write to. Runs once, then exits; the same image and
+  # the same mount as ntfy, no network, only the one capability a chown needs.
+  ntfy-init:
+    profiles: ["ntfy"]
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    entrypoint: ["chown", "-R", "1000:1000", "/var/lib/ntfy"]
+    command: []
+    restart: "no"
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    network_mode: none
+    volumes:
+      - ${NTFY_DATA:-${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy}:/var/lib/ntfy
+    mem_limit: 64m
+    pids_limit: 16
+
   ntfy:
     profiles: ["ntfy"]
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    depends_on:
+      ntfy-init:
+        condition: service_completed_successfully
     command: ["serve"]
     restart: unless-stopped
     user: "1000:1000"

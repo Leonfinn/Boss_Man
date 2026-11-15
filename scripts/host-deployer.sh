@@ -1462,6 +1462,9 @@ recover_interrupted() {
 # The request is data only. Every field is checked against its own pattern, and the only commands that run inside the
 # container are these fixed ones: ntfy user list | user add | user change-pass | access <user> <topic> read-only.
 PHONE_USER='phone-read' # the only account this request may make or reset: the server is not trusted to pick another (an owner's admin login would be one reset away)
+# BOS-1581: action "setup" makes (or finds) the one account Boss Man itself publishes with, write-only on the topic, and
+# one access token for it. Same rules: the user is fixed here, and the token goes back sealed like the password does.
+PUBLISH_USER='bossman-publish'
 PHONE_SEAL_OPTS=(-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256)
 PL_USER=""
 phone_result() { # id result message [sealed]: the answer the server polls for. Only the sealed (encrypted) password is ever in it.
@@ -1473,6 +1476,33 @@ phone_result() { # id result message [sealed]: the answer the server polls for. 
 ntfy_exec() { # container-id args...: a fixed ntfy command in the container; a NTFY_PASSWORD set by the caller is passed on through the environment
   local cid=$1; shift
   timeout 30 docker exec -e NTFY_PASSWORD "$cid" ntfy "$@" </dev/null 2>&1
+}
+phone_setup_run() { # id user topic workdir cid: BOS-1581. Make or find the publish user, its write-only access and its token; seal the token.
+  local id=$1 user=$2 topic=$3 td=$4 cid=$5 out pw tok made=0
+  # Only fixed commands: ntfy user list | user add | access <user> <topic> write-only | token list <user> | token add <user>.
+  # Running it again finds all three and adds nothing. The token is only ever in the sealed answer.
+  if ! out="$(ntfy_exec "$cid" user list)"; then phone_result "$id" failed "Failed: ntfy could not list its users: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; fi
+  if ! grep -qE "^user $user( |$)" <<<"$out"; then
+    # The account needs a password to exist; nobody is ever shown it (Boss Man signs in with the token), so it is thrown away.
+    pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
+    [[ ${#pw} -eq 24 ]] || { phone_result "$id" failed "Failed: could not make a password."; return 0; }
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user add --role=user "$user")" || { phone_result "$id" failed "Failed: ntfy could not add the user: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+    made=1
+  fi
+  out="$(ntfy_exec "$cid" access "$user" "$topic" write-only)" || { phone_result "$id" failed "Failed: ntfy refused the write-only access on topic $topic: $(head -n 1 <<<"$out" | cut -c1-160). Press the button again to retry."; return 0; }
+  out="$(ntfy_exec "$cid" token list "$user")" || { phone_result "$id" failed "Failed: ntfy could not list the tokens of $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+  tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+  if [[ -z $tok ]]; then
+    out="$(ntfy_exec "$cid" token add "$user")" || { phone_result "$id" failed "Failed: ntfy could not make a token for $user: $(head -n 1 <<<"$out" | cut -c1-160)"; return 0; }
+    tok="$(grep -oE 'tk_[a-z0-9]{29}' <<<"$out" | head -n 1 || true)"
+    made=1
+  fi
+  [[ $tok =~ ^tk_[a-z0-9]{29}$ ]] || { phone_result "$id" failed "Failed: ntfy answered in a form this deployer did not expect, so no token was read."; return 0; }
+  local sealed
+  sealed="$(printf '%s' "$tok" | openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$td/pub.der" "${PHONE_SEAL_OPTS[@]}" 2>/dev/null | base64 -w0)" || sealed=""
+  [[ $sealed =~ ^[A-Za-z0-9+/]{100,}={0,2}$ ]] || { phone_result "$id" failed "Failed: could not seal the token."; return 0; }
+  if ((made)); then phone_result "$id" setup "Made the publish user $user with write-only access to topic $topic and a token." "$sealed"
+  else phone_result "$id" setup "The publish user $user, its write-only access to topic $topic and its token were already there. Nothing was changed." "$sealed"; fi
 }
 phone_login_run() { # file: handle one request; never exits the deployer
   local f=$1 flat k id action user topic pubkey now_s last
@@ -1491,8 +1521,10 @@ phone_login_run() { # file: handle one request; never exits the deployer
   [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || { log "Phone login request ignored: bad id."; return 0; }
   if grep -qs " $id " "$STATE/phone-login.log"; then log "Phone login request $id ignored: already handled."; return 0; fi
   PL_USER=$user
-  [[ $action =~ ^(create|reset)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create or reset."; return 0; }
-  if [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
+  [[ $action =~ ^(create|reset|setup)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create, reset or setup."; return 0; }
+  if [[ $action == setup ]]; then
+    if [[ $user != "$PUBLISH_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: the ntfy setup can only be made for the user $PUBLISH_USER."; return 0; fi
+  elif [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
   [[ $topic =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { phone_result "$id" rejected "Rejected: the topic may only have letters, digits, - and _ (1 to 64)."; return 0; }
   [[ $pubkey =~ ^[A-Za-z0-9+/]{100,900}={0,2}$ ]] || { phone_result "$id" rejected "Rejected: the sealing key is not valid."; return 0; }
   now_s="$(date +%s)"; last="$(cat "$STATE/last-phone-login" 2>/dev/null || echo 0)"
@@ -1521,6 +1553,7 @@ phone_login_run() { # file: handle one request; never exits the deployer
   fi
   cid="$cids"
   [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || { rm -rf "$td"; phone_result "$id" failed "Failed: docker named the ntfy container in a form that was not expected."; return 0; }
+  if [[ $action == setup ]]; then phone_setup_run "$id" "$user" "$topic" "$td" "$cid"; rm -rf "$td"; return 0; fi
   # The password is made and sealed before anything changes, so a failure here leaves ntfy as it was.
   local pw sealed out exists=0
   pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
