@@ -3,6 +3,8 @@ import { WATCHDOG_RULE_LABEL, type WatchdogRule, type WatchdogSettings } from "@
 import { api, type Company } from "../../api";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
+import { Advanced, PresetCards } from "../../components/PresetCards";
+import { limitsFromDraft, matchPreset, WATCHDOG_PRESETS, type WatchdogLimits } from "../../lib/presets";
 
 type WatchdogStatus = {
   settings: WatchdogSettings;
@@ -61,6 +63,7 @@ export function Watchdog({ company }: { company: Company }) {
       await load();
       return "Saved.";
     });
+  const preset = matchPreset(limitsFromDraft(draft) as WatchdogLimits, WATCHDOG_PRESETS);
   const on = status.settings.enabled;
   const recordOnly = status.settings.recordOnly;
   return (
@@ -98,15 +101,19 @@ export function Watchdog({ company }: { company: Company }) {
           ))}
         </select>
       </div>
-      <div className="wd-limits">
-        {WATCHDOG_LIMITS.map((l) => (
-          <div key={l.key} style={{ display: "contents" }}>
-            <label htmlFor={`wd-${l.key}`}>{l.label}</label>
-            <input id={`wd-${l.key}`} type="number" min={0} value={draft[l.key] ?? ""} onChange={(e) => setDraft({ ...draft, [l.key]: e.target.value })} />
-            <span className="muted">{l.unit}</span>
-          </div>
-        ))}
-      </div>
+      {/* Presets (BOS-1493): picking one fills the limits below; nothing is saved until Save. */}
+      <PresetCards label="Watchdog preset" presets={WATCHDOG_PRESETS} active={preset} onPick={(p) => setDraft({ ...draft, ...Object.fromEntries(Object.entries(p.values).map(([k, v]) => [k, String(v)])) })} />
+      <Advanced storeKey="watchdog" forceOpen={!preset} summary={preset ? `The ${WATCHDOG_LIMITS.length} limits behind ${preset.name}.` : "Your own limits: edit them or pick a card."}>
+        <div className="wd-limits" style={{ marginTop: 8 }}>
+          {WATCHDOG_LIMITS.map((l) => (
+            <div key={l.key} style={{ display: "contents" }}>
+              <label htmlFor={`wd-${l.key}`}>{l.label}</label>
+              <input id={`wd-${l.key}`} type="number" min={0} value={draft[l.key] ?? ""} onChange={(e) => setDraft({ ...draft, [l.key]: e.target.value })} />
+              <span className="muted">{l.unit}</span>
+            </div>
+          ))}
+        </div>
+      </Advanced>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <button type="button" className="btn" disabled={act.busy} onClick={() => void save({})}>
           Save

@@ -654,6 +654,11 @@ details > summary { cursor: pointer; font-size: 14px; }
   .wd-limits { grid-template-columns: 90px minmax(0, 1fr); }
   .wd-limits label { grid-column: 1 / -1; }
 }
+/* Preset cards on Reviews and Watchdog (BOS-1493): a row that wraps, the chosen card outlined in the accent colour. */
+.preset-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.preset-card { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--card); color: var(--ink); font: inherit; }
+button.preset-card { cursor: pointer; }
+.preset-card.on { border-color: var(--accent-dark); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-dark); }
 /* The page title takes focus when the page changes (h1 with tabindex -1): no outline ring around it. */
 .page-head h1:focus { outline: none; }
 .set-scope { margin-left: 10px; vertical-align: middle; white-space: nowrap; }
