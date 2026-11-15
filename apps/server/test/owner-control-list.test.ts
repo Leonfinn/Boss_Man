@@ -103,6 +103,8 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Agents.tsx": "Agents",
   "pages/Auth.tsx": "Log in",
   "pages/Board.tsx": "Board",
+  // A project's Budget tab (also shown on Settings → Funding).
+  "pages/ProjectBudget.tsx": "Board",
   "pages/Chat.tsx": "Chat",
   "pages/Decisions.tsx": "Decisions",
   "pages/Features.tsx": "Features",

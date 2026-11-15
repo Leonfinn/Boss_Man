@@ -254,9 +254,13 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         // reading. The adapter's figure for a free model is a list-price guess, not money spent.
         if (isInfiniteModel(run?.model) || isInfiniteModel(event.model)) return [];
         const [eng] = run?.engagementId ? await tx.select().from(engagements).where(eq(engagements.id, run.engagementId)) : [];
+        // The project the run worked on (BOS-1564), so a project spending limit counts it.
+        const ticketId = run?.ticketId ?? run?.runTicketId;
+        const [ticketRow] = ticketId ? await tx.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId)) : [];
         const base = {
           fundingSourceId: event.fundingSourceId,
           companyId: runner.companyId,
+          projectId: ticketRow?.projectId ?? null,
           runId: event.runId,
           agentId: run?.agentId ?? null,
           engagementId: run?.engagementId ?? null,

@@ -57,7 +57,7 @@ export const OWNER_CONTROLS = {
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
-    "Show all done tasks", "Run now", "Discard draft",
+    "Show all done tasks", "Run now", "Discard draft", "Add limit",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters",
@@ -170,7 +170,7 @@ export const OWNER_CONTROLS = {
   Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
-  Funding: ["Save", "Add funding source", "Edit", "Delete", "Cancel"],
+  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Save", "Check with Claude", "Check", "Remove"],
   Workflow: [],
@@ -211,7 +211,7 @@ export const OWNER_FIELDS = {
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
     "Done when (one acceptance criterion per line)", "Objective or milestone", "Ask the CEO to plan it", "Part of feature",
-    "Assign to", "Risk", "Project", "Assigned to", "Feature",
+    "Assign to", "Risk", "Project", "Assigned to", "Feature", "Spending limit per month (USD)", "At the limit",
   ],
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
@@ -313,6 +313,8 @@ export const OWNER_FIELDS = {
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
     // Adding or editing a funding source (BOS-1019: it lives here, not on a separate tab).
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
+    // A project's monthly spending limit (its Budget tab, BOS-1564).
+    "Spending limit per month (USD)", "At the limit",
   ],
   // "Add" is the kind of credential to add (Claude token, GitHub token, Other…).
   Secrets: ["Add", "Value", "Name", "Variable name", "Rotate: new value"],
