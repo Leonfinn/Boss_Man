@@ -256,6 +256,22 @@ export class MergeTrain {
   get size() {
     return this.members.length + this.waiting.size;
   }
+
+  /** Seated tickets, head first (BOS-1504: the check queue serves their merge jobs in this order). */
+  seatedIds(): string[] {
+    return this.members.map((m) => m.ticketId);
+  }
+
+  /**
+   * BOS-1504: a merge job of this ticket must not take a check slot now. True while it waits for a seat, and after a restart
+   * while the seed still names it and it hasn't been seated or left (its landing may not have re-joined yet). A slot spent on
+   * it would check a tree no landing uses: when it is seated, it prepares again on the train's base.
+   */
+  withheld(ticketId: string): boolean {
+    if (this.index(ticketId) >= 0) return false;
+    if (this.waiting.has(ticketId)) return true;
+    return !!this.seed && this.now() < this.seed.until && this.seed.order.includes(ticketId) && this.wanted(ticketId);
+  }
 }
 
 /** One train per project, on the server in charge. Cleared only by a restart (the train is rebuilt, never stored). */
@@ -273,6 +289,16 @@ export function trainFor(projectId: string, seats: number): { train: MergeTrain;
   const train = new MergeTrain({ seats: () => seatCounts.get(projectId) ?? 1 });
   trains.set(projectId, train);
   return { train, created: true };
+}
+
+/**
+ * BOS-1504: what the check queue needs from a project's train: the seated tickets (head first) and which tickets' merge jobs to
+ * hold back. Null when this server has no train for the project (a standby copy, or no landing since it started): then the
+ * queue serves as it did before. Runners connect only to the server in charge, so the queue's pump runs beside the trains.
+ */
+export function trainView(projectId: string): { seated: string[]; withheld: (ticketId: string) => boolean } | null {
+  const train = trains.get(projectId);
+  return train ? { seated: train.seatedIds(), withheld: (id) => train.withheld(id) } : null;
 }
 
 /** Tests only: forget every train, as a restart does. */

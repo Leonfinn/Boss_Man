@@ -1,0 +1,174 @@
+// The Dashboard's two lead panels (BOS-1507, design BOS-1490): "Needs you" (what is waiting for the owner,
+// with a button to each item) and "Right now" (four fixed health lines). Every state has a symbol and words,
+// never colour alone, and a line that couldn't be read says "not known" instead of turning green.
+import type { Decision, DecisionTally } from "../api";
+import { raisedAgo } from "../age";
+import type { MergeHealthView, StuckSummary } from "./MergesStuckBanner";
+import { waitedText } from "./MergesStuckBanner";
+
+export const NEEDS_YOU_MAX = 5;
+
+/** What the server's dashboard read says about the lines it owns; a missing field is an older server. */
+export type HealthData = {
+  runner?: { registered: boolean; connected: boolean; lastSeenAt: string | null } | null;
+  usage?: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
+  update?: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+};
+
+export type LineTone = "ok" | "warn" | "bad" | "unknown";
+export type HealthLine = {
+  key: "runner" | "merges" | "usage" | "update";
+  tone: LineTone;
+  /** ✓ ‖ ↑ ! ✕ ?: the symbol is always shown beside the words. */
+  symbol: string;
+  /** The state in words: "Runner offline". */
+  state: string;
+  /** The short phone-pill words. */
+  pill: string;
+  /** The one plain sentence under it. */
+  text: string;
+  href: string;
+  linkText: string;
+};
+
+const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
+
+/** The four lines, always in this order: Runner, Merges, Usage limits, Update. */
+export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
+  const { health, merges, stuck, running, companyId } = input;
+  const now = input.now ?? Date.now();
+  const system = `#/settings/${companyId}/system`;
+
+  let runner: HealthLine;
+  const r = health?.runner;
+  if (r == null) runner = { key: "runner", tone: "unknown", symbol: "?", state: "Runner: not known", pill: "Runner not known", text: "Couldn't check. Trying again in 10 s.", href: system, linkText: "Runner settings" };
+  else if (!r.registered) runner = { key: "runner", tone: "warn", symbol: "‖", state: "No runner set up", pill: "No runner set up", text: "Nothing can run until a runner connects.", href: system, linkText: "Runner settings" };
+  else if (!r.connected) {
+    const since = r.lastSeenAt ? `Since ${clock(r.lastSeenAt)} (${hoursText(now - new Date(r.lastSeenAt).getTime())}). ` : "";
+    runner = { key: "runner", tone: "bad", symbol: "✕", state: "Runner offline", pill: "Runner offline", text: `${since}Runs and checks can't start.`, href: system, linkText: "Runner settings" };
+  } else runner = { key: "runner", tone: "ok", symbol: "✓", state: "Runner connected", pill: "Runner connected", text: running === 1 ? "1 agent running now." : `${running} agents running now.`, href: system, linkText: "Runner settings" };
+
+  let mergesLine: HealthLine;
+  if (!merges) mergesLine = { key: "merges", tone: "unknown", symbol: "?", state: "Merges: couldn't check", pill: "Merges not known", text: "The server didn't answer. Trying again in 20 s.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  else if (stuck) {
+    const behind = merges.waitingCount > 0 ? ` ${merges.waitingCount} in the line.` : "";
+    mergesLine = { key: "merges", tone: "bad", symbol: "!", state: "Merges stuck", pill: "Merges stuck", text: `${stuck.title}.${behind}`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: merges.waitingCount > 0 ? `${merges.waitingCount} waiting, none stuck.` : "Nothing waiting to merge.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+
+  let usage: HealthLine;
+  const u = health?.usage;
+  if (u == null) usage = { key: "usage", tone: "unknown", symbol: "?", state: "Usage limits: not known", pill: "Limits not known", text: "This server is older than the check. It shows after the next update.", href: "#/agents", linkText: "Agents" };
+  else if (u.agents > 0) {
+    const who = u.accounts.length === 1 ? `${u.accounts[0]} account` : u.accounts.length > 1 ? `${u.accounts.length} accounts` : "An account";
+    const reset = u.firstResetAt ? (u.accounts.length > 1 ? `, first resets at ${clock(u.firstResetAt)}` : ` resets at ${clock(u.firstResetAt)}`) : " has no reset time yet";
+    usage = { key: "usage", tone: "warn", symbol: "‖", state: `${u.agents} ${u.agents === 1 ? "agent" : "agents"} held by a usage limit`, pill: u.firstResetAt ? `${u.agents} held till ${clock(u.firstResetAt)}` : `${u.agents} held`, text: `${who}${reset}.`, href: "#/agents", linkText: "Agents" };
+  } else usage = { key: "usage", tone: "ok", symbol: "✓", state: "No agent held by a usage limit", pill: "No limit holds", text: "Every agent can start when it has work.", href: "#/agents", linkText: "Agents" };
+
+  let update: HealthLine;
+  const up = health?.update;
+  if (up == null) update = { key: "update", tone: "unknown", symbol: "?", state: "Updates: not known", pill: "Updates not known", text: "Couldn't check.", href: system, linkText: "Updates" };
+  else if (up.waiting) update = { key: "update", tone: "warn", symbol: "↑", state: "Update waiting", pill: "Update waiting", text: up.deadline ? `Server update waits for a quiet machine; you'll be asked at ${clock(up.deadline)}.` : "Server update waits for a quiet machine.", href: system, linkText: "Updates" };
+  else update = { key: "update", tone: "ok", symbol: "✓", state: "No update waiting", pill: "No update waiting", text: "Nothing is waiting to be installed.", href: system, linkText: "Updates" };
+
+  return [runner, mergesLine, usage, update];
+}
+
+export function RightNow({ lines, paused, companyId, loading }: { lines: HealthLine[] | null; paused: boolean; companyId: string; loading?: boolean }) {
+  return (
+    <section className="card dash-panel dash-right" aria-labelledby="dash-right">
+      <h2 id="dash-right" className="dash-panel-head">
+        Right now
+        <small className="muted">{loading ? "Checking…" : "Refreshes every 10 s"}</small>
+      </h2>
+      {paused && (
+        <p className="dash-line tone-warn">
+          <span className="dash-sym" aria-hidden="true">‖</span>
+          <span><strong>Company paused</strong> Nothing starts until you resume it. <a href={`#/settings/${companyId}/system`}>Settings</a></span>
+        </p>
+      )}
+      <ul className="dash-lines">
+        {(lines ?? (["Runner", "Merges", "Usage limits", "Updates"] as const).map((n) => ({ key: n, tone: "unknown" as const, symbol: "…", state: `${n}: checking…`, pill: `${n}…`, text: "", href: "#", linkText: "" }))).map((l) => (
+          <li key={l.key} className={`dash-line tone-${l.tone}`}>
+            <a className="dash-line-link" href={l.href} aria-label={l.text ? `${l.state}. ${l.text} Open ${l.linkText}.` : l.state}>
+              <span className="dash-sym" aria-hidden="true">{l.symbol}</span>
+              <span className="dash-line-text">
+                <strong className="dash-state">{l.state}</strong>
+                <span className="dash-pill" aria-hidden="true">{l.pill}</span>
+                {l.text && <span className="dash-sentence">{l.text}</span>}
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** The tag and button words for one of the owner's items. */
+export function needsKind(d: Pick<Decision, "kind" | "options" | "context">): { tag: string; button: string } {
+  if (d.kind === "signoff" || d.context?.type === "risk_review") return { tag: "Sign-off", button: "Sign off" };
+  if (d.options.includes("Approve plan")) return { tag: "Review", button: "Review" };
+  return { tag: "Card", button: "Answer" };
+}
+
+export function needsList(decisions: Decision[]): Decision[] {
+  return decisions.filter((d) => !d.waiting).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+export function NeedsYou({ decisions, tally }: { decisions: Decision[] | null; tally: DecisionTally | null | undefined }) {
+  if (!decisions) {
+    return (
+      <section className="card dash-panel dash-needs" aria-labelledby="dash-needs" aria-busy="true">
+        <h2 id="dash-needs" className="dash-panel-head">Needs you <small className="muted">Checking…</small></h2>
+        <ul className="dash-needs-list" aria-hidden="true">
+          {[0, 1, 2].map((i) => <li key={i} className="dash-needs-item skeleton"><span /></li>)}
+        </ul>
+      </section>
+    );
+  }
+  const queue = needsList(decisions);
+  const open = tally?.open ?? queue.length;
+  const waiting = tally?.waiting ?? decisions.filter((d) => !!d.waiting).length;
+  const shown = queue.slice(0, NEEDS_YOU_MAX);
+  const more = Math.max(0, open - shown.length);
+  const waitingText = waiting > 0 ? `${waiting} with the team, nothing to do yet` : null;
+  return (
+    <section className="card dash-panel dash-needs" aria-labelledby="dash-needs">
+      <h2 id="dash-needs" className="dash-panel-head">
+        Needs you
+        {open > 0 && <span className="dash-count" aria-label={`${open} ${open === 1 ? "item needs" : "items need"} you`}>{open}</span>}
+      </h2>
+      {shown.length === 0 && open === 0 ? (
+        <p className="dash-calm">
+          <span className="dash-sym" aria-hidden="true">✓</span>
+          <span>
+            <strong>Nothing needs you.</strong>{" "}
+            {waiting > 0 ? `${waiting === 1 ? "1 card is" : `${waiting} cards are`} with the team; you'll be told if one comes to you.` : "You'll be told if something comes to you."}
+          </span>
+        </p>
+      ) : (
+        <ul className="dash-needs-list">
+          {shown.map((d) => {
+            const k = needsKind(d);
+            const ref = d.about?.[0]?.ref ?? d.blocks[0]?.ref ?? null;
+            const small = [ref, d.agentName ?? d.forAgentName ?? null, d.recommendedOption ? `recommends ${d.recommendedOption}` : null, raisedAgo(d.createdAt, Date.now())].filter(Boolean).join(" · ");
+            return (
+              <li key={d.id} className="dash-needs-item">
+                <span className="tag amber">{k.tag}</span>
+                <a className="dash-needs-title" href={`#/decisions/${d.id}`} title={d.question}>{d.question}</a>
+                <small className="muted">{small}</small>
+                <a className="btn primary dash-needs-btn" href={`#/decisions/${d.id}`} aria-label={`${k.button}: ${d.question}`}>{k.button}</a>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="dash-needs-foot">
+        {more > 0 && <span>{more} more {more === 1 ? "needs" : "need"} you · </span>}
+        {waitingText && open > 0 && <span>{waitingText} · </span>}
+        <a href="#/decisions">{more > 0 ? `Open Decisions (all ${open})` : "Open Decisions"}</a>
+      </p>
+    </section>
+  );
+}

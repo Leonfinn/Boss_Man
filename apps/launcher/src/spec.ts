@@ -61,6 +61,10 @@ export type LauncherConfig = {
   envMemoryCap?: number;
   /** BOS-993: the host's total memory in bytes (from /proc/meminfo), when known. */
   hostMemoryBytes?: number;
+  /** BOS-1498: the most agents one company's runner can carry at once, pushed by the server with the slots. Unset = not sent yet, so the old 13 GB base applies. */
+  requestedAgents?: number;
+  /** BOS-1498: the memory runners already had when this launcher first heard the agents number, kept while neither setting is lowered. */
+  kept?: KeptMemory;
   /** BOSSMAN_OPENCODE_SESSION_DAYS: the runner deletes OpenCode sessions untouched this many days (BOS-616). Unset = the runner's default (14); 0 = never. */
   opencodeSessionDays?: number;
   /** PNPM_STORE_DIR: the shared pnpm store inside the runner, a folder under the workspaces volume (default: its .pnpm-store). */
@@ -152,12 +156,26 @@ export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(compan
 
 const GIB = 1024 ** 3;
 /**
- * A runner's memory: this much for everything the company's agents run at once (they all live in the one runner; the live runner
- * needed 16 GB with one check slot), plus one allowance per check slot (a full check peaks at about 3 GB).
- * So 1 slot = 16 GB, 2 = 19 GB, 3 = 22 GB (13 GB plus 3 GB a slot). It is always cut down to what the host has (see HOST_RESERVE_BYTES).
+ * The old base, from before BOS-1498: 13 GB for every agent the company runs, plus 3 GB a check slot (1 slot = 16 GB).
+ * It came from Boss Man building itself with many agents, so it now applies only while the launcher has not been told the
+ * agents number (an older server, or the minute before the first push), so no runner shrinks on an upgrade alone.
  */
 export const RUNNER_BASE_BYTES = 13 * GIB;
+/** A full check peaks at about 3 GB (BOS-993's figure, unchanged). */
 export const RUNNER_PER_SLOT_BYTES = 3 * GIB;
+/**
+ * BOS-1498: a runner is sized from what it carries. 2 GB for the runner itself, git and ripgrep and one owner chat (chats are
+ * outside the run limits), plus 1 GB per agent at once, plus RUNNER_PER_SLOT_BYTES per check. Both figures are estimates: BOS-212
+ * (research/infrastructure/hardware-sizing-and-docker-packaging-for-boss-man-unfinished-research) measured an idle runner at
+ * 0.1 GiB and put an agent at 0.5 to 1 GB (more while it drives a browser) without measuring it yet; we take the top of that.
+ * Update both here when BOS-212 measures them.
+ */
+export const RUNNER_AGENT_BASE_BYTES = 2 * GIB;
+export const RUNNER_PER_AGENT_BYTES = 1 * GIB;
+/** The most agents the server can send: 16 in a company plus 16 background (settings-limits.ts), with room to spare. */
+export const MAX_AGENTS = 64;
+/** BOS-1498: what runners had when the agents number first arrived, and the settings then. See planChecks. */
+export type KeptMemory = { bytes: number; slots: number; agents: number };
 /** The least a runner is given, even on a small host (the old default). */
 export const RUNNER_MIN_BYTES = 4 * GIB;
 /** Memory kept back on the host for the server, database and proxy when sizing a runner from the host's total. */
@@ -171,33 +189,71 @@ export type ChecksPlan = {
   memoryBytes: number;
   /** Why `slots` is lower than `requested`; null when it isn't. */
   reason: string | null;
+  /** BOS-1498: the agents number the server sent (null before it has). */
+  agents: number | null;
+  /** BOS-1498: one plain line for the owner: what a runner made now is given and why. */
+  why: string;
 };
 
 const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
+const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
 
 /**
- * The runner's check slots and memory (BOS-993). The setting drives both; .env values are upper bounds and the host's
- * memory limits what fits. With no setting pushed yet the .env values apply as before.
+ * The runner's check slots and memory (BOS-993, BOS-1498). The settings drive both and the host's memory limits what fits.
+ * BOSSMAN_CHECK_SLOTS is an upper bound; BOSSMAN_RUNNER_MEMORY is an upper bound on the old path and the size itself once the
+ * agents number is known. With no setting pushed yet the .env values apply as before.
+ *
+ * Memory = 2 GB + 1 GB per agent at once + 3 GB per check. Until the server sends the agents number, the old 13 GB base stands in.
+ * `kept` (recorded by the launcher when the agents number first arrives and runners already exist) keeps those runners' memory
+ * while neither setting is below what it was then: an upgrade alone never shrinks a runner, raising a setting only adds, and
+ * only an owner who lowers one of the two settings moves to the smaller formula.
  */
 export function planChecks(cfg: LauncherConfig): ChecksPlan {
-  if (cfg.requestedSlots === undefined) return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null };
+  if (cfg.requestedSlots === undefined) {
+    const why = `${gb(cfg.memoryBytes)}: ${cfg.envMemoryCap !== undefined ? "set by BOSSMAN_RUNNER_MEMORY in the host's .env" : "the starting size, until Boss Man sends your settings"}.`;
+    return { requested: null, slots: cfg.checkSlots ?? 1, memoryBytes: cfg.memoryBytes, reason: null, agents: null, why };
+  }
   const want = cfg.requestedSlots;
-  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_MIN_BYTES) : Infinity;
-  const ceiling = Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
-  const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - RUNNER_BASE_BYTES) / RUNNER_PER_SLOT_BYTES)) : Infinity;
+  const agents = cfg.requestedAgents;
+  const sized = agents !== undefined;
+  const base = sized ? RUNNER_AGENT_BASE_BYTES + RUNNER_PER_AGENT_BYTES * agents : RUNNER_BASE_BYTES;
+  // Before the agents number (the old path, unchanged): never below 4 GB, and .env is only an upper bound.
+  // With it (BOS-1498, the CEO's rules): a size the owner wrote in .env is used as it is, and on a small machine the host's limit
+  // wins over the 4 GB floor, so the runner never takes the memory the server needs; the line then says it is under 4 GB.
+  // The 1 GB floor only stops a nonsense limit on a host under 3 GB.
+  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, sized ? GIB : RUNNER_MIN_BYTES) : Infinity;
+  const envWins = sized && cfg.envMemoryCap !== undefined;
+  const ceiling = envWins ? cfg.envMemoryCap! : sized ? hostCeiling : Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
+  const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - base) / RUNNER_PER_SLOT_BYTES)) : Infinity;
   const slots = Math.min(want, cfg.envSlotsCap ?? Infinity, fits);
-  const memoryBytes = Math.min(RUNNER_BASE_BYTES + RUNNER_PER_SLOT_BYTES * slots, ceiling);
+  const need = base + RUNNER_PER_SLOT_BYTES * slots;
+  const kept = sized && cfg.kept && want >= cfg.kept.slots && agents >= cfg.kept.agents ? cfg.kept.bytes : 0;
+  const target = Math.max(need, kept);
+  const memoryBytes = envWins ? cfg.envMemoryCap! : Math.min(target, ceiling);
+  const what = sized ? `${n(agents, "agent", "agents")} at once and ${n(slots, "check", "checks")}` : `the earlier fixed size for ${n(slots, "check", "checks")} at once (13 GB plus 3 GB a check)`;
+  const machine = cfg.hostMemoryBytes ? `this ${gb(cfg.hostMemoryBytes)} machine` : "this machine";
+  let why: string;
+  if (envWins) why = `${gb(memoryBytes)}: set by BOSSMAN_RUNNER_MEMORY in the host's .env (${what} would need ${gb(target)}).`;
+  else if (memoryBytes < target)
+    why =
+      cfg.envMemoryCap !== undefined && cfg.envMemoryCap <= hostCeiling
+        ? `${gb(memoryBytes)}: ${what} would need ${gb(target)}, but BOSSMAN_RUNNER_MEMORY in the host's .env caps it.`
+        : `${gb(memoryBytes)}: ${what} would need ${gb(target)}; ${machine} keeps ${gb(HOST_RESERVE_BYTES)} for the server and database.` +
+          (memoryBytes < RUNNER_MIN_BYTES ? ` That is under the ${gb(RUNNER_MIN_BYTES)} a runner should have, so expect slow or failed runs: lower Agents at once or use a bigger machine.` : "");
+  else if (kept > need) why = `${gb(memoryBytes)}: kept from before (${what} need ${gb(need)}). Lower Agents at once or Checks at once to use the smaller size.`;
+  else if (!sized) why = `${gb(memoryBytes)}: ${what}, until Boss Man sends your Agents at once.`;
+  else why = `${gb(memoryBytes)}: ${what}${cfg.hostMemoryBytes ? `, on a ${gb(cfg.hostMemoryBytes)} machine` : ""}.`;
   let reason: string | null = null;
   if (slots < want) {
     if (cfg.envSlotsCap !== undefined && slots === cfg.envSlotsCap) reason = `The host's .env caps it at ${slots} (BOSSMAN_CHECK_SLOTS).`;
-    else if (cfg.envMemoryCap !== undefined && slots === fits && cfg.envMemoryCap <= hostCeiling) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
+    else if (cfg.envMemoryCap !== undefined && slots === fits && (envWins || cfg.envMemoryCap <= hostCeiling)) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
     else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
   }
-  return { requested: want, slots, memoryBytes, reason };
+  return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why };
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string, image?: string) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image?: string, host?: { dockerVersion: string; osType: string } | null) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
@@ -213,6 +269,8 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string)
       ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
+      // The runner has no Docker socket; it reports these with its kernel as the platform fingerprint (DR-049 point 1).
+      ...(host ? [`BOSSMAN_HOST_DOCKER=${host.dockerVersion}`, `BOSSMAN_HOST_OS=${host.osType}`] : []),
     ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {

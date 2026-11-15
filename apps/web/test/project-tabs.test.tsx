@@ -52,7 +52,7 @@ describe("project page tabs", () => {
     show("budget");
     expect(await screen.findByText("$3.50")).toBeTruthy();
     expect(screen.getByText("$4.50")).toBeTruthy();
-    expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap").getAttribute("max")).toBe("10000000");
+    expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap (API and credit runs only)").getAttribute("max")).toBe("10000000");
     expect(screen.getByRole("link", { name: "Big job" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Tokens")).toBeTruthy();
     expect(screen.getByText(/1\.2M \/ 45K/)).toBeTruthy();

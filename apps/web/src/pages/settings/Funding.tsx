@@ -165,7 +165,7 @@ export function ProjectBudgets({ company }: { company: Company }) {
   return (
     <Section id="budgets-h" title="Budgets">
       <p className="muted" style={{ fontSize: 14 }}>
-        What each project has cost, and its cap per task and per month. Set a project's caps on its Config tab.
+        What each project has cost on API and credit runs (list-price estimates, not a bill), and its cap per task and per month. Runs paid from a subscription are left out of the dollar figures. Set a project's caps on its Config tab.
       </p>
       {projects.error ? <p className="error" role="alert">{projects.error.message}</p> : null}
       {projects.data === null ? <Loader label="Loading projects" /> : rows.length === 0 ? <p className="muted">No projects yet. Add one on the Projects page.</p> : (

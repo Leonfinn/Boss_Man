@@ -24,7 +24,7 @@ describe("Checks in Settings", () => {
       }),
     );
     render(<CheckQueueSetting />);
-    const legacy = (await screen.findByRole("radio", { name: /Agents run their own/ })) as HTMLInputElement;
+    const legacy = (await screen.findByRole("radio", { name: /Each agent runs its own/ })) as HTMLInputElement;
     const server = screen.getByRole("radio", { name: /Boss Man runs them/ }) as HTMLInputElement;
     expect(legacy.checked).toBe(true);
     expect(server.parentElement!.textContent).toContain("woken with the result");
@@ -44,5 +44,19 @@ describe("Checks in Settings", () => {
     expect((await screen.findByTestId("check-queue-old-runner")).textContent).toContain("App Co");
     fireEvent.change(screen.getByLabelText(/Checks at once/), { target: { value: "9" } });
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("BOS-1498: shows what memory the runners are given and why", async () => {
+    const memoryLine = "11 GB: 6 agents at once and 1 check, on a 16 GB machine.";
+    const runner = { slots: 1, memoryBytes: 11 * 1024 ** 3, reason: null, pending: 0, applying: false, runnerCount: 1 };
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runner: { ...runner, memoryLine } })));
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("runner-memory-line")).textContent).toBe(memoryLine);
+    cleanup();
+    // An older launcher sends no line: the panel shows the limit alone.
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...view, runner })));
+    render(<CheckQueueSetting />);
+    expect((await screen.findByTestId("check-runner-limit")).textContent).toContain("11 GB memory limit");
+    expect(screen.queryByTestId("runner-memory-line")).toBeNull();
   });
 });

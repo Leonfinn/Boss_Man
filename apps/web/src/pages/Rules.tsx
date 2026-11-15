@@ -6,7 +6,7 @@ import { clearDraft } from "../drafts";
 import { DraftTextarea } from "../components/DraftTextarea";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; destructive?: boolean; pushing?: boolean };
+type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; tempCleanupOnly?: boolean; workingCopyOnly?: boolean; reservedTmpRemoval?: boolean; destructive?: boolean; pushing?: boolean };
 type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
@@ -31,6 +31,7 @@ function describeMatch(m: Match) {
   if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
   if (m.destructive) parts.push("the command deletes or destroys data (Boss Man reads what each part runs, however it's written)");
   if (m.tempCleanupOnly) parts.push("its only deletes are of entries directly in /tmp");
+  if (m.reservedTmpRemoval) parts.push("it removes one of Boss Man's own /tmp entries (a check slot, a skills folder)");
   if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
   if (m.safeOnly) parts.push("it is not a destructive or pushing command");
   if (m.pushing) parts.push("the command pushes or publishes");

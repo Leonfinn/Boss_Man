@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
 import { setHold, useHold } from "../../hold";
@@ -6,7 +6,8 @@ import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
-import { LiveState, UpdateHistory, type MaintenanceView, type Report, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
+import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -17,10 +18,12 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
   return (
     <Section id="workspace-disk-h" title="Workspace disk">
       <p className="muted" style={{ fontSize: 14 }}>
-        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this cap, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. Worktrees of tickets done more than 7 days ago are released automatically.
+        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this amount, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. The working files of tickets done more than 7 days ago are cleared automatically.
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <label htmlFor="disk-cap">Disk cap (GB)</label>
+        <label htmlFor="disk-cap">
+          Most disk to use (GB) <code className="mono">workspace disk cap</code>
+        </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
         <button
           type="button"
@@ -45,58 +48,6 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
   );
 }
 
-type SelfDeployView = {
-  enabled: boolean;
-  pending: boolean;
-  status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
-  available: { tip: string; deployed: string; checkedAt: string; commits?: { sha: string; subject?: string }[]; runnerChanged?: boolean; bluegreen?: boolean } | null;
-  /** When the host deployer last showed it is alive, and whether that is overdue (BOS-753). Absent from an older server. */
-  deployer?: { reportedAt: string | null; late: boolean };
-  lateAfterMinutes?: number;
-  /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
-  trial?: { endsAt: string; seconds: number } | null;
-  /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
-  deployWait?: { until: string } | null;
-  /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
-  runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
-  /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
-  heldDeploy?: { id: string; commit: string; since: string } | null;
-  /** Why a queued runner update was cancelled (a rolled-back server update), until the next press. */
-  queueCancelled?: { at: string; why: string } | null;
-};
-
-/** A server update waiting for a quiet machine (BOS-420). */
-type DeployWaitView =
-  | { on: false }
-  | { on: true; phase: "waiting" | "sent" | "window" | "handover"; origin: "approve" | "hand"; commit: string; deadline: string; windowUntil?: string; quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[] } };
-
-const gbOf = (mb: number) => `${(mb / 1024).toFixed(1)} GB`;
-
-/** The plain-words line for a waiting update: what it waits for, and what is held back meanwhile. */
-function waitLine(w: Extract<DeployWaitView, { on: true }>): string {
-  const q = w.quiet;
-  const mem = q?.freeMb != null && q.needMb != null ? ` ${gbOf(q.freeMb)} free of the ${gbOf(q.needMb)} it needs.` : "";
-  const held = " Meanwhile new merge checks wait and fewer runs start.";
-  if (w.phase === "waiting")
-    return w.origin === "hand"
-      ? q?.ready
-        ? `Ready: the machine is quiet. Apply the update to ${w.commit.slice(0, 8)} by hand now.${mem}${held}`
-        : `Making room before you apply the update to ${w.commit.slice(0, 8)} by hand: ${q?.why.join("; ") || "checking"}.${mem}${held}`
-      : `The update to ${w.commit.slice(0, 8)} is waiting for a quiet machine: ${q?.why.join("; ") || "checking"}.${mem} You'll be asked at ${when(w.deadline)} if it is still waiting.${held}`;
-  if (w.phase === "sent") return `The update to ${w.commit.slice(0, 8)} has gone to the machine.${held}`;
-  if (w.phase === "window") return `The update is live; its standby window runs until ${when(w.windowUntil ?? w.deadline)}.${held}`;
-  return `The update is live; waiting for the runner update to start.${held}`;
-}
-
-/** "15:33", in the reader's own clock, from an ISO instant (BOS-953). */
-function atTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-/** "in about 6 minutes", or "in less than a minute", from now to an instant (BOS-953). */
-function inAbout(iso: string, now: number): string {
-  const mins = Math.ceil((Date.parse(iso) - now) / 60_000);
-  return mins <= 0 ? "now" : mins === 1 ? "in about 1 minute" : `in about ${mins} minutes`;
-}
 /** A clock that ticks every 15 s, so a countdown on the page moves without waiting for the next poll (BOS-953). */
 export function useNow(everyMs = 15_000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -105,15 +56,6 @@ export function useNow(everyMs = 15_000): number {
     return () => clearInterval(timer);
   }, [everyMs]);
   return now;
-}
-
-/** The line under "Last deploy" when the host has no offer to show (BOS-753): "not reported" only when it really is overdue. */
-function deployerLine(v: SelfDeployView): string {
-  const d = v.deployer;
-  if (!d) return "The host deployer has not reported yet.";
-  if (!d.reportedAt) return "The host deployer has not reported yet. Check that its cron job is running.";
-  if (d.late) return `The host deployer last reported ${when(d.reportedAt)}, more than ${v.lateAfterMinutes ?? 10} minutes ago; it should report every minute. Check that its cron job is running.`;
-  return `The host deployer last reported ${when(d.reportedAt)}. It is reading main again and shows what is waiting within a few minutes.`;
 }
 
 /** Boss Man's merges record the ticket as `Merge "<title>" (<ticket id>)` (BOS-213). */
@@ -138,9 +80,9 @@ function waitingMerges(commits: { subject?: string }[] | undefined): { title: st
 function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefined }) {
   const changes = waitingMerges(commits);
   if (!changes.length) return null;
-  const shown = changes.slice(0, 10);
+  const shown = changes.slice(0, 5);
   return (
-    <div style={{ fontSize: 14 }}>
+    <div style={{ fontSize: 14 }} data-testid="waiting-changes">
       <p style={{ margin: 0 }}>{changes.length === 1 ? "1 change waiting:" : `${changes.length} changes waiting:`}</p>
       <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
         {shown.map((c, i) => (
@@ -159,7 +101,7 @@ function WaitingChanges({ commits }: { commits: { subject?: string }[] | undefin
  * host's frozen text and never disagree with the BLUE/GREEN rows (the trial comes from the same colour probe).
  * Pure, so a layout test can render it on its own.
  */
-export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
+export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial?: { endsAt: string } | null; wait?: { until: string; target?: string } | null; now: number; queue?: { startsAt: string | null; why: string } | null; cancelled?: { why: string } | null; held?: { commit: string } | null }) {
   const trialOver = trial ? Date.parse(trial.endsAt) <= now : false;
   const waitOver = wait ? Date.parse(wait.until) <= now : false;
   return (
@@ -188,7 +130,7 @@ export function TrialLines({ trial, wait, now, queue, cancelled, held }: { trial
       )}
       {wait && (
         <p className={waitOver ? "muted" : "error"} role="status" data-testid="deploy-wait" style={{ fontSize: 14 }}>
-          {waitOver ? "You can deploy now." : `A server deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
+          {waitOver ? "You can deploy now." : `A ${wait.target === "runner" ? "runner" : "server"} deploy was refused to keep one every 10 minutes. You can deploy again from ${atTime(wait.until)}, ${inAbout(wait.until, now)}.`}
         </p>
       )}
     </>
@@ -200,136 +142,319 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
   const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
   const wait = usePoll((signal) => api<DeployWaitView>("/api/self-deploy/wait", { signal }), 10_000, "self-deploy-wait");
   const maint = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-updates");
+  const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
+  const history = usePoll((signal) => api<HistoryRow[]>("/api/self-deploy/history?limit=5", { signal }), 30_000, "self-deploy-history");
   const act = useAction();
   // A clock so the trial and rate-limit lines count down between polls (BOS-953).
   const now = useNow();
   const v = view.data;
-  const w = wait.data?.on ? wait.data : null;
-  if (!v?.enabled) return null;
-  const s = v.status;
-  // Right after a deploy the host's offer still names the old commit for a few minutes.
-  const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed && !(s?.result === "deployed" && s.to_commit === v.available.tip);
+  if (v && !v.enabled) {
+    // BOS-1486: with no host deployer there is no Build and update runners button, but a hand-built image still needs the drain.
+    return (
+      <Section id="deploy-h" title="Updates">
+        <p className="muted" style={{ fontSize: 14 }}>
+          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+        </p>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !!maint.data?.on}
+          onClick={() =>
+            act.run(async () => {
+              await api("/api/maintenance/start", { method: "POST", body: {} });
+              maint.reload();
+            })
+          }
+        >
+          Update runners (finish runs first)
+        </button>
+        {act.view}
+      </Section>
+    );
+  }
+  const s =v?.status ?? null;
+  const progress = runnerProgress(report.data?.live, maint.data);
+  const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
+  const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
+  const busy = act.busy || !v;
+  const idle = !!v && !v.pending && s?.result !== "running";
+
+  const deployLatest = () =>
+    act.run(async () => {
+      try {
+        await api("/api/self-deploy/deploy-latest", { method: "POST", body: {} });
+      } catch (err) {
+        // Nothing new is not a failure: the server says so, and has asked the host to look at main again.
+        if (err instanceof ApiError && err.status === 409) return err.message;
+        throw err;
+      }
+      go("decisions");
+    });
+  const wrapUp = () =>
+    act.run(async () => {
+      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
+      maint.reload();
+      return "Every running agent was asked to wrap up.";
+    });
+  const stopThem = (runIds: string[]) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${runIds.length} run${runIds.length === 1 ? "" : "s"} and carry on with the update? They stop mid-step, so anything they have not saved is lost. They are not woken again afterwards: their tickets wait where they stopped.`)) return;
+      const r = await api<{ stopped: number; skipped: number }>("/api/maintenance/stop-stragglers", { method: "POST", body: { runIds } });
+      maint.reload();
+      return `Stopped ${r.stopped}${r.skipped ? `; ${r.skipped} had already ended` : ""}. The update goes ahead once no run is left.`;
+    });
+  const press = (id: NonNullable<UpdateStatus["primary"]>["id"]) => {
+    if (id === "ask-wrapup") return wrapUp();
+    if (id === "stop-stragglers") return stopThem(st.primary?.runIds ?? []);
+    return deployLatest(); // Try again, Review and deploy, Check for updates now: all are deploy-latest.
+  };
+  const normal = (id: UpdateStatus["normal"][number]["id"]) =>
+    act.run(async () => {
+      if (id === "cancel-queue") {
+        await api("/api/self-deploy/cancel-runner-queue", { method: "POST", body: {} });
+        view.reload();
+        return "The queued runner update is cancelled.";
+      }
+      if (id === "cancel-update") {
+        await api("/api/maintenance/cancel", { method: "POST", body: {} });
+        maint.reload();
+        return;
+      }
+      try {
+        await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) return err.message;
+        throw err;
+      }
+    });
+  const stopOne = (run: WrapUpRun) =>
+    act.run(async () => {
+      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
+      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
+      maint.reload();
+      return "Stopping that run.";
+    });
+
   return (
     <Section id="deploy-h" title="Updates">
-      {/* "Ask agents to wrap up", inside the update box (BOS-988): the main action while an update or rebuild waits on runs. */}
-      <WrapUpAction m={maint.data} reload={maint.reload} />
-      <p style={{ fontSize: 14 }}>
-        {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
-      </p>
-      <p className="muted" style={{ fontSize: 14 }}>
-        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : deployerLine(v)}
-      </p>
-      <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />
-      {waiting && <WaitingChanges commits={v.available?.commits} />}
-      {w && (
-        <p style={{ fontSize: 14 }}>
-          {waitLine(w)}{" "}
-          <button
-            type="button"
-            className="btn"
-            disabled={act.busy}
-            onClick={() =>
-              act.run(async () => {
-                try {
-                  await api("/api/self-deploy/wait/cancel", { method: "POST", body: {} });
-                } catch (err) {
-                  if (err instanceof ApiError && err.status === 409) return err.message;
-                  throw err;
-                }
-              })
-            }
-          >
-            {w.phase === "waiting" && w.origin === "hand" ? "Stop making room" : w.phase === "waiting" || w.phase === "sent" ? "Cancel the update" : "Lift the hold now"}
-          </button>
-        </p>
+      {/* One status box in every state, at the same height while loading (BOS-1238). */}
+      <div className={`upd-status ${st.tone}`} role={st.alert ? "alert" : "status"} aria-live={st.alert ? "assertive" : "polite"} data-testid="update-status" data-state={st.tag}>
+        <span className={`tag ${st.tone}`} data-testid="update-tag">{st.tag}</span>
+        <div className="upd-status-body">
+          <p className="upd-say" data-testid="update-say">{st.tag === "Checking…" ? "" : st.say}</p>
+          {st.progress && (
+            <div className="upd-bar" role="img" aria-label={`Trial ${st.progress.doneMin} of ${st.progress.totalMin} minutes done`}>
+              <span style={{ width: `${Math.round((st.progress.doneMin / st.progress.totalMin) * 100)}%` }} />
+            </div>
+          )}
+          {st.more && <p className="muted" style={{ fontSize: 14 }}>{st.more}</p>}
+          {st.next && <p style={{ fontSize: 14 }} data-testid="update-next">{st.next}</p>}
+          {v && <TrialLines trial={v.trial ?? null} wait={v.deployWait ?? null} now={now} queue={v.runnerQueue ?? null} cancelled={v.queueCancelled ?? null} held={v.heldDeploy ?? null} />}
+          {st.raw && (
+            <details>
+              <summary className="muted" style={{ fontSize: 13 }}>What the host said</summary>
+              <p className="mono" style={{ fontSize: 13, overflowWrap: "anywhere" }} data-testid="host-said">{st.raw}</p>
+            </details>
+          )}
+        </div>
+      </div>
+      {(st.primary || st.normal.length > 0) && (
+        <div className="upd-main">
+          {st.primary && (
+            <>
+              <button type="button" className={`btn${st.primary.blue ? " primary" : ""}`} data-testid="update-main" disabled={busy || st.primary.disabled || (st.primary.id !== "ask-wrapup" && st.primary.id !== "stop-stragglers" && !idle)} onClick={() => void press(st.primary!.id)}>
+                {st.primary.label}
+              </button>
+              {st.primary.hint && <span className="muted" style={{ fontSize: 13 }}>{st.primary.hint}</span>}
+            </>
+          )}
+          {st.normal.map((b) => (
+            <button key={b.id} type="button" className="btn" disabled={act.busy} onClick={() => void normal(b.id)}>
+              {b.label}
+            </button>
+          ))}
+        </div>
       )}
-      <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || v.pending || s?.result === "running"}
-          title="Updates the server only. If the update changed the runners, press Build and update runners afterwards."
-          onClick={() =>
-            act.run(async () => {
-              try {
-                await api("/api/self-deploy/deploy-latest", { method: "POST", body: {} });
-              } catch (err) {
-                // Nothing new is not a failure: the server says so, and has asked the host to look at main again.
-                if (err instanceof ApiError && err.status === 409) return err.message;
-                throw err;
-              }
-              go("decisions");
-            })
-          }
-        >
-          Deploy latest
-        </button>{" "}
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || v.pending || s?.result === "running"}
-          title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
-          onClick={() =>
-            act.run(async () => {
-              const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
-              // BOS-1086: a press that cannot run yet is queued, not refused; the line above says when it starts.
-              if (r?.queued) {
-                view.reload();
-                return r.message ?? "The runner update is queued.";
-              }
-              go("decisions");
-            })
-          }
-        >
-          Build and update runners
-        </button>{" "}
-        {v.runnerQueue && (
-          <>
+      {act.view}
+      <div className="upd-cols">
+        <div className="upd-col">
+          {wrap && wrap.runsList.length > 0 ? (
+            <WrapUpRuns s={wrap} busy={act.busy} onStop={stopOne} />
+          ) : (
+            v?.available && st.tag === "Update ready" && <WaitingChanges commits={v.available.commits} />
+          )}
+          <NowRunning v={v} report={report.data} progress={progress} />
+        </div>
+        <RecentUpdates rows={history.data} progress={progress} />
+      </div>
+      {v && (
+        <div className="upd-other" data-testid="other-actions">
+          <h3 style={{ fontSize: 14, fontWeight: 600 }}>Other actions</h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
             <button
               type="button"
               className="btn"
-              disabled={act.busy}
-              title="Takes back the queued runner update. Nothing else changes."
+              disabled={act.busy || !idle}
+              title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
               onClick={() =>
                 act.run(async () => {
-                  await api("/api/self-deploy/cancel-runner-queue", { method: "POST", body: {} });
-                  view.reload();
-                  return "The queued runner update is cancelled.";
+                  const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+                  // BOS-1086: a press that cannot run yet is queued, not refused; the status box says when it starts.
+                  if (r?.queued) {
+                    view.reload();
+                    return r.message ?? "The runner update is queued.";
+                  }
+                  go("decisions");
                 })
               }
             >
-              Cancel queued runner update
-            </button>{" "}
-          </>
-        )}
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy || v.pending || s?.result === "running" || !v.available?.deployed}
-          title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
-          onClick={() => {
-            const bg = v.available?.bluegreen === true;
-            const ask = bg
-              ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
-              : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
-            if (!window.confirm(ask)) return;
-            act.run(async () => {
-              await api("/api/self-deploy/restart", { method: "POST", body: {} });
-              return "Restart requested. The host picks it up within a minute; the line above shows how it went.";
-            });
-          }}
-        >
-          Restart the server
-        </button>
-      </div>
-      {v.available?.runnerChanged && (
-        <p style={{ fontSize: 14 }}>This update changes the runners: after Deploy latest, press Build and update runners.</p>
+              Build and update runners
+            </button>
+            <button type="button" className="btn" disabled={act.busy} onClick={() => void wrapUp()} title="Stop the running agents cleanly before an update, if any are going.">
+              Ask agents to wrap up
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy || !idle || !v.available?.deployed}
+              title="Starts the server again at the version it runs now (BOS-647). Use it when a server-health card says memory is high or freezes are piling up and no update is waiting."
+              onClick={() => {
+                const bg = v.available?.bluegreen === true;
+                const ask = bg
+                  ? "Restart the server? It starts a fresh copy of the current version and switches over; pages keep working. The one-step rollback to the release before this one is lost. Continue?"
+                  : "Restart the server? It stops for about a minute while it restarts; runs pick up again after. Continue?";
+                if (!window.confirm(ask)) return;
+                act.run(async () => {
+                  await api("/api/self-deploy/restart", { method: "POST", body: {} });
+                  return "Restart requested. The host picks it up within a minute; the status above shows how it went.";
+                });
+              }}
+            >
+              Restart the server…
+            </button>
+          </div>
+          {wrap && (
+            <div>
+              <button type="button" className="btn" disabled={act.busy} onClick={() => void act.run(async () => { await api("/api/maintenance/cancel-wrap", { method: "POST", body: {} }); maint.reload(); return "Wrap-up cancelled: runs already told still end by themselves; an update keeps waiting for them."; })}>
+                Cancel wrap-up
+              </button>
+            </div>
+          )}
+          <details>
+            <summary className="muted" style={{ fontSize: 13 }}>For a hand-built runner image</summary>
+            <p className="muted" style={{ fontSize: 13 }}>
+              Only after you ran scripts/update-runner.sh yourself: puts every company's runner on the newest image. Nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle.
+            </p>
+            <button
+              type="button"
+              className="btn"
+              disabled={act.busy || !!maint.data?.on}
+              onClick={() =>
+                act.run(async () => {
+                  await api("/api/maintenance/start", { method: "POST", body: {} });
+                  maint.reload();
+                })
+              }
+            >
+              Update runners (finish runs first)
+            </button>
+          </details>
+        </div>
       )}
-      <p className="muted" style={{ fontSize: 14 }}>
-        Deploy latest updates the server only. If an update changed the runners, press Build and update runners afterwards.
-      </p>
-      {act.view}
     </Section>
+  );
+}
+
+/** The agents still running while an update or wrap-up waits, each with its ticket and, once stuck, a Stop (BOS-929, BOS-1238). */
+export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean; onStop: (run: WrapUpRun) => void }) {
+  return (
+    <div data-testid="wrapup-box">
+      <p style={{ margin: 0, fontSize: 14 }}>{s.runsList.length === 1 ? "1 agent still running:" : `${s.runsList.length} agents still running:`}</p>
+      <ul style={{ listStyle: "none", margin: "6px 0 0", padding: 0, display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }} data-testid="wrapup-runs">
+        {s.runsList.map((run) => {
+          const onCard = !!run.waitingOn;
+          const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
+          // BOS-1016: a run inside one long step (a check, a build) is busy, not stuck.
+          const step = run.step ?? null;
+          return (
+            <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+              <strong title={run.agent ?? undefined}>{run.agent ? run.agent.split(/\s+[-–]\s+/)[0] : "An agent"}</strong>
+              <span className="muted">
+                {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
+                {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
+              </span>
+              {onCard ? (
+                <span className="tag amber" title={run.waitingOn!.question}>Waiting for an answer</span>
+              ) : late ? (
+                <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes or more after being asked to wrap up.`}>Still going after {run.sinceWrapUpMinutes} min</span>
+              ) : run.gotMessage ? (
+                <span className="tag grey" title="It has the message and is saving its work.">Finishing up</span>
+              ) : step ? (
+                <span className="tag grey" title={`It is running ${step.title}. Some agents can only read the wrap-up message when this step ends, so if you want it to stop now use Stop this run.`}>In a long step: it will stop when this step ends</span>
+              ) : (
+                <span className="tag grey">Working</span>
+              )}
+              <button type="button" className="btn small" disabled={busy} onClick={() => onStop(run)}>
+                Stop this run
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
+        Stopping ends that agent where it got to, so anything it hasn't saved yet is lost. It isn't woken again afterwards: its ticket waits where it stopped.
+      </p>
+    </div>
+  );
+}
+
+/** Now running: the server's version as a date and each company's runner (BOS-1238). Replaces the Runner update box's "Now" list. */
+function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report: Report | null; progress: RunnerProgress }) {
+  const s = v?.status;
+  const server = s && s.target === "server" && s.result === "deployed" ? when(s.ended || s.started) : null;
+  return (
+    <div role="status" data-testid="runner-live">
+      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Now running</h3>
+      <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+        {server && (
+          <li style={{ listStyle: "none" }}>
+            <strong>Server</strong> <span className="muted">updated {server}</span>
+          </li>
+        )}
+        {report?.live?.map((l) => <LiveState key={l.slug} r={l} progress={progress} />)}
+      </ul>
+      {report?.live && !report.live.length &&<p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>}
+    </div>
+  );
+}
+
+/** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
+function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress: RunnerProgress }) {
+  // Only the newest runner row can be mid-swap; older ones are history.
+  const newestRunner = rows?.find((r) => r.target === "runner")?.id;
+  return (
+    <div className="upd-col" data-testid="recent-updates">
+      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Recent updates</h3>
+      {rows === null ? (
+        <p className="muted" style={{ fontSize: 14 }}>Checking…</p>
+      ) : rows.length === 0 ? (
+        <p className="muted" style={{ fontSize: 14 }}>No update has gone in yet.</p>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
+          {rows.map((r) => {
+            const t = historyTag(r, r.id === newestRunner ? progress : null);
+            return (
+              <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
+                <span>{when(r.at)}</span>
+                <span>{historyWhat(r)}</span>
+                <span className={`tag ${t.tone}`}>{t.tag}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p style={{ fontSize: 13 }}><a href="#/decisions">All updates</a></p>
+    </div>
   );
 }
 
@@ -363,14 +488,16 @@ export function RunLimits() {
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <label htmlFor="limit-background">
+          Background agents at once (0 to 16) <code className="mono">infinite mode</code>
+        </label>
         <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
         </p>
       </div>
       <p className="muted" style={{ fontSize: 14 }}>
-        Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
+        Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits. A company's runner is given memory to match: 2 GB, plus 1 GB for each agent it can run at once (one company's number plus the background number), plus 3 GB for each check; a change reaches each runner the next time it restarts.
       </p>
       <div>
         <button
@@ -395,10 +522,58 @@ export function RunLimits() {
 }
 
 /**
+ * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Saved on its
+ * own, since the two limits above are for every company and these are this company's.
+ */
+function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+  const act = useAction();
+  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const [edit, setEdit] = useState<{ merges: string; checks: string } | null>(null);
+  const v = edit ?? { merges: text(company.holdStartsMergesWaiting), checks: text(company.holdStartsQuickChecksQueued) };
+  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
+  const [m, q] = [parse(v.merges), parse(v.checks)];
+  const ok = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-merges">Hold new starts while this many merges are waiting (leave empty for off)</label>
+        <input id="hold-merges" type="number" min={1} max={1000} placeholder="Off" value={v.merges} onChange={(e) => setEdit({ ...v, merges: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks and urgent tickets carry on.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-checks">Hold new starts while this many quick checks are queued (leave empty for off)</label>
+        <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
+      </div>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !ok(m) || !ok(q)}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
+              setEdit(null);
+              onChanged?.();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </>
+  );
+}
+
+/**
  * Tickets in progress per agent (BOS-1029): an agent finishes before it starts more. Only in-progress tickets
  * count (review, blocked and done don't). Empty box = No limit.
  */
-export function WipLimits() {
+export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
   const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
@@ -422,6 +597,7 @@ export function WipLimits() {
         <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
       </div>
+      {company ? <HoldStarts company={company} onChanged={onChanged} /> : null}
       <div>
         <button
           type="button"
@@ -444,7 +620,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[] };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -546,17 +722,17 @@ export function CheckQueueSetting() {
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-        <legend>Who runs agents' checks</legend>
+        <legend>Who runs the checks</legend>
         <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
           <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
           <span>
-            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+            <strong>Each agent runs its own.</strong> <code className="mono">legacy</code> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
           </span>
         </label>
         <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
           <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
           <span>
-            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+            <strong>Boss Man runs them.</strong> <code className="mono">server queue</code> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
           </span>
         </label>
       </fieldset>
@@ -574,7 +750,9 @@ export function CheckQueueSetting() {
         )}
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
-            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check). That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
+            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check).
+            {/* BOS-1498: what the runner is given and why, from Agents at once and Checks at once. */}
+            {d.runner.memoryLine ? <> Runner memory: <span data-testid="runner-memory-line">{d.runner.memoryLine}</span></> : null} That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
             {d.runner.perCheckBytes ? <> Separately, each single check is stopped with a clear message if it uses more than {Math.round((d.runner.perCheckBytes / 1024 ** 3) * 10) / 10} GB, so one runaway check cannot starve the others.</> : null}
             {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
             {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}
@@ -594,7 +772,7 @@ export function CheckQueueSetting() {
       <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
         <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
         <span>
-          <strong>Land approved merges in order (merge train).</strong>{" "}
+          <strong>Merge approved work in the order it was approved.</strong> <code className="mono">merge train</code>{" "}
           <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
         </span>
       </label>
@@ -603,6 +781,7 @@ export function CheckQueueSetting() {
           <span className="tag red">Update needed</span> The runner for {d.runnersTooOldForTrain!.join(", ")} is too old for the merge train; its merges land one at a time as before until you update the runners (Updates → Build and update runners).
         </p>
       )}
+      <CheckWorkers workers={d.workers ?? []} maxSlots={d.maxSlots} reload={view.reload} />
       <p className="muted" style={{ fontSize: 14 }}>
         Switching back to legacy cancels checks that are still waiting (their agents are told to run the check themselves); checks already running finish.
       </p>
@@ -751,185 +930,3 @@ export function EmailSetting() {
   );
 }
 
-/** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
-export function RunnerUpdate() {
-  const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
-  const report = usePoll((signal) => api<Report>("/api/runner-report", { signal }), 5_000, "runner-report");
-  const act = useAction();
-  const m = view.data;
-  if (!m) return null;
-  const r = report.data;
-  return (
-    <Section id="drain-h" title="Runner update">
-      {r && (
-        <div role="status" data-testid="runner-live">
-          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Now</h3>
-          {r.live.length ? (
-            <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-              {r.live.map((l) => (
-                <LiveState key={l.slug} r={l} />
-              ))}
-            </ul>
-          ) : (
-            <p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>
-          )}
-        </div>
-      )}
-      <p className="muted" style={{ fontSize: 14 }}>
-        {m.on
-          ? m.kind === "wrapup"
-            ? "Agents were asked to wrap up. Press Cancel wrap-up once you are done to let new work start again."
-            : `${m.kind === "settings" ? "Applying a runner setting change (for example Check slots). This is not a runner update: the image stays the same" : "Update pending"}: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. ${m.blocking === false ? "It is past its deadline, so new runs are no longer held for it." : "Nothing new starts until it is done."} To end the runs sooner, use "Ask agents to wrap up" at the top of Settings → Server and runner.`
-          : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
-      </p>
-      <div>
-        {r?.update ? (
-          <UpdateHistory r={r.update} />
-        ) : (
-          <p className="muted" style={{ fontSize: 14 }}>
-            No runner update has finished here yet.
-          </p>
-        )}
-      </div>
-      <div>
-        <button
-          type="button"
-          className="btn"
-          disabled={act.busy}
-          onClick={() =>
-            act.run(async () => {
-              await api(m.on ? "/api/maintenance/cancel" : "/api/maintenance/start", { method: "POST", body: {} });
-              view.reload();
-            })
-          }
-        >
-          {m.on ? "Cancel the update" : "Update runners (finish runs first)"}
-        </button>
-      </div>
-      {act.view}
-    </Section>
-  );
-}
-
-/**
- * "Ask agents to wrap up" (BOS-929, BOS-988), inside the top Runner update box. It tells every running agent to
- * finish its step, save its work and stop cleanly, so an update or a runner rebuild can go ahead. Unlike "Stop all
- * work" it also messages the runs going now, so they end by themselves. While an update waits it is the main action
- * and the still-running list shows here; the update keeps waiting and goes ahead when the runs end. Nothing is ever
- * stopped for you: the not-responding flag only offers a Stop for that one run.
- */
-export function WrapUpAction({ m, reload, children }: { m: MaintenanceView | null; reload: () => void; children?: ReactNode }) {
-  const act = useAction();
-  if (!m) return null;
-  const s = m.on && (m.kind === "wrapup" || (m as WrapUpStatus).wrapAsked) ? (m as WrapUpStatus) : null;
-  const waiting = m.on && !s;
-  const start = () =>
-    act.run(async () => {
-      await api("/api/maintenance/wrapup", { method: "POST", body: {} });
-      reload();
-      return "Every running agent was asked to wrap up.";
-    });
-  const cancel = () =>
-    act.run(async () => {
-      await api("/api/maintenance/cancel-wrap", { method: "POST", body: {} });
-      reload();
-      return "Wrap-up cancelled: runs already told still end by themselves; the update keeps waiting for them.";
-    });
-  const stopOne = (run: WrapUpRun) =>
-    act.run(async () => {
-      if (!window.confirm(`Stop ${run.agent ?? "this agent"}'s run? It stops mid-step, so anything it has not committed yet can be lost.`)) return;
-      await api(`/api/runs/${run.runId}/cancel`, { method: "POST", body: {} });
-      reload();
-      return "Stopping that run.";
-    });
-  const n = s ? s.runsList.length : m.on ? m.runs : 0;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }} data-testid="wrapup-box">
-      {s ? (
-        <>
-          <p style={{ fontSize: 14 }} data-testid="wrapup-on">
-            <span className="tag">Wrap-up on</span>{" "}
-            {n === 0
-              ? "Every agent has finished; the update can go ahead."
-              : `${n} agent${n === 1 ? " is" : "s are"} still running and ${n === 1 ? "has" : "have"} been asked to finish the step they are on. Nothing new starts; the update starts when they have finished.`}
-          </p>
-          {s.runsList.length > 0 && (
-            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }} data-testid="wrapup-runs">
-              {s.runsList.map((run) => {
-                const onCard = !!run.waitingOn;
-                const late = !onCard && run.sinceWrapUpMinutes >= s.notRespondingAfter;
-                // BOS-1016: a run inside one long step (a check, a build) is busy, not stuck. Agents that can be
-                // steered get the message inside the step; others read it when the step ends.
-                const step = run.step ?? null;
-                return (
-                  <li key={run.runId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
-                    <strong>{run.agent ?? "An agent"}</strong>
-                    <span className="muted">
-                      {run.ticket ? `${run.ticket}${run.ticketTitle ? `: ${run.ticketTitle}` : ""}` : "no ticket"} · asked to wrap up {run.sinceWrapUpMinutes} min ago
-                      {step ? ` · running ${step.title} for ${step.sinceMinutes} min` : ""}
-                    </span>
-                    {onCard ? (
-                      <span className="tag amber" title={run.waitingOn!.question}>
-                        Waiting for an answer
-                      </span>
-                    ) : late ? (
-                      <span className="tag red" title={`Still going ${s.notRespondingAfter} minutes or more after being asked to wrap up.`}>
-                        Still going after {run.sinceWrapUpMinutes} min
-                      </span>
-                    ) : run.gotMessage ? (
-                      <span className="tag grey" title="It has the message and is saving its work.">
-                        Finishing up
-                      </span>
-                    ) : step ? (
-                      <span className="tag grey" title={`It is running ${step.title}. Some agents can only read the wrap-up message when this step ends, so if you want it to stop now use Stop this run.`}>
-                        In a long step: it will stop when this step ends
-                      </span>
-                    ) : (
-                      <span className="tag grey">Working</span>
-                    )}
-                    <button type="button" className="btn small" disabled={act.busy} onClick={() => void stopOne(run)}>
-                      Stop this run
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {s.runsList.length > 0 && (
-            <p className="muted" style={{ fontSize: 13 }} data-testid="wrapup-note">
-              Agents have been asked to save their work and finish; most finish within a few minutes. One in a long step, like a full check, may take longer, and some agents can only read the message when their step ends. One still going {s.notRespondingAfter} minutes after being asked shows Still going next to its name. Boss Man won't stop an agent for you, but Stop this run is there next to every one of them: press it to end one now, and the others carry on. Stopping ends that agent where it got to, so anything it hasn't saved yet is lost, and it isn't woken again when this is over: its ticket waits where it stopped.{" "}
-              {s.kind === "wrapup"
-                ? "If you do nothing, nothing new starts until you press Cancel wrap-up."
-                : `If you do nothing, the update keeps waiting; at ${when(s.deadline)} you'll be asked whether to stop the agents still running.`}
-            </p>
-          )}
-          <div>
-            <button type="button" className="btn" disabled={act.busy} onClick={() => void cancel()}>
-              Cancel wrap-up
-            </button>
-          </div>
-        </>
-      ) : waiting ? (
-        <>
-          <p style={{ fontSize: 14 }} data-testid="wrapup-waiting">
-            <span className="tag amber">Update waiting</span>{" "}
-            {n === 0 ? "No agents are running now; the update can go ahead." : `${n} agent${n === 1 ? " is" : "s are"} still running. The update starts when they have finished: press Ask agents to wrap up to have them finish their step and stop by themselves.`}
-          </p>
-          <div>{children ?? (
-            <button type="button" className="btn" disabled={act.busy} onClick={() => void start()}>
-              Ask agents to wrap up
-            </button>
-          )}</div>
-        </>
-      ) : (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button type="button" className="btn small" disabled={act.busy} onClick={() => void start()}>
-            Ask agents to wrap up
-          </button>
-          <span className="muted" style={{ fontSize: 13 }}>Stop the running agents cleanly before an update, if any are going.</span>
-        </div>
-      )}
-      {act.view}
-    </div>
-  );
-}

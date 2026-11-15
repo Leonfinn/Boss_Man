@@ -73,7 +73,8 @@ describe("an owner card on handed-in work (BOS-919)", () => {
     const t = await ctx.ticket({ systemState: "done" });
     const card = await ctx.raise(t.id);
     expect(await stateOf(t.id)).toBe("done");
-    await ctx.decisions.answer(card.id, "Stripe");
+    // The card is dead once its ticket is done (DR-061 Q4): the answer is refused and the ticket stays done.
+    await expect(ctx.decisions.answer(card.id, "Stripe")).rejects.toThrow(/no longer valid/);
     expect(await stateOf(t.id)).toBe("done");
   });
 

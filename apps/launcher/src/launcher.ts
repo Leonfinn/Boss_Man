@@ -6,7 +6,7 @@ import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
 import { ensurePack } from "./claude-pack.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, guardImageOf, LABEL, listLabel, previousRunnerImage, runnerImageOf, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, parseTrusted, planChecks, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, guardImageOf, LABEL, listLabel, previousRunnerImage, runnerImageOf, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, MAX_AGENTS, parseAllow, parseTrusted, planChecks, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -224,7 +224,9 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (!packReady) console.error(JSON.stringify({ at: new Date().toISOString(), msg: `Claude Code will be absent on ${slug}'s runner until its pack can install`, slug }));
     const old = await ours(slug);
     if (old) await removeSettled(docker, old.Id);
-    const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug, image));
+    // A daemon that won't say (or a fake in a test) just means "unknown" in the runner's platform fingerprint.
+    const host = await docker.hostInfo().catch(() => null);
+    const id = await docker.create(containerName(slug, cfg.stack), containerSpec(cfg, slug, image, host));
     try {
       await holdNetwork(id);
       await docker.start(id);
@@ -245,15 +247,27 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
      * BOS-993: the owner's "Checks at once". Remembered in a file under the data folder (so a launcher restart keeps it)
      * and used for every runner made from now on; running runners change when they are recreated.
      */
-    setChecks(slots: number) {
+    async setChecks(slots: number, agents?: number) {
       if (!Number.isInteger(slots) || slots < 1 || slots > 16) throw new LauncherError(400, "Slots must be a whole number from 1 to 16.");
+      if (agents !== undefined && (!Number.isInteger(agents) || agents < 0 || agents > MAX_AGENTS)) throw new LauncherError(400, `Agents must be a whole number from 0 to ${MAX_AGENTS}.`);
+      // BOS-1498: the first agents number this launcher hears. Runners made before it were sized on the old 13 GB base; their
+      // memory is kept (planChecks) so the upgrade alone never shrinks one. A fresh install has no runners yet, so nothing is kept.
+      if (agents !== undefined && cfg.requestedAgents === undefined && !cfg.kept) {
+        let most = 0;
+        for (const r of await this.list()) most = Math.max(most, (await docker.inspect(containerName(r.slug, cfg.stack)).catch(() => null))?.HostConfig?.Memory ?? 0);
+        if (most > 0) cfg.kept = { bytes: most, slots, agents };
+      }
+      // The owner lowered a setting: from now on the formula applies, also if they raise it again later.
+      if (cfg.kept && (slots < cfg.kept.slots || (agents ?? cfg.requestedAgents ?? cfg.kept.agents) < cfg.kept.agents)) cfg.kept = undefined;
       // The number is taken first: the launcher container's root is read-only and only companies/ is mounted, so the file
       // may not be writable. The server sends the setting again every minute (BOS-1152), so a launcher that cannot
       // remember it across a restart still ends up on the right number.
       cfg.requestedSlots = slots;
+      if (agents !== undefined) cfg.requestedAgents = agents;
       try {
         const file = path.join(cfg.dataRoot, CHECKS_FILE);
-        writeFileSync(`${file}.tmp`, JSON.stringify({ slots }), { mode: 0o600 });
+        const saved = { slots, ...(cfg.requestedAgents !== undefined ? { agents: cfg.requestedAgents } : {}), ...(cfg.kept ? { kept: cfg.kept } : {}) };
+        writeFileSync(`${file}.tmp`, JSON.stringify(saved), { mode: 0o600 });
         renameSync(`${file}.tmp`, file);
       } catch (e) {
         console.warn(JSON.stringify({ at: new Date().toISOString(), msg: "could not save Checks at once; the server will send it again after a restart", error: String((e as Error)?.message ?? e) }));
@@ -592,8 +606,11 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (req.method === "GET") return send(200, await api.checks());
         if (req.method !== "PUT") throw new LauncherError(405, "Only GET or PUT here.");
         const body = await readJson(req);
-        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof (body as { slots?: unknown }).slots !== "number") throw new LauncherError(400, "Send { slots }.");
-        return send(200, api.setChecks((body as { slots: number }).slots));
+        // { slots } from an older server, { slots, agents } since BOS-1498; nothing else.
+        const b = body as { slots?: unknown; agents?: unknown };
+        const keys = body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : null;
+        if (!keys || typeof b.slots !== "number" || !keys.every((k) => k === "slots" || k === "agents") || (keys.includes("agents") && typeof b.agents !== "number")) throw new LauncherError(400, "Send { slots } or { slots, agents }.");
+        return send(200, await api.setChecks(b.slots, b.agents as number | undefined));
       }
       if (url.pathname === "/wanted") {
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
