@@ -10,19 +10,20 @@ name: boss-man-check-worker
 
 services:
   check-worker:
-    # No image to download or build by hand: Compose builds it from Boss Man's source at the commit below. It is the
+    # No image to download or build by hand: Compose builds it from Boss Man's source (the `main` branch). It is the
     # runner image without Claude Code and OpenCode, because a worker never runs an agent. `pull_policy: build` makes
-    # every `up -d` look at the commit again; when it has not changed, Docker reuses its cache and rebuilds nothing.
+    # every `up -d` look at the source again; when the tools have not changed, Docker reuses its cache and rebuilds nothing.
+    # There is no commit to keep in step with your runner: a worker takes jobs when its TOOLS (Node, pnpm, git, ...) match
+    # your runner's, and Boss Man's Checks panel says which tool differs if they ever do. Then you only redeploy (the
+    # same `docker compose up -d`, or the Redeploy button in Arcane, Portainer or Dockge); you never edit this file.
+    # To freeze a worker on one version instead, replace `#main` with `#` and a 40-character commit.
     build:
-      # CHANGE THIS (commit, 1 of 2): the 40-character commit your Boss Man runner is built from.
-      context: https://github.com/Leonfinn/Boss_Man.git#0000000000000000000000000000000000000000
+      context: https://github.com/Leonfinn/Boss_Man.git#main
       dockerfile: apps/runner/Dockerfile
       args:
         WITH_HARNESS: "0"
         # A web browser (Chromium) in the image: the project's own tests need one and fail, not skip, in a full check without it.
         RUNNER_ADDONS: agent-browser
-        # CHANGE THIS (commit, 2 of 2): the same 40 characters. A worker takes jobs only when it matches your runner.
-        BOSSMAN_IMAGE_COMMIT: "0000000000000000000000000000000000000000"
     pull_policy: build
     restart: unless-stopped
     environment:

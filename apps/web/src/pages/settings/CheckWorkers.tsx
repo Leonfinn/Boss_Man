@@ -20,6 +20,7 @@ export type CheckWorkerView = {
   checkThreads: number | null;
   checkMemoryMb: number | null;
   imageCommit: string | null;
+  toolchain: Record<string, string> | null;
   lastSeenAt: string | null;
   companies: { id: string; name: string; ready: boolean; reason: string | null }[];
   reason: string | null;
@@ -84,7 +85,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
       <h3 style={{ margin: "8px 0 0" }}>Check workers</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks only when it was built from the same version as the company's runner.
+        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (
@@ -95,7 +96,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
             <span className="muted" style={{ fontSize: 14 }}>
               {w.limit} check{w.limit === 1 ? "" : "s"} at once{w.reportedSlots !== null && w.reportedSlots < w.slots ? ` (the machine says it can run ${w.reportedSlots})` : ""}
               {w.lastSeenAt ? ` · last seen ${when(w.lastSeenAt)}` : ""}
-              {w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
+              {w.toolchain?.node ? ` · Node ${w.toolchain.node}` : w.imageCommit ? ` · version ${w.imageCommit.slice(0, 7)}` : ""}
             </span>
           </div>
           {w.reason ? (
@@ -181,11 +182,10 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
       {added && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-worker-token">
           <p>
-            <strong>Copy this file now; it holds the worker's token and isn't shown again.</strong> On the worker's machine, save it as <code>compose.yaml</code> in an empty folder (or paste it into a TrueNAS custom app, Portainer or Dockge) and run <code>docker compose up -d</code>. Nothing else to edit
-            {added.commit ? "." : ": no runner has said which commit it is built from yet, so replace the two lines of zeros with the 40-character commit from the Updates panel."}
+            <strong>Copy this file now; it holds the worker's token and isn't shown again.</strong> On the worker's machine, save it as <code>compose.yaml</code> in an empty folder (or paste it into a TrueNAS custom app, Portainer or Dockge) and run <code>docker compose up -d</code>. Nothing else to edit, now or after a runner update.
           </p>
           <pre className="mono codebox" data-testid="check-worker-compose" style={{ maxHeight: 320, overflow: "auto" }}>
-            {workerComposeFile({ url: workerSocketUrl(window.location.origin), commit: added.commit, slots: added.slots, token: added.token })}
+            {workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })}
           </pre>
           <div style={{ display: "flex", gap: 8 }}>
             <button
@@ -193,7 +193,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               className="btn primary"
               onClick={() =>
                 void act.run(async () =>
-                  copyMessage(await copyText(workerComposeFile({ url: workerSocketUrl(window.location.origin), commit: added.commit, slots: added.slots, token: added.token })), "Compose file"),
+                  copyMessage(await copyText(workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })), "Compose file"),
                 )
               }
             >
