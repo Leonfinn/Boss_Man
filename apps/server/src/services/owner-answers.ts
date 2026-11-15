@@ -11,10 +11,11 @@
 // Meaning search (embeddings) is opt-in per company and reuses the wiki's provider settings; it only
 // adds hits and never stands alone, so a slow or failing provider leaves word search answering.
 import { and, cosineDistance, eq, inArray, sql } from "drizzle-orm";
-import { ticketRef } from "@boss-man/shared";
+import { redact, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, ownerAnswerEmbeddings, tickets } from "../db/schema.js";
 import { ANSWERED_LOOKBACK_MS, answeredBefore, answerHoldsAsFact, decisionTicketIds, quotedAnswer } from "./stale-requests.js";
+import { PA_BRIEF_START } from "./pa.js";
 import type { Embedder } from "./wiki-semantic.js";
 
 export type OwnerAnswerKind = "card" | "ticket_reply" | "chat" | "note";
@@ -79,7 +80,10 @@ export async function stems(db: Db, text: string): Promise<string[]> {
 /**
  * The owner's answers as one row set (kind, source_id, question, answer, owner_note, ticket_id, at, v, qv):
  * v is the full text searched, qv the card's question or note's title alone. Only the owner's own answers:
- * a card the CEO settled for the owner, and a card answer echoed onto its tickets, are left out.
+ * a card the CEO settled for the owner, and a card answer echoed onto its tickets, are left out. So are
+ * the PA's escalation brief copied into the CEO's thread as an owner line (its "What the PA found" is the
+ * PA model's words, read from wiki and ticket text) and a note kept at an agent's request (its why is
+ * that agent's reason): neither is the owner's own words (security review, BOS-1593).
  */
 function ownerAnswerSources(c: string, since: Date, kinds: ReadonlySet<OwnerAnswerKind>) {
   const parts = [];
@@ -113,13 +117,15 @@ function ownerAnswerSources(c: string, since: Date, kinds: ReadonlySet<OwnerAnsw
             order by p.created_at desc limit 1) as prev
         from owner_chat_messages o
         where o.company_id = ${c} and o.role = 'owner' and o.created_at > ${since}
+          and not exists (select 1 from pa_answers pa where pa.ceo_message_id = o.id)
+          and o.text not like ${`${PA_BRIEF_START}%`}
       ) c`);
   if (kinds.has("note"))
     parts.push(sql`
       select 'note', n.id::text, n.title, n.why, n.text, n.ticket_id::text, n.created_at,
         to_tsvector('english', n.title || ' ' || n.text || ' ' || n.why), to_tsvector('english', n.title)
       from agent_notes n
-      where n.company_id = ${c} and n.created_at > ${since}`);
+      where n.company_id = ${c} and n.created_at > ${since} and n.source in ('chat', 'ticket', 'owner')`);
   return parts.length ? sql`src (kind, source_id, question, answer, owner_note, ticket_id, at, v, qv) as (${sql.join(parts, sql` union all `)})` : null;
 }
 
@@ -247,7 +253,7 @@ export async function ownerAnswerSearch(db: Db, input: SearchInput, deps: { embe
 /** The text a source is embedded from: what was asked, then what the owner said. */
 function embedText(r: { kind: string; question: string | null; answer: string; owner_note: string | null }) {
   const parts = r.kind === "card" ? [r.question, `Owner: ${r.answer}`, r.owner_note] : r.kind === "chat" ? [r.question, `Owner: ${r.answer}`] : r.kind === "note" ? [r.question, r.owner_note, r.answer] : [r.answer];
-  return parts.filter(Boolean).join("\n").slice(0, 4000);
+  return redact(parts.filter(Boolean).join("\n")).slice(0, 4000);
 }
 
 /**
@@ -336,8 +342,9 @@ async function withTicketRefs(db: Db, hits: OwnerAnswerHit[]): Promise<OwnerAnsw
 
 const KIND_LABEL: Record<OwnerAnswerKind, string> = { card: "card", ticket_reply: "ticket message", chat: "chat", note: "lasting note" };
 const day = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ");
+/** Every quote shown to an agent goes through here, so a token the owner pasted into chat is redacted first. */
 const clip = (s: string, n: number) => {
-  const t = s.replace(/\s+/g, " ").trim();
+  const t = redact(s).replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 

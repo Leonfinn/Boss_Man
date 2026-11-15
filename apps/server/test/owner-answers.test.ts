@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { issueRunToken } from "../src/mcp.js";
 import { openPglite } from "../src/db/client.js";
-import { agentNotes, decisions, ownerAnswerEmbeddings, ownerChatMessages, ticketMessages } from "../src/db/schema.js";
+import { agentNotes, decisions, ownerAnswerEmbeddings, ownerChatMessages, paAnswers, ticketMessages } from "../src/db/schema.js";
 import { describeOwnerAnswer, embedMissingOwnerAnswers, isRepeat, ownerAnswerSearch, searchOwnerAnswers } from "../src/services/owner-answers.js";
 
 // A fake embedder: words that mean the same thing share a concept, so their vectors point the same way.
@@ -346,6 +346,46 @@ describe("owner-answer memory (BOS-1593)", () => {
       expect(isError(r)).toBe(false);
       expect(textOf(r)).toContain("Possibly related earlier owner answers");
       expect(textOf(r)).toContain("Don't send the weekly email on Sundays.");
+    });
+
+    // Security review: only the owner's own words may refuse a card or be quoted as their answer.
+    it("doesn't count a note kept at an agent's request as the owner's answer", async () => {
+      const c = (ctx = await setup());
+      await c.db.insert(agentNotes).values({ companyId: c.company.id, agentId: c.ceo.id, title: "Repo visibility", text: "Making the GitHub repo public is fine.", why: "I think the owner wants the repo public.", source: "request" });
+      expect(await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Is making the GitHub repo public fine?" })).toEqual([]);
+      const asking = await c.ticket("Launch");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Is making the GitHub repo public fine?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(false);
+      expect(textOf(r)).not.toContain("Making the GitHub repo public is fine.");
+    });
+
+    it("doesn't count the PA's escalation brief copied into the CEO's thread as an owner chat answer", async () => {
+      const c = (ctx = await setup());
+      const pa = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "PA" })).json() as { id: string };
+      const [asked] = await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: pa.id, role: "owner", text: "What's happening with the launch?" }).returning();
+      // The PA's words, written from wiki and ticket text, stored under the owner's role in the CEO thread.
+      const found = "What the PA found: the staging site uses port 8080, never 3000.";
+      const [copy] = await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: `Your PA is passing this on from the owner.\nThe owner asked: What's happening with the launch?\n${found}` }).returning();
+      // A copy without the opening line (a later wording) is still left out through pa_answers.
+      const [reworded] = await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: `From the PA: ${found}` }).returning();
+      await c.db.insert(paAnswers).values({ companyId: c.company.id, chatMessageId: asked!.id, question: asked!.text, outcome: "escalated:judgement", ceoMessageId: reworded!.id });
+      const hits = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: "Does the staging site use port 8080?" });
+      expect(hits.map((h) => h.sourceId)).not.toContain(copy!.id);
+      expect(hits.map((h) => h.sourceId)).not.toContain(reworded!.id);
+      const asking = await c.ticket("Staging");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Does the staging site use port 8080?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(false);
+      expect(textOf(r)).not.toContain("What the PA found");
+    });
+
+    it("redacts a token the owner pasted into chat before quoting it to an agent", async () => {
+      const c = (ctx = await setup());
+      await c.db.insert(ownerChatMessages).values({ companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: "Use port 8080 for the staging site, never 3000.\napi_key = made-up-key-0123456789" });
+      const asking = await c.ticket("Staging");
+      const r = await raise(await mcpAs(c, c.ceo.id), "Which port should the staging site use?", { blocksTicketId: asking.id });
+      expect(isError(r)).toBe(true);
+      expect(textOf(r)).toContain("Use port 8080 for the staging site");
+      expect(textOf(r)).not.toContain("made-up-key-0123456789");
     });
 
     it("with meaning search on, refuses the same question in other words; with the provider down, warns and checks by words", async () => {
