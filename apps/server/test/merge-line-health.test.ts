@@ -18,7 +18,7 @@ describe("mergeLineHealth", () => {
   it("17 tickets behind 3 slots, landing every 20 minutes: over capacity, not stuck (the 15 Nov case)", () => {
     const line = mergeLineHealth(input({ waiting: queue(17), recent: [merged(7, 1), merged(27, 2), merged(47, 3), merged(67, 4)] }), { now: NOW });
     expect(line).toEqual({ state: "over_capacity", waiting: 17, etaMinutes: 340, lastLandedAt: ago(7), advice: null });
-    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 17 waiting, about 5 h 40 min to clear at the current rate, last landed 19:03.");
+    expect(slowText(line as never, () => "19:03")).toBe("Merging, but slowly: 17 merge checks waiting, about 5 h 40 min to clear at the current rate, last landed 19:03.");
   });
 
   it("names a check worker only when none is connected", () => {
@@ -94,7 +94,7 @@ describe("the jam alert reads the same verdict", () => {
     await c.service.run();
     expect(c.sent).toHaveLength(1);
     expect(c.sent[0]).toMatchObject({ level: "note", title: "Merging, but slowly" });
-    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 waiting, about 4 h 15 min to clear at the current rate, last landed 19:03 UTC.");
+    expect(c.sent[0]!.body).toContain("Merging, but slowly: 17 merge checks waiting, about 4 h 15 min to clear at the current rate, last landed 19:03 UTC.");
     c.advance(2 * 3_600_000);
     await c.service.run();
     expect(c.sent).toHaveLength(2);

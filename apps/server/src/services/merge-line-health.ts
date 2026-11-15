@@ -141,5 +141,5 @@ export function mergeLineHealth(view: HealthInput, opts: HealthOpts): MergeLineH
 export function slowText(s: SlowLine, clock: (iso: string) => string): string {
   const eta = s.etaMinutes === null ? "" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  return `Merging, but slowly: ${s.waiting} waiting${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
+  return `Merging, but slowly: ${s.waiting} merge ${plural(s.waiting, "check", "checks")} waiting${eta}${last}.${s.advice ? ` ${s.advice}` : ""}`;
 }

@@ -52,7 +52,7 @@ export function slowSummary(view: Pick<MergeHealthView, "line">): SlowSummary | 
 export function slowText(s: SlowSummary): string {
   const eta = s.etaMinutes === null ? "" : `, about ${waitedText(s.etaMinutes)} to clear at the current rate`;
   const last = s.lastLandedAt ? `, last landed ${clock(s.lastLandedAt)}` : "";
-  return `Merging, but slowly: ${s.waiting} waiting${eta}${last}.`;
+  return `Merging, but slowly: ${s.waiting} merge ${s.waiting === 1 ? "check" : "checks"} waiting${eta}${last}.`;
 }
 
 export function MergesStuckBanner({ stuck, slow, companyId }: { stuck: StuckSummary | null; slow?: SlowSummary | null; companyId?: string }) {

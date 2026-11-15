@@ -113,7 +113,7 @@ describe("Stuck-merges banner", () => {
     expect(stuckSummary(view({ line: slowLine }))).toBeNull();
     render(<MergesStuckBanner stuck={null} slow={slowSummary(view({ line: slowLine }))} companyId="c1" />);
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Merging, but slowly: 17 waiting, about 4 h 15 min to clear at the current rate, last landed");
+    expect(banner.textContent).toContain("Merging, but slowly: 17 merge checks waiting, about 4 h 15 min to clear at the current rate, last landed");
     expect(banner.textContent).not.toMatch(/stuck/i);
     expect(banner.className).toContain("merges-banner-slow");
   });
