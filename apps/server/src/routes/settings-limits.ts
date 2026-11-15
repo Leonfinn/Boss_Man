@@ -10,7 +10,7 @@ import type { Db } from "../db/client.js";
 import { stagingReachable } from "../mcp-common.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
-import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
+import { checkQueue, DEFAULT_CHECK_SLOTS, MACHINE_TAKES, MAX_CHECK_SLOTS } from "../services/check-queue.js";
 import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, readRunnerAgents } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
@@ -23,6 +23,8 @@ import type { runnersService } from "../services/runners.js";
 import { DEFAULT_LIMITS, type schedulerService } from "../services/scheduler.js";
 
 const Uuid = z.string().uuid();
+/** BOS-1602: what a machine takes and how many of its slots are kept for merges (only with "both"). */
+const Policy = z.object({ takes: z.enum(MACHINE_TAKES), mergeKept: z.number().int().min(0).max(MAX_CHECK_SLOTS) });
 
 export function settingsLimitsRoutes(
   owner: FastifyInstance,
@@ -145,6 +147,8 @@ export function settingsLimitsRoutes(
       // BOS-1366: the merge train switch (off by default) and the connected runners too old for it (they land one at a time).
       train: await checkQueueSvc.train(),
       runnersTooOldForTrain: live.filter((r) => !runners.can(r.id, "merge-base")).map((r) => r.company),
+      // BOS-1602: what the company runner takes and how many of its slots are kept for merges.
+      runnerPolicy: await checkQueueSvc.runnerPolicy(),
       // BOS-1435: check workers, each with per company whether it takes checks and, if not, why.
       workers: (await checkWorkers?.list()) ?? [],
     };
@@ -152,10 +156,15 @@ export function settingsLimitsRoutes(
   owner.get("/api/settings/check-queue", async () => checkQueueView());
   owner.put("/api/settings/check-queue", async (req) => {
     // `train` is optional, so an older page that doesn't send it leaves the switch as it was.
-    const b = z.object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional() }).parse(req.body);
+    // BOS-1602: `runnerPolicy` is optional too (an older page leaves it as it was); kept for merges can't exceed the slots.
+    const b = z
+      .object({ mode: z.enum(["legacy", "server"]), slots: z.number().int().min(1).max(MAX_CHECK_SLOTS), train: z.boolean().optional(), runnerPolicy: Policy.optional() })
+      .refine((v) => !v.runnerPolicy || v.runnerPolicy.mergeKept <= v.slots, { message: "Kept for merges can't be more than the runner's check slots." })
+      .parse(req.body);
     const was = await checkQueueSvc.mode();
     const slotsWere = await checkQueueSvc.slots();
     await checkQueueSvc.setSlots(b.slots);
+    if (b.runnerPolicy) await checkQueueSvc.setRunnerPolicy(b.runnerPolicy);
     await checkQueueSvc.setMode(b.mode);
     if (b.train !== undefined) await checkQueueSvc.setTrain(b.train);
     // BOS-993: no .env edit. The launcher is told the new number and the runners are recreated through the same drain a
@@ -180,7 +189,14 @@ export function settingsLimitsRoutes(
     checkThreads: z.number().int().min(1).max(THREADS_MAX).nullable(),
     checkMemoryMb: z.number().int().min(MEMORY_MB_MIN).max(MEMORY_MB_MAX).nullable(),
     enabled: z.boolean(),
+    // BOS-1602: optional, so an older page leaves them as they were (a new worker then takes both kinds, none kept).
+    takes: z.enum(MACHINE_TAKES).optional(),
+    mergeKept: z.number().int().min(0).max(MAX_CHECK_SLOTS).optional(),
   });
+  const keptFits = (b: { slots?: number; mergeKept?: number }, slotsNow?: number) => {
+    const slots = b.slots ?? slotsNow;
+    if (b.mergeKept !== undefined && slots !== undefined && b.mergeKept > slots) throw Object.assign(new Error("Kept for merges can't be more than the worker's slots."), { statusCode: 400 });
+  };
   const needWorkers = () => {
     if (!checkWorkers) throw Object.assign(new Error("Check workers are not available on this server."), { statusCode: 404 });
     return checkWorkers;
@@ -195,6 +211,7 @@ export function settingsLimitsRoutes(
   owner.post("/api/settings/check-workers", async (req) => {
     const w = needWorkers();
     const b = WorkerBody.parse(req.body);
+    keptFits(b);
     await knownCompanies(b.companyIds);
     const { worker, token } = await w.register(b);
     // BOS-1550: the commit the worker must be built from = the one its chosen companies' runners are built from, so the
@@ -210,6 +227,7 @@ export function settingsLimitsRoutes(
     const w = needWorkers();
     const { id } = z.object({ id: Uuid }).parse(req.params);
     const b = WorkerBody.partial().parse(req.body);
+    if (b.mergeKept !== undefined) keptFits(b, (await w.get(id))?.slots);
     if (b.companyIds) await knownCompanies(b.companyIds);
     const row = await w.update(id, b);
     if (!row) return reply.code(404).send({ error: "not_found" });

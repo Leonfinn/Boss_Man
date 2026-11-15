@@ -1068,6 +1068,10 @@ export const checkWorkers = pgTable("check_workers", {
   companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
   /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
   slots: integer("slots").notNull().default(1),
+  /** BOS-1602: what kinds of check this machine takes: "both", "merge" (merge checks only) or "checks" (pre-review checks only). */
+  takes: text("takes").notNull().default("both"),
+  /** BOS-1602: how many of its slots only ever run merge checks (with takes "both"); 0 = none kept. */
+  mergeKept: integer("merge_kept").notNull().default(0),
   /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
   checkThreads: integer("check_threads"),
   checkMemoryMb: integer("check_memory_mb"),

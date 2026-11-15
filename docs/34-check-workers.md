@@ -1,6 +1,6 @@
 # Check workers: more machines for checks
 
-A **check worker** is a small container on another Docker host that takes check jobs (quick checks and merge checks) from your Boss Man server when the check line is long. It runs no agents and never merges anything. Design: DR-060.
+A **check worker** is a small container on another Docker host that takes check jobs (quick checks and merge checks) from your Boss Man server when the check line is long. It runs no agents. It can run the merge check (the full test run before a ticket lands), but code only ever goes onto main from your main Boss Man server, never from a worker. Design: DR-060.
 
 ## Add a worker (any Docker host)
 
@@ -57,6 +57,17 @@ These are lines already in the file; change them in place. None has a host-speci
 - Test workers per check and a memory hint per check are set per worker in the Add a check worker form, not in the file.
 
 Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
+
+## Which checks each machine takes
+
+In Settings → Server and runner → Checks, the company runner and each worker have two settings:
+
+- **Takes:** merge checks and quick checks (the default), merge checks only, or quick checks only. A merge check is the full test run before a ticket lands; quick checks are the ones agents ask for before review, including the rare full one. Wherever a merge check runs, the code only goes onto main from your main Boss Man server.
+- **Kept for merge checks:** with "merge checks and quick checks", how many of that machine's slots only ever run merge checks (0 to its slot count). The rest take either kind.
+
+Example: a fast main machine and a slower NAS. Company runner: 3 checks at once, 2 kept for merge checks. NAS worker: 2 checks at once, quick checks only. Merge checks then always run on the fast machine, quick checks go to the NAS first, and the runner's third slot takes a quick check when one is waiting, otherwise a merge check.
+
+How a check is placed: a merge check goes to a kept slot first, then to a free either slot on a machine that takes merge checks. A quick check goes to a quick-checks-only machine first, then to a free either slot. On a machine with kept slots, a merge check doesn't take the last free either slot while a quick check waits (merge checks already have their kept slots); with nothing set, the older rule stands: a merge check never takes a machine's last free slot while a quick check waits. The merge train seats one ticket per slot that can run a merge check, so a quick-checks-only worker adds no seat. A waiting check says why on the Merge queue page's Queued checks tab, for example "waiting for a merge slot: 3 of 3 busy", or that no ready machine takes its kind.
 
 ## Per-host notes
 
