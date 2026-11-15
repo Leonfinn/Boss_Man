@@ -66,7 +66,7 @@ import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
-import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
+import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
 import { planningService } from "./services/planning.js";
@@ -164,6 +164,8 @@ export type AppOptions = {
   limits?: Partial<Limits>;
   /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
   tickOnWake?: boolean;
+  /** Hold every run until its runner's report proves the fence and the network guard (DR-049 point 1). main.ts sets it; most tests build without a runner report. */
+  requireRunnerProof?: boolean;
   /** Where runners put each ticket's workspace. */
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
@@ -468,6 +470,7 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
+    requireRunnerProof: opts.requireRunnerProof,
     log: (m, companyId) => (companyId ? app.log.error({ companyId }, m) : app.log.error(m)),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
@@ -1319,7 +1322,7 @@ export async function buildApp(opts: AppOptions) {
       }
       // A fence mode sent from Settings is the owner's choice (BOS-940): Boss Man never changes it, and its card goes.
       const chosenAt = b.fenceMode ? new Date() : null;
-      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt } : {}) };
+      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt, fenceOffFingerprint: null } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
       if (chosenAt) await closeFenceCard(db, id, chosenAt);
@@ -1459,7 +1462,23 @@ export async function buildApp(opts: AppOptions) {
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
       const report = await runnerReport.companyPanel(id);
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher, report };
+      // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
+      const [co] = await db.select().from(companies).where(eq(companies.id, id));
+      const safety = co ? featureStates(co, r.sandbox) : null;
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report };
+    });
+
+    // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
+    // false is "Keep agents stopped". The choice is kept with this runner's platform.
+    owner.post("/api/companies/:id/safety-choice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ feature: z.enum(["guard", "fence"]), run: z.boolean() }).parse(req.body);
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
+      if (!r) return reply.code(404).send({ error: "no_runner" });
+      const at = new Date();
+      if (b.feature === "guard") await chooseGuard(db, id, b.run, at);
+      else await chooseFence(db, id, b.run, at);
+      return { ok: true };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.

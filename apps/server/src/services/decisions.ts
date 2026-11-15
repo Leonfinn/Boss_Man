@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
-import { applyFenceAnswer, applyFenceUnavailableAnswer, checkFenceAnswer } from "./fence-default.js";
+import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -253,6 +253,8 @@ export type DecisionContext =
   | { type: "fence_default" }
   /** A company's agent work held because its runner can't fence (BOS-373): run agents without the fence, or keep them stopped. */
   | { type: "fence_unavailable" }
+  /** A company's agent work held because its runner's network guard isn't proven on (DR-049 point 1, BOS-938). */
+  | { type: "guard_unavailable" }
   | { type: "budget_limit"; policyId: string }
   /**
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
@@ -395,6 +397,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "run_time_limit",
   "fence_default",
   "fence_unavailable",
+  "guard_unavailable",
   "ticket_cap",
   "rule_proposal",
   "goal_check",
@@ -3495,6 +3498,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await applyFenceAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "fence_unavailable") {
         await applyFenceUnavailableAnswer(db, d.companyId, answer, now());
+      } else if (ctx.type === "guard_unavailable") {
+        await applyGuardAnswer(db, d.companyId, answer, now());
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.

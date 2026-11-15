@@ -27,9 +27,24 @@ export type GuardReport = z.infer<typeof GuardReport>;
  * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
  * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
  */
+/** What the runner is running on (DR-049 point 1): an owner's choice to run without a safety feature is kept with this, and a different host or kernel asks again. */
+export const PlatformReport = z.object({
+  kernel: z.string().max(100),
+  dockerVersion: z.string().max(60),
+  osType: z.string().max(40),
+});
+export type PlatformReport = z.infer<typeof PlatformReport>;
+
+/** One comparable string for a platform; null while the runner hasn't reported one. */
+export function platformFingerprint(p: PlatformReport | null | undefined): string | null {
+  return p ? `${p.kernel}|docker ${p.dockerVersion}|${p.osType}` : null;
+}
+
 export const SandboxReport =z.object({
   /** The runner's own network-guard probe (DR-049 point 2); absent on a runner that predates it. */
   guard: GuardReport.optional(),
+  /** Kernel, Docker version and OS type (DR-049 point 1); absent on a runner that predates it. */
+  platform: PlatformReport.optional(),
   landlockAbi: z.number().int().nonnegative(),
   errno: z.string().max(200).nullable(),
   level: z.enum(["full", "partial", "unavailable"]),

@@ -136,6 +136,8 @@ export const OWNER_CONTROLS = {
     "Stop making room", "Lift the hold now",
     // The server-wide hold (BOS-836); Resume is on the banner every screen shows while it is on.
     "Stop all work",
+    // The safety cards under the runner (BOS-938).
+    "Keep agents stopped", "Run agents without the network guard", "Run agents without the fence",
     // Ask every running agent to stop cleanly before an update (BOS-929).
     "Ask agents to wrap up", "Cancel wrap-up", "Stop this run",
     // Updates (BOS-647): a fresh copy of the version that runs, through the host deployer.

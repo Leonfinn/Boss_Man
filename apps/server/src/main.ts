@@ -36,6 +36,8 @@ const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefU
   secureCookies: trustedProxies.length ? "auto" : env.BOSSMAN_INSECURE_COOKIES === "1" ? false : true,
   trustedProxies,
   leader,
+  // DR-049 point 1: an agent run starts only when its runner has proven the fence and the network guard (or the owner chose otherwise).
+  requireRunnerProof: true,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
   deployerDir: env.BOSSMAN_DEPLOYER_DIR,
