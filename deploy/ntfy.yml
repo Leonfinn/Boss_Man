@@ -15,7 +15,9 @@
 #   NTFY_EDGE_IP=<address>      # default 172.30.0.6, ntfy fixed address on edge. Must sit inside BOSSMAN_EDGE_SUBNET and never be
 #                               # BOSSMAN_EDGE_IP (the one address whose forwarded headers the server trusts) or the gateway (.1).
 # Optional: NTFY_IMAGE (pinned by digest below; change version and digest together), NTFY_CACHE_DURATION (1h),
-#   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
+#   NTFY_UPSTREAM_BASE_URL (leave unset for Android; iPhone only, see the doc).
+# After ANY restart of ntfy, Android phones may stay silent until the ntfy app is closed and reopened: see
+# "After you restart ntfy (Android)" in docs/06-install-truenas.md and send a test push with the app closed.
 #
 # No port is published on the host at all. The container joins the "edge" network of the Tailscale sidecar
 # from deploy/tailscale.yml (BOS-242, set that up first); the sidecar's Serve config (deploy/tailscale/serve.json)
@@ -23,8 +25,8 @@
 # Boss Man's server is on the same edge network and publishes to http://ntfy:80 directly (no ts.net name needed);
 # only the phone and the Approve buttons use the https address.
 # Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
-# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set, so nothing is
-# relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
+# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set by default, so
+# nothing is relayed anywhere (unless you set NTFY_UPSTREAM_BASE_URL for an iPhone). Messages are kept for NTFY_CACHE_DURATION, then dropped.
 
 services:
   ntfy:

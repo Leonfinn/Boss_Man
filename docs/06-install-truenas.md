@@ -816,7 +816,7 @@ How it is set up (all in `deploy/ntfy.yml`):
 **Do section 10b (HTTPS through Tailscale Serve) first.** This section builds on it and doesn't work without it.
 - **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
 - **Short memory.** Messages are kept for 1 hour (`NTFY_CACHE_DURATION`), then dropped.
-- **No relay.** No upstream server is set, so nothing leaves your network.
+- **No relay by default.** No upstream server is set, so nothing leaves your network. (iPhone only: see the iPhone note below.)
 
 Treat the topic name and the passwords as secrets: notifications will carry Approve links. Don't paste them into tickets, chat or this repository.
 
@@ -861,6 +861,15 @@ From a device that is not on your tailnet the address must not answer at all.
 ### iPhone
 
 iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
+
+### After you restart ntfy (Android)
+
+The Android app does not use Google's push service with a self-hosted server. It keeps its own long connection open to your ntfy address (the "Listening for instant notifications" entry in the notification shade) and only fetches by hand when you open it. Restarting ntfy (an update, or adding `deploy/ntfy-bluegreen.yml`) cuts that connection. If the app does not reconnect by itself, messages wait on the server and show only when you open the app, even though Boss Man reports the push as accepted. This happened on 14 Nov (BOS-1481); fully closing and reopening the app fixed it.
+
+After every ntfy restart:
+1. On the phone, open the ntfy app, then swipe it away from recent apps and open it again.
+2. Send a test notification from Boss Man (Settings → Notifications) with the app closed and the screen off. It should pop up without you opening the app.
+3. If it only appears when you open the app: in the app's Settings turn on "Instant delivery in doze mode", turn on "Instant delivery" on that subscription, and in Android Settings → Apps → ntfy → Battery choose "Unrestricted".
 
 ### Approve buttons
 
