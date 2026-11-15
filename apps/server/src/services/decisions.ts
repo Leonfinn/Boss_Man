@@ -2991,7 +2991,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // its first raise's ticket, so it stays out of this: it closes itself once the cause is gone (BOS-469).
       const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type) && (ctx as { decisionsKind?: string }).decisionsKind !== "alert:account_limit";
       if (ctx.ladder?.rung === "owner" && !ownerTierInfo) throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
-      if (ownerTierInfo && !(await cardInvalidReason(db, d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
+      if (ownerTierInfo && !(await cardInvalidReason(db, d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or merged, or the card is otherwise dead).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       // BOS-1193: except a plan card whose run has ended. Nothing is waiting on it any more, and it is the CEO's to close
@@ -3008,10 +3008,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // Two open sign-offs or loop cards for one ticket are normal (one per round), so a duplicate
         // is not a reason to clear one of the owner's own cards: only a finished ticket is.
         if (!(await cardInvalidReason(db, d))) {
-          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
+          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished or merged.");
         }
       } else if (!direct && !inRecheck && !(await cardInvalidReason(db, d)) && !(await isDuplicate(d))) {
-        throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
+        throw new AnswerError("This card is the owner's. Withdraw it only when it is dead (its ticket is finished or merged) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       // DR-058 B, after the checks above so a card the CEO may not withdraw is refused for that reason first.
