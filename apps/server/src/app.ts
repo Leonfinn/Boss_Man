@@ -64,6 +64,7 @@ import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
+import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
 import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
@@ -80,6 +81,7 @@ import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
 import { mergeJamService } from "./services/merge-jam.js";
+import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -99,6 +101,8 @@ import { PrivateDetailsRejected, privateDetailsService } from "./services/privat
 import type { ScanListWarning } from "./services/scan-list.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
+import { checkWorkersService } from "./services/check-workers.js";
+import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -298,7 +302,7 @@ export async function buildApp(opts: AppOptions) {
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
   // Which add-ons are running (DR-023, BOS-521), for server_status and the card lint's R9. Every route that raises a
   // card reads it through addonFacts, and a failed read is "unknown" for all (warnings only), never a refused card.
-  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), now: opts.now });
+  const addonsSvc = addonsService(db, { trustedProxies: opts.trustedProxies ?? [], notifySettings: () => notes.getSettings(), phoneTest: () => notes.testStatus(), now: opts.now });
   // The host deployer's add-on report (BOS-419) is merged in; the worse state wins when the two disagree.
   const addonFacts = async () => {
     const own = await addonsSvc.facts().catch(() => unknownAddons("Boss Man couldn't read the add-on state just now"));
@@ -318,7 +322,7 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
@@ -329,13 +333,16 @@ export async function buildApp(opts: AppOptions) {
     notify: (n) => notes.notify({ companyId: null, agentId: null, level: n.level, title: n.title, body: n.body, link: n.link }),
     isSet: () => privateDetails.isSet(),
   };
+  // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
+  const checkWorkersSvc = checkWorkersService(db);
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
       return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
     },
-    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve() });
+    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc, isLeader: () => leader.isLeader() });
+  await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -458,6 +465,8 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    // BOS-1377: the per-run Stop (runsSvc is built further down; this only runs when the owner answers a card).
+    cancelRun: (runId) => runsSvc.cancel(runId, undefined, undefined),
     tellRunning: async (text) => {
       const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
       for (const r of live) {
@@ -505,6 +514,7 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (id) => runners.isConnected(id),
     connectedSince: (id) => runners.connectedSince(id),
     launcher: (companyId) => launch.status(companyId),
+    launcherOn: () => launch.enabled,
   });
   const permLog = createPermissionLog({ log: (line) => app.log.info(line), now: opts.now });
   decisionsSvc.setPermissionLog(permLog);
@@ -692,7 +702,21 @@ export async function buildApp(opts: AppOptions) {
           if (!event.error || event.interrupted) return;
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
+          // A run the account refused for a usage limit goes back in the queue, held to the real reset, once per window (BOS-1438).
+          // A second refusal in the same window is the account card instead.
+          const requeued = await limitRequeues.afterRun(event.runId);
+          if (run && requeued.outcome === "second_refusal") {
+            await alerts.raise({
+              companyId: run.companyId,
+              kind: "account_limit",
+              question: `${requeued.account}: a run was refused again on ${requeued.window} after its work was already put back to wait for the reset.`,
+              ticketId: run.ticketId,
+              about: [run.agentId],
+              cause: { account: { fundingSourceId: requeued.fundingSourceId, name: requeued.account, window: requeued.window }, agents: [run.agentId] },
+            });
+          }
         })
+        .then(() => limitRequeues.releaseReady())
         // A run that took the owner's message and ended without an answer wakes its agent again (BOS-425).
         .then(() => ownerReplies.afterRunEnded(event.runId))
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
@@ -740,6 +764,7 @@ export async function buildApp(opts: AppOptions) {
     // The merge line jam alert (BOS-766) reads the same view the Merge queue screen does; `mergeQueue` is
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
+    priorityWatch: () => priorityWatch.run(),
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
       const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
@@ -839,6 +864,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   // A limit or auth failure closes into one card per account (DR-017 B, BOS-469 point 3): the agent's own
   // funding source, or the one the run used when it says so.
+  const limitRequeues = limitRequeue(db, { now: opts.now ?? (() => new Date()) });
   const loops = loopGuards(db, {
     limits: opts.loopLimits,
     now: opts.now,
@@ -931,6 +957,7 @@ export async function buildApp(opts: AppOptions) {
     scanListWarning,
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
+    checkCapacity: (companyId) => checks.capacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
@@ -947,7 +974,7 @@ export async function buildApp(opts: AppOptions) {
     limit: () => checkGate(db).limit(),
     runningChecks: (companyId) =>
       db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
         .orderBy(asc(checkJobs.startedAt)),
@@ -961,9 +988,31 @@ export async function buildApp(opts: AppOptions) {
         })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), inArray(checkJobs.state, ["queued", "running"])))) as [{ running: number; waiting: number }];
-      return { mode: mode as CheckQueueMode, slots: await checkQueueSvc.slots(), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
+      // BOS-1435: slots across the runner and ready check workers (the slots setting when there are none).
+      return { mode: mode as CheckQueueMode, slots: await checks.capacity(companyId), running: live?.running ?? 0, waiting: live?.waiting ?? 0 };
     },
     places: async (companyId) => new Map((await checkQueueSvc.list(companyId)).rows.filter((r) => r.kind === "merge" && r.state === "waiting" && r.position).map((r) => [r.ticketId, { place: r.position!, why: r.why }])),
+    // BOS-1486: the live reasons a merge waits, so the screen never says "waiting for a slot" for another cause.
+    runnerConnected: async (companyId) => {
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      return !!r && runners.isConnected(r.id);
+    },
+    runnerUpdateOn: async () => {
+      const h = await getHold(db);
+      return !!h && h.kind !== "wrapup";
+    },
+    launcherOn: () => launch.enabled,
+    queueDetail: async (companyId) => {
+      const q = await checkQueueSvc.list(companyId);
+      const fix = q.rows.find((r) => r.fixesMain);
+      return {
+        slots: q.slots,
+        busy: q.rows.filter((r) => r.state === "running").map((r) => ({ ref: r.ref, title: r.title, kind: r.kind === "merge" ? "merge check" : r.kind === "full" ? "full check" : "quick check" })),
+        mainRed: q.rows.some((r) => r.heldByMain),
+        fixRef: fix ? (fix.ref ?? fix.title) : null,
+        seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
+      };
+    },
     now: opts.now,
   });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
@@ -1005,6 +1054,15 @@ export async function buildApp(opts: AppOptions) {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: "merge held by a stale card", ticketId, priority: 2, note });
     },
+    now: opts.now,
+  });
+  // Priority watch (BOS-1514): the CEO is woken on a wake that is never dropped; the owner gets one notification per stop.
+  const priorityWatch = priorityWatchService(db, {
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
     now: opts.now,
   });
   decisionsSvc.setLoopHooks({
@@ -1344,7 +1402,7 @@ export async function buildApp(opts: AppOptions) {
         throw err;
       }
     });
-    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners });
+    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, checkWorkers: checkWorkersSvc });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
@@ -1791,7 +1849,15 @@ export async function buildApp(opts: AppOptions) {
     // The merge queue, read-only (BOS-587): what is running now, what waits and how the last ones ended.
     owner.get("/api/companies/:id/merge-queue", async (req) => mergeQueue.get(IdParam.parse(req.params).id));
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
-    owner.get("/api/companies/:id/check-queue", async (req) => checkQueueSvc.list(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/check-queue", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      return checkQueueSvc.list(id, new Date(), await checks.capacity(id));
+    });
+    // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
+    owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
+      const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
+      return { statusLine: await mergeQueue.statusLineFor(id, ticketId) };
+    });
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
       const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
@@ -2045,7 +2111,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

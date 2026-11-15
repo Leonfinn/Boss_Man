@@ -13,7 +13,14 @@ export const ADDONS = ["tailscale", "ntfy", "penpot"] as const;
 export type Addon = (typeof ADDONS)[number];
 export type AddonState = "not_set_up" | "stopped" | "needs_login" | "running" | "unknown";
 /** One add-on's state, when it was last seen in it (null when that isn't known) and what the state was read from. */
-export type AddonFact = { state: AddonState; since: string | null; source: string; detail?: string };
+export type AddonFact = {
+  state: AddonState;
+  since: string | null;
+  source: string;
+  detail?: string;
+  /** ntfy only (BOS-1482): the last test push and when the phone tapped Got it (null: never confirmed). "running" says only that ntfy accepted a push. */
+  phone?: { testSentAt: string | null; confirmedAt: string | null };
+};
 export type AddonFacts = Record<Addon, AddonFact>;
 /** Each add-on's name as the owner reads it. */
 export const ADDON_LABELS: Record<Addon, string> = { tailscale: "Tailscale", ntfy: "ntfy", penpot: "Penpot" };
@@ -52,7 +59,7 @@ export function mergeHostAddons(own: AddonFacts, reported: Record<string, string
   return out;
 }
 
-export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySettings: ReturnType<typeof notificationsService>["getSettings"]; now?: () => Date }) {
+export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySettings: ReturnType<typeof notificationsService>["getSettings"]; phoneTest?: ReturnType<typeof notificationsService>["testStatus"]; now?: () => Date }) {
   const now = deps.now ?? (() => new Date());
   // Exact addresses only. A CIDR range in BOSSMAN_TRUSTED_PROXIES never matches here, so Tailscale stays
   // unknown (a warning) rather than running; that's the safe side to be wrong on.
@@ -87,8 +94,10 @@ export function addonsService(db: Db, deps: { trustedProxies: string[]; notifySe
         ntfy = !last
           ? { state: "unknown", since: null, source: "ntfy is set up but no phone push has been sent yet" }
           : last.pushedAt
-            ? { state: "running", since: last.pushedAt.toISOString(), source: "the last phone push went through" }
+            ? { state: "running", since: last.pushedAt.toISOString(), source: "ntfy accepted the last push, which doesn't show the phone got it" }
             : { state: "stopped", since: last.createdAt.toISOString(), source: "the last phone push failed", detail: last.pushError ?? undefined };
+        const test = deps.phoneTest ? await deps.phoneTest().catch(() => null) : null;
+        ntfy.phone = { testSentAt: test?.sentAt ?? null, confirmedAt: test?.confirmedAt ?? null };
       }
 
       const penpot: AddonFact = { state: "unknown", since: null, source: "Boss Man can't see Penpot until the host reports it (BOS-419)" };

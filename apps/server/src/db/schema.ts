@@ -345,6 +345,8 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
+    /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
+    touchesRunnerUpdate: boolean("touches_runner_update"),
     /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
@@ -396,6 +398,8 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
+    /** The files the branch changed when its diff was last read for a landing (BOS-1411): the plan-overlap warning reads them, so it needs no runner call. */
+    diffFiles: jsonb("diff_files").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
@@ -1033,6 +1037,33 @@ export const checkResults = pgTable(
 );
 
 /**
+ * A check worker (DR-060, BOS-1435): a runner image started with BOSSMAN_ROLE=check-worker on any Docker host, which takes
+ * check jobs when the company runner's slots are full. Deliberately not a `runners` row: a runner holds secrets, merges and
+ * agent runs, and runners.company_id is unique. A worker's token opens only /api/check-worker/connect, which carries check
+ * messages and nothing else. Its slots are shared across every company it may serve.
+ */
+export const checkWorkers = pgTable("check_workers", {
+  id: id(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** The companies whose checks it may run; empty means none. */
+  companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
+  /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
+  slots: integer("slots").notNull().default(1),
+  /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
+  checkThreads: integer("check_threads"),
+  checkMemoryMb: integer("check_memory_mb"),
+  enabled: boolean("enabled").notNull().default(true),
+  /** From the worker's last hello. A job goes to it only when imageCommit equals the company runner's (DR-042). */
+  imageCommit: text("image_commit"),
+  imageVersion: text("image_version"),
+  reportedSlots: integer("reported_slots"),
+  features: jsonb("features").$type<string[]>(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+/**
  * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
  * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
  * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
@@ -1061,6 +1092,8 @@ export const checkJobs = pgTable(
     /** The agent to wake with the result. */
     requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
     runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    /** BOS-1435: the check worker a running job was sent to (runner_id is then null); null for a runner's job. */
+    workerId: uuid("worker_id").references(() => checkWorkers.id, { onDelete: "set null" }),
     command: text("command"),
     exitCode: integer("exit_code"),
     /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
@@ -1075,6 +1108,7 @@ export const checkJobs = pgTable(
     index("check_jobs_state_queued").on(t.state, t.queuedAt),
     index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
     index("check_jobs_project_tree").on(t.projectId, t.tree),
+    index("check_jobs_worker_state").on(t.workerId, t.state),
   ],
 );
 

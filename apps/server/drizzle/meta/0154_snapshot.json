@@ -1,5 +1,5 @@
 {
-  "id": "830c7bec-5743-4b04-96a1-c4b661f72615",
+  "id": "598f9fa4-315e-4feb-b1e3-3f17ce81a932",
   "prevId": "f142c9aa-122f-4b77-993e-17a2e6148809",
   "version": "7",
   "dialect": "postgresql",
@@ -1408,6 +1408,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "worker_id": {
+          "name": "worker_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "command": {
           "name": "command",
           "type": "text",
@@ -1521,6 +1527,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "check_jobs_worker_state": {
+          "name": "check_jobs_worker_state",
+          "columns": [
+            {
+              "expression": "worker_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1582,6 +1609,19 @@
           "tableTo": "runners",
           "columnsFrom": [
             "runner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "check_jobs_worker_id_check_workers_id_fk": {
+          "name": "check_jobs_worker_id_check_workers_id_fk",
+          "tableFrom": "check_jobs",
+          "tableTo": "check_workers",
+          "columnsFrom": [
+            "worker_id"
           ],
           "columnsTo": [
             "id"
@@ -1725,6 +1765,116 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.check_workers": {
+      "name": "check_workers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "company_ids": {
+          "name": "company_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "slots": {
+          "name": "slots",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "check_threads": {
+          "name": "check_threads",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "check_memory_mb": {
+          "name": "check_memory_mb",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "image_commit": {
+          "name": "image_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "image_version": {
+          "name": "image_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reported_slots": {
+          "name": "reported_slots",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "features": {
+          "name": "features",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "check_workers_token_hash_unique": {
+          "name": "check_workers_token_hash_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "token_hash"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -3724,30 +3874,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "confirm_token_hash": {
-          "name": "confirm_token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "confirm_expires_at": {
-          "name": "confirm_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "confirm_email": {
-          "name": "confirm_email",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "confirm_name": {
-          "name": "confirm_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -3786,21 +3912,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "feedback_notes_confirm_token": {
-          "name": "feedback_notes_confirm_token",
-          "columns": [
-            {
-              "expression": "confirm_token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3925,27 +4036,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "confirm_by_email": {
-          "name": "confirm_by_email",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "confirm_link_hours": {
-          "name": "confirm_link_hours",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 24
-        },
-        "remember_address_days": {
-          "name": "remember_address_days",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 90
         }
       },
       "indexes": {},
@@ -6054,102 +6144,6 @@
             "id"
           ],
           "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.portal_confirmed_addresses": {
-      "name": "portal_confirmed_addresses",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "email_hash": {
-          "name": "email_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "secret_hash": {
-          "name": "secret_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "portal_confirmed_secret": {
-          "name": "portal_confirmed_secret",
-          "columns": [
-            {
-              "expression": "secret_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "portal_confirmed_expires": {
-          "name": "portal_confirmed_expires",
-          "columns": [
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "portal_confirmed_addresses_company_id_companies_id_fk": {
-          "name": "portal_confirmed_addresses_company_id_companies_id_fk",
-          "tableFrom": "portal_confirmed_addresses",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },

@@ -846,6 +846,16 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -px/ -i -e s/a/b/ x.rb",
     "ruby -x/srv -i.bak -pe s/a/b/ f",
     "ruby --chdir=/srv -pi -e s/a/b/ x.rb",
+    // ruby's -0 is octal only, so an x after it is its own -x[dir] switch, not perl's hex separator (BOS-1441).
+    "ruby -0x/ -i -pe s/a/b/ etc/hosts",
+    "ruby -0x/srv -i -pe s/a/b/ etc/hosts",
+    "ruby -p0x/ -i -e s/a/b/ x.rb",
+    "ruby -i -0x/ -pe s/a/b/ x.rb",
+    "ruby -0777x/ -i -pe s/a/b/ x.rb",
+    "ruby -l0x/ -i -pe s/a/b/ x.rb",
+    "ruby -pl0x/ -i -e s/a/b/ x.rb",
+    "ruby -0xC/ -i -pe s/a/b/ x.rb",
+    "ruby -0C/ -i -pe s/a/b/ x.rb",
     // ruby long options whose value is the next word must not hide the -i (security review round 3).
     "ruby --encoding utf-8 -i -pe s/a/b/ /etc/hosts",
     "ruby --external-encoding utf-8 -i -pe s/a/b/ /etc/hosts",
@@ -886,6 +896,12 @@ describe("forms left out of BOS-393 (BOS-571)", () => {
     "ruby -pC/ -e 'p 1' x.rb",
     "ruby -px -i -e s/a/b/ x.rb",
     "ruby -x script.rb",
+    // -0 and -l bundles without a directory (BOS-1441); perl's hex separator is unchanged.
+    "ruby -0777 -pi -e s/a/b/ x.rb",
+    "ruby -0pi -e s/a/b/ x.rb",
+    "ruby -0x -i -e s/a/b/ x.rb",
+    "ruby -lpi -e s/a/b/ x.rb",
+    "perl -0xFF -pi -e s/a/b/ x.pl",
     // Long options that read a value, without -i.
     "ruby --encoding utf-8 script.rb",
     "ruby --encoding utf-8 -pe s/a/b/ x.rb",
