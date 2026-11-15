@@ -18,7 +18,7 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
-import { openBlockers } from "./ticket-links.js";
+import { openBlockers, ticketBlockerFinished } from "./ticket-links.js";
 import { oldestInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
@@ -613,14 +613,14 @@ export function schedulerService(
     const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), ne(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
     if (busyRun || busyWake) return null;
     const deps = await db
-      .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, decision: decisions.status, engagement: engagements.status })
+      .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, decision: decisions.status, engagement: engagements.status })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
       .where(inArray(ticketDependencies.blockedTicketId, ids));
     if (deps.some((d) => d.decision === "open" || (d.engagement && d.engagement !== "signed_off"))) return null;
-    const waits = (id: string) => deps.filter((d) => d.blocked === id && d.ticket && d.ticketState !== "done").map((d) => `${d.ticket} (${d.ticketState})`).sort();
+    const waits = (id: string) => deps.filter((d) => d.blocked === id && d.ticket && !ticketBlockerFinished(d)).map((d) => `${d.ticket} (${d.ticketState})`).sort();
     const items = tree.map((x) => ({ title: x.t.title, state: x.t.systemState, assignee: x.assignee ?? (x.t.assignedToOwner ? "the owner" : "nobody"), waits: waits(x.t.id), key: [x.t.id, x.t.systemState, x.t.assigneeAgentId, x.t.version, waits(x.t.id).join(",")].join("|") }));
     return { items, fp: createHash("sha256").update(items.map((i) => i.key).join("\n")).digest("hex") };
   }

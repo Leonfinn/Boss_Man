@@ -129,7 +129,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
     /** The company's open tickets, plus everything they wait on, as a laid-out graph. */
     async plan(companyId: string) {
       const edges = await db
-        .select({ id: ticketDependencies.id, to: ticketDependencies.blockedTicketId, ticket: ticketDependencies.blockerTicketId, engagement: ticketDependencies.blockerEngagementId, decision: ticketDependencies.blockerDecisionId })
+        .select({ id: ticketDependencies.id, to: ticketDependencies.blockedTicketId, ticket: ticketDependencies.blockerTicketId, engagement: ticketDependencies.blockerEngagementId, decision: ticketDependencies.blockerDecisionId, until: ticketDependencies.until })
         .from(ticketDependencies)
         .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
         .where(and(eq(tickets.companyId, companyId), ne(tickets.systemState, "done")));
@@ -137,7 +137,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       for (const e of edges) (ticketIds.add(e.to), e.ticket && ticketIds.add(e.ticket));
       const ts = ticketIds.size
         ? await db
-            .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title, state: tickets.systemState, assignee: agents.name, project: projects.name })
+            .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, title: tickets.title, state: tickets.systemState, mergeCommit: tickets.mergeCommit, assignee: agents.name, project: projects.name })
             .from(tickets)
             .innerJoin(projects, eq(projects.id, tickets.projectId))
             .innerJoin(companies, eq(companies.id, tickets.companyId))
@@ -150,7 +150,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const ds = decIds.length ? await db.select({ id: decisions.id, question: decisions.question, status: decisions.status }).from(decisions).where(inArray(decisions.id, decIds)) : [];
 
       const base: Array<Omit<PlanNodeView, "layer" | "blocked" | "causes" | "holdingUp">> = [
-        ...ts.map((t) => ({ id: t.id, kind: "ticket" as const, ref: ticketRef(t.prefix, t.number), title: t.title, state: t.state, open: t.state !== "done", link: `#/tickets/${t.id}`, assignee: t.assignee, project: t.project })),
+        ...ts.map((t) => ({ id: t.id, kind: "ticket" as const, ref: ticketRef(t.prefix, t.number), title: t.title, state: t.state, open: !ticketBlockerFinished({ ticketState: t.state, mergeCommit: t.mergeCommit, until: edges.some((e) => e.ticket === t.id && e.until !== "merged") || !edges.some((e) => e.ticket === t.id) ? "done" : "merged" }), link: `#/tickets/${t.id}`, assignee: t.assignee, project: t.project })),
         ...es.map((e) => ({ id: e.id, kind: "engagement" as const, ref: null, title: e.title, state: e.status, open: e.status !== "signed_off", link: `#/engagements/${e.id}`, assignee: null, project: null })),
         ...ds.map((d) => ({ id: d.id, kind: "decision" as const, ref: null, title: d.question, state: d.status, open: d.status === "open", link: "#/decisions", assignee: null, project: null })),
       ];

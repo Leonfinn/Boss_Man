@@ -26,6 +26,8 @@ export function ticketBlockerFinished(d: { ticketState: string | null; mergeComm
   return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
 }
 
+export { ticketBlockerOpenSql } from "./blocker-sql.js";
+
 export type OpenBlocker = { kind: "ticket" | "engagement" | "decision"; title: string | null };
 
 /**

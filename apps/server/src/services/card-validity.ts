@@ -11,6 +11,7 @@ import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, engagements, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { systemMoveTicket } from "./ticket-transition.js";
+import { openBlockers } from "./ticket-links.js";
 import { mergeContext } from "./decision-context.js";
 import { record } from "./activity.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
@@ -108,14 +109,7 @@ export type CloseDeps = {
 
 /** A ticket that waited only on closed cards, tickets and engagements goes back to ready (the same test as decisions.ts releaseIfFree). */
 async function releaseWhenFree(db: Db, ticketId: string, at: Date) {
-  const deps = await db
-    .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-    .from(ticketDependencies)
-    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(eq(ticketDependencies.blockedTicketId, ticketId));
-  if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) return null;
+  if ((await openBlockers(db, ticketId)).length) return null;
   return systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: at });
 }
 
