@@ -2,45 +2,78 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
+import { useMediaQuery } from "../hooks";
+import { Activity, BookOpen, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, FolderGit2, Bell, GitMerge, Gavel, Handshake, LayoutDashboard, ListChecks, LogOut, Map, Menu as MenuIcon, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
-const GROUPS: Array<{ title: string; items: Item[] }> = [
-  {
-    title: "Overview",
-    items: [
-      { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-      { id: "decisions", label: "Decisions", icon: Gavel },
-      { id: "notifications", label: "Notifications", icon: Bell },
-      { id: "chat", label: "Chat", icon: MessageSquare },
-    ],
-  },
-  {
-    title: "Work",
-    items: [
-      { id: "projects", label: "Projects", icon: FolderGit2 },
-      { id: "roadmap", label: "Roadmap", icon: Map },
-      { id: "merge-queue", label: "Merge queue", icon: GitMerge },
-      { id: "plan", label: "Plan", icon: ListChecks },
-      { id: "wiki", label: "Wiki", icon: BookOpen },
-      { id: "features", label: "Features", icon: Sparkles },
-      { id: "feedback", label: "Feedback", icon: MessageCircle },
-    ],
-  },
-  {
-    title: "Company",
-    items: [
-      { id: "agents", label: "Agents", icon: Users },
-      { id: "skills", label: "Skills", icon: Puzzle },
-      { id: "runs", label: "Runs", icon: Activity },
-      { id: "scrum-master", label: "Scrum Master log", icon: ShieldCheck },
-      { id: "workflow", label: "Workflow report", icon: WorkflowIcon },
-      { id: "engagements", label: "Engagements", icon: Handshake },
-      { id: "settings", label: "Settings", icon: Settings },
-    ],
-  },
+type Group = { group: string; label: string; icon: LucideIcon; items: Item[] };
+type Entry = Item | Group;
+const isGroup = (e: Entry): e is Group => "group" in e;
+// (BOS-1506) About ten rows in three blocks (thin lines between them, no headings); Product, Team and
+// Activity hold the rest, one level only (BOS-1018). Settings and Log out are pinned below the list.
+const BLOCKS: Entry[][] = [
+  [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "decisions", label: "Decisions", icon: Gavel },
+    { id: "notifications", label: "Notifications", icon: Bell },
+    { id: "chat", label: "Chat", icon: MessageSquare },
+  ],
+  [
+    { id: "projects", label: "Projects", icon: FolderGit2 },
+    {
+      group: "product",
+      label: "Product",
+      icon: Sparkles,
+      items: [
+        { id: "roadmap", label: "Roadmap", icon: Map },
+        { id: "features", label: "Features", icon: Sparkles },
+        { id: "feedback", label: "Feedback", icon: MessageCircle },
+        { id: "plan", label: "Plan", icon: ListChecks },
+      ],
+    },
+    { id: "merge-queue", label: "Merge queue", icon: GitMerge },
+    { id: "wiki", label: "Wiki", icon: BookOpen },
+  ],
+  [
+    {
+      group: "team",
+      label: "Team",
+      icon: Users,
+      items: [
+        { id: "agents", label: "Agents", icon: Users },
+        { id: "skills", label: "Skills", icon: Puzzle },
+        { id: "engagements", label: "Engagements", icon: Handshake },
+      ],
+    },
+    {
+      group: "activity",
+      label: "Activity",
+      icon: Activity,
+      items: [
+        { id: "runs", label: "Runs", icon: Activity },
+        { id: "scrum-master", label: "Scrum Master log", icon: ShieldCheck },
+        { id: "workflow", label: "Workflow report", icon: WorkflowIcon },
+      ],
+    },
+  ],
 ];
+const SETTINGS: Item = { id: "settings", label: "Settings", icon: Settings };
+const ALL_ITEMS: Item[] = [...BLOCKS.flat().flatMap((e) => (isGroup(e) ? e.items : [e])), SETTINGS];
+const GROUP_IDS = BLOCKS.flat().filter(isGroup).map((g) => g.group);
+
+// Which groups are unfolded in place is remembered on this device. Nothing saved: all open on a
+// window with room, all folded on a phone (its Menu sheet opens short).
+const OPEN_KEY = "bm-side-groups";
+function readOpen(phone: boolean): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "null");
+    if (Array.isArray(saved)) return saved.filter((x): x is string => typeof x === "string");
+  } catch {
+    /* storage blocked or unreadable: fall back to the default */
+  }
+  return phone ? [] : GROUP_IDS;
+}
 
 function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { companies: Company[]; current: Company | undefined; waiting: (id: string) => number; onPick: (id: string) => void; onCreate: (name: string) => Promise<void> }) {
   const [open, setOpen] = useState(false);
@@ -132,22 +165,67 @@ export function Sidebar(props: {
   feedback: number;
   mergeWaiting: number;
   mergeStuck: number;
-  notifications: NotificationPermission | "unsupported";
+  /** Kept for the callers; the browser-notifications button now sits on the Notifications page (BOS-1506). */
+  notifications?: NotificationPermission | "unsupported";
   collapsed: boolean;
   narrow: boolean;
   onToggleCollapsed: () => void;
   onPickCompany: (id: string) => void;
   onCreateCompany: (name: string) => Promise<void>;
-  onEnableNotifications: () => void;
+  onEnableNotifications?: () => void;
   onLogout: () => void;
 }) {
   const [menu, setMenu] = useState(false);
   const nav = useRef<HTMLElement>(null);
+  // (BOS-1506) Where a group's pages go: in place (a phone's Menu sheet, a window with room) or in a
+  // small panel beside the row (the icon strip, or a window too short to unfold them: 1667x724).
+  const phone = useMediaQuery("(max-width: 640px)");
+  const short = useMediaQuery("(min-width: 641px) and (max-height: 860px)");
+  const panelMode = !phone && (props.collapsed || short);
+  const [openGroups, setOpenGroups] = useState<string[]>(() => readOpen(phone));
+  const [panel, setPanel] = useState<{ id: string; top: number; left: number } | null>(null);
+  const toggleGroup = (id: string, button: HTMLElement, rows: number) => {
+    if (panelMode) {
+      const r = button.getBoundingClientRect();
+      // Lined up with its row, but moved up when it would run off the bottom of the window (title + rows + padding).
+      const height = 44 + rows * 44 + 16;
+      setPanel((p) => (p?.id === id ? null : { id, top: Math.max(8, Math.min(r.top, window.innerHeight - height - 8)), left: r.right + 8 }));
+      return;
+    }
+    setOpenGroups((cur) => {
+      const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+      try {
+        localStorage.setItem(OPEN_KEY, JSON.stringify(next));
+      } catch {
+        /* storage blocked: the choice lasts until the page reloads */
+      }
+      return next;
+    });
+  };
   // On a narrow screen an expanded menu covers the page, so it folds away once a page is chosen.
   const closeIfNarrow = () => {
     setMenu(false);
+    setPanel(null);
     if (props.narrow && !props.collapsed) props.onToggleCollapsed();
   };
+  useEffect(() => {
+    if (!panelMode) setPanel(null);
+  }, [panelMode]);
+  useEffect(() => {
+    if (!panel) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as Element).closest?.(".side-panel, .nav-group-row")) setPanel(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPanel(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [panel]);
   useEffect(() => {
     if (!props.narrow || props.collapsed || !nav.current) return;
     const onDown = (e: MouseEvent) => {
@@ -173,15 +251,30 @@ export function Sidebar(props: {
   // the "Waiting, nothing to do yet" group stand in, so it is never the inflated number.
   const needsOwner = props.decisions.filter((d) => !d.waiting).filter((d) => !props.current || d.companyId === props.current.id).length;
   const badgeCount = props.decisionsTally ? props.decisionsTally.open : needsOwner;
-  const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || ((props.active === "tickets" || props.active === "board") && i.id === "projects"))?.label ?? "Menu";
   const isCurrent = (id: string) => props.active === id || ((props.active === "tickets" || props.active === "board") && id === "projects");
+  const label = ALL_ITEMS.find((i) => isCurrent(i.id))?.label ?? "Menu";
   const badge = (n: Item) =>
     n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${badgeCount} ${badgeCount === 1 ? "needs" : "need"} you${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${props.decisionsTally.waiting} with the team` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: `${props.mergeStuck} stuck`, warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
+  const itemLink = (n: Item) => {
+    const b = badge(n);
+    return (
+      <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
+        <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
+        <span className="nav-label">{n.label}</span>
+        {b && <span className={`count${b.warn ? " warn" : ""}`} aria-label={b.label}>{b.value}</span>}
+        {b && <span className={`count-dot${b.warn ? " warn" : ""}`} aria-hidden="true" />}
+      </a>
+    );
+  };
   return (
     <nav ref={nav} className={`side${props.collapsed ? " collapsed" : ""}`} aria-label="Main">
       <div className="brand">
         <img src={art.mark64} alt="" />
         <span>Boss Man</span>
+        {/* The strip/expanded switch, beside the name (BOS-1506). Hidden on a phone, which keeps its Menu button. */}
+        <button type="button" className="side-collapse" aria-expanded={!props.collapsed} aria-controls="nav-groups" aria-label={props.collapsed ? "Expand menu" : "Collapse menu"} title={props.collapsed ? "Expand menu" : "Collapse menu"} onClick={props.onToggleCollapsed}>
+          {props.collapsed ? <ChevronsRight size={18} strokeWidth={1.75} aria-hidden="true" /> : <ChevronsLeft size={18} strokeWidth={1.75} aria-hidden="true" />}
+        </button>
       </div>
       <div className="side-bar">
         <CompanySwitcher companies={props.companies} current={props.current} waiting={waiting} onPick={props.onPickCompany} onCreate={props.onCreateCompany} />
@@ -189,26 +282,53 @@ export function Sidebar(props: {
           <MenuIcon size={20} strokeWidth={1.75} aria-hidden="true" />
           <span className="sr-only">{menu ? "Close menu" : `Menu, ${label}`}</span>
         </button>
-        {/* The strip/expanded switch. Hidden on a phone, which keeps its Menu button above. */}
-        <button type="button" className="side-collapse" aria-expanded={!props.collapsed} aria-controls="nav-groups" aria-label={props.collapsed ? "Expand menu" : "Collapse menu"} title={props.collapsed ? "Expand menu" : "Collapse menu"} onClick={props.onToggleCollapsed}>
-          {props.collapsed ? <ChevronsRight size={18} strokeWidth={1.75} aria-hidden="true" /> : <ChevronsLeft size={18} strokeWidth={1.75} aria-hidden="true" />}
-        </button>
       </div>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
-        {GROUPS.map((g) => (
-          <section key={g.title} aria-label={g.title}>
-            <h2>{g.title}</h2>
+        <div className="nav-scroll">
+        {BLOCKS.map((block, bi) => (
+          <section key={bi} aria-label={["Overview", "Work", "Company"][bi]}>
             <ul>
-              {g.items.map((n) => {
-                const b = badge(n);
+              {block.map((entry) => {
+                if (isGroup(entry)) {
+                  const open = !panelMode && openGroups.includes(entry.group);
+                  const shown = panelMode && panel?.id === entry.group;
+                  const here = entry.items.find((i) => isCurrent(i.id));
+                  const bs = entry.items.map(badge).filter((x): x is NonNullable<ReturnType<typeof badge>> => !!x);
+                  const total = bs.reduce((s, x) => s + x.value, 0);
+                  const gb = bs.length ? { value: total, label: bs.map((x) => x.label).join(", "), warn: bs.some((x) => x.warn) } : null;
+                  const links = (
+                    <ul aria-label={`${entry.label} pages`}>
+                      {entry.items.map((n) => (
+                        <li key={n.id}>{itemLink(n)}</li>
+                      ))}
+                    </ul>
+                  );
+                  return (
+                    <li key={entry.group} className="nav-group">
+                      <button type="button" className="nav nav-group-row" aria-expanded={open || shown} aria-controls={`nav-group-${entry.group}`} title={entry.label} data-here={here && !open ? "true" : undefined} onClick={(e) => toggleGroup(entry.group, e.currentTarget, entry.items.length)}>
+                        <entry.icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                        <span className="nav-label">
+                          {entry.label}
+                          {here && !open && <small className="nav-here">{here.label}</small>}
+                        </span>
+                        {gb && !open && <span className={`count${gb.warn ? " warn" : ""}`} aria-label={gb.label}>{gb.value}</span>}
+                        {gb && !open && <span className={`count-dot${gb.warn ? " warn" : ""}`} aria-hidden="true" />}
+                        {open ? <ChevronDown className="nav-chev" size={16} strokeWidth={1.75} aria-hidden="true" /> : <ChevronRight className="nav-chev" size={16} strokeWidth={1.75} aria-hidden="true" />}
+                      </button>
+                      {open && <div id={`nav-group-${entry.group}`} className="nav-group-pages">{links}</div>}
+                      {shown && (
+                        <div id={`nav-group-${entry.group}`} className="side-panel" role="group" aria-label={entry.label} style={{ top: panel!.top, left: panel!.left }}>
+                          <p className="side-panel-title">{entry.label}</p>
+                          {links}
+                        </div>
+                      )}
+                    </li>
+                  );
+                }
+                const n = entry;
                 return (
                   <li key={n.id}>
-                    <a className="nav" href={`#/${n.id}`} onClick={closeIfNarrow} title={n.label} aria-current={isCurrent(n.id) ? "page" : undefined}>
-                      <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
-                      <span className="nav-label">{n.label}</span>
-                      {b && <span className={`count${b.warn ? " warn" : ""}`} aria-label={b.label}>{b.value}</span>}
-                      {b && <span className={`count-dot${b.warn ? " warn" : ""}`} aria-hidden="true" />}
-                    </a>
+                    {itemLink(n)}
                     {n.id === "chat" && starred.length > 0 && (
                       <ul className="sub-nav" aria-label="Starred agents">
                         {starred.map((a) => (
@@ -239,14 +359,10 @@ export function Sidebar(props: {
             </ul>
           </section>
         ))}
-        {/* On a phone these sit inside the folded menu, so the header stays one row. */}
-        <div className="foot">
-          {props.notifications === "default" && (
-            <button type="button" onClick={props.onEnableNotifications} title="Turn on browser notifications">
-              <span className="label-full">Turn on browser notifications</span>
-            </button>
-          )}
-          {props.notifications === "denied" && <small style={{ color: "var(--side-muted)" }}>Notifications are blocked in this browser.</small>}
+        </div>
+        {/* Pinned below the list, so Settings and Log out are in view without scrolling. On a phone they sit inside the folded menu, so the header stays one row. */}
+        <div className="side-pinned foot">
+          {itemLink(SETTINGS)}
           <button type="button" className="logout" onClick={props.onLogout} title="Log out" aria-label="Log out">
             <LogOut size={18} strokeWidth={1.75} aria-hidden="true" className="logout-icon" />
             <span className="label-full">Log out</span>

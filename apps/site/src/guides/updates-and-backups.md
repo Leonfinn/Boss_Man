@@ -40,7 +40,7 @@ Follow the swap in **Updates**, which also has **Cancel the update**. To undo, r
 
 ## Update from the web page (optional)
 
-With the optional host deployer, you can update from Boss Man. The host deployer is a root script on the machine, run every minute by cron. Setting it up is in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), section 9a, and works on any Linux host.
+With the optional host deployer, you can update from Boss Man. The host deployer is a root script on the machine, run every minute by cron. Setting it up is in [`docs/30-in-app-updates.md`](@repo/blob/main/docs/30-in-app-updates.md), which works on any Linux host, with a short section for TrueNAS.
 
 Once it is set up:
 

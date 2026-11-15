@@ -27,6 +27,10 @@ export const NtfyUrl = z
 export const PHONE_PUSH_MODES = ["urgent", "all"] as const;
 export type PhonePushMode = (typeof PHONE_PUSH_MODES)[number];
 
+/** Which phone the owner uses (BOS-1484), so agents and the Notifications page don't guess. Unset until the owner says. */
+export const PHONE_TYPES = ["android", "iphone", "both"] as const;
+export type PhoneType = (typeof PHONE_TYPES)[number];
+
 export const NotifySettings = z.object({
   quietHours: z
     .object({
@@ -54,6 +58,8 @@ export const NotifySettings = z.object({
   publicUrl: z.string().url().nullable(),
   /** The owner's off switch for phone Approve buttons (BOS-243); on unless set to false. */
   approveButtons: z.boolean().optional(),
+  /** The owner's phone type (BOS-1484): android, iphone or both. Null or missing means the owner hasn't said. */
+  phoneType: z.enum(PHONE_TYPES).nullable().optional(),
 });
 export type NotifySettings = z.infer<typeof NotifySettings>;
 

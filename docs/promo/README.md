@@ -27,6 +27,11 @@ All commands from the repo root. Use a short `TMPDIR` or Chromium will not start
    `ffmpeg -ss 9 -i boss-man-promo.mp4 -frames:v 1 docs/promo/poster.jpg`.
    The MP4 itself is uploaded by the owner through GitHub's README editor (see the research page BOS-1432).
 
+7. Autoplay loop (`boss-man-promo-loop.gif`, top of the main README, 10 s, 720 px wide, 15 fps, about 0.5 MB):
+   GitHub never autoplays an MP4 but plays a GIF on its own. Cut four 2.5 s pieces of the MP4 (board at 8 s,
+   agents at 16 s, merge queue at 32 s, roadmap at 52 s) with ffmpeg `trim` + `concat`, then `fps=15,scale=720:-1`
+   and a two-pass `palettegen` / `paletteuse` (160 colours) with `-loop 0`.
+
 ## Files
 
 - `scenes.mjs`: the storyboard; one entry per scene with its caption and the clicks.
