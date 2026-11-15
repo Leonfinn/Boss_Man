@@ -13,6 +13,7 @@ const ANSWERS: Record<string, string> = {
   "docker compose version": "Docker Compose version v5.7.0\n",
   actionlint: "1.7.12\ninstalled by building from source\n",
   chromium: "Chromium 131.0.6778.204 built on Debian\n",
+  playwright: "Version 1.64.1\n",
 };
 const run = async (cmd: string, args: string[]) => {
   const key = cmd === "docker" ? `docker ${args.join(" ")}` : cmd;
@@ -34,6 +35,13 @@ describe("toolchain fingerprint", () => {
     expect(a.fingerprint).toMatch(/^[0-9a-f]{64}$/);
     expect(fingerprintOf({ a: "1", b: "2" })).toBe(fingerprintOf({ b: "2", a: "1" }));
     expect(a.tools).toMatchObject({ node: "22.11.0", os: "debian-12", pnpm: "10.28.0", git: "2.39.5", shellcheck: "0.9.0", ripgrep: "13.0.0", jq: "1.6", "docker-cli": "29.9.3", "docker-compose": "5.7.0", actionlint: "1.7.12" });
+  });
+
+  it("BOS-1606: a worker without playwright differs from a runner with it, and says so", async () => {
+    const runner = await readToolchain({ run, nodeVersion: "22.11.0", os: "debian-12" });
+    const worker = await readToolchain({ run: (c, a) => (c === "playwright" ? Promise.reject(new Error("gone")) : run(c, a)), nodeVersion: "22.11.0", os: "debian-12" });
+    expect(worker.fingerprint).not.toBe(runner.fingerprint);
+    expect(toolchainDifferences(worker.tools, runner.tools)).toEqual(["playwright missing here, 1.64.1 on your runner"]);
   });
 
   it("changes when a tool changes or goes missing, but not when only the browser differs", async () => {

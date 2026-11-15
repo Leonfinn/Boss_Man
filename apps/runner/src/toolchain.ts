@@ -26,6 +26,9 @@ const ASKS: Array<[name: string, cmd: string, args: string[]]> = [
   ["docker-compose", "docker", ["compose", "version"]],
   ["actionlint", "actionlint", ["-version"]],
   ["chromium", "chromium", ["--version"]],
+  // BOS-1606: the web tests load the playwright module; a worker without it failed full checks on good code. Compared, so a
+  // worker that lacks it (or an older image) takes no checks and the panel says "playwright missing here".
+  ["playwright", "playwright", ["--version"]],
 ];
 
 export function osRelease(read: () => string = () => readFileSync("/etc/os-release", "utf8")): string | null {
