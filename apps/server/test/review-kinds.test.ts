@@ -18,6 +18,8 @@ afterEach(async () => {
 
 const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "x", added: 1, removed: 0 }], diff: "diff --git a/x b/x", truncated: false };
 const PLAN = "1. Read the limiter.";
+// The branch tip the fake runner reports (BOS-1528): tests move it between two reviewers' approvals.
+const branch: { head: string | null; covers: boolean } = { head: null, covers: false };
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
 async function setup() {
@@ -42,12 +44,14 @@ async function setup() {
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") ok(DIFF);
+    if (c.type === "workspace.diff") ok({ ...DIFF, head: branch.head ?? DIFF.head });
+    // BOS-1528: whether main's merges since an older head were clean (signoffCovers).
+    if (c.type === "workspace.covers") ok({ covers: branch.covers, reason: "", newCommits: 0, handMerges: 0 });
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
     if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
-  });
+  }, ["signoff-covers"]);
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   const ticket = async (fields: Record<string, unknown> = {}) => {
@@ -121,6 +125,38 @@ describe("review kinds", () => {
     expect((await c.row(c.t.id)).systemState).toBe("review");
     expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
     await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
+  });
+
+  describe("each approval carries the head its reviewer read (BOS-1528)", () => {
+    const NEW_HEAD = "d".repeat(40);
+    afterEach(() => {
+      branch.head = null;
+      branch.covers = false;
+    });
+
+    it("stamps each reviewer's own head, and reopens an earlier reviewer when the branch moved with new code", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      expect((await c.rows()).filter((r) => r.status === "approved").map((r) => r.head)).toEqual([DIFF.head, DIFF.head]);
+      branch.head = NEW_HEAD; // the author commits before the last reviewer answers
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("reopened");
+      const rows = await c.rows();
+      expect(rows.find((r) => r.kind === "infra")).toMatchObject({ status: "approved", head: NEW_HEAD });
+      expect(rows.filter((r) => r.kind !== "infra").map((r) => [r.status, r.head])).toEqual([["pending", null], ["pending", null]]);
+      expect((await c.row(c.t.id)).systemState).toBe("review");
+      expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).some((a) => a.kind === "review_reopened")).toBe(true);
+    });
+
+    it("lets the round pass when the later head only took clean merges of main", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      branch.head = NEW_HEAD;
+      branch.covers = true;
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      expect((await c.rows()).filter((r) => r.status === "pending")).toHaveLength(0);
+    });
   });
 
   it("sends the work back once everyone has answered if one asks for changes", async () => {
