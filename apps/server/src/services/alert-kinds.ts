@@ -88,6 +88,11 @@ export const ALERT_KINDS = {
   run_time_limit: {
     topRung: "owner",
   },
+  // github-watch.ts (BOS-1393): the GitHub watcher can't read the repo (bad token, missing permission, repo not found).
+  // The owner's own token and setting, so it starts with them; one card per project, withdrawn by the watcher itself on the next good pass.
+  github_watch: {
+    topRung: "owner",
+  },
   // sweeps.ts missedWork (BOS-1015): a ticket woken again and again with nothing running on it. The Scrum Master
   // settles it first, then the CEO; it reaches the owner only if the CEO escalates it.
   looks_stuck: {

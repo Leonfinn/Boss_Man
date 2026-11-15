@@ -854,9 +854,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(
             rows
               .map(({ note: n, customer }) => {
-                const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title ? `: ${n.title}` : ""}`;
+                // A title from outside is a stranger's text too (BOS-1393): it goes inside the block with the body.
+                const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title && !n.untrusted ? `: ${n.title}` : ""}`;
                 const body = cut(n.text, 2000, () => `read it all with feedback note noteId=${n.id}`);
-                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, body) : body}`;
+                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, `${n.title ? `Title: ${n.title}\n` : ""}${body}`) : body}`;
               })
               .join("\n\n"),
           );
@@ -864,7 +865,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (input.action === "note") {
           if (!input.noteId) return fail("Give the noteId.");
           const { note: n } = await feedback.noteDetail(input.noteId, scope.companyId);
-          return text(`${n.title ? `${n.title}\n` : ""}${n.untrusted ? untrusted(`feedback via ${n.source}`, n.text) : n.text}`);
+          return text(n.untrusted ? untrusted(`feedback via ${n.source}`, `${n.title ? `Title: ${n.title}\n` : ""}${n.text}`) : `${n.title ? `${n.title}\n` : ""}${n.text}`);
         }
         if (input.action === "features") {
           const all = await feedback.scored(scope.companyId);
