@@ -530,6 +530,53 @@ const DEVNULL_REDIRECT = /(?:(?<=^|\s)[12&])?>>?\s*\/dev\/null|2>&1/g;
  * A delete naming one keeps today's CEO-first route. Prefixes, case-insensitive: a lookalike goes to the CEO too.
  */
 const RESERVED_TMP_ENTRY = /^\/tmp\/(?:bossman|bm-|guard-|claude|tmp\.|\.)/i;
+const RESERVED_TMP_PREFIXES = ["bossman", "bm-", "guard-", "claude", "tmp.", "."];
+
+/** Whether a /tmp entry name (the first component under /tmp) is, or with its glob or variable could be, a reserved one. Fails closed: a name that starts with a wildcard could be anything. */
+function mayBeReservedName(name: string): boolean {
+  const wild = name.search(/[*?[{$`]/);
+  const lower = (wild < 0 ? name : name.slice(0, wild)).toLowerCase();
+  if (wild < 0) return RESERVED_TMP_PREFIXES.some((p) => lower.startsWith(p));
+  return RESERVED_TMP_PREFIXES.some((p) => p.startsWith(lower) || lower.startsWith(p));
+}
+
+/** Words that remove a file: rm, unlink, rmdir (also by path, or after git/command), and an interpreter's own delete call. */
+const REMOVER = /(?<![\w.-])(?:\S*\/)?(?:rm|unlink|rmdir)(?![\w-])|unlinkSync|rmSync|rmtree|os\.(?:remove|unlink)/;
+/** A path under /tmp (or $TMPDIR, or a relative ../tmp) with the first component after it captured. */
+const TMP_CHILD = /(?:^|[\s=:(,])(?:\/tmp|\$\{?TMPDIR\}?|(?:\.\.\/)+tmp)\/([^\s/;|&)]*)/g;
+const CD_TMP = /(?:^|[\s;&|])(?:cd|pushd)\s+(?:\/tmp|\$\{?TMPDIR\}?)\/?(?=$|[\s;&|])/;
+
+/** Quotes, escapes, "//", "/./" and "/x/../" removed, so a lookalike spelling reads as the path it is. */
+function plainPaths(s: string): string {
+  let t = s.replace(/["'\\]/g, "").replace(/\/{2,}/g, "/");
+  for (let prev = ""; prev !== t; ) {
+    prev = t;
+    t = t.replace(/\/\.(?=\/|$)/g, "").replace(/\/[^/\s.][^/\s]*\/\.\.(?=\/|$)/g, "");
+  }
+  return t;
+}
+
+/**
+ * Whether a command removes (rm, unlink, rmdir, with or without flags) an entry Boss Man reserves in /tmp (BOS-1545):
+ * a plain `rm /tmp/bossman-check-all.slot.1` isn't destructive, but it frees a check slot another run holds, so it
+ * goes to the CEO like the flagged forms. Judged per command segment, and fails closed: a glob or variable that
+ * could name a reserved entry, a bare name after `cd /tmp`, and xargs or an unresolved operand beside a reserved
+ * path elsewhere in the command all count. Plain removes of other paths are untouched. Shortcut: a symlink in /tmp
+ * that points at a reserved entry isn't followed, and a bare name is judged only after a `cd /tmp` (cwd is unknown).
+ */
+export function removesReservedTmpEntry(command: string): boolean {
+  const segs = segments(command).map(plainPaths);
+  const cdTmp = CD_TMP.test(plainPaths(command));
+  const reservedNamed = (s: string) => [...s.matchAll(TMP_CHILD)].some((m) => mayBeReservedName(m[1] ?? ""));
+  const mentionsReserved = segs.some(reservedNamed);
+  for (const s of segs) {
+    if (!REMOVER.test(s)) continue;
+    if (reservedNamed(s)) return true;
+    if (cdTmp && s.split(/[\s;&|()`]+/).some((w) => w && !w.startsWith("-") && !w.includes("/") && mayBeReservedName(w) && !REMOVER.test(w) && w !== "sudo" && w !== "command")) return true;
+    if (mentionsReserved && (/\bxargs\b/.test(s) || /[$`]/.test(s.replace(/\$\{?TMPDIR\}?/g, "")))) return true;
+  }
+  return false;
+}
 
 /**
  * Whether a command is a temp cleanup that Boss Man may allow without asking anyone (BOS-1453). Narrower than
