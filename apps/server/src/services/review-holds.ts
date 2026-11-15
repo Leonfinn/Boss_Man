@@ -8,7 +8,8 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, reviewHolds, reviewHoldWaits, reviewRequests, ticketDependencies, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { goLiveWaitOf } from "./go-live-wait.js";
-import { ticketBlockerFinished } from "./ticket-links.js";
+import { openSignoffCard } from "./signoff.js";
+import { openHoldingCard, ticketBlockerFinished } from "./ticket-links.js";
 
 export type ReviewHold = typeof reviewHolds.$inferSelect;
 export const HOLD_WAKE_REASON = "review hold ready";
@@ -86,8 +87,9 @@ async function waitsOf(db: Db, holdId: string): Promise<WaitRow[]> {
   const out: WaitRow[] = [];
   for (const r of rows) {
     if (r.blockerTicketId) {
-      const [t] = await db.select({ number: tickets.number, title: tickets.title, state: tickets.systemState, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.blockerTicketId));
-      out.push({ kind: "ticket", id: r.blockerTicketId, label: (t && ticketRef(t.prefix, t.number)) || t?.title || r.blockerTicketId, closed: !t || t.state === "done" });
+      const [t] = await db.select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, r.blockerTicketId));
+      // The same test the release uses (releaseReadyHolds), so the view and the release can't disagree.
+      out.push({ kind: "ticket", id: r.blockerTicketId, label: (t && ticketRef(t.prefix, t.number)) || t?.title || r.blockerTicketId, closed: await ticketInForce(db, r.blockerTicketId) });
     } else if (r.blockerDecisionId) {
       const [d] = await db.select({ status: decisions.status, question: decisions.question }).from(decisions).where(eq(decisions.id, r.blockerDecisionId));
       out.push({ kind: "decision", id: r.blockerDecisionId, label: d ? `decision "${d.question.slice(0, 40)}"` : "a decision", closed: !d || d.status !== "open" });
@@ -133,7 +135,7 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
  * says (merged, or done; ticketBlockerFinished, BOS-989), with no wait for a deploy.
  */
 export async function ticketInForce(db: Db, ticketId: string, until: "merged" | "done" = "merged"): Promise<boolean> {
-  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
   if (!b) return true;
   if (!b.fixesMergeCheck) return ticketBlockerFinished({ ticketState: b.state, mergeCommit: b.mergeCommit, until });
   if (!b.mergeCommit) return b.state === "done";
@@ -159,6 +161,35 @@ export async function mergeWaits(db: Db, t: { id: string; projectId: string; fix
   const waits = [...linked.map((l) => ({ id: l.id!, until: l.until === "done" ? ("done" as const) : ("merged" as const) })), ...gate.map((g) => ({ id: g.id, until: "merged" as const }))].filter((w) => w.id !== t.id);
   const out: string[] = [];
   for (const w of waits) if (!out.includes(w.id) && !(await ticketInForce(db, w.id, w.until))) out.push(w.id);
+  return out;
+}
+
+/** One thing that holds an approved ticket's merge (DR-061 Q2b). */
+export type MergeHold =
+  | { kind: "signoff"; id: string }
+  | { kind: "hold"; id: string }
+  | { kind: "card"; id: string }
+  | { kind: "waits"; ids: string[] };
+
+/**
+ * Everything that holds this ticket's merge, in the order the merge paths refuse it (DR-061 Q2b): the owner's open
+ * sign-off card, a reviewer's or Boss Man's open hold, an open card that holds the merge (holdsMergeSql), and waits on
+ * tickets not yet in force (mergeWaits). Empty: nothing holds it. A read only: it records nothing and raises nothing.
+ * The one answer startLanding, land, approvedAndWaiting, the unmerged-approvals sweep and the Merge queue use.
+ */
+export async function mergeHolds(db: Db, ticketId: string): Promise<MergeHold[]> {
+  const out: MergeHold[] = [];
+  const signoff = await openSignoffCard(db, ticketId);
+  if (signoff) out.push({ kind: "signoff", id: signoff });
+  const hold = await openHold(db, ticketId);
+  if (hold) out.push({ kind: "hold", id: hold.id });
+  const card = await openHoldingCard(db, ticketId);
+  if (card) out.push({ kind: "card", id: card });
+  const [t] = await db.select({ id: tickets.id, projectId: tickets.projectId, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  if (t) {
+    const ids = await mergeWaits(db, t);
+    if (ids.length) out.push({ kind: "waits", ids });
+  }
   return out;
 }
 

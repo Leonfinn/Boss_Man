@@ -6,10 +6,10 @@ import { and, eq } from "drizzle-orm";
 import { SENIOR_DEV_TEMPLATE, type RunnerCommand, type WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, reviewHolds, reviewRequests, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, reviewHolds, reviewRequests, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { ReviewError, ReviewHeldError } from "../src/services/review.js";
 import { requestReviews } from "../src/services/review-kinds.js";
-import { holdView } from "../src/services/review-holds.js";
+import { holdView, mergeHolds } from "../src/services/review-holds.js";
 
 const HOUR = 3_600_000;
 const MIN = 60_000;
@@ -180,6 +180,22 @@ describe("release and cancel (BOS-808)", () => {
     await requestReviews(ctx.db, t!);
     expect((await ctx.db.select().from(reviewHolds))[0]!.status).toBe("cancelled");
     expect(await holdView(ctx.db, id)).toBeNull();
+  });
+});
+
+describe("one merge-hold answer (DR-061 Q2b, mergeHolds)", () => {
+  it("names a reviewer's hold, names nothing for a plain approved ticket, and the queue and sweep agree", async () => {
+    ctx = await setup();
+    const { id: heldId } = await ctx.holdIt("Held");
+    const plain = await ctx.ticket("Plain approved");
+    await ctx.slot(plain, "approved");
+    const [h] = await mergeHolds(ctx.db, heldId);
+    expect(h).toMatchObject({ kind: "hold" });
+    expect(await mergeHolds(ctx.db, plain)).toEqual([]);
+    // A wait on a ticket that is not yet in force holds the merge too, hold row or not.
+    const open = await ctx.ticket("Not merged yet", { assigneeAgentId: null, systemState: "in_progress" });
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: plain, blockerTicketId: open, until: "merged" });
+    expect((await mergeHolds(ctx.db, plain)).map((x) => x.kind)).toEqual(["waits"]);
   });
 });
 

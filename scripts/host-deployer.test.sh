@@ -266,6 +266,34 @@ const c=h.checks.container_status;
 if(!c||!Array.isArray(c.stopped))process.exit(2);
 if(!c.stopped.every(s=>typeof s.exit==="string")){console.error(JSON.stringify(c.stopped));process.exit(3)};
 ' "$D/outbox/host.json" || fail "an empty inspect must leave a valid host.json with string exits: $(cat "$D/outbox/host.json")"
+# ntfy reach (BOS-1466): "running" is not "the server can resolve ntfy". The report says whether the ntfy container
+# shares a Docker network with a running server container; false is the blue/green install started without
+# deploy/ntfy-bluegreen.yml. Only the ntfy and server service labels answer; network names never appear in host.json.
+mkdir -p "$T/nt"; cat >"$T/nt/docker" <<'FAKE'
+#!/usr/bin/env bash
+if [[ $1 == ps && $2 == --filter ]]; then
+  case $3 in
+    label=com.docker.compose.service=ntfy) [[ $4 == --format ]] && echo ntfy-1 ;;
+    label=com.docker.compose.service=server-green) [[ $4 == --format ]] && echo sg1 ;;
+  esac
+  exit 0
+fi
+if [[ $1 == inspect && $2 == -f ]]; then
+  case $4 in
+    ntfy-1) echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
+    sg1) echo "bm_front bm_internal " ;;
+  esac
+  exit 0
+fi
+exit 0
+FAKE
+chmod +x "$T/nt/docker"
+sed "s#^export PATH=.*#export PATH=$T/nt:\$PATH#" "$here/host-deployer.sh" >"$T/nt/hd.sh"; chmod +x "$T/nt/hd.sh"
+"$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy fake) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.container!=="ntfy-1"||n.serverReach!==false)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on edge only must report serverReach false: $(cat "$D/outbox/host.json")"
+hasnt "$D/outbox/host.json" 'bm_front'
+FAKE_NTFY_NETS="bm_edge bm_front " "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy on front) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.serverReach!==true)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on the front network must report serverReach true: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"

@@ -21,13 +21,13 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, DEPLOY_REF, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -146,6 +146,24 @@ export function hasCredential(url: string): boolean {
 }
 
 const firstLine = (err: unknown) => String((err as { stderr?: string })?.stderr || (err as Error)?.message || err).trim().split("\n")[0]!.slice(0, 300);
+const lastLine = (s: string) => (s.split("\n").filter(Boolean).pop() ?? "").slice(0, 300);
+
+// Check bundles (BOS-1436).
+const UUID_RE = UUID;
+const SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+/** Job refs a check worker keeps per project as its bundle base; older ones go so the repo doesn't grow forever. */
+const CHECK_BUNDLE_KEEP_JOBS = 10;
+export type CheckBundleMade = CheckBundleInfo;
+/** Size and sha256 of a file, read as a stream (a full bundle is a few hundred MB). */
+async function fileDigest(file: string): Promise<{ bytes: number; sha256: string }> {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(file)) {
+    hash.update(chunk as Buffer);
+    bytes += (chunk as Buffer).length;
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
 
 /** A ticket's copy that is its own clone (a .git folder), not a worktree of the shared repo (a .git file). */
 export const isClone = (dir: string) => statSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isDirectory() ?? false;
@@ -188,6 +206,11 @@ export async function diskUsage(target: string): Promise<number> {
   };
   await walk(target);
   return total;
+}
+
+/** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
+function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
+  return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
 }
 
 /** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
@@ -558,8 +581,24 @@ export class Workspaces {
       const readWrite = [tmp, ...(extra.GIT_INDEX_FILE ? [path.dirname(extra.GIT_INDEX_FILE)] : [])];
       const cmd = fencedCommand(fenceProfile({ cwd: dir, home: tmp, tmp, readOnly: [repo, ...reads], readWrite }), "git", args);
       const env = { PATH: this.baseEnv.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: "/dev/null", ...safeGitEnv(extra) };
-      const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
-      return stdout.trim();
+      try {
+        const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+        return stdout.trim();
+      } catch (err) {
+        // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
+        // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
+        const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
+        // The first line is usually the reason (git's "Unable to create '...index.lock'"), the rest advice: keep it and the tail (BOS-1476).
+        const lines = String(e.stderr ?? "").trim().split("\n").filter(Boolean);
+        const why = (lines.length > 4 ? [lines[0], ...lines.slice(-3)] : lines).join(" | ").slice(0, 300);
+        const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
+        // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
+        throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
+          code: e.code,
+          stdout: e.stdout,
+          stderr: e.stderr,
+        });
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -869,8 +908,8 @@ export class Workspaces {
         );
       }
       if (existsSync(path.join(dir, ".git"))) {
-        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir, repo });
-        await this.git(["clean", "-fdq"], { cwd: dir, repo });
+        await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
+        await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);
       } else {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
@@ -880,6 +919,39 @@ export class Workspaces {
       await this.refreshCopy(spec.projectId, repo, dir, auth);
       return { path: dir, commit };
     });
+  }
+
+  /** How long a review copy's prep waits for a git lock that someone else holds before it gives up (BOS-1476). */
+  reviewLockWaitMs = 30_000;
+  /** A lock file this old belongs to a git that died: no git operation holds its lock for a minute. */
+  reviewStaleLockMs = 60_000;
+
+  /**
+   * git in a review copy, waiting out a lock file (BOS-1476). The repo lock only keeps the runner's own jobs apart; a
+   * reviewer's agent already running in the same copy (or the author's, before the copy exists) runs its own git, which
+   * holds index.lock for a moment. The runner's checkout then exits 128 ("Unable to create index.lock: File exists") and
+   * the review never started. So it waits and tries again until the deadline; a lock file older than a minute is a crashed
+   * git's and is removed. Any other failure is thrown at once, and the fence is the same on every try.
+   */
+  private async gitWaitingForLocks(args: string[], dir: string, repo: string) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    let removedStale = false;
+    for (;;) {
+      try {
+        return await this.git(args, { cwd: dir, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        const lock = /Unable to create '([^']+\.lock)'/.exec(text)?.[1];
+        if (!lock) throw err;
+        const gitDir = path.join(path.resolve(dir), ".git") + path.sep;
+        const mtime = path.resolve(lock).startsWith(gitDir) ? statSync(lock, { throwIfNoEntry: false })?.mtimeMs : undefined;
+        if (!removedStale && mtime !== undefined && Date.now() - mtime > this.reviewStaleLockMs) {
+          removedStale = true;
+          rmSync(lock, { force: true });
+        } else if (Date.now() >= deadline) throw err;
+        else await new Promise((r) => setTimeout(r, 250));
+      }
+    }
   }
 
   /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
@@ -1120,7 +1192,33 @@ export class Workspaces {
     const recorded = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
     // Fetches under the repo lock, like every other git call that touches the shared refs.
-    const { base: baseCommit, tip } = await this.withRepoLock(spec.projectId, () => this.reviewBase(repo, dir, head, recorded, baseRef, secrets));
+    const { base: baseCommit, tip, unsynced } = await this.withRepoLock(spec.projectId, async () => {
+      // BOS-1544: a clone's commits reach the shared repo only by syncBranch, which otherwise runs at turn checkpoints, and
+      // only on the ticket's own branch name. A check job opens its work area from the shared repo, so head must be there
+      // now, not after the turn. When it isn't (the sync failed, or the copy's HEAD is on another branch or detached, as an
+      // agent's `git switch` can leave it), the reason goes back with the diff instead of a check that dies with
+      // "invalid reference".
+      let unsynced: string | undefined;
+      if (isClone(dir)) {
+        const own = branchFor(spec.ticketId);
+        let failed: string | undefined;
+        await this.syncBranch(repo, dir, spec.ticketId).catch((err: unknown) => {
+          // git's reason can be on any line of its stderr, so all of it, on one line.
+          failed = String((err as Error)?.message ?? err).replace(/\s+/g, " ").trim().slice(0, 600);
+        });
+        if ((await this.gitCode(["cat-file", "-e", `${head}^{commit}`], { cwd: repo })).code !== 0) {
+          const on = (await this.gitCode(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir, repo })).stdout;
+          const why =
+            on && on !== own
+              ? `the copy is on branch ${on}, not the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+              : !on
+                ? `the copy's HEAD is detached, not on the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+                : (failed ?? "the ticket's branch moved while it was being copied over; ask again");
+          unsynced = `commit ${head.slice(0, 12)} isn't in the runner's shared repo: ${why}`;
+        }
+      }
+      return { ...(await this.reviewBase(repo, dir, head, recorded, baseRef, secrets)), unsynced };
+    });
     // The tree is read from the same commit as head, before the slow steps: a commit landing
     // mid-diff must not leave head A tagged with B's tree (the check queue reuses passes by tree).
     const tree = await this.git(["rev-parse", `${head}^{tree}`], { cwd: dir, repo });
@@ -1134,7 +1232,11 @@ export class Workspaces {
       await this.git(["read-tree", head], { cwd: dir, env, repo });
       await this.git(["add", "-A"], { cwd: dir, env, repo });
       // No external diff program or textconv driver: the diff is git's own (BOS-332).
-      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
+      // No rename detection either (BOS-1100): git would fold a move into one `old => new` line, and the
+      // owner-approval check matches exact paths, so a branch could move scripts/check-all.sh away (or move
+      // and edit it in one commit) and merge without the owner's sign-off. With renames off, a move is a
+      // delete of the old path plus an add of the new one, so both sides are named. Same rule as `--no-ext-diff`.
+      const numstat = await this.git(["diff", "--cached", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
@@ -1143,7 +1245,7 @@ export class Workspaces {
         : [];
       const full = await this.git(["diff", "--cached", "--no-ext-diff", "--no-textconv", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
-      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+      return { baseCommit, head, tree, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, ...(unsynced ? { unsynced } : {}) };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -1174,10 +1276,18 @@ export class Workspaces {
   async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string, by?: string): Promise<{ turn: number; commit: string; files: number } | null> {
     const dir = this.ticketDir(spec.ticketId);
     if (!existsSync(path.join(dir, ".git"))) return null;
-    const made = await this.recordCheckpoint(spec, dir, label, by);
     // Before and after every turn, recorded or not (a commit can leave the files unchanged), so the
-    // shared repo is never more than a turn behind a clone's branch.
-    if (isClone(dir)) await this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId));
+    // shared repo is never more than a turn behind a clone's branch. BOS-1544: even when recording fails (a file git
+    // can't read, a lock), the branch is still synced, so one bad checkpoint can't leave the branch behind for good.
+    const sync = () => (isClone(dir) ? this.withRepoLock(spec.projectId, () => this.syncBranch(this.repoDir(spec.projectId), dir, spec.ticketId)) : Promise.resolve());
+    let made: Awaited<ReturnType<typeof this.recordCheckpoint>>;
+    try {
+      made = await this.recordCheckpoint(spec, dir, label, by);
+    } catch (err) {
+      await sync().catch(() => undefined);
+      throw err;
+    }
+    await sync();
     return made;
   }
 
@@ -1322,7 +1432,7 @@ export class Workspaces {
     spec: { projectId: string; jobId: string; commit: string },
     command: string,
     timeoutMs: number,
-    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string } = {},
+    hooks: { onOutput?: (tail: string) => void; onStart?: (cancel: () => void) => void; scanList?: string; limitsEnv?: Record<string, string> } = {},
   ): Promise<VerifyResult> {
     if (!/^[0-9a-f-]{36}$/i.test(spec.jobId)) throw new Error("the job id isn't a UUID");
     const repo = this.repoDir(spec.projectId);
@@ -1334,10 +1444,18 @@ export class Workspaces {
       await this.withRepoLock(spec.projectId, async () => {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
+        // BOS-1544: git's own "invalid reference" reads like a bad commit id; this says where it's missing and why.
+        if ((await this.gitCode(["cat-file", "-e", `${spec.commit}^{commit}`], { cwd: repo })).code !== 0) {
+          throw new Error(`commit ${spec.commit.slice(0, 12)} isn't in this runner's shared repo, so there is nothing to check out. The code isn't at fault: the ticket's copy wasn't synced there (the runner's log says why: "Couldn't bring ticket ... over"), or on a check worker the bundle didn't carry it.`);
+        }
         await this.git(["worktree", "add", "--quiet", "--detach", dir, spec.commit], { cwd: repo });
       });
       try {
-        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence: this.jobFenceFor(repo, dir, home) }, null, { projectId: spec.projectId, list: hooks.scanList });
+        // BOS-1435: the machine's per-check caps (BOSSMAN_CHECK_THREADS / _MEMORY_MB), already bounded by checkLimitsEnv. The
+        // job's environment is a whitelist built from the fence env, so they go there.
+        const fence = this.jobFenceFor(repo, dir, home);
+        Object.assign(fence.env, hooks.limitsEnv ?? {});
+        return await this.runCheck(dir, command, timeoutMs, VERIFY_QUEUE_MAX_MS, { onOutput: hooks.onOutput, onStart: hooks.onStart, fence }, null, { projectId: spec.projectId, list: hooks.scanList });
       } finally {
         await this.withRepoLock(spec.projectId, async () => {
           await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
@@ -1351,6 +1469,155 @@ export class Workspaces {
       rmSync(this.jobTmpDir(spec.jobId), { recursive: true, force: true });
       this.activeJobs.delete(spec.jobId);
     }
+  }
+
+  /**
+   * DR-060 part 2 (BOS-1436): the company runner packs a check job's commit for a check worker, which has no GitHub login.
+   * The bundle carries the job's commit (under refs/bossman/bundle/<jobId>) and the runner's own origin/<main>, which
+   * check-quick diffs against and the secrets scan reads. `haves` are commits the worker says it holds: those it really
+   * has here become the `--not` base, so after the first (full) bundle the next ones are thin. When the worker already
+   * has both tips git refuses an empty bundle, and the answer is `empty` with nothing uploaded. The temporary ref and
+   * the file go in every case; `upload` streams the file to the server before this returns.
+   */
+  async makeCheckBundle(
+    spec: { projectId: string; jobId: string; commit: string; haves: string[]; full: boolean },
+    upload: (file: string, meta: { bytes: number; sha256: string }) => Promise<void>,
+  ): Promise<CheckBundleMade> {
+    if (!UUID_RE.test(spec.jobId)) throw new Error("the job id isn't a UUID");
+    if (!SHA_RE.test(spec.commit)) throw new Error("the job's commit isn't a commit id");
+    const repo = this.repoDir(spec.projectId);
+    if (!existsSync(path.join(repo, "HEAD"))) throw new Error("this runner has no copy of the project's repo");
+    await this.git(["rev-parse", "--verify", "--quiet", `${spec.commit}^{commit}`], { cwd: repo }).catch(() => {
+      throw new Error(`commit ${spec.commit.slice(0, 12)} isn't in the runner's repo`);
+    });
+    const { mainRef, mainCommit } = await this.originMain(repo);
+    const haves: string[] = [];
+    if (!spec.full) {
+      for (const h of [...new Set(spec.haves)].slice(0, CHECK_BUNDLE_MAX_HAVES)) {
+        if (!SHA_RE.test(h)) continue;
+        if ((await this.gitCode(["cat-file", "-e", `${h}^{commit}`], { cwd: repo })).code === 0) haves.push(h);
+      }
+    }
+    const ref = `refs/bossman/bundle/${spec.jobId}`;
+    const dir = this.scratch("bundle");
+    const file = path.join(dir, `${spec.jobId}.bundle`);
+    try {
+      await this.git(["update-ref", ref, spec.commit], { cwd: repo });
+      const r = await this.gitCode(["bundle", "create", "--quiet", file, ref, mainRef, ...(haves.length ? ["--not", ...haves] : [])], { cwd: repo });
+      if (r.code !== 0) {
+        // The worker already has every object: nothing to send. It checks for both tips itself before it runs.
+        if (haves.length && /empty bundle/i.test(r.stderr)) return { bytes: 0, sha256: "", mainRef, mainCommit, empty: true };
+        throw new Error(`git bundle create failed (exit ${r.code}): ${r.stderr.split("\n").filter(Boolean).pop() ?? ""}`);
+      }
+      const meta = await fileDigest(file);
+      await upload(file, meta);
+      return { ...meta, mainRef, mainCommit, empty: false };
+    } finally {
+      await this.gitCode(["update-ref", "-d", ref], { cwd: repo }).catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The shared repo's origin/<default branch>: where origin/HEAD points, else main, else master. */
+  private async originMain(repo: string): Promise<{ mainRef: string; mainCommit: string }> {
+    const head = (await this.gitCode(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: repo })).stdout;
+    for (const ref of [head, "refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+      if (!ref || !/^refs\/remotes\/origin\/[A-Za-z0-9._/-]+$/.test(ref) || ref === "refs/remotes/origin/HEAD") continue;
+      const c = await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo });
+      if (c.code === 0 && c.stdout) return { mainRef: ref, mainCommit: c.stdout };
+    }
+    throw new Error("the runner's repo has no origin/main (or origin/master) to send with the job");
+  }
+
+  /** A fresh folder for a downloaded bundle (BOS-1436); the caller removes it. */
+  checkBundleScratch = () => this.scratch("bundle-in");
+
+  /**
+   * DR-060 part 2 (BOS-1436), on a check worker: takes a job's bundle into the project's bare repo (one per project,
+   * made on the first job), so runCommitCheck then finds the commit as on the company runner. The bundle must hold
+   * exactly the job's commit and the main the runner named; objects are fsck'd on the way in. `file` null means the
+   * runner sent nothing because this repo already has both tips. `missing` says a thin bundle's base isn't here, so
+   * the caller can ask for a full one.
+   */
+  async takeCheckBundle(
+    spec: { projectId: string; jobId: string; commit: string; mainRef: string; mainCommit: string },
+    file: string | null,
+  ): Promise<{ ok: true } | { ok: false; missing: boolean; reason: string }> {
+    if (!UUID_RE.test(spec.jobId) || !UUID_RE.test(spec.projectId)) return { ok: false, missing: false, reason: "the job or project id isn't a UUID" };
+    if (!SHA_RE.test(spec.commit) || !SHA_RE.test(spec.mainCommit)) return { ok: false, missing: false, reason: "the job's commit isn't a commit id" };
+    if (!/^refs\/remotes\/origin\/[A-Za-z0-9._/-]+$/.test(spec.mainRef) || spec.mainRef.includes("..")) return { ok: false, missing: false, reason: "the main ref isn't an origin branch" };
+    const repo = this.repoDir(spec.projectId);
+    const jobRef = `refs/bossman/jobs/${spec.jobId}`;
+    return this.withRepoLock(spec.projectId, async () => {
+      if (!existsSync(path.join(repo, "HEAD"))) {
+        mkdirSync(path.dirname(repo), { recursive: true });
+        await this.git(["init", "--bare", "--quiet", repo]);
+      }
+      if (file) {
+        // No --quiet: git 2.39 then drops the "lacks these prerequisite commits" line this reads.
+        const verify = await this.gitCode(["bundle", "verify", file], { cwd: repo });
+        if (verify.code !== 0) {
+          const missing = /lacks these prerequisite/i.test(verify.stderr);
+          return { ok: false, missing, reason: missing ? "the bundle needs commits this worker doesn't have" : `the bundle didn't verify: ${lastLine(verify.stderr)}` };
+        }
+        const heads = new Map(
+          (await this.git(["bundle", "list-heads", file], { cwd: repo }))
+            .split("\n")
+            .map((l) => l.trim().split(/\s+/))
+            .filter((p) => p.length === 2)
+            .map(([sha, name]) => [name, sha] as const),
+        );
+        // git leaves a tip out of a thin bundle when it is one of the `--not` commits (main unchanged since the last job,
+        // or the same commit checked again), so a head may be absent; one that is there must be the one named.
+        const tips = [
+          { name: `refs/bossman/bundle/${spec.jobId}`, to: jobRef, commit: spec.commit },
+          { name: spec.mainRef, to: spec.mainRef, commit: spec.mainCommit },
+        ];
+        if (tips.some((t) => heads.has(t.name) && heads.get(t.name) !== t.commit) || !tips.some((t) => heads.has(t.name))) {
+          return { ok: false, missing: false, reason: "the bundle doesn't hold the job's commit and main" };
+        }
+        const specs = tips.filter((t) => heads.has(t.name)).map((t) => `+${t.name}:${t.to}`);
+        const fetched = await this.gitCode(["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, ...specs], { cwd: repo });
+        if (fetched.code !== 0) return { ok: false, missing: /prerequisite|missing/i.test(fetched.stderr), reason: `fetching the bundle failed: ${lastLine(fetched.stderr)}` };
+      }
+      // Tips not in the bundle (or no bundle at all: the worker had both) must already be here.
+      for (const c of [spec.commit, spec.mainCommit]) {
+        if ((await this.gitCode(["cat-file", "-e", `${c}^{commit}`], { cwd: repo })).code !== 0) return { ok: false, missing: true, reason: "the runner sent no bundle, but this worker lacks the commit" };
+      }
+      await this.git(["update-ref", jobRef, spec.commit], { cwd: repo });
+      await this.git(["update-ref", spec.mainRef, spec.mainCommit], { cwd: repo });
+      if ((await this.git(["rev-parse", "--verify", "--quiet", `${jobRef}^{commit}`], { cwd: repo })) !== spec.commit) return { ok: false, missing: false, reason: "the job's commit didn't arrive" };
+      // check-quick and the secrets scan look for origin/main or origin/HEAD.
+      await this.git(["symbolic-ref", "refs/remotes/origin/HEAD", spec.mainRef], { cwd: repo });
+      await this.pruneJobRefs(repo, spec.jobId);
+      return { ok: true };
+    });
+  }
+
+  /** Keeps the newest CHECK_BUNDLE_KEEP_JOBS job refs (and the current job's), so the repo's haves stay recent and it doesn't grow forever. */
+  private async pruneJobRefs(repo: string, keep: string) {
+    const refs = (await this.git(["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/bossman/jobs/"], { cwd: repo })).split("\n").filter(Boolean);
+    const old = refs.filter((r) => !r.endsWith(`/${keep}`)).slice(CHECK_BUNDLE_KEEP_JOBS - 1);
+    for (const r of old) await this.gitCode(["update-ref", "-d", r], { cwd: repo });
+    if (old.length) await this.gitCode(["gc", "--auto", "--quiet"], { cwd: repo });
+  }
+
+  /**
+   * What a check worker tells the server it holds, per project (BOS-1436): the tips of its recent job refs and its
+   * origin branches, newest first, at most CHECK_BUNDLE_MAX_HAVES. The runner uses them as the next bundle's base.
+   */
+  async checkBundleHaves(): Promise<Array<{ projectId: string; haves: string[] }>> {
+    const root = this.reposRoot();
+    if (!existsSync(root)) return [];
+    const out: Array<{ projectId: string; haves: string[] }> = [];
+    for (const name of readdirSync(root)) {
+      const projectId = name.replace(/\.git$/, "");
+      if (!name.endsWith(".git") || !UUID_RE.test(projectId) || !existsSync(path.join(root, name, "HEAD"))) continue;
+      const list = await this.gitCode(["for-each-ref", "--sort=-committerdate", "--format=%(objectname)", "refs/remotes/origin/", "refs/bossman/jobs/"], { cwd: this.repoDir(projectId) });
+      const haves = [...new Set(list.stdout.split("\n").filter((s) => SHA_RE.test(s)))].slice(0, CHECK_BUNDLE_MAX_HAVES);
+      if (haves.length) out.push({ projectId, haves });
+    }
+    return out;
   }
 
   /** Job ids whose folders belong to a check running in this process: the start-up sweep leaves them alone. */
@@ -1607,9 +1874,9 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
-    if (phase) return this.mergePhase(spec, target, message, secrets, phase);
-    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string): Promise<MergeResult> {
+    if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, pin);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -1623,6 +1890,8 @@ export class Workspaces {
       for (let attempt = 0; attempt < 2; attempt++) {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         const { tree, targetSha, branchSha } = tried;
         // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
@@ -1643,7 +1912,7 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
     const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
@@ -1662,13 +1931,16 @@ export class Workspaces {
       // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
       const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
+      // BOS-1413: both phases refuse a branch that is not at the head the reviews covered, before anything is kept or pushed.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
       if (problems.length) return { status: "migration_journal" as const, problems };
       if (phase.phase === "prepare") {
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again.
       if (tried.tree !== phase.tree) return { status: "main_moved" };
@@ -1696,7 +1968,7 @@ export class Workspaces {
    * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
    * a changed one is checked again (three checks at most, then main_moved so the caller retries).
    */
-  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number): Promise<MergeResult> {
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
@@ -1721,6 +1993,8 @@ export class Workspaces {
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         // Same journal rule as the plain merge (BOS-360): a refused branch builds and pushes nothing.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
         const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
@@ -1801,10 +2075,12 @@ export class Workspaces {
     const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
     // When the only trouble is migration bookkeeping, the gate renumbers the branch's migration itself (BOS-690, DR-037).
     // Anything it can't do safely comes back "refused" and the merge result is what it was before.
+    let refusedWhy: string | undefined;
     const rebuild = async () => {
       const mb = await this.gitCode(["merge-base", targetSha, branchSha], { cwd: repo });
       if (mb.code !== 0 || !mb.stdout) return null;
       const r = await rebaseMigrations((args, env) => this.gitCode(args, { cwd: repo, env }), { base: mb.stdout, branch: branchSha, main: targetSha });
+      if (r.status === "refused") refusedWhy = r.reason;
       return r.status === "rebuilt" ? r : null;
     };
     if (tried.code === 1) {
@@ -1812,7 +2088,7 @@ export class Workspaces {
       const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
       const rebuilt = await rebuild();
       if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
-      return { status: "conflicts" as const, files };
+      return { status: "conflicts" as const, files, ...(refusedWhy ? { why: refusedWhy } : {}) };
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
     const tree = tried.stdout.split("\n")[0]!;
@@ -1842,6 +2118,50 @@ export class Workspaces {
       if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       const tried = await this.tryMerge(repo, `refs/heads/${branchFor(spec.ticketId)}`, target, auth);
       return tried.status === "conflicts" ? { clashes: true, files: tried.files } : { clashes: false, files: [] };
+    });
+  }
+
+  /**
+   * Which approved branches in the merge line really conflict with the ticket's branch (BOS-1411): a read-only
+   * merge-tree of the ticket's branch on top of the target with each of `branches`, the tickets ahead in the line.
+   * The same three calls `tryMerge` makes, but nothing is written, built or pushed, and a branch that can't be read
+   * here is left out rather than reported as clean: the caller shows this to the owner and mustn't invent a clash.
+   */
+  async mergeLineConflicts(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, branches: Array<{ ticketId: string; branch: string }>, secrets: Record<string, string | undefined> = {}): Promise<MergeLineConflictsResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      // A clone's branch reaches the shared repo only when it's synced (BOS-343), as for a clash check (BOS-832).
+      const dir = this.ticketDir(spec.ticketId);
+      if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
+      await this.fetchOrigin(repo, auth, this.fetchTimeoutMs);
+      const sha = async (ref: string) => {
+        const r = await this.gitCode(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo });
+        return r.code === 0 ? r.stdout.trim() : null;
+      };
+      const targetSha = await sha(`refs/remotes/origin/${target}`);
+      const mine = await sha(`refs/heads/${branchFor(spec.ticketId)}`);
+      // Nothing of the ticket's to merge, or no target to merge onto: no conflicts to tell anyone about.
+      if (!targetSha || !mine) return { conflicts: [] };
+      const conflicts: MergeLineConflict[] = [];
+      let ahead = false;
+      for (const b of branches) {
+        if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
+        ahead = true;
+        const theirs = await sha(`refs/heads/${b.branch}`);
+        if (!theirs) continue;
+        // A branch already inside this one merges cleanly by definition; merging it again would say nothing.
+        if ((await this.gitCode(["merge-base", "--is-ancestor", theirs, mine], { cwd: repo })).code === 0) continue;
+        const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", mine, theirs], { cwd: repo });
+        if (tried.code === 0) continue;
+        if (tried.code !== 1) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
+        const out = tried.stdout.split("\n");
+        const end = out.indexOf("");
+        const files = out.slice(1, end === -1 ? undefined : end).filter(Boolean);
+        conflicts.push({ ticketId: b.ticketId, branch: b.branch, ahead, clashes: true, files });
+      }
+      return { conflicts };
     });
   }
 

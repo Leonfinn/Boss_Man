@@ -11,20 +11,58 @@ export const RUNNER_CODE_PATHS = /^(apps\/runner\/|apps\/launcher\/|apps\/netgua
 export const touchesRunnerCode = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_CODE_PATHS.test(p));
 
 /**
- * Files the owner must approve before a change to them merges (BOS-1094; CLAUDE.md: the owner approves changes to
- * check-all.sh). A diff that touches one is held at high risk, so the owner's sign-off is needed whatever the card says.
+ * The runner-update path (BOS-1467): the script the "Build and update runners" press runs. Runners are built only from
+ * the version the server runs, so a fix to it does nothing until the server runs it.
  */
-export const OWNER_APPROVED_PATHS: readonly string[] = ["scripts/check-all.sh"];
+export const RUNNER_UPDATE_PATHS = /^scripts\/update-runner\.sh$/;
+
+/** True when any of the changed files is on the runner-update path. */
+export const touchesRunnerUpdate = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_UPDATE_PATHS.test(p));
+
+/**
+ * Files the owner must approve before a change to them merges (BOS-1094, widened by BOS-1100). A diff that touches one is
+ * held at high risk, so the owner's sign-off is needed whatever the card says.
+ *
+ * The merge gate itself (scripts/check-all.sh) and the pieces it runs from the branch's own tree to decide what it
+ * checks and whether the run passed: the shell lint and shell tests, the thread budget that sizes a run, the
+ * migration lint, the in-memory state check, and the two checks that can fail a run outright (memory ceiling and
+ * skipped tests). A branch that edits one of these can weaken the gate that is about to merge it, so each needs the
+ * owner's eyes. CLAUDE.md is here because it sets the rules the team works by (the full-check and test rules): a
+ * change to it changes what "before you hand work in" means, so the owner approves it too.
+ *
+ * scripts/check-quick.sh is deliberately not here: it is the quick gate an agent runs before review, and the merge
+ * gate always runs the full check (check-all.sh) whatever it says, so changing it cannot merge unreviewed code.
+ */
+export const OWNER_APPROVED_PATHS: readonly string[] = [
+  "scripts/check-all.sh",
+  "scripts/check-shell.sh",
+  "scripts/test-shell.sh",
+  "scripts/check-threads.mjs",
+  "scripts/check-in-memory-state.mjs",
+  "scripts/lint-migrations.mjs",
+  "scripts/check-mem-guard.mjs",
+  "scripts/check-no-skips.mjs",
+  "CLAUDE.md",
+];
 
 /** The owner-approved files among the changed ones. */
 export const ownerApprovedFiles = (paths: readonly string[]): string[] => paths.filter((p) => OWNER_APPROVED_PATHS.includes(p));
 
-/** What a merged ticket's after-merge checks still wait for: the server deploy, the runner rebuild, or both. */
-export type GoLiveWait = "server" | "runner" | "both";
+/**
+ * What a merged ticket's after-merge checks still wait for: the server deploy, the runner rebuild, or both; or,
+ * for a company Boss Man's server doesn't put live (BOS-1345), its CEO marking the ticket live ("own").
+ */
+export type GoLiveWait = "server" | "runner" | "both" | "own";
 
 /** Plain words for the board: what "waiting for go-live" is waiting for. */
 export const goLiveWaitWords = (w: GoLiveWait): string =>
-  w === "both" ? "waiting for go-live: the server update and the runner rebuild" : w === "runner" ? "waiting for go-live: the runner rebuild" : "waiting for go-live: the server update";
+  w === "own"
+    ? "waiting for go-live: the CEO to mark it live (this company puts its own work live)"
+    : w === "both"
+      ? "waiting for go-live: the server update and the runner rebuild"
+      : w === "runner"
+        ? "waiting for go-live: the runner rebuild"
+        : "waiting for go-live: the server update";
 
 /** How long a ticket may wait before the watchdog looks at it again (nobody may have deployed). */
 export const GO_LIVE_WAIT_MAX_MS = 3 * 24 * 60 * 60 * 1000;

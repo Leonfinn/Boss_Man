@@ -181,7 +181,8 @@ describe("unrated task", () => {
     render(<Ticket id="t1" companies={[{ id: "c1", name: "App Co", mission: null, paused: false, agents: [] }]} />);
     expect(await screen.findByText("Not rated yet (counts as medium).")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "About Risk" }));
-    expect(screen.getByText("Rod reviews it; a short plan first.")).toBeTruthy();
+    // The risk levels are fetched only once the ticket (its companyId) has loaded, so wait for them: on a slow runner they arrive after the field.
+    expect(await screen.findByText("Rod reviews it; a short plan first.")).toBeTruthy();
     // Unrated, so no level is marked "(this task)"; the field says it counts as medium.
     expect(screen.queryByText(/\(this task\)/)).toBeNull();
   });

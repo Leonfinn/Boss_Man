@@ -29,8 +29,8 @@ afterAll(async () => {
 });
 
 const DIFF: WorkspaceDiff = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "diff --git a/src/a.ts b/src/a.ts", truncated: false };
-const OLD = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
-const NEW = { status: "prepared", commit: "e".repeat(40), tree: "8".repeat(40), targetSha: "2".repeat(40) };
+const OLD = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40), branchSha: "b".repeat(40) };
+const NEW = { status: "prepared", commit: "e".repeat(40), tree: "8".repeat(40), targetSha: "2".repeat(40), branchSha: "b".repeat(40) };
 
 async function setup() {
   await shared.reset();

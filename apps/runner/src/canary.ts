@@ -117,7 +117,7 @@ export type CanaryResult = { ok: boolean; checks: Record<string, boolean>; detai
  * Runs one session of an agent kind against the stand-in model and reports what worked.
  * fence: the host's fence level; unless "unavailable", the session runs fenced and must stay so.
  */
-export async function runCanary(opts: { agentKind?: CanaryKind; fence?: FenceLevel; timeoutMs?: number; baseEnv?: NodeJS.ProcessEnv } = {}): Promise<CanaryResult> {
+export async function runCanary(opts: { agentKind?: CanaryKind; fence?: FenceLevel; timeoutMs?: number; baseEnv?: NodeJS.ProcessEnv; adapterBin?: string } = {}): Promise<CanaryResult> {
   const started = Date.now();
   const kind = opts.agentKind ?? "claude";
   const fenced = !!opts.fence && opts.fence !== "unavailable";
@@ -152,6 +152,8 @@ export async function runCanary(opts: { agentKind?: CanaryKind; fence?: FenceLev
   const manager: SessionManager = new SessionManager({
     // Nothing listens here: the session has to carry on without Boss Man's tools.
     mcpUrl: `${model.url}/mcp`,
+    // The Claude pack's adapter lives outside the image, so the installer names it (BOS-972).
+    ...(opts.adapterBin ? { adapterBins: { [kind]: opts.adapterBin } } : {}),
     baseEnv: { PATH: base.PATH, HOME: home, NO_PROXY: local, NPM_CONFIG_PREFIX: base.NPM_CONFIG_PREFIX, ...kindEnv[kind] },
     resolveEnv: async () => ({ ...secrets[kind], NO_PROXY: local }),
     ...(fenced ? { fence: { level: opts.fence!, agentsRoot: path.join(home, "agents") } } : {}),

@@ -93,7 +93,9 @@ describe("wake classes: the table", () => {
       // Plain lower-case words only: the sentences after `reason:` elsewhere are refusals shown to people.
       for (const m of text.matchAll(/\breason: "([a-z_][a-z_ -]*)"/g)) found.set(m[1]!, file);
     }
-    for (const r of ["update pending"]) found.delete(r); // the maintenance hold's label, not a wake
+    // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
+    // stop-stragglers endpoint (BOS-1238). None is a wake.
+    for (const r of ["update pending", "no_wrapup", "too_early"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
     const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
     expect(unclassified).toEqual([]);

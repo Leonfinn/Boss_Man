@@ -73,6 +73,8 @@ export const companies = pgTable("companies", {
   standingRulesAt: timestamp("standing_rules_at", { withTimezone: true }),
   /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
   permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
+  /** A cleanup that only deletes plain entries directly in /tmp is allowed by the rules with no card (BOS-1453). On by default; off sends it to the CEO first as before. */
+  autoTempCleanup: boolean("auto_temp_cleanup").notNull().default(true),
   /**
    * The agent fence (BOS-325): off, watch (fenced, refusals logged) or enforce (locked until BOS-323).
    * New companies start at watch (DR-049 point 3, BOS-940); companies made before then kept their mode.
@@ -84,6 +86,14 @@ export const companies = pgTable("companies", {
    * unchosen Off gets the card.
    */
   fenceModeChosenAt: timestamp("fence_mode_chosen_at", { withTimezone: true }),
+  /**
+   * The runner platform (kernel, Docker version, OS type) the owner was on when they answered the fence card with
+   * "Run agents without the fence" (DR-049 point 1). A different platform asks again. Null for an Off chosen in Settings.
+   */
+  fenceOffFingerprint: text("fence_off_fingerprint"),
+  /** When the owner chose to run agents without the network guard, and on which runner platform; a different platform asks again (DR-049 point 1). */
+  guardOffChosenAt: timestamp("guard_off_chosen_at", { withTimezone: true }),
+  guardOffFingerprint: text("guard_off_fingerprint"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -345,9 +355,14 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
-    /** What its after-merge checks still wait for ("server" | "runner" | "both") and since when (BOS-1021): null = not waiting. */
+    /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
+    touchesRunnerUpdate: boolean("touches_runner_update"),
+    /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
+    /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
+    liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
@@ -393,6 +408,8 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
+    /** The files the branch changed when its diff was last read for a landing (BOS-1411): the plan-overlap warning reads them, so it needs no runner call. */
+    diffFiles: jsonb("diff_files").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
@@ -1030,6 +1047,33 @@ export const checkResults = pgTable(
 );
 
 /**
+ * A check worker (DR-060, BOS-1435): a runner image started with BOSSMAN_ROLE=check-worker on any Docker host, which takes
+ * check jobs when the company runner's slots are full. Deliberately not a `runners` row: a runner holds secrets, merges and
+ * agent runs, and runners.company_id is unique. A worker's token opens only /api/check-worker/connect, which carries check
+ * messages and nothing else. Its slots are shared across every company it may serve.
+ */
+export const checkWorkers = pgTable("check_workers", {
+  id: id(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** The companies whose checks it may run; empty means none. */
+  companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
+  /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
+  slots: integer("slots").notNull().default(1),
+  /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
+  checkThreads: integer("check_threads"),
+  checkMemoryMb: integer("check_memory_mb"),
+  enabled: boolean("enabled").notNull().default(true),
+  /** From the worker's last hello. A job goes to it only when imageCommit equals the company runner's (DR-042). */
+  imageCommit: text("image_commit"),
+  imageVersion: text("image_version"),
+  reportedSlots: integer("reported_slots"),
+  features: jsonb("features").$type<string[]>(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+/**
  * The server-owned check queue (DR-003, BOS-316). One row per requested check; the runner runs it in a process it owns,
  * outside any agent session. kind: merge (the gate's one full check) or pre_review (an author's or reviewer's quick or full check).
  * state: queued, running, passed, failed, stuck (with a reason), cancelled (with a reason). A job never leaves the queue without a reason.
@@ -1058,6 +1102,8 @@ export const checkJobs = pgTable(
     /** The agent to wake with the result. */
     requestedBy: uuid("requested_by").references(() => agents.id, { onDelete: "set null" }),
     runnerId: uuid("runner_id").references(() => runners.id, { onDelete: "set null" }),
+    /** BOS-1435: the check worker a running job was sent to (runner_id is then null); null for a runner's job. */
+    workerId: uuid("worker_id").references(() => checkWorkers.id, { onDelete: "set null" }),
     command: text("command"),
     exitCode: integer("exit_code"),
     /** Why the job is stuck or cancelled, or how it ended. Set whenever the state is stuck or cancelled. */
@@ -1072,6 +1118,7 @@ export const checkJobs = pgTable(
     index("check_jobs_state_queued").on(t.state, t.queuedAt),
     index("check_jobs_ticket").on(t.ticketId, t.queuedAt),
     index("check_jobs_project_tree").on(t.projectId, t.tree),
+    index("check_jobs_worker_state").on(t.workerId, t.state),
   ],
 );
 
@@ -1494,7 +1541,27 @@ export const feedbackSettings = pgTable("feedback_settings", {
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
+  /** BOS-1388: posts, comments and votes count only after the visitor clicks an emailed link. Off by default. */
+  confirmByEmail: boolean("confirm_by_email").notNull().default(false),
+  /** How long an emailed link works, in hours. */
+  confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
+  /** How long a confirmed browser may post without confirming again, in days. */
+  rememberAddressDays: integer("remember_address_days").notNull().default(90),
 });
+
+/** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */
+export const portalConfirmedAddresses = pgTable(
+  "portal_confirmed_addresses",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    emailHash: text("email_hash").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("portal_confirmed_secret").on(t.secretHash), index("portal_confirmed_expires").on(t.expiresAt)],
+);
 
 /** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */
 export const featureDrivers = pgTable("feature_drivers", {
@@ -1590,10 +1657,17 @@ export const feedbackNotes = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
     portalVoter: text("portal_voter"),
+    /** BOS-1388: set while the visitor has not yet clicked the emailed link (SHA-256 of the link's token). Such a
+     * note is hidden from everyone and counts for nothing; confirming clears it. Null means counted. */
+    confirmTokenHash: text("confirm_token_hash"),
+    confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+    /** The address and name the visitor gave, kept only until they confirm (then they move to the customer, if a name was given). */
+    confirmEmail: text("confirm_email"),
+    confirmName: text("confirm_name"),
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
-  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt)],
+  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt), uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash)],
 );
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
