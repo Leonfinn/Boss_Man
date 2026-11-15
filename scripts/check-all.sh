@@ -190,6 +190,7 @@ if [ -z "$pre_done" ]; then
     pnpm install --frozen-lockfile --prefer-offline >/dev/null
     node --test scripts/*.test.mjs
     node scripts/lint-migrations.mjs
+    node scripts/check-doc-numbers.mjs
   fi
 fi
 

@@ -296,7 +296,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     const rows = await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.enabled, true));
     if (!rows.length) return "";
     const names = rows.map((w) => w.name).join(", ");
-    return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: build or pull the new worker image, set BOSSMAN_WORKER_IMAGE in its env file to it, and run docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d. The steps are in docs/26-check-workers.md; the Checks panel shows which workers are out of date.`;
+    return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: build or pull the new worker image, set BOSSMAN_WORKER_IMAGE in its env file to it, and run docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d. The steps are in docs/34-check-workers.md; the Checks panel shows which workers are out of date.`;
   }
 
   async function end(title: string, level: NotifyInput["level"], body: string) {

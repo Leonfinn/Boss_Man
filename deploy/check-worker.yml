@@ -1,7 +1,7 @@
 # A Boss Man check worker (DR-060): a container on ANY Docker host that takes check jobs from your Boss Man server.
 # It is its OWN Compose project, never merged with Boss Man's own files. Start it on the second host:
 #   docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d
-# See docs/26-check-workers.md for the steps, per-host notes and how to update it.
+# See docs/34-check-workers.md for the steps, per-host notes and how to update it.
 #
 # It dials OUT only (a wss:// address, or a Tailscale address); no port is published. It holds no GitHub, AI or deploy
 # credentials: only the worker token from Settings > Server and runner > Checks > Add a check worker (shown once).
