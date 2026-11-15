@@ -159,7 +159,11 @@ export const OWNER_CONTROLS = {
     "Copy compose file",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
-  "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
+  "Tools and deploys": [
+    "Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel",
+    // The Penpot form (BOS-1582).
+    "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
+  ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults", "Save"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
@@ -290,6 +294,8 @@ export const OWNER_FIELDS = {
     // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
     "Name", "Kind", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
     "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
+    // The Penpot form (BOS-1582).
+    "Penpot address", "Access token", "Export email (optional)", "Export password (optional)",
   ],
   // Who reviews at each risk level, and the "did it move the goal?" check.
   Reviews: ["Ask after (days)"],

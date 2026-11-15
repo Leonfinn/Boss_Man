@@ -30,7 +30,7 @@ import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
-import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
+import { answeredBefore, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
@@ -370,6 +370,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
         recommended: z.string(),
         blocksTicketId: z.string().uuid().optional(),
+        // BOS-1591: every other ticket that waits on this same answer is held by this one card, so one answer releases them all.
+        alsoBlocks: z.array(z.string().uuid()).max(10).optional().describe("Other tickets (ids) that wait on this same answer. The card holds them too, and the owner's one answer releases and wakes every one. Use it instead of a second card, and instead of a note that says a ticket waits for this."),
         // BOS-1078: the card holds blocksTicketId's merge until it is answered. Without it, an approved ticket merges past it.
         holdsMerge: z.boolean().optional(),
         triedFirst: z.string().max(1000),
@@ -404,7 +406,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -435,6 +437,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
       }
+      const alsoIds = [...new Set(alsoBlocks ?? [])].filter((id) => id !== blocksTicketId);
+      if (alsoIds.length) {
+        if (!blocksTicketId) return fail("alsoBlocks goes with blocksTicketId: name the first ticket there and the others in alsoBlocks.");
+        if (holdsMerge || criterion !== undefined) return fail("alsoBlocks can't be used with holdsMerge or criterion: those settle one ticket's merge or check. Raise a card per ticket for that.");
+        for (const id of alsoIds) {
+          const [o] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId)));
+          if (!o) return fail(`alsoBlocks: no ticket ${id} in your company.`);
+          const refused = await reviewTicketWriteRefusal(db, scope.companyId, id, scope.agentId);
+          if (refused) return fail(`alsoBlocks ${id}: ${refused}`);
+        }
+      }
       // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
       // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.
       let criterionIndexes: number[] | undefined;
@@ -460,16 +473,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
       // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
-      if (blocksTicketId) {
-        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
-        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question });
-        if (earlier && !stillNeeded?.trim()) {
+      // BOS-1591: looks at every owner answer in the company from the last 30 days, not only this ticket's own.
+      if (!stillNeeded?.trim()) {
+        const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: blocksTicketId, question });
+        if (earlier) {
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -799,8 +812,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         // Don't tell the owner they still must act on something they have already answered (BOS-123).
         const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
         if (asks && !input.stillNeeded?.trim()) {
-          const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
-          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: `${input.title} ${input.body ?? ""}` });
+          const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: input.ticketId, question: `${input.title} ${input.body ?? ""}` });
           if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
         }
       }
