@@ -1444,7 +1444,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         case "raise_decision": {
           const [d] = await db.select().from(decisions).where(eq(decisions.id, after.decisionId!));
           if (!d || d.status !== "open") throw new WatchdogError(409, "The owner has already answered it (or it was withdrawn), so it can't be taken back.");
-          await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(eq(decisions.id, d.id));
+          await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
           await markDecisionNotificationRead(db, d.id);
           await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           // Back to where it was, if nothing else holds it now.
