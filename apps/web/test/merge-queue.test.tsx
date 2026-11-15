@@ -156,6 +156,29 @@ describe("merge queue screen in server mode (BOS-597)", () => {
   });
 });
 
+// BOS-1517: one status line per ticket: step, since when, next, and what is in the way.
+describe("status line (BOS-1517)", () => {
+  it("shows a train-seat wait and a running check each as one line, with the check's own start", async () => {
+    const since = new Date(Date.now() - 12 * 60_000).toISOString();
+    const server = {
+      ...data,
+      mode: "server",
+      waitingCount: 1,
+      running: [{ ...data.running[0]!, statusLine: { step: "slot 1: running the check", since, next: "It merges by itself if the check passes.", blocker: null } }],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_seat", label: "waiting for a train seat", stuck: false, next: "x", actor: "system", decisionId: null, risk: "low", urgent: false, failedCheck: false, statusLine: { step: "waiting for a train seat", since, next: "It takes a seat as soon as one frees; its check then starts by itself.", blocker: "Every merge-train seat is taken." } }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Waiting for a train seat")).toBeTruthy();
+    const lines = document.querySelectorAll("[data-status-line]");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]!.textContent).toMatch(/^Slot 1: running the check · since .*\(12m\)\. Next: It merges by itself if the check passes\.$/);
+    expect(lines[1]!.textContent).toMatch(/Next: It takes a seat as soon as one frees; its check then starts by itself\. In the way: Every merge-train seat is taken\.$/);
+    expect(screen.queryByText(/check slot/)).toBeNull();
+  });
+});
+
 // The Merge queue's attention layout (BOS-1239, design BOS-1207).
 const base = { risk: "low", urgent: false, failedCheck: false, decisionId: null, actor: "system" as const, stuck: false, minutes: 10, next: "Boss Man merges it.", signedOffAt: null };
 const checkRow = (over: Record<string, unknown>) => ({ id: "j1", ticketId: "t1", ref: "APP-1", title: "A check", kind: "quick", requestedBy: "Bungle", state: "waiting", position: 1, minutes: 22, fixesMain: false, heldBy: null, ...over, heldByMain: String(over.heldBy ?? "").startsWith("main is red") });
