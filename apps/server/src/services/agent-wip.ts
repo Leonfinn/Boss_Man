@@ -100,6 +100,7 @@ export type WipHold = { reason: string; limit: number; scope: "agent" | "company
  * so this module needs no second way to count; with none registered, nothing is held.
  */
 export type StartHoldCounts = (companyId: string) => Promise<{ merges: number; quickChecks: number }>;
+// shortcut: one source per server process, set once by app.ts at start-up; lost on restart, harmless because start-up registers it again.
 let startHoldCounts: StartHoldCounts | null = null;
 export function setStartHoldCounts(fn: StartHoldCounts | null): void {
   startHoldCounts = fn;
