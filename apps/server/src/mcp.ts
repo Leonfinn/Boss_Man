@@ -8,6 +8,7 @@ import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { ticketHasOpenCard } from "./services/owner-todo.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -87,17 +88,13 @@ const OWNER_ASK = /\b(please|you(?:'ll| will)? (?:need|have|must|should)|could y
  */
 async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<{ uncovered: boolean; message: string } | null> {
   if (!OWNER_ASK.test(body)) return null;
-  // An open decision covers it when it blocks this ticket, or this agent already asked about it.
-  const covering = await db
-    .select({ id: decisionsTable.id })
-    .from(decisionsTable)
-    .leftJoin(ticketDependencies, eq(ticketDependencies.blockerDecisionId, decisionsTable.id))
-    .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
-    .limit(1);
-  if (covering.length) return null;
+  // Covered means this ticket (BOS-1576): an open card that names it or that it waits on, or steps in its
+  // ownerSetup (Boss Man raises their card at go-live). A card the agent raised about another ticket covers nothing here.
+  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  if (t?.ownerSetup?.trim()) return null;
+  if (await ticketHasOpenCard(db, ticketId)) return null;
   // A ticket owed the owner's sign-off whose card is missing: Boss Man raises the card itself rather than leave
   // the warning in the agent's run (BOS-503). Agents can't see decision state, so they couldn't act on it.
-  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
   const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
   if (restored) return { uncovered: false, message: `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.` };
   return { uncovered: true, message: "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted." };
@@ -110,7 +107,7 @@ async function ceoUrgentHold(db: Db, scope: Scope, body: string, ticketId: strin
   return me?.role === "ceo" ? urgentHeldMessage(db, scope.companyId, body, ticketId) : null;
 }
 /** What the CEO is told when a reply asking the owner to act is held (BOS-901). */
-const CEO_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open decision covers it, and the owner doesn't watch tickets, so the ask would be lost. Call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
+const OWNER_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open card covers this ticket, and the owner only looks at their Decisions queue, so the ask would be lost. If they need to act now: call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the steps are for after this change goes live: put them in the ticket's ownerSetup (set_ticket_state); Boss Man raises a checked card for them at go-live, and the reply then posts. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
 export { cut };
 const OUTLINE_OVER = 8000;
 
@@ -304,20 +301,18 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. If you are the CEO, a reply that asks the owner to act is not posted until an open decision covers it; a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
-      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("CEO only: send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a CEO reply that asks the owner to act is held (not posted) until an open decision covers it."), quotesUrgent: QUOTES_URGENT },
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. A reply that asks the owner to act is not posted until an open decision on this ticket covers it (or, for steps after go-live, the ticket's ownerSetup is set); a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("Send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a reply that asks the owner to act is held (not posted) until an open decision on this ticket covers it."), quotesUrgent: QUOTES_URGENT },
     },
     async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
       const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
       if (urgentHold) return fail(urgentHold);
-      // The CEO's owner-ask is held, not posted, until a card covers it (BOS-901): the hint after posting is too late for them.
+      // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
+      // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
       let hint: { uncovered: boolean; message: string } | null = null;
-      if (scope.agentId) {
-        const [me] = await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)));
-        if (me?.role === "ceo") {
-          hint = await ownerActionHint(db, scope, ticketId, body);
-          if (hint?.uncovered && !notAnAsk) return fail(CEO_ASK_HELD);
-        }
+      if (scope.agentId && !notAnAsk) {
+        hint = await ownerActionHint(db, scope, ticketId, body);
+        if (hint?.uncovered) return fail(OWNER_ASK_HELD);
       }
       try {
         await ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId: scope.agentId, runId: scope.runId, text: body });
@@ -333,7 +328,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
-      hint ??= await ownerActionHint(db, scope, ticketId, body);
+      // (Held above for agents; this is only the raised-sign-off-card message, or the owner's own reply.)
+      if (!scope.agentId || notAnAsk) hint = null;
+      else hint ??= await ownerActionHint(db, scope, ticketId, body);
       const links = await missingPageNote(db, scope.companyId, body);
       return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}${notLiveWarning ? `\n\n${notLiveWarning}` : ""}`);
     },
