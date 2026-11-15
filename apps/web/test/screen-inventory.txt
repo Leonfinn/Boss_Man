@@ -33,6 +33,7 @@ sections:
   - Most expensive tasks
   - Passed, held
   - Project brief
+  - Spending limit
   - Tokens
   - Your review
 reads: 
@@ -179,6 +180,7 @@ sections:
   - Budgets
   - Funding sources
   - Most expensive tasks
+  - Spending limit
   - Spending limits
   - Tokens
 reads: 
