@@ -16,6 +16,7 @@ import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
+import { allMergeOrder, liveServerCommit, serverContains } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
@@ -414,7 +415,35 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * now, one in its trial, or the host's "try again in N minutes" wait. It reads the host's own files, never a
    * guessed state, so it holds on any Docker host and on blue/green or single-colour alike.
    */
+  /**
+   * BOS-1467: a merged change to the runner-update path (scripts/update-runner.sh) that the server doesn't run yet.
+   * Runners are built only from the version the server runs, so every press would run the OLD script until it is
+   * live. Refused, never queued: a queued press would just fail the same way. Names the oldest such ticket, or null.
+   * The server has no git, so "live" is read from merge order, as in go-live-wait.ts; a merge it can't place, or
+   * nothing recorded about what runs, is never waited for.
+   */
+  async function runnerUpdateFix(): Promise<string | null> {
+    const companyId = await homeCompany();
+    if (!companyId) return null;
+    const rows = await db
+      .select({ number: tickets.number, mergeCommit: tickets.mergeCommit, prefix: companies.ticketPrefix })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(eq(tickets.companyId, companyId), eq(tickets.touchesRunnerUpdate, true), isNotNull(tickets.mergeCommit)))
+      .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
+    if (!rows.length) return null;
+    const live = await liveServerCommit(db, companyId);
+    if (!live) return null;
+    const order = await allMergeOrder(db, companyId);
+    const waiting = rows.find((r) => !serverContains(live, r.mergeCommit!, order) && order.includes(r.mergeCommit!.toLowerCase()));
+    if (!waiting) return null;
+    const ref = ticketRef(waiting.prefix, waiting.number) ?? "A merged change";
+    return `Waiting for ${ref} to go live: it fixes the runner update itself.`;
+  }
+
   async function runnerBlocker(a: Available | null): Promise<string | null> {
+    const fix = await runnerUpdateFix();
+    if (fix) return fix.replace(/^Waiting/, "waiting").replace(/\.$/, ", so the runners can't be updated yet.");
     const s = await status();
     if (s?.result === "running") return "a server update is running now, so the runners can't be updated until it finishes.";
     if (await pending()) return "a server update is already waiting for the host, so the runners can't be updated until it has run.";
@@ -1286,6 +1315,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       // wait) is QUEUED, never refused: it starts by itself the moment nothing blocks it (releaseRunnerDue), is cancelled
       // with a plain reason if the server update is switched back, and the owner can cancel it. A server update only
       // waiting for the owner's answer does not count (it never blocks the runners).
+      // BOS-1467: refused, not queued, while a merged fix to the runner update itself isn't live: the press would run the old script and fail.
+      const fix = await runnerUpdateFix();
+      if (fix) return { error: fix } as const;
       const trial = await trialState(a);
       const notNow = await runnerBlocker(a);
       if (trial || notNow) {
