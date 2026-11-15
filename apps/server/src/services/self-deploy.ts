@@ -699,7 +699,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   /** A card closed by the product, not answered: its notification is marked read here (BOS-413). */
   async function withdrawOpen(id: string, notice?: ClosedNotice | ((steps?: string[]) => ClosedNotice)) {
     const [row] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, id));
-    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, id));
+    await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     await markDecisionNotificationRead(db, id);
     // BOS-739: a card the system closed leaves a notice where it was, so an owner part-way through its
     // hand steps knows why it closed (and where to carry on). Its steps stay readable with the notice.

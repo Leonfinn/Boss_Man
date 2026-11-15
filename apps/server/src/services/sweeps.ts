@@ -154,7 +154,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
   async function withdraw(ids: string[]) {
     if (!ids.length) return;
-    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(and(inArray(decisions.id, ids), eq(decisions.status, "open")));
     // Withdrawn without an answer: their notifications are read now (BOS-413).
     await db.update(notifications).set({ readAt: now() }).where(and(inArray(notifications.decisionId, ids), isNull(notifications.readAt)));
   }
