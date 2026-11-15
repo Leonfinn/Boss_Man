@@ -4,7 +4,8 @@
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
 import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
+import { openBlockers } from "./ticket-links.js";
+import { ticketBlockerOpenSql } from "./blocker-sql.js";
 import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
