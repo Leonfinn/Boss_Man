@@ -372,8 +372,9 @@ jobs:
             # First the error blocks (the line and the 6 after it, for the first 4 matches), then the failed test names.
             clean="$RUNNER_TEMP/worker-check.clean.log"
             sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/worker-check.log" > "$clean"
-            echo "::error title=check worker image: first errors::$(grep -E -m4 -A6 'FAIL|Error|error TS' "$clean" | tr '\n' '|' | cut -c1-3000)"
-            echo "::error title=check worker image: failed tests::$(grep -E '✗|×' "$clean" | head -40 | tr '\n' '|' | cut -c1-3000)"
+            # GitHub workflow-command escaping: % becomes %25 (first) and a carriage return %0D; newlines already became '|'.
+            echo "::error title=check worker image: first errors::$(grep -E -m4 -A6 'FAIL|Error|error TS' "$clean" | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            echo "::error title=check worker image: failed tests::$(grep -E '✗|×' "$clean" | head -40 | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
           fi
           exit "$rc"
 
