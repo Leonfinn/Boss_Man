@@ -59,6 +59,10 @@ x-server-env: &server-env
   BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
   BOSSMAN_PORTAL_PORT: "3101"
   BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
+  # The portal's reverse proxy: its own address(es) or CIDRs. Empty = the connecting address is the visitor.
+  BOSSMAN_PORTAL_TRUSTED_PROXY: ${BOSSMAN_PORTAL_TRUSTED_PROXY:-}
+  # Which header names the visitor: x-forwarded-for (default) or cf-connecting-ip (only when Cloudflare is the proxy).
+  BOSSMAN_PORTAL_CLIENT_HEADER: ${BOSSMAN_PORTAL_CLIENT_HEADER:-}
   # The stall profiler (BOS-602): 0 turns it off. Empty = on.
   BOSSMAN_STALL_PROFILE: ${BOSSMAN_STALL_PROFILE:-}
   BOSSMAN_DEPLOYER_DIR: /run/deployer

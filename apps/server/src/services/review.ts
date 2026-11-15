@@ -1962,7 +1962,7 @@ export function reviewService(
       type Stuck = { status: "job_stuck"; command: string; reason: string; output: string };
       type Prepared = Extract<MergeResult, { status: "prepared" }>;
       type CheckFailed = Extract<MergeResult, { status: "check_failed" }>;
-      type RoundEnd = { status: "passed" } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | CheckFailed;
+      type RoundEnd = { status: "passed" } | { status: "restack"; why: RestackWhy } | Stuck | { status: "job_superseded" } | { status: "left_review" } | CheckFailed;
       const message = `Merge "${t.title}" (${ticketId})`;
       const retargetOn = async () => {
         const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MERGE_RETARGET_KEY));
@@ -1981,7 +1981,7 @@ export function reviewService(
        * every poll: once it names a reason the round ends and the caller prepares again. Queueing the new tree then replaces a
        * queued job and keeps its place (BOS-1328); a running one is cancelled as a leftover, which frees its slot.
        */
-      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined }): Promise<RoundEnd> => {
+      const runRound = async (ref: { prep: Prepared }, o: { refresh: () => Promise<boolean>; stale?: () => RestackWhy | null; onRetarget?: (p: Prepared) => void; train?: () => { place: number; ahead: number } | undefined; leftReview?: () => Promise<boolean> }): Promise<RoundEnd> => {
         let lastRefresh = Date.now();
         for (const command of queuedChecks) {
           {
@@ -2018,6 +2018,15 @@ export function reviewService(
               }
               cur = row;
               await started(cur);
+              // Merge train (BOS-1504): the ticket left review (sent back, moved by hand) while its check waited or ran. Its seat
+              // must not stay taken by a check nobody will land, so the job is cancelled and the round ends; trainMerge's
+              // `finally` then gives up the seat and the members behind restack. Only the train passes leftReview: today's path
+              // keeps its behaviour.
+              if ((cur.state === "queued" || cur.state === "running") && o.leftReview && (await o.leftReview())) {
+                await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
+                await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
+                return { status: "left_review" };
+              }
               // Merge train: the base this tree was built on no longer holds. Leave the job to the next round (it replaces it).
               const why = cur.state === "queued" || cur.state === "running" ? o.stale?.() : null;
               if (why) {
@@ -2098,9 +2107,9 @@ export function reviewService(
         // BOS-1435: seats grow with ready check workers; a worker that drops shrinks them, and admit never evicts a seated member.
         const { train, created } = trainFor(t.projectId, deps.checkCapacity ? await deps.checkCapacity(t.companyId) : await queue.slots());
         if (created) {
-          // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live.
-          const live = await db.select({ ticketId: checkJobs.ticketId }).from(checkJobs).where(and(eq(checkJobs.projectId, t.projectId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running"]))).orderBy(asc(checkJobs.queuedAt));
-          train.seedOrder([...new Set(live.map((r) => r.ticketId).filter((id): id is string => !!id))]);
+          // BOS-1289: the first landing after a server start seeds the old order from the merge jobs still live, ordered the way
+          // admit orders (tier, then place: BOS-1504), so a background-lane ticket isn't seated right behind the head.
+          train.seedOrder(await queue.liveMergeOrder(t.projectId));
         }
         const pl = await queue.place(ticketId);
         // BOS-1403 tiers: urgent/fix 0, ordinary 1, background lane 2; a ticket at the front of the line counts as 0.
@@ -2184,6 +2193,7 @@ export function reviewService(
                   stale: () => train.stale(ticketId),
                   onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree }),
                   train: seatOf,
+                  leftReview: async () => !(await inReview()),
                 });
               let r = await round();
               if (r.status === "check_failed") {
