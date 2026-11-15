@@ -297,10 +297,12 @@ reads:
 ## #/settings/<company>/tools
 sections: 
   - Deploy targets
+  - Penpot
   - Tool servers (MCP)
 reads: 
   - /api/companies/:id/deploy-targets
   - /api/companies/:id/mcp-servers
+  - /api/companies/:id/penpot
   - /api/companies/:id/projects
 
 ## #/settings/<company>/transfer

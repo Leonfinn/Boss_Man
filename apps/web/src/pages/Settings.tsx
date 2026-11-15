@@ -5,7 +5,7 @@ import { CompanyReviews } from "../components/ReviewPolicy";
 import { Section, useAction } from "./settings/shared";
 import { Runner } from "./settings/Runner";
 import { Credentials } from "./settings/Credentials";
-import { ToolServers, DeployTargets } from "./settings/Tools";
+import { ToolServers, DeployTargets, PenpotSettings } from "./settings/Tools";
 import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
@@ -245,6 +245,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     tools: company ? (
       <div key={company.id} style={{ display: "contents" }}>
         <ToolServers company={company} />
+        <PenpotSettings company={company} />
         <DeployTargets company={company} />
       </div>
     ) : (
