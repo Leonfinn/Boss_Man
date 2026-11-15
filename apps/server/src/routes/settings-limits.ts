@@ -15,6 +15,7 @@ import { agentsAtOnce, CHECK_MEMORY_CEILING_BYTES, limitReason, memoryLine, read
 import type { checkDispatcher } from "../services/check-dispatcher.js";
 import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
+import { runnerImageCommit } from "../services/runner-image.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
 import { getHold, type maintenanceService } from "../services/maintenance.js";
@@ -205,7 +206,14 @@ export function settingsLimitsRoutes(
     const b = WorkerBody.parse(req.body);
     await knownCompanies(b.companyIds);
     const { worker, token } = await w.register(b);
-    return { id: worker.id, token };
+    // BOS-1550: the commit the worker must be built from = the one its chosen companies' runners are built from, so the
+    // Add a check worker card can show a compose file already filled in. Null when no chosen runner has said one yet.
+    let commit: string | null = null;
+    for (const companyId of b.companyIds) {
+      commit = await runnerImageCommit(db, companyId);
+      if (commit) break;
+    }
+    return { id: worker.id, token, commit };
   });
   owner.patch("/api/settings/check-workers/:id", async (req, reply) => {
     const w = needWorkers();

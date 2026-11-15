@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runs, tickets } from "../src/db/schema.js";
+import { decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { dashboardService, runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -131,5 +131,37 @@ describe("QA: home screen 'Need your answer' equals the Decisions menu badge (BO
     expect(tally).toEqual({ open: 2, waiting: 1 });
     const data = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json();
     expect(data.stats.decisionsWaiting).toBe(tally.open);
+  });
+});
+
+describe("dashboard health lines (BOS-1507)", () => {
+  type Health = { runner: { registered: boolean; connected: boolean } | null; usage: { agents: number; accounts: string[]; firstResetAt: string | null } | null; update: { waiting: boolean; phase: string | null; deadline: string | null } | null };
+
+  it("reports the runner connection, usage-limit holds and the update wait", async () => {
+    const c = (ctx = await setup());
+    const health = async () => (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().health as Health;
+    let h = await health();
+    expect(h.runner).toMatchObject({ registered: true, connected: true });
+    expect(h.usage).toMatchObject({ agents: 0, firstResetAt: null });
+    expect(h.update).toEqual({ waiting: false, phase: null, deadline: null });
+    const until = new Date(Date.now() + 3_600_000);
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "ticket", status: "deferred", statusReason: "subscription weekly window nearly used up", notBefore: until });
+    h = await health();
+    expect(h.usage?.agents).toBe(1);
+    expect(h.usage?.firstResetAt).toBe(until.toISOString());
+  });
+
+  it("greys a line that can't be read and leaves the others, and says offline when the runner is gone", async () => {
+    const c = (ctx = await setup());
+    const svc = dashboardService(c.db, {
+      runnerConnected: () => false,
+      updateWait: async () => {
+        throw new Error("deploy wait unavailable");
+      },
+    });
+    const h = (await svc.get(c.company.id)).health as Health;
+    expect(h.runner).toMatchObject({ registered: true, connected: false });
+    expect(h.update).toBeNull();
+    expect(h.usage).not.toBeNull();
   });
 });

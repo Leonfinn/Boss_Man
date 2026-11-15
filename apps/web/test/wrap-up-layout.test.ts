@@ -141,7 +141,7 @@ describe.skipIf(!built)("BOS-988 wrap-up layout at the owner's sizes", () => {
           const errors: string[] = [];
           page.on("pageerror", (e) => errors.push(String(e)));
           // The Updates box is on Settings → Server and runner since the Settings menu redesign; #/settings alone is the menu.
-          await page.goto(`${base}/#/settings/${company.id}/system`);
+          await page.goto(`${base}/#/settings/${company.id}/updates`);
           await page.waitForSelector("body", { timeout: 4000 });
           await page.waitForSelector("section.card:has(h2#deploy-h)", { timeout: 8000 });
           await new Promise((r) => setTimeout(r, 1200));

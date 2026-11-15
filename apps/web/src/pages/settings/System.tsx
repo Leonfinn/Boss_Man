@@ -7,7 +7,7 @@ import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
-import { LiveState, atTime, historyTag, historyWhat, inAbout, updateStatus, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -173,6 +173,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     );
   }
   const s =v?.status ?? null;
+  const progress = runnerProgress(report.data?.live, maint.data);
   const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;
@@ -282,9 +283,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           ) : (
             v?.available && st.tag === "Update ready" && <WaitingChanges commits={v.available.commits} />
           )}
-          <NowRunning v={v} report={report.data} />
+          <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={history.data} />
+        <RecentUpdates rows={history.data} progress={progress} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
@@ -408,7 +409,7 @@ export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean
 }
 
 /** Now running: the server's version as a date and each company's runner (BOS-1238). Replaces the Runner update box's "Now" list. */
-function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | null }) {
+function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report: Report | null; progress: RunnerProgress }) {
   const s = v?.status;
   const server = s && s.target === "server" && s.result === "deployed" ? when(s.ended || s.started) : null;
   return (
@@ -420,7 +421,7 @@ function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | 
             <strong>Server</strong> <span className="muted">updated {server}</span>
           </li>
         )}
-        {report?.live?.map((l) => <LiveState key={l.slug} r={l} />)}
+        {report?.live?.map((l) => <LiveState key={l.slug} r={l} progress={progress} />)}
       </ul>
       {report?.live && !report.live.length &&<p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>}
     </div>
@@ -428,7 +429,9 @@ function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | 
 }
 
 /** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
-function RecentUpdates({ rows }: { rows: HistoryRow[] | null }) {
+function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress: RunnerProgress }) {
+  // Only the newest runner row can be mid-swap; older ones are history.
+  const newestRunner = rows?.find((r) => r.target === "runner")?.id;
   return (
     <div className="upd-col" data-testid="recent-updates">
       <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Recent updates</h3>
@@ -439,7 +442,7 @@ function RecentUpdates({ rows }: { rows: HistoryRow[] | null }) {
       ) : (
         <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           {rows.map((r) => {
-            const t = historyTag(r);
+            const t = historyTag(r, r.id === newestRunner ? progress : null);
             return (
               <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
                 <span>{when(r.at)}</span>

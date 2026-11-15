@@ -126,7 +126,10 @@ export const OWNER_CONTROLS = {
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
-    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions", "Server and runner", "Import and export",
+    // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
+    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
+    "Server and runner",
     "Run the setup wizard",
   ],
   "Server and runner": [
@@ -152,6 +155,8 @@ export const OWNER_CONTROLS = {
     "Turn off", "Send test email",
     // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
+    // BOS-1550: copy the ready-filled compose file shown after adding.
+    "Copy compose file",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -320,6 +325,9 @@ export const OWNER_MENU = [
 ] as const;
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
-  Settings: ["Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions", "Server and runner", "Import and export"],
+  Settings: [
+    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
+  ],
   Board: ["Kanban", "Budget", "Config"],
 } as const;
