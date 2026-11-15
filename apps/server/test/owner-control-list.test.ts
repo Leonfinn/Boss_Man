@@ -469,3 +469,24 @@ describe("OWNER_CONTROLS matches the web app", () => {
     expect(stale, `remove from packages/shared/src/owner-controls.ts, or fix FILE_SCREEN, PAGE_SCREEN or SITE_SCREEN: ${stale.join(" | ")}`).toEqual([]);
   });
 });
+
+// BOS-1494 (Morph's review, item 10): developer words may stay in help text or boxed technical names, never in a label.
+describe("owner labels use plain words", () => {
+  const DEVELOPER_WORDS = /\blegacy\b|merge train|leader lock|worktrees?\b|quota hold|no funding set|RUNNER_ADDONS|server queue/i;
+
+  it("no button, field label, menu entry or tab uses a developer word", () => {
+    const labels = [
+      ...tsx.flatMap((f) => {
+        const src = readFileSync(f, "utf8");
+        return [...buttonLabels(src), ...fieldLabels(src)].map((l) => `${rel(f)}: ${l}`);
+      }),
+      ...Object.values(OWNER_CONTROLS).flat(),
+      ...Object.values(OWNER_FIELDS).flat(),
+      ...OWNER_MENU,
+      ...Object.values(OWNER_TABS).flat(),
+    ];
+    expect(labels.length).toBeGreaterThan(500); // the scan found the app's labels, so an empty pass can't hide a miss
+    const bad = labels.filter((l) => DEVELOPER_WORDS.test(l.replace(/^[^:]+\.tsx: /, "")));
+    expect(bad).toEqual([]);
+  });
+});
