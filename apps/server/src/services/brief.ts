@@ -4,6 +4,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, notInArray, or, sql } 
 import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReading, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
+import { ceoPlanText } from "./ceo-plan.js";
 import { heldReadyTickets } from "./agent-wip.js";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
@@ -147,7 +148,8 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
         .flatMap((d) => (d.blocker ? (d.ticketState !== "done" ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
     const myLines = mine.map((t) => {
       const w = waitsOn(t.id);
-      return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}`;
+      const plan = ceoPlanText(t, now, 200);
+      return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}${plan ? ` ${plan}` : ""}`;
     });
     const decIds = deps.flatMap((d) => (d.decId && d.blocked && ids.includes(d.blocked) ? [d.decId] : []));
     const asked = agentId

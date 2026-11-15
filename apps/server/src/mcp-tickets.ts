@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { goLiveWaitWords, type GoLiveWait, acceptanceCriteriaSchema, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, criteriaText, failedAfterMerge, isAfterMerge, isTaskSize, missingVerdicts, planFirstByDefault, RISK_TIERS, SIZE_SCALE, unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
+import { agents, decisions as decisionsTable, engagements as engagementsTable, features, projects, reviewRequests, runs as runsTable, ticketDependencies, tickets, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { FIXES_LIVE_MAX, fixesLiveProblem, ownerSetupFixKey } from "./services/decisions.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, ownerSetupFacts, ownerSetupWriteCheck } from "./services/owner-setup-check.js";
@@ -19,6 +19,7 @@ import { NOTHING_CHANGED, ReviewError } from "./services/review.js";
 import { reviewTicketWriteRefusal } from "./services/skill-proposals.js";
 import { wipQueuedNote } from "./services/agent-wip.js";
 import { moveTicket } from "./services/ticket-moves.js";
+import { ceoMoveNote, ceoPlanText, IN_PROGRESS_BLOCKED_WARNING, leavesPlan, planMoveWarning, REVIEW_BLOCKED_REFUSAL, unexpiredPlan, urgentBackwards } from "./services/ceo-plan.js";
 import { addTicketDependency, openBlockers } from "./services/ticket-links.js";
 import { systemMoveTicket } from "./services/ticket-transition.js";
 import { staleVersionMessage, startRefusal, WorkError } from "./services/work.js";
@@ -443,7 +444,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
   server.registerTool(
     "set_ticket_state",
     {
-      description: `Move one of your company's tickets to a new state. Call it with state "review" when your work is ready to check, or "done" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is for every kind of wait on unfinished work and does not count toward the in-progress limits: it is accepted for a waits-on ticket, an open card (plan cards too), a blocked_until date, or a merged ticket with after-merge checks not yet reported; anything else is refused. If you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria to check before merge, the summary must say pass or fail for each; a criterion marked checked after merge is reported once the work is live, and the ticket cannot be marked done until it is. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies. ${FINISHED_STAYS_IN_REVIEW} Moving it back to review on code its reviews already passed keeps those approvals and the owner's sign-off; no new review round is opened. When you hand work on to someone else, pass followUps on review or done so it lands on their queue (${FOLLOW_UP_HELP}) A move to done is refused when the summary or your last reply hands work on ("the CEO will", "for X to", "hand to", "next: someone") and neither followUps nor noFollowUpReason is given.`,
+      description: `Move one of your company's tickets to a new state. Call it with state "review" when your work is ready to check, or "done" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is for a ticket that has not finished its own work and waits on something, and does not count toward the in-progress limits; a ticket whose work is finished and reviewed never goes to Blocked to wait for another ticket's merge (a move from review to Blocked for that reason is refused; it waits in review). Blocked is accepted for a waits-on ticket, an open card (plan cards too), a blocked_until date, or a merged ticket with after-merge checks not yet reported; anything else is refused. If you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria to check before merge, the summary must say pass or fail for each; a criterion marked checked after merge is reported once the work is live, and the ticket cannot be marked done until it is. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies. ${FINISHED_STAYS_IN_REVIEW} Moving it back to review on code its reviews already passed keeps those approvals and the owner's sign-off; no new review round is opened. When you hand work on to someone else, pass followUps on review or done so it lands on their queue (${FOLLOW_UP_HELP}) A move to done is refused when the summary or your last reply hands work on ("the CEO will", "for X to", "hand to", "next: someone") and neither followUps nor noFollowUpReason is given.`,
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional(), ownerSetup: z.string().max(4000).optional().describe(`The owner's steps, for a ticket whose change needs them to do something once it is live (a setting, a secret, a button): plain words by button path, one step per line, e.g. Settings → Funding → Add funding source. Boss Man raises their card with these steps when the change goes live, not at merge. Pass an empty string to clear it. Only the ticket's own assignee, CEO or a manager may set it, and not once the ticket is merged (the steps freeze at merge; only the owner changes them on the ticket page). ${SETUP_HELP}`), lintOverride: LINT_OVERRIDE, fixesLive: z.string().max(FIXES_LIVE_MAX).optional().describe(`${FIXES_LIVE_HELP} An empty string clears it. Only the ticket's own assignee, CEO or a manager may set it here; a reviewer adds it with the review tool.`), followUps: followUpsSchema.optional().describe(`With state review or done. ${FOLLOW_UP_HELP}`), noFollowUpReason: z.string().max(240).optional().describe("With state done: why nothing is handed on although the summary or last reply sounds like it does.") },
     },
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason, ownerSetup, lintOverride, fixesLive, followUps, noFollowUpReason }) => {
@@ -502,7 +503,7 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
       const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState })
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState, ceoPlan: tickets.ceoPlan, ceoPlanDeadline: tickets.ceoPlanDeadline, urgent: tickets.urgent, title: tickets.title, assigneeId: tickets.assigneeAgentId })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!withCriteria) return fail("No ticket with that ID in your company.");
@@ -556,6 +557,13 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
       if (state === "blocked" && !until && !(await hasOpenBlocker(db, ticketId)) && !(await hasOpenCard(db, ticketId)) && !(await mergedAwaitingChecks(db, ticketId))) {
         return fail(BLOCKED_REFUSAL);
+      }
+      // BOS-1509: finished, reviewed work whose only wait is another ticket's merge stays in review ("Passed, held").
+      let waitsOnMergeOnly = false;
+      if (state === "blocked" && !sameState && !until && (withCriteria.prev === "review" || withCriteria.prev === "in_progress")) {
+        const open = await openBlockers(db, ticketId);
+        waitsOnMergeOnly = open.length > 0 && open.every((b) => b.kind === "ticket") && !(await hasOpenCard(db, ticketId)) && !(await mergedAwaitingChecks(db, ticketId));
+        if (waitsOnMergeOnly && withCriteria.prev === "review") return fail(REVIEW_BLOCKED_REFUSAL);
       }
       // The move itself is moveTicket's (DR-047): the column, the WIP limit, the field rules, the history line,
       // the merge line's "left" event, and the done, review and feature steps after a real change. This tool
@@ -621,7 +629,25 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // BOS-734: a head that moves after the owner's sign-off card is raised can void it.
       const signoffHint = state === "review" && !sameState ? "\n\nWhile this waits on review or the owner's sign-off, don't merge main into the branch unless the merge gate says it clashes. Boss Man carries a sign-off over only when main was merged in automatically with no clashes and no new code; a hand-fixed merge or a new commit means the owner must sign off again." : "";
       if (moved.held) return text(`Ticket ${ticketId} did not start: ${moved.held} It is in Ready, assigned to you. Finish or hand over one of your in-progress tickets first, and it starts by itself.`);
-      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
+      // BOS-1509: the CEO's plan and urgent tickets. The move stands; the mover is told, and so is the CEO, once per move.
+      let planNote = "";
+      if (!sameState) {
+        const now = new Date();
+        const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        const byCeo = me?.role === "ceo";
+        const planned = unexpiredPlan(withCriteria, now) && leavesPlan(withCriteria.prev, state);
+        const backwards = withCriteria.urgent && urgentBackwards(withCriteria.prev, state);
+        if ((planned || backwards) && !byCeo && hooks.wake) {
+          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), eq(agents.role, "ceo")));
+          if (ceo && ceo.id !== scope.agentId) {
+            const plan = planned ? ceoPlanText(withCriteria, now, 1000) : null;
+            await Promise.resolve(hooks.wake(ceo.id, { reason: "ticket moved off plan", ticketId, causedByRunId: scope.runId, note: ceoMoveNote({ title: withCriteria.title, ref: null, from: withCriteria.prev, to: state, mover: me?.name ?? "An agent", summary: summary?.trim() || null, plan, urgent: !!backwards }) })).catch(() => undefined);
+          }
+        }
+        if (planned) planNote = planMoveWarning(ceoPlanText(withCriteria, now, 1000)!, withCriteria.prev, state, !byCeo);
+        if (state === "blocked" && withCriteria.prev === "in_progress" && waitsOnMergeOnly && (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(eq(reviewRequests.ticketId, ticketId)).limit(1)).length) planNote += `\n\n${IN_PROGRESS_BLOCKED_WARNING}`;
+      }
+      return text(`Ticket ${ticketId} is now ${state}.${moved.urgentOver ? " It started over your WIP limit because it is urgent." : ""}${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${followUp}${planNote}${warn}${setupHint}${signoffHint}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}${waitsOnAdvice(summary)}`);
     },
   );
 }
