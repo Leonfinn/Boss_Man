@@ -232,13 +232,27 @@ describe("review kinds", () => {
       expect((await c.rows()).find((r) => r.kind === "code")?.status).toBe("changes_requested");
     });
 
-    it("stamps the head that was read when the branch only took clean merges of main since", async () => {
+    it("stamps the current head (not the older one read) when the branch only took clean merges of main since", async () => {
       const c = await kinds();
       await c.call(c.senior.id, { action: "diff" });
       branch.head = NEW_HEAD;
       branch.covers = true;
       await c.call(c.senior.id, { action: "submit", verdict: "approved" });
-      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: DIFF.head });
+      expect((await c.rows()).find((r) => r.kind === "code")).toMatchObject({ status: "approved", head: NEW_HEAD });
+    });
+
+    it("does not reopen a reviewer already approved on the newer head when a later reviewer read the older one", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "diff" }); // reads the old head
+      branch.head = NEW_HEAD; // main merged in cleanly
+      branch.covers = true;
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" }); // approves on the newer head
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" }); // read the older head
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      const rows = await c.rows();
+      expect(rows.filter((r) => r.status === "pending")).toHaveLength(0);
+      expect(rows.map((r) => r.head)).toEqual([NEW_HEAD, NEW_HEAD, NEW_HEAD]);
+      expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).some((a) => a.kind === "review_reopened")).toBe(false);
     });
 
     it("stamps the submit-time head as before when no diff was read", async () => {

@@ -963,7 +963,9 @@ export function reviewService(
             await db.update(reviewRequests).set({ readHead: null }).where(eq(reviewRequests.id, row.id));
             throw new ReviewError(409, `The branch moved since you read it (you read ${row.readHead.slice(0, 8)}, it is now ${nowHead.slice(0, 8)}). Read the diff again, then submit.`);
           }
-          approvedHead = row.readHead;
+          // Covered: the verdict on readHead carries over to nowHead. Stamping the older head would make it settle()'s
+          // "newest" and reopen reviewers already approved on the newer head.
+          approvedHead = nowHead;
         }
         await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null, head: approvedHead, readHead: approvedHead });
         // "Passed, hold merge": the pass stands, and every path into a merge now waits for the hold to end (BOS-808).
