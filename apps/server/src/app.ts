@@ -80,6 +80,7 @@ import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
+import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkGate } from "./services/check-gate.js";
@@ -1045,6 +1046,15 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // BOS-1489: the start hold's two counts. Merges: the Merge queue page's own figure. Quick checks: queued jobs that aren't a
+  // merge or a full check, through check_jobs_state_queued (state first), counted for the company.
+  setStartHoldCounts(async (companyId) => {
+    const [q] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.state, "queued"), eq(checkJobs.companyId, companyId), eq(checkJobs.scope, "quick"), ne(checkJobs.kind, "merge")));
+    return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0 };
+  });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
   const deployWait = deployWaitService(db, {
@@ -1310,7 +1320,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), holdStartsMergesWaiting: z.number().int().min(1).max(1000).nullable(), holdStartsQuickChecksQueued: z.number().int().min(1).max(1000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1335,6 +1345,9 @@ export async function buildApp(opts: AppOptions) {
         const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
         await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
       }
+      // The start hold's limits (BOS-1489) change what starts, so keep a record of who set them and to what.
+      for (const [key, label] of [["holdStartsMergesWaiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued"]] as const)
+        if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${label}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
       return c;
     });
 

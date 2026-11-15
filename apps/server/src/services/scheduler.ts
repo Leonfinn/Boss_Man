@@ -19,7 +19,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { blockedHolds, openBlockers, ticketBlockerFinished } from "./ticket-links.js";
-import { oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { agentWipHold, oldestMovableInProgress, WIP_REFUSED_REASON } from "./agent-wip.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
@@ -296,6 +296,10 @@ export function schedulerService(
   async function wipHeldRefusal(ticketId: string): Promise<string | null> {
     const [t] = await db.select({ state: tickets.systemState, heldAt: tickets.wipHeldAt, agentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "ready" || !t.heldAt || !t.agentId) return null;
+    // BOS-1489: held for a long merge line or check queue, not for the agent's own limit: say so.
+    const [full] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    const hold = full ? (await agentWipHold(db, full)).hold : null;
+    if (hold?.scope === "queue") return `${hold.reason.replace(/\. It starts by itself.*$/, "")}, so it stays in Ready and starts by itself when the line is shorter. (Not started.)`;
     const oldest = await oldestMovableInProgress(db, t.agentId);
     if (!oldest) return `a WIP limit holds it in Ready, and it starts when there is room. (Not started.)`;
     const [o] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, oldest));
