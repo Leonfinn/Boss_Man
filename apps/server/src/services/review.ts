@@ -2314,7 +2314,16 @@ export function reviewService(
             }
             // A stacked prepare that came back main_moved: its base isn't on main any more. Wait for a new base rather than spin.
             let badBase: string | null = null;
+            let again = false;
             for (;;) {
+              // BOS-1604: the owner turned the train off. A member about to prepare again holds no checked tree, so it leaves
+              // and lands the way it did before, like one still waiting for a seat. Before this, a seated member kept restacking
+              // until the cap (with the back-off, up to ~20 min). A member with a passed check never gets here, so it keeps its base.
+              if (again && !(await queue.train())) {
+                train.leave(ticketId);
+                return serverMerge();
+              }
+              again = true;
               // BOS-1604: a member restacking again and again before any check could run backs off instead of re-preparing
               // every poll (the train's thrash fact raises one alarm meanwhile). It still leaves at once if it leaves review.
               for (const until = Date.now() + train.backoffMs(ticketId); Date.now() < until; ) {

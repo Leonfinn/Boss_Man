@@ -462,6 +462,24 @@ describe("merge train landings (BOS-1366)", () => {
     expect(c.git.has(c.git.main).sort()).toEqual(["A", "B", "C"]);
   });
 
+  it("turning the switch off stops a seated member that has to restack: it lands the old way, not stacked again (BOS-1604)", async () => {
+    const c = await setup();
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await approveInOrder(c, [a, b]);
+    expect(await c.waitFor(async () => (await c.db.select().from(checkJobs)).length === 2)).toBe(true);
+    // 15 Nov: the owner unticks the switch while B is seated. A then fails for real and leaves, so B must prepare again.
+    await c.db.update(settings).set({ value: false }).where(eq(settings.key, "merge_train"));
+    const stop = c.runJobs((_has, who) => who === "A");
+    expect([await c.outcome(a), await c.outcome(b)]).toEqual(["verify_failed", "merged"]);
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["B"]);
+    // B's first prepare was stacked on A (train); after the restack it took today's path: no base, no expectBase.
+    const bSeen = c.git.seen.filter((s) => s.ticket === "B");
+    expect(bSeen[0]!.base).toBeDefined();
+    expect(bSeen.filter((s) => s.phase === "finish").some((s) => s.expectBase)).toBe(false);
+    expect((await c.events(b, "restacked")).length).toBe(1);
+  }, 60_000);
+
   it("with the switch off, or a runner without merge-base, merges as before: no base or expectBase is ever sent", async () => {
     for (const opts of [{ train: false }, { features: ["carried-check", "check-jobs"] }]) {
       const c = await setup(opts);
