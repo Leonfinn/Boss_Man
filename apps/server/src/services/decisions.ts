@@ -237,7 +237,7 @@ export type DecisionContext =
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
-  | { type: "maintenance"; since: string }
+  | { type: "maintenance"; since: string; /** BOS-1377: the runs the card listed; "Stop these" touches no others. Absent on an older card. */ runIds?: string[] }
   /** An approved server update still waiting for a quiet machine (services/deploy-wait.ts, BOS-420): keep waiting, update now, or cancel. */
   | { type: "deploy_wait"; approvedAt: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
@@ -739,6 +739,11 @@ export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
 export const CANCEL_UPDATE = "Cancel the update";
+/** BOS-1377: the runner update's deadline card. Stop only the runs the card listed (each through the per-run Stop), wait 10 more minutes, or cancel the update. */
+export const STOP_THESE_CARRY_ON = "Stop these and carry on";
+export const WAIT_TEN_MORE = "Wait 10 more minutes";
+export const CANCEL_RUNNER_UPDATE = "Cancel the runner update";
+export const DEADLINE_WAIT_MINUTES = 10;
 /** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
 export const UPDATE_NOW_ANYWAY = "Update now anyway";
 
@@ -1037,7 +1042,7 @@ export type LoopHooks = {
   signoffStale?(ticketId: string, cardHead: string): Promise<string | null>;
 };
 
-export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
+export type MaintenanceHook = { answered(answer: string, ctx?: { runIds?: string[] }): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, opts?: { override?: boolean; thenRunners?: boolean }): Promise<unknown> };
 /** The quiet-machine wait of a server update (BOS-420, deploy-wait.ts). */
@@ -3417,7 +3422,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
         }
       } else if (ctx.type === "maintenance") {
-        await maintenance?.answered(answer);
+        await maintenance?.answered(answer, { runIds: ctx.runIds });
       } else if (ctx.type === "deploy_wait") {
         await deployWait?.answered(answer);
       } else if (ctx.type === "team_plan") {
