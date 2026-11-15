@@ -133,7 +133,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         await new Promise((r) => setTimeout(r, 400));
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
-        expect(await page.locator("nav[aria-label='Settings'] a").count(), `${vp.name}: nine menu links ${navHtml}`).toBe(9);
+        expect(await page.locator("nav[aria-label='Settings'] a").count(), `${vp.name}: 14 menu links ${navHtml}`).toBe(14);
         expect(await page.locator("[role='tablist']").count(), `${vp.name}: no tab row`).toBe(0);
         // The current page is marked, and shown by weight and a bar as well as colour.
         const cur = page.locator("nav[aria-label='Settings'] a[aria-current='page']");
@@ -197,7 +197,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       await phone.goto(`${base}/#/settings`);
       await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
       await new Promise((r) => setTimeout(r, 300));
-      expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: nine rows").toBe(9);
+      expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: 14 rows").toBe(14);
       expect(await phone.locator("nav[aria-label='Settings'] .set-item-hint").first().isVisible(), "phone menu: hints show").toBe(true);
       expect(await phone.getByText("Run the setup wizard").count(), "phone menu: the wizard button").toBeGreaterThanOrEqual(1);
       expect(await phone.locator(".set-page").count(), "phone menu: no page shown yet").toBe(0);
@@ -208,7 +208,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
     }
   });
 
-  it("BOS-1126 Q8: the bare menu on a wide screen shows each hint under its name in two columns, one column on a phone", async () => {
+  it("BOS-1126 Q8: the bare menu on a wide screen shows each hint under its name in three group columns, one column on a phone", async () => {
     const browser = await launch();
     if (!browser) return;
     try {
@@ -219,11 +219,21 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         await new Promise((r) => setTimeout(r, 300));
         const hint = page.locator("nav[aria-label='Settings'] .set-item-hint").first();
         expect(await hint.isVisible(), `${vp.name}: hint shows`).toBe(true);
-        const links = page.locator("nav[aria-label='Settings'] ul").first().locator("a");
-        const a = await links.nth(0).boundingBox();
-        const b = await links.nth(1).boundingBox();
-        expect(b!.x, `${vp.name}: second page sits in a second column`).toBeGreaterThan(a!.x + a!.width - 1);
+        // BOS-1492: from 1200 px the 14 pages are three groups side by side (one column each), so the first page
+        // of the second group sits to the right of the first page of the first group, on the same row.
+        const links = page.locator("nav[aria-label='Settings'] ul").locator("a");
+        const lists = page.locator("nav[aria-label='Settings'] ul");
+        expect(await lists.count(), `${vp.name}: three groups`).toBe(3);
+        const a = await lists.nth(0).locator("a").first().boundingBox();
+        const b = await lists.nth(1).locator("a").first().boundingBox();
+        const c = await lists.nth(2).locator("a").first().boundingBox();
+        expect(await links.count(), `${vp.name}: all 14 pages are in the menu`).toBe(14);
+        expect(b!.x, `${vp.name}: second group sits in a second column`).toBeGreaterThan(a!.x + a!.width - 1);
+        expect(c!.x, `${vp.name}: third group sits in a third column`).toBeGreaterThan(b!.x + b!.width - 1);
         expect(Math.abs(b!.y - a!.y), `${vp.name}: same row`).toBeLessThan(2);
+        // Within a group the pages stack in one column.
+        const a2 = await lists.nth(0).locator("a").nth(1).boundingBox();
+        expect(a2!.y, `${vp.name}: a group's pages are one column`).toBeGreaterThan(a!.y + a!.height - 1);
         const rowGap = await page.locator("nav[aria-label='Settings'] ul").first().evaluate((el: Element) => getComputedStyle(el).rowGap);
         expect(rowGap, `${vp.name}: the rows sit on the 8 px spacing scale`).toBe("8px");
         await saveShot(`settings-index-${vp.name}.png`, page);

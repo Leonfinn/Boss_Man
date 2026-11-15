@@ -680,7 +680,8 @@ button.preset-card { cursor: pointer; }
   .set-nav-index .set-item-hint { display: block; grid-column: 1; grid-row: 2; }
   .set-nav-index .set-item-chevron { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
   /* The side list is longer since "Server and runner" became six pages (BOS-1492): on a short window it scrolls inside its own column rather than running off the screen. */
-  .set-layout .set-nav { max-height: calc(100vh - 32px); overflow-y: auto; }
+  /* The menu starts about 134 px down (top bar and page title above it), so its height is the screen less that and a 16 px gap: its last row is on the screen without scrolling the page (the owner's foldable is 724 px tall). */
+  .set-layout .set-nav { max-height: calc(100vh - 152px); overflow-y: auto; }
 }
 @media (min-width: 1200px) {
   /* (BOS-1492) The front page: the three groups side by side, so all 14 pages are in view without scrolling. */

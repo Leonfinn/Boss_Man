@@ -191,6 +191,8 @@ export const runners = pgTable("runners", {
   imageVersion: text("image_version"),
   /** The git commit the runner image was built from (BOS-764), from its last hello; null for an image built before it was recorded. */
   imageCommit: text("image_commit"),
+  /** The tools checks run with and their fingerprint (BOS-1570), from its last hello; null from an image built before it. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -1068,8 +1070,10 @@ export const checkWorkers = pgTable("check_workers", {
   checkThreads: integer("check_threads"),
   checkMemoryMb: integer("check_memory_mb"),
   enabled: boolean("enabled").notNull().default(true),
-  /** From the worker's last hello. A job goes to it only when imageCommit equals the company runner's (DR-042). */
+  /** From the worker's last hello. Shown to the owner; a job goes to it when its toolchain matches the runner's (BOS-1570), or, for an image that reports none, when imageCommit equals the runner's (DR-042). */
   imageCommit: text("image_commit"),
+  /** The tools it checks with and their fingerprint (BOS-1570), from its last hello. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   imageVersion: text("image_version"),
   reportedSlots: integer("reported_slots"),
   features: jsonb("features").$type<string[]>(),

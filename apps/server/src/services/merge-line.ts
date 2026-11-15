@@ -21,6 +21,8 @@
 //   attempt_failed a merge attempt did not land (reason: check_failed | landing_refused | main_moved | conflict |
 //                  lock_timeout | restart | gate_fault; jobId; note). BOS-1461: server_status counts the last hour
 //                  by reason, and three of one reason in 30 minutes raise one CEO alert (merge-failures.ts).
+//   train_clash    merge train (BOS-1515): on ahead = held to land on main alone (with: the members it clashed with, files),
+//                  on main = a trial merge on main clashed after main moved, so it is sent back at once (files)
 //   left           it left review without merging (to: the state it moved to)
 //   takeover       a server took charge (by: the cause, see TakeoverCause; commit: the live commit). One row per
 //                  company per takeover, with ticket_id null, written whether or not a merge is waiting; the
@@ -59,6 +61,12 @@ export type MergeLineEvent =
   | { event: "merged"; commit: string | null }
   /** BOS-1461: a merge attempt that did not land, with why (`reason`) and the check job it was about, when there is one. */
   | { event: "attempt_failed"; reason: FailReason; jobId?: string; note?: string }
+  /**
+   * BOS-1515: a merge-train clash. on "ahead": it didn't merge cleanly on the members ahead (`with`), so it waits to land on main
+   * alone (action land_alone). on "main": a trial merge on main clashed after main moved, so it goes back now (action sent_back);
+   * `with` then names the tickets it was held alone for, if any. `files` is capped at TRAIN_CLASH_FILES.
+   */
+  | { event: "train_clash"; on: "ahead" | "main"; with: Array<{ ticketId: string; ref: string | null; title: string }>; files: string[]; fileCount?: number; action: "land_alone" | "sent_back" }
   | { event: "left"; to: string }
   | { event: "takeover"; by: TakeoverCause; commit: string | null };
 
@@ -106,6 +114,17 @@ export async function recordTakeover(db: Db, t: { cause: TakeoverCause; commit: 
   }
 }
 
+/** At most this many files are kept on a train_clash row (the count says how many there were). */
+export const TRAIN_CLASH_FILES = 30;
+
+/** "BOS-1471 in 7 files (a.ts, b.ts, c.ts, …)": the clash in words, for the record, the merge queue and the stall alarm. */
+export function clashWords(withRefs: string[], files: string[], total = files.length): string {
+  const who = withRefs.length ? withRefs.join(", ") : "the tickets ahead";
+  const shown = files.slice(0, 3).join(", ");
+  const list = shown ? ` (${shown}${total > 3 ? ", …" : ""})` : "";
+  return `${who}${total ? ` in ${total} file${total === 1 ? "" : "s"}${list}` : ""}`;
+}
+
 /** Why a merge attempt did not land (BOS-1461). */
 export const FAIL_REASONS = ["check_failed", "landing_refused", "main_moved", "conflict", "lock_timeout", "restart", "gate_fault"] as const;
 export type FailReason = (typeof FAIL_REASONS)[number];
@@ -134,6 +153,13 @@ const SUMMARY: { [K in MergeLineEvent["event"]]: (e: Extract<MergeLineEvent, { e
   hold_ended: (e) => `Merge line: hold (${e.hold}) ended after ${Math.round(e.heldMs / 60_000)} min`,
   merged: (e) => `Merge line: merged${e.commit ? ` as ${e.commit.slice(0, 12)}` : ""}`,
   attempt_failed: (e) => `Merge line: merge attempt failed (${e.reason})${e.note ? `: ${e.note}` : ""}`,
+  train_clash: (e) => {
+    const names = e.with.map((w) => w.ref ?? `"${w.title}"`);
+    const total = e.fileCount ?? e.files.length;
+    return e.on === "ahead"
+      ? `Merge line: held to land alone: clashes with ${clashWords(names, e.files, total)}`
+      : `Merge line: sent back: clashes with ${clashWords(["main"], e.files, total)}${names.length ? `, after ${names.join(", ")} landed` : ""}`;
+  },
   left: (e) => `Merge line: left without merging (moved to ${e.to})`,
   takeover: (e) => `Merge line: a server took charge (${e.by}${e.commit ? `, ${e.commit.slice(0, 12)}` : ""})`,
 };
