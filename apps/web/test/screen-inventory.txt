@@ -181,6 +181,20 @@ sections:
   - Settings
 reads: (none)
 
+## #/settings/<company>/devices
+sections: 
+  - Private details to block
+  - Your devices
+reads: 
+  - /api/devices
+  - /api/private-details
+
+## #/settings/<company>/email
+sections: 
+  - Outgoing email
+reads: 
+  - /api/settings/email
+
 ## #/settings/<company>/funding
 sections: 
   - Budgets
@@ -195,6 +209,18 @@ reads:
   - /api/funding-sources/:id/status
   - /api/projects/:id/spend
   - /api/secrets
+
+## #/settings/<company>/limits
+sections: 
+  - Agents at once
+  - Check workers
+  - Checks
+  - Tickets in progress
+reads: 
+  - /api/companies
+  - /api/run-limits
+  - /api/settings/check-queue
+  - /api/wip-limits
 
 ## #/settings/<company>/permissions
 sections: 
@@ -219,6 +245,15 @@ sections:
   - Reviews
 reads: (none)
 
+## #/settings/<company>/runner
+sections: 
+  - Add-ons
+  - Runner
+  - Workspace disk
+reads: 
+  - /api/companies/:id/runner
+  - /api/companies/:id/runner/:id
+
 ## #/settings/<company>/secrets
 sections: 
   - All stored secrets
@@ -229,49 +264,19 @@ reads:
   - /api/secrets/:id/access-log
   - /api/secrets/:id/grants
 
-## #/settings/<company>/system
+## #/settings/<company>/server
 sections: 
-  - Add-ons
-  - Agents at once
   - Allowed automatically
-  - Check workers
-  - Checks
   - Extra lines from your.env
   - Facts only you can give
   - Network guard
-  - Now running
-  - Other actions
-  - Outgoing email
-  - Private details to block
-  - Recent updates
-  - Runner
   - Server
-  - Stop all work
   - This host
-  - Tickets in progress
-  - Updates
-  - Workspace disk
-  - Your devices
 reads: 
   - /api/bluegreen
-  - /api/companies
-  - /api/companies/:id/runner
-  - /api/companies/:id/runner/:id
-  - /api/devices
   - /api/health
   - /api/host-facts
-  - /api/kill-switch
-  - /api/maintenance
   - /api/netguard-allow
-  - /api/private-details
-  - /api/run-limits
-  - /api/runner-report
-  - /api/self-deploy
-  - /api/self-deploy/history
-  - /api/self-deploy/wait
-  - /api/settings/check-queue
-  - /api/settings/email
-  - /api/wip-limits
 
 ## #/settings/<company>/team
 sections: 
@@ -302,6 +307,21 @@ sections:
   - Import a company
 reads: 
   - /api/funding-sources
+
+## #/settings/<company>/updates
+sections: 
+  - Now running
+  - Other actions
+  - Recent updates
+  - Stop all work
+  - Updates
+reads: 
+  - /api/kill-switch
+  - /api/maintenance
+  - /api/runner-report
+  - /api/self-deploy
+  - /api/self-deploy/history
+  - /api/self-deploy/wait
 
 ## #/settings/<company>/watchdog
 sections: 

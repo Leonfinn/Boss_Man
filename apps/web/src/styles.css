@@ -679,6 +679,14 @@ button.preset-card { cursor: pointer; }
   .set-nav-index .set-item-label { grid-column: 1; grid-row: 1; }
   .set-nav-index .set-item-hint { display: block; grid-column: 1; grid-row: 2; }
   .set-nav-index .set-item-chevron { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+  /* The side list is longer since "Server and runner" became six pages (BOS-1492): on a short window it scrolls inside its own column rather than running off the screen. */
+  .set-layout .set-nav { max-height: calc(100vh - 32px); overflow-y: auto; }
+}
+@media (min-width: 1200px) {
+  /* (BOS-1492) The front page: the three groups side by side, so all 14 pages are in view without scrolling. */
+  .set-nav-index { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 24px; align-items: start; }
+  .set-nav-index .set-wizard { grid-column: 1 / -1; }
+  .set-nav-index ul { grid-template-columns: minmax(0, 1fr); }
 }
 /* A touch screen gets 44 px rows even on a wide screen (BOS-1018 §5: 40 px rows, 44 px on touch). */
 @media (pointer: coarse) {

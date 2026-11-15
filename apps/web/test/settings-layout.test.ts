@@ -184,7 +184,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
           expect(pageBox!.y, `${vp.name}: the page starts high`).toBeLessThan(400);
         }
         // The "All companies" tag stays on one line (Server and runner is a company-wide page).
-        await page.goto(`${base}/#/settings/c1/system`);
+        await page.goto(`${base}/#/settings/c1/updates`);
         await page.waitForSelector(".set-scope", { timeout: 8000 });
         await new Promise((r) => setTimeout(r, 300));
         const tag = await page.locator(".set-scope").boundingBox();
