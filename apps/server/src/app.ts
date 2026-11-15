@@ -103,6 +103,9 @@ import { SecretRejected, secretsService, type LiveValidator } from "./services/s
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkWorkersService } from "./services/check-workers.js";
 import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
+import { checkBundleRoutes } from "./routes/check-bundles.js";
+import { checkBundleStore } from "./services/check-bundles.js";
+import { CheckBundleInfo } from "@boss-man/shared";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -155,6 +158,8 @@ export type AppOptions = {
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
+  /** BOS-1436: where check bundles wait for their worker (else BOSSMAN_CHECK_BUNDLE_DIR, else under the OS temp folder); tests give their own. */
+  checkBundleDir?: string;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
   limits?: Partial<Limits>;
   /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
@@ -322,7 +327,8 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    // Check bundles (BOS-1436) live in the leader's folder only, so a standby refuses their downloads too.
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path.startsWith("/api/check-bundles/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
@@ -335,14 +341,33 @@ export async function buildApp(opts: AppOptions) {
   };
   // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
   const checkWorkersSvc = checkWorkersService(db);
+  // BOS-1436: a worker's code comes as a git bundle the company runner packs and uploads here. Nothing in the folder
+  // outlives a restart usefully (a worker asks again), so it starts empty.
+  const bundleStore = checkBundleStore(opts.checkBundleDir ? { dir: opts.checkBundleDir } : {});
+  bundleStore.clear();
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
       return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
     },
-    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc, isLeader: () => leader.isLeader() });
+    scanList: () => privateDetails.forRunner(),
+    scanListWarning,
+    send: (id, c) => runners.send(id, c),
+    isConnected: (id) => runners.isConnected(id),
+    can: (id) => runners.can(id, "check-jobs"),
+    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    workers: checkWorkersSvc,
+    bundles: {
+      store: bundleStore,
+      canPack: (id) => runners.can(id, "check-bundle"),
+      // A first (full) bundle of a large repo takes a minute or two to pack and upload.
+      pack: async (runnerId, cmd) => CheckBundleInfo.parse(await runners.request<unknown>(runnerId, (requestId) => ({ type: "check.bundle", requestId, ...cmd }), 10 * 60_000)),
+    },
+    isLeader: () => leader.isLeader(),
+  });
   await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  await checkBundleRoutes(app, db, { store: bundleStore, runners, workers: checkWorkersSvc, checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),

@@ -2,8 +2,11 @@
 // session: it keeps going when a run ends and an agent has no command that can stop it (only the server's check.cancel).
 // The server's slots order the jobs; each job also takes a slot in the runner's own check line (BOS-805), so jobs, agents'
 // hand-run checks and the vitest guard share the machine's real limit. The runner's count caps the server's check_slots.
-import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, CheckLimits, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type RunnerMessage } from "@boss-man/shared";
+import { CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, CheckLimits, VERIFY_TIMEOUT_MS, redactForModel, withCheckFacts, type CheckBundleInfo, type RunnerMessage } from "@boss-man/shared";
 import type { Workspaces } from "./workspace.js";
+
+/** What a job needs from check.run (tests pass only some of it). */
+export type CheckRunCommand = { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string; limits?: CheckLimits; bundle?: CheckBundleInfo };
 
 type Done = Extract<RunnerMessage, { type: "check.done" }>;
 const PROGRESS_EVERY_MS = 30_000;
@@ -28,6 +31,12 @@ export class CheckJobs {
     private readonly workspaces: Pick<Workspaces, "runCommitCheck">,
     private readonly send: (m: RunnerMessage) => void,
     private readonly log: (m: string) => void = () => {},
+    /**
+     * BOS-1436, check workers only: gets the job's code onto this machine before the check. False means the check doesn't
+     * run here and prepare has told the server why (it asked for the full history, or couldn't get the code at all), so
+     * no result is sent. The company runner has none: its shared repo already holds every commit it is sent.
+     */
+    private readonly prepare?: (cmd: CheckRunCommand) => Promise<boolean>,
   ) {}
 
   /** Job ids this runner is running now, for the hello message: the server puts back in line any it thinks run here but don't. */
@@ -46,10 +55,29 @@ export class CheckJobs {
     this.unsent.delete(jobId);
   }
 
-  run(cmd: { jobId: string; projectId: string; commit: string; command: string; timeoutMs?: number; scanList?: string; limits?: CheckLimits }) {
+  run(cmd: CheckRunCommand) {
     if (this.cancels.has(cmd.jobId)) return; // the server asked twice
+    const job = { cancelled: false };
+    this.cancels.set(cmd.jobId, () => {
+      job.cancelled = true;
+    });
+    if (!this.prepare) return this.check(cmd, job);
+    void this.prepare(cmd)
+      .catch((err: Error) => {
+        this.log(`check job ${cmd.jobId}: getting the code failed: ${String(err?.message ?? err).slice(0, 300)}`);
+        return false;
+      })
+      .then((go) => {
+        if (go && !job.cancelled) return this.check(cmd, job);
+        // Not run here: prepare has told the server (it re-sends the job with the full history, or puts it back in line),
+        // and a job cancelled meanwhile needs no answer. Freed, so a re-sent check.run for it is taken.
+        this.cancels.delete(cmd.jobId);
+      });
+  }
+
+  private check(cmd: CheckRunCommand, job: { cancelled: boolean }) {
     let lastSent = 0;
-    let cancelled = false;
+    let cancelled = job.cancelled;
     this.cancels.set(cmd.jobId, () => {
       cancelled = true;
     });

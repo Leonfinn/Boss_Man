@@ -66,8 +66,8 @@ const status = (url: string, token: string) =>
     });
   });
 
-function workerConn(token: string, commands: unknown[] = []) {
-  return new RunnerConnection({ url: workerUrl(), token, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: COMMIT, onCommand: (c) => void commands.push(c), runningChecks: () => [], checkWorker: { slots: 3, features: WORKER_FEATURES } });
+function workerConn(token: string, commands: unknown[] = [], features: readonly string[] = WORKER_FEATURES) {
+  return new RunnerConnection({ url: workerUrl(), token, runnerVersion: "test", heartbeatMs: HEARTBEAT, imageCommit: COMMIT, onCommand: (c) => void commands.push(c), runningChecks: () => [], checkWorker: { slots: 3, features } });
 }
 
 describe("check worker socket (BOS-1435)", () => {
@@ -98,7 +98,8 @@ describe("check worker socket (BOS-1435)", () => {
 
   it("a worker connects, says its slots and commit in hello, and shows as connected without taking checks (no bundle support yet)", async () => {
     const { id, token } = await ctx.addWorker();
-    const conn = workerConn(token);
+    // An image from before BOS-1436: it can run checks but not fetch their code.
+    const conn = workerConn(token, [], ["check-jobs"]);
     conn.start();
     try {
       await waitFor(() => conn.isLive, Boolean);
@@ -157,10 +158,35 @@ describe("check worker socket (BOS-1435)", () => {
     return { ws, got, closed, runs: () => got.filter((m) => m.command?.type === "check.run").map((m) => m.command!.jobId) };
   }
 
+  /**
+   * BOS-1436: a worker only gets a job once the company runner has packed its code. This raw runner socket packs (answers
+   * every check.bundle as "the worker already has it") but doesn't run checks itself, so the worker is still the only
+   * machine that can take the job.
+   */
+  async function packingRunner() {
+    const ws = new WebSocket(`ws://${ctx.base}/api/runner/connect`, { headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    let welcomed!: () => void;
+    const welcome = new Promise<void>((r) => (welcomed = r));
+    ws.on("message", (raw) => {
+      const m = JSON.parse(String(raw));
+      if (m.type === "welcome") welcomed();
+      if (m.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
+      const c = m.command ?? m;
+      if (c?.type === "check.bundle")
+        ws.send(JSON.stringify({ type: "reply", requestId: c.requestId, ok: true, data: { sha256: "f".repeat(64), bytes: 0, mainRef: "refs/remotes/origin/main", mainCommit: COMMIT, empty: true } }));
+    });
+    await new Promise((r) => ws.on("open", r));
+    ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: "t", imageVersion: null, imageCommit: COMMIT, features: [BUNDLE_FEATURE] }));
+    await welcome;
+    return ws;
+  }
+
   it("removing a busy worker puts its checks back in line, not back on the worker it is removing (Freddy's BOS-1435 find)", async () => {
-    // The company runner is offline, so the worker is the only machine; before the fix, the pump inside the re-queue handed
-    // the job straight back to the worker, and deleting the row then left it running with no machine at all.
+    // The company runner doesn't run checks (it only packs code, BOS-1436), so the worker is the only machine; before the fix,
+    // the pump inside the re-queue handed the job straight back to the worker, and deleting the row then left it running with
+    // no machine at all.
     const { db } = ctx;
+    const packer = await packingRunner();
     await db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, ctx.reg.runnerId));
     for (const [key, value] of [[CHECK_QUEUE_MODE_KEY, "server"], [CHECK_SLOTS_KEY, 1]] as const)
       await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
@@ -177,6 +203,7 @@ describe("check worker socket (BOS-1435)", () => {
     expect(await w.closed).toBe(4003);
     expect(w.got.some((m) => m.command?.type === "check.cancel" && m.command.jobId === job.id)).toBe(true);
     expect(w.runs()).toEqual([job.id]); // sent once, never again
+    packer.close();
   });
 
   it("a second machine with the same token replaces the first, whose socket is closed", async () => {
