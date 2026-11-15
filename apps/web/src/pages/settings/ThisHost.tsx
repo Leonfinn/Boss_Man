@@ -178,7 +178,7 @@ export function ThisHost() {
 
 type AutomaticEntryView = {
   address: string;
-  kind: "tool server" | "git host";
+  kind: "tool server" | "git host" | "Penpot";
   name: string;
   company: string | null;
   trusted: boolean;
@@ -198,6 +198,7 @@ type NetguardAllowView = {
 
 /** What an address the guard opens by itself is, in plain words. */
 function automaticLabel(e: AutomaticEntryView): string {
+  if (e.kind === "Penpot") return "Penpot (Settings → Tools)";
   return e.kind === "git host" ? `git host for the project "${e.name}"` : `tool server "${e.name}"`;
 }
 
@@ -222,12 +223,12 @@ export function NetguardAllow() {
       {r.mode === "off" && <p>The network guard is turned off (BOSSMAN_NETGUARD=off), so these lists aren't used.</p>}
       <h3 style={{ fontSize: 15, fontWeight: 600 }}>Allowed automatically</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Addresses Boss Man opens itself: each company's tool servers and its projects' git hosts. A company's entries are only reachable from that company's own runners.
+        Addresses Boss Man opens itself: each company's tool servers, its projects' git hosts and its Penpot. A company's entries are only reachable from that company's own runners.
       </p>
       {r.automatic === null ? (
         <p className="muted" data-testid="netguard-automatic-unknown">Boss Man couldn't work out the addresses it opens by itself just now.</p>
       ) : automatic.length === 0 ? (
-        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses.</p>
+        <p data-testid="netguard-automatic-empty">Boss Man opens no extra addresses by itself: no tool servers, no project git addresses, no Penpot.</p>
       ) : (
         <ul data-testid="netguard-automatic" style={{ fontSize: 14 }}>
           {automatic.map((e) => (
