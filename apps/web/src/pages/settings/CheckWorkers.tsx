@@ -92,7 +92,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }} data-testid="check-workers">
       <h3 style={{ margin: "8px 0 0" }}>Check workers</h3>
       <p className="muted" style={{ fontSize: 14 }}>
-        Other machines that take checks when the runner's slots are full. A check worker runs checks only: it gets no secrets, runs no agents and never merges. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
+        Other machines that take checks when the runner's slots are full. A check worker runs checks only: merge checks (the full test run before a ticket lands) and quick checks (before review). It gets no secrets and runs no agents, and code only ever goes onto main from your main Boss Man server, never from a worker. It takes checks when its tools (Node, pnpm, git and so on) match the company's runner, so an ordinary runner update does not stop it. If the tools ever differ, this page says which one and you press Redeploy on that machine.
       </p>
       {workers.length === 0 && <p className="muted" style={{ fontSize: 14 }}>No check workers yet.</p>}
       {workers.map((w) => (

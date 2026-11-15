@@ -58,9 +58,9 @@ describe("Checks in Settings", () => {
       }),
     );
     render(<CheckQueueSetting />);
-    expect((await screen.findByTestId("check-runner-split")).textContent).toContain("Merges and quick checks");
+    expect((await screen.findByTestId("check-runner-split")).textContent).toContain("Merge checks and quick checks");
     expect(screen.getByTestId("check-worker-split").textContent).toContain("Quick checks only");
-    const kept = screen.getByLabelText(/Kept for merges/);
+    const kept = screen.getByLabelText(/Kept for merge checks/);
     fireEvent.change(kept, { target: { value: "4" } });
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true); // more than the 3 slots
     fireEvent.change(kept, { target: { value: "2" } });
