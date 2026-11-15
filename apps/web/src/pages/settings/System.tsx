@@ -819,6 +819,47 @@ export function CheckQueueSetting() {
   );
 }
 
+type MainCiView = { on: boolean; projects: Array<{ projectId: string; project: string; status: { state: string; detail?: string } }> };
+
+/** Settings → Server and runner → Main's CI (BOS-1072): the switch for the watcher that opens a ticket when GitHub CI fails on main, and its plain line per project. */
+export function MainCiSetting() {  const view = usePoll((signal) => api<MainCiView>("/api/settings/main-ci", { signal }), 60_000, "main-ci");
+  const act = useAction();
+  const d = view.data;
+  if (!d) return null;
+  return (
+    <Section id="main-ci-h" title="Main's CI">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When GitHub's CI fails on a project's main branch (a push or the nightly run), Boss Man opens one ticket for each failing step, adds later failed runs to it instead of opening another, and says so on it when main is green again. It sends no cards and no alerts.
+      </p>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api<MainCiView>("/api/settings/main-ci", { method: "PUT", body: { on: e.target.checked } });
+              view.reload();
+              return e.target.checked ? "Watching main's CI." : "Stopped watching main's CI.";
+            })
+          }
+        />
+        Watch main's CI and open tickets for failures
+      </label>
+      {d.on && d.projects.length > 0 && (
+        <ul style={{ fontSize: 14 }} data-testid="main-ci-status">
+          {d.projects.map((p) => (
+            <li key={p.projectId}>
+              <strong>{p.project}:</strong> {p.status.detail ?? "Not checked yet."}
+            </li>
+          ))}
+        </ul>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 type EmailView = { settings: { host: string; port: number; security: "starttls" | "tls" | "none"; username: string | null; fromAddress: string; fromName: string | null; hasPassword: boolean } | null; configured: boolean };
 
 /** Outgoing email (BOS-1387): plain authenticated SMTP. The password goes to the secret store and is never shown again. */

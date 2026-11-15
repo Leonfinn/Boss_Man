@@ -12,7 +12,7 @@ import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settin
 import { Watchdog } from "./settings/Watchdog";
 import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
+import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -310,7 +310,12 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ) : (
       line
     ),
-    email: <EmailSetting />,
+    email: (
+      <>
+        <EmailSetting />
+        <MainCiSetting />
+      </>
+    ),
     server: (
       <>
         <ServerPanel />
