@@ -68,7 +68,7 @@ function fakeGitea() {
 
 // pin: the runner announces "merge-pin" like the real one: workspace.push answers branch_moved unless its pin is the branch tip
 // held in pin.branch; workspace.covers answers pin.covers. The pins the pushes carried are kept in pin.pins.
-type PinRunner = { branch: string; covers: boolean; pins: Array<string | undefined> };
+type PinRunner = { branch: string; covers: boolean; pins: Array<string | undefined>; ignores?: boolean };
 
 async function setup(opts: { token?: boolean; pin?: PinRunner } = {}) {
   const gitea = fakeGitea();
@@ -93,7 +93,10 @@ async function setup(opts: { token?: boolean; pin?: PinRunner } = {}) {
     if (c.type === "workspace.push") {
       const pin = opts.pin;
       pin?.pins.push(c.pin);
-      const data = pin && c.pin && c.pin !== pin.branch ? { status: "branch_moved", head: pin.branch, pinned: c.pin } : { status: "pushed", branch: `bossman/${c.ticketId}`, commit: HEAD };
+      // ignores: an older runner that announces merge-pin but drops the push pin, so it pushes the branch tip whatever the pin.
+      const data = pin?.ignores
+        ? { status: "pushed", branch: `bossman/${c.ticketId}`, commit: pin.branch }
+        : pin && c.pin && c.pin !== pin.branch ? { status: "branch_moved", head: pin.branch, pinned: c.pin } : { status: "pushed", branch: `bossman/${c.ticketId}`, commit: pin?.branch ?? HEAD };
       queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data }));
     }
     if (c.type === "workspace.covers") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { covers: opts.pin?.covers ?? false, reason: "", newCommits: opts.pin?.covers ? 0 : 1, handMerges: 0 } }));
@@ -178,6 +181,15 @@ describe("the pull-request push is pinned to the reviewed head (BOS-1413 follow-
 
   it("a commit made after the approval is not pushed: no pull request, ticket sent back", async () => {
     const pin: PinRunner = { branch: LATE, covers: false, pins: [] };
+    const c = (ctx = await setup({ pin }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    expect((await c.approve()).json()).toMatchObject({ outcome: "branch_changed" });
+    expect(c.gitea.calls.some((x) => x.method === "POST")).toBe(false);
+    expect(await c.state()).toMatchObject({ systemState: "in_progress", pullRequestNumber: null });
+  });
+
+  it("a runner that ignores the push pin and pushes another commit gets no pull request", async () => {
+    const pin: PinRunner = { branch: LATE, covers: false, pins: [], ignores: true };
     const c = (ctx = await setup({ pin }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
     expect((await c.approve()).json()).toMatchObject({ outcome: "branch_changed" });

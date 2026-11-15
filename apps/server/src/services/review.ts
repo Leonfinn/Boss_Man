@@ -1850,7 +1850,9 @@ export function reviewService(
           const r = await ask<MergeResult | PushResult>((requestId) => ({ ...build(requestId), ...(pinned ? { pin: pinned } : {}) }) as never, timeoutMs);
           if (!pinned) return r as R;
           // A runner older than this change ignores the pin and doesn't name the branch commit: it can't be trusted to keep it.
-          const head = r.status === "branch_moved" ? r.head : r.status === "prepared" && r.branchSha !== pinned ? (r.branchSha ?? "") : null;
+          // A push answer naming another commit comes from a runner that announces merge-pin but drops the push pin: the branch
+          // ref is out there, but no pull request may be opened or merged on it unless signoffCovers says it only added main.
+          const head = r.status === "branch_moved" ? r.head : r.status === "prepared" && r.branchSha !== pinned ? (r.branchSha ?? "") : r.status === "pushed" && !(r.commit.startsWith(pinned) || pinned.startsWith(r.commit)) ? r.commit : null;
           if (head === null) return r as R;
           if (head && again < 3 && (await this.signoffCovers(ticketId, pinned, head))?.covers) {
             await record(db, { companyId: t.companyId, ticketId, kind: "signoff_carried", summary: `The approval of ${pinned.slice(0, 8)} still covers ${head.slice(0, 8)}: while the merge waited, main was only merged in automatically, with no clashes and no new code from the ticket.` });

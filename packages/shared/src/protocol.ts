@@ -505,7 +505,7 @@ export type MergeLineConflict = { ticketId: string; branch: string; ahead: boole
 export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
-export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } |{ status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
+export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "branch_moved"; head: string; pinned: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;
 
 /** The answer to workspace.resolve (DR-033). `commit` is null when the ref names no commit (an image tag, say). */
 export type ResolveResult = { commit: string | null; onBase: boolean; branches: string[]; error?: string };
