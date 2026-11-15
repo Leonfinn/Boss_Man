@@ -331,6 +331,7 @@ describe("the setting", () => {
     const main = readFileSync(join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
     const loops = main.slice(main.indexOf("createBackground("), main.indexOf("// Background work follows leadership"));
     expect(loops).toContain('name: "github watch"');
-    expect(main).toMatch(/onPromote\([^)]*\)?[\s\S]{0,200}startBackground\(\)/);
+    // The window is wide on purpose: main's takeover bookkeeping sits between onPromote and startBackground.
+    expect(main).toMatch(/onPromote\([^)]*\)?[\s\S]{0,1000}startBackground\(\)/);
   });
 });
