@@ -1404,6 +1404,46 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
     expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
   });
+
+  // BOS-1462: a live fix whose only step is the runner update used to get a silent, routine runner card.
+  it("a runner card carries the heading and pages once when a fixes-live ticket only needs the runners rebuilt", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Runner fix", number: 410, systemState: "done", mergeCommit: B, ownerSetup: "Build and update runners", fixesLive: "server freezes as memory climbs." })
+      .returning();
+    // The server card carries no marked ticket itself; the fix is only in the runner image.
+    await c.available({ runnerChanged: true, commits: [{ sha: B, subject: "Add rate limiting" }] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [runner] = await c.open();
+    expect(runner).toMatchObject({ context: { type: "self_deploy", target: "runner", commit: B } });
+    expect(runner!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(urgentOf(runner!)).toEqual({ heading: HEADING, fixes: [{ ticketId: fix!.id, ref: "BOS-410", symptom: "server freezes as memory climbs." }] });
+    await c.notes.syncDecisions();
+    const sent = await c.db.select().from(notifications);
+    expect(sent.find((n) => n.decisionId === runner!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+
+    // A second runner card for the same fix (the owner said "Not now", then pressed the button) is a repeat: it
+    // keeps the heading text but is routine again, so the owner is not paged twice for one fix.
+    await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Not now" });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const [again] = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
+    expect(again!.id).not.toBe(runner!.id);
+    expect(urgentOf(again!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    const all = await c.db.select().from(notifications);
+    expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
+  });
 });
 
 describe("an approval when main moves on before the host runs it (BOS-753)", () => {

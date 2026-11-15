@@ -306,8 +306,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * deploy card (open, withdrawn or answered): main moving on raises a new card, and that must not page
    * the owner again for the same fix.
    */
-  async function urgentFor(a: Available | null): Promise<DeployUrgent | undefined> {
-    const ids = [...new Set((a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }))];
+  async function urgentFor(a: Available | null, extraIds: string[] = []): Promise<DeployUrgent | undefined> {
+    const ids = [...new Set([...(a?.commits ?? []).flatMap((c) => { const id = c.subject ? mergedTicket(c.subject) : null; return id ? [id] : []; }), ...extraIds])];
     if (!ids.length) return undefined;
     const rows = await db
       .select({ id: tickets.id, number: tickets.number, prefix: companies.ticketPrefix, fixesLive: tickets.fixesLive })
@@ -576,8 +576,9 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
       risks,
     });
-    // Only the server update carries the fix: the runner card that may follow it is unchanged (BOS-639).
-    const urgent = target === "server" ? await urgentFor(a) : undefined;
+    // BOS-1462: a runner card carries the same heading and one page when a live fix only needs the runners rebuilt
+    // (its runner-only tickets). A fix already on an earlier card, server or runner, is a repeat and pages no more.
+    const urgent = target === "server" ? await urgentFor(a) : await urgentFor(a, runnerTickets.map((t) => t.ticketId));
     // (BOS-551) A server update restarts Boss Man, which resets anything a reading on the owner's queue
     // would measure. Point the update card at the open owner cards a restart would disturb: a card the
     // raising agent marked `resetsOnRestart`, and a hand-apply to-do that isn't itself a server or runner
