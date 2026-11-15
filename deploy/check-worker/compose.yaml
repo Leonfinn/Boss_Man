@@ -19,6 +19,8 @@ services:
       dockerfile: apps/runner/Dockerfile
       args:
         WITH_HARNESS: "0"
+        # A web browser (Chromium) in the image: the project's own tests need one and fail, not skip, in a full check without it.
+        RUNNER_ADDONS: agent-browser
         # CHANGE THIS (commit, 2 of 2): the same 40 characters. A worker takes jobs only when it matches your runner.
         BOSSMAN_IMAGE_COMMIT: "0000000000000000000000000000000000000000"
     pull_policy: build

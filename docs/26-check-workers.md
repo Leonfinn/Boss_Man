@@ -23,7 +23,7 @@ Remove a worker: `docker compose down -v` next to the file, then remove it in Bo
 
 ### How the image gets there
 
-Compose **builds the worker image itself from Boss Man's source on GitHub, pinned to one commit** (`build: context: <repo>.git#<commit>`). This was chosen over a published image because the worker image is not in the published set yet (docs/25-published-images.md: only the server, launcher and netguard images are), and over a clone on the worker host because it needs no git, no clone and no build command. The same commit on the second line is the "image commit match" below, so one value decides what runs. It is the runner image built without Claude Code and OpenCode (`WITH_HARNESS=0`), because a worker never runs an agent. When a worker image is published, `build:` can become `image:` with no other change.
+Compose **builds the worker image itself from Boss Man's source on GitHub, pinned to one commit** (`build: context: <repo>.git#<commit>`). This was chosen over a published image because the worker image is not in the published set yet (docs/25-published-images.md: only the server, launcher and netguard images are), and over a clone on the worker host because it needs no git, no clone and no build command. The same commit on the second line is the "image commit match" below, so one value decides what runs. It is the runner image built without Claude Code and OpenCode (`WITH_HARNESS=0`), because a worker never runs an agent. It does include a web browser (`RUNNER_ADDONS=agent-browser`, Chromium), because the project's own tests need one and fail rather than skip in a full check without it (BOS-1553). When a worker image is published, `build:` can become `image:` with no other change.
 
 ### The token
 

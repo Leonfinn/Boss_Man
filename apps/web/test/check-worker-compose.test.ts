@@ -28,6 +28,12 @@ describe("check worker compose file (BOS-1550)", () => {
     expect(out).not.toMatch(/BOSSMAN_CHECK_WORKER_TOKEN:/);
   });
 
+  it("builds the image with a browser and without the agent harness (BOS-1553)", () => {
+    const out = workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: COMMIT, slots: 1, token: "t" });
+    expect(out).toContain("RUNNER_ADDONS: agent-browser");
+    expect(out).toContain('WITH_HARNESS: "0"');
+  });
+
   it("keeps the zeros when no runner has reported a commit, and never trusts a malformed one", () => {
     expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: null, slots: 1, token: "t" })).toContain("0".repeat(40));
     expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: "main; rm -rf /", slots: 1, token: "t" })).not.toContain("rm -rf");
