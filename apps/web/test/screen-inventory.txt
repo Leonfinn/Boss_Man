@@ -31,7 +31,9 @@ sections:
   - Approved, merging
   - Costliest tasks
   - Filter tasks
+  - On your subscriptions
   - Passed, held
+  - Pay-as-you-go spend
   - Project brief
   - Tokens
   - Your review
@@ -184,7 +186,7 @@ sections:
   - Pay-as-you-go spend
   - Spending limits
   - Tokens
-reads:
+reads: 
   - /api/budgets
   - /api/companies/:id/projects
   - /api/funding-sources
