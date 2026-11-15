@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, looksLikeSecurity, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, portalShows, PORTAL_STATUSES, portalTitle, portalVerdict, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, portalConfirmedAddresses, tickets } from "../db/schema.js";
@@ -130,9 +130,10 @@ export function feedbackService(
     const rows = await db
       .select({ id: features.id, title: features.title, publicSummary: features.publicSummary, publicTitle: features.publicTitle, status: features.status, releasedAt: features.releasedAt })
       .from(features)
-      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+      .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), eq(features.keepOffPortal, false), inArray(features.status, [...PORTAL_STATUSES])))
       .orderBy(asc(features.title));
-    return rows.filter((f) => !!f.publicSummary?.trim() && !looksLikeSecurity([f.publicTitle ?? "", f.publicSummary!].join(" ")));
+    // The rest of the rule is portalShows, shared with the Features page (BOS-1496).
+    return rows.filter((f) => portalShows({ portalVisible: true, keepOffPortal: false, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary }).shown);
   }
 
   /** Every feature of a company with its demand, priority and delivery, in one pass. */
@@ -181,7 +182,8 @@ export function feedbackService(
         // Why the feature is on or off the portal, so the list can show the tick and a small reason (BOS-957).
         const criteria = Object.keys(scores).map((id) => drivers.find((x) => x.id === id)?.name ?? "");
         const portal = portalVerdict({ title: f.title, description: f.description, publicTitle: f.publicTitle, publicSummary: f.publicSummary, area: f.areaId ? (areaName.get(f.areaId) ?? null) : null, criteria, keepOffPortal: f.keepOffPortal, hasPublicSummary: !!f.publicSummary?.trim() });
-        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
+        const portalShow = portalShows({ portalVisible: f.portalVisible, keepOffPortal: f.keepOffPortal, status: f.status, publicTitle: f.publicTitle, publicSummary: f.publicSummary });
+        return { ...f, portalShow, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, portal, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }

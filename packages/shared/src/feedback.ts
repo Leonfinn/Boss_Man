@@ -195,3 +195,25 @@ export function portalVerdict(input: {
   if (!hasPublicSummary) return { onPortal: false, reason: "needs public summary" };
   return { onPortal: true, reason: null };
 }
+
+/** The statuses whose features can reach the portal (the rest are rejected or dropped work). */
+export const PORTAL_STATUSES = ["idea", "considering", "planned", "in_progress", "released"] as const;
+
+/** Why a ticked feature is not on the portal: the words are the owner-facing fix (BOS-1496). */
+export type PortalNotShown = "kept off (sensitive)" | "looks like security work" | "needs public summary" | "status not shown";
+export type PortalShowVerdict = { shown: true } | { shown: false; ticked: boolean; reason: PortalNotShown | null };
+
+/**
+ * The one rule for whether a feature reaches portal visitors: ticked on, not marked keep-off, a status the portal
+ * lists, a public summary, and no security wording in what visitors would read. The portal's own query and the
+ * Features page both call this, so the page can't promise what the portal won't show (BOS-1496).
+ */
+export function portalShows(f: { portalVisible: boolean; keepOffPortal: boolean; status: string; publicTitle?: string | null; publicSummary?: string | null }): PortalShowVerdict {
+  const ticked = f.portalVisible;
+  if (f.keepOffPortal) return { shown: false, ticked, reason: "kept off (sensitive)" };
+  if (!(PORTAL_STATUSES as readonly string[]).includes(f.status)) return { shown: false, ticked, reason: ticked ? "status not shown" : null };
+  const summary = f.publicSummary?.trim();
+  if (!summary) return { shown: false, ticked, reason: "needs public summary" };
+  if (looksLikeSecurity([f.publicTitle ?? "", summary].join(" "))) return { shown: false, ticked, reason: "looks like security work" };
+  return ticked ? { shown: true } : { shown: false, ticked, reason: null };
+}
