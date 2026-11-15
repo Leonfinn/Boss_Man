@@ -349,6 +349,37 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  # DR-060 / BOS-1437: the check worker image is the runner image built without Claude Code and OpenCode
+  # (WITH_HARNESS=0). This job proves the project's own tests and typecheck pass inside it with neither binary
+  # present, so a check on a worker host gives the same answer as on the runner. Nothing is pushed.
+  check-worker-image:
+    needs: changes
+    if: ${{ !startsWith(github.ref, 'refs/heads/bossman/') && needs.changes.outputs.images == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the check worker image (no Claude Code, no OpenCode)
+        run: docker build -f apps/runner/Dockerfile --build-arg WITH_HARNESS=0 --build-arg BOSSMAN_IMAGE_VERSION=ci --build-arg BOSSMAN_IMAGE_COMMIT=${{ github.sha }} -t boss-man-check-worker:ci .
+      - name: The image has git, pnpm and no agent binaries, and runs as the non-root user
+        run: |
+          docker run --rm --entrypoint sh boss-man-check-worker:ci -c '
+            git --version && pnpm --version && test "$(id -u)" = 1000
+            if command -v claude || command -v opencode; then echo "an agent binary is in the worker image"; exit 1; fi'
+      - name: A worker refuses to start without a token file
+        run: |
+          if docker run --rm -e BOSSMAN_ROLE=check-worker -e BOSSMAN_URL=wss://example.com/api/check-worker/connect boss-man-check-worker:ci 2> err.txt; then echo "expected failure"; exit 1; fi
+          grep -q "BOSSMAN_CHECK_WORKER_TOKEN_FILE" err.txt
+      - name: The project's typecheck and tests inside the worker image (no skips hidden)
+        run: |
+          # A copy owned by the image's user (uid 1000); the checkout belongs to the CI user.
+          work="$RUNNER_TEMP/work"
+          mkdir -p "$work" && cp -a . "$work/repo" && sudo chown -R 1000:1000 "$work"
+          docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
+            -e CI=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+              pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
+              pnpm typecheck && pnpm test'
+
   # Joins the two architectures into one multi-arch image per name with `docker buildx imagetools create`,
   # in a throwaway registry on this CI machine. Nothing leaves it: publishing is a later ticket (BOS-935).
   images-join:

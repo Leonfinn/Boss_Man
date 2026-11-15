@@ -36,7 +36,7 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | `BOSSMAN_DATA` (default `/srv/boss-man/data`) | `docker-compose.yml`, launcher | Host-neutral. Set it in `.env` to a folder on the new host |
 | `BOSSMAN_DEPLOYER` (absolute host path, e.g. `/mnt/tank/apps/boss-man/deployer` on TrueNAS), `NTFY_DATA` if set | `.env`; required by `deploy/truenas-deployer.yml` and `deploy/truenas-bluegreen.yml` | **Must be changed** to the new host's paths. A copied `.env` keeps the old path and the stack will not start (or mounts nothing useful) |
 | `deploy/truenas.yml`, `deploy/truenas-deployer.yml`, `deploy/truenas-bluegreen.yml` | `deploy/`, and `scripts/deploy.sh` and `scripts/host-deployer.sh` match on the file names | **Generic despite the names:** they bind-mount the data folder, add the deployer mounts, and add blue/green. Use them unchanged on any host. Renaming would break a live `COMPOSE_FILE`, so it is a follow-up ticket (rename with the old names kept working) |
-| "TrueNAS cron job" for the deployer | `docs/09-self-deploy.md`, `scripts/host-deployer.sh` header | The script needs only bash, git, docker, flock and curl. The one-minute scheduler is whatever the new host has. **Unconfirmed** for each host: find out with `systemctl --version` (systemd timer) or `command -v crontab` (cron) |
+| "TrueNAS cron job" for the deployer | `docs/09-self-deploy.md`, `scripts/host-deployer.sh` header | The script needs only bash, git, docker, flock and curl. The one-minute scheduler is whatever the new host has; [docs/30, step 7](30-in-app-updates.md#7-run-the-script-every-minute) gives a cron line. **Unconfirmed** for each host: find out with `systemctl --version` (systemd timer) or `command -v crontab` (cron) |
 | The old host's LAN address | `.env` values `BOSSMAN_BIND` and `BOSSMAN_PORTAL_URL`, and the restore runbook in the private wiki | `.env` values **must be changed** to the new host's address |
 | `BOSSMAN_DOCKER_GID` | `.env` | Differs per host. Find it on the new host with `stat -c %g /var/run/docker.sock` |
 | `PENPOT_BIND`, `PENPOT_PUBLIC_URI` | `.env`, `deploy/penpot.yml` | Host addresses; must be changed if Penpot moves |
@@ -282,6 +282,8 @@ After your sign-off: remove the old deploy key from GitHub, delete the old host'
 - The deployer's scheduler on TrueNAS is a cron job in the TrueNAS UI; stop it there at stage 3.
 
 ### Proxmox (the new host)
+
+The short version, for a fresh install too, is in [docs/32-proxmox.md](32-proxmox.md).
 
 - **Recommendation: a VM, not an LXC container.** Boss Man mounts the Docker socket and starts runner containers that run agent code. A VM has its own kernel, so Docker uses normal overlay2 storage, nothing depends on LXC nesting or AppArmor, and agent code stays behind a hardware boundary. Tailscale needs no special device (this repository runs it in userspace mode).
 - **If you choose an LXC container anyway,** each of these must be proven before the move, not assumed: nesting turned on in the container's options, a working Docker storage driver on the backing store, owner mapping so uid 1000 bind mounts work, and Tailscale in userspace mode (already the default in `deploy/tailscale.yml`; `/dev/net/tun` is then not needed). Prove it with `docker run --rm hello-world` and a Boss Man test run inside it.

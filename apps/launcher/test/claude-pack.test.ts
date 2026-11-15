@@ -34,6 +34,9 @@ function fakeDocker(exitCode = 0) {
       if (!c) return null;
       return { Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, ...(c.health ? { Health: { Status: c.health } } : {}) } } as ContainerInfo;
     },
+    async hostInfo() {
+      return { dockerVersion: "27.0.1", osType: "linux" };
+    },
     async imageId() {
       return "img";
     },

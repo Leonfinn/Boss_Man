@@ -4,8 +4,10 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, notInArray, or, sql } 
 import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReading, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
+import { ceoPlanText } from "./ceo-plan.js";
 import { heldReadyTickets } from "./agent-wip.js";
-import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
+import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 import { CHECK_REUSED_KIND } from "./check-request.js";
@@ -47,13 +49,17 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   const deviceLines = async (hasTicket: boolean) => {
     if (!hasTicket) return [];
     const rows = await db.select().from(deviceProfiles).orderBy(desc(deviceProfiles.reportedAt));
-    return rows
+    // The owner's phone type (BOS-1484), once an ntfy server is set up: so nobody guesses Android or iPhone.
+    const [notif] = await db.select().from(settings).where(eq(settings.key, "notifications"));
+    const nv = notif?.value as { ntfy?: unknown; phoneType?: string | null } | undefined;
+    const phoneLine = nv?.ntfy ? [`- Owner's phone for ntfy pushes: ${nv.phoneType === "android" ? "Android" : nv.phoneType === "iphone" ? "iPhone" : nv.phoneType === "both" ? "both Android and iPhone" : "phone type unknown: ask the owner"}`] : [];
+    return [...phoneLine, ...rows
       .map((r) => ({ label: r.label, browser: r.browser, readings: r.readings }))
       .filter((p) => isRenderableProfile(p) && p.readings.every((x) => DEVICE_UNITS.every((k) => typeof x.units?.[k] === "number")))
       .map((p) => {
         const t = tallestReading(p);
         return `- ${one(p.label, 40)} (${one(p.browser, 20)}): ${t.width}×${t.height} CSS px, ratio ${t.pixelRatio}, ${t.coarsePointer ? "touch" : "mouse"}, ${t.displayMode}; 100vh ${t.units.vh}, 100dvh ${t.units.dvh}, 100svh ${t.units.svh}, 100lvh ${t.units.lvh}, visual ${t.units.visual} px`;
-      });
+      })];
   };
 
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
@@ -146,7 +152,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const ids = mine.map((t) => t.id);
     const deps = ids.length
       ? await db
-          .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, ticket: tickets.title, ticketState: tickets.systemState, eng: engagements.title, engStatus: engagements.status, dec: decisions.question, decId: decisions.id, decStatus: decisions.status })
+          .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, ticket: tickets.title, ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, eng: engagements.title, engStatus: engagements.status, dec: decisions.question, decId: decisions.id, decStatus: decisions.status })
           .from(ticketDependencies)
           .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
           .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
@@ -156,10 +162,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const waitsOn = (id: string) =>
       deps
         .filter((d) => d.blocked === id)
-        .flatMap((d) => (d.blocker ? (d.ticketState !== "done" ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
+        .flatMap((d) => (d.blocker ? (!ticketBlockerFinished(d) ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
     const myLines = mine.map((t) => {
       const w = waitsOn(t.id);
-      return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}`;
+      const plan = ceoPlanText(t, now, 200);
+      return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}${plan ? ` ${plan}` : ""}`;
     });
     const decIds = deps.flatMap((d) => (d.decId && d.blocked && ids.includes(d.blocked) ? [d.decId] : []));
     const asked = agentId
@@ -173,7 +180,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const relevant = [...new Set([...ids, ...deps.flatMap((d) => [d.blocked, d.blocker])])].filter((x): x is string => !!x);
     body = [
       ...section("My open tickets", capped(myLines, 5)),
-      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(mine.length > 0), 3)),
+      ...section("Your devices (layout tickets: check at these, not a guessed size)", capped(await deviceLines(mine.length > 0), 4)),
       ...section("Open decisions on my tickets", capped(asked.map((d) => `- "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`), 3)),
       ...section("Changed since my last run", capped((await changes(relevant)).map(changeLine), 10)),
       ...section("In flight elsewhere", capped(await flightLines(), 8)),

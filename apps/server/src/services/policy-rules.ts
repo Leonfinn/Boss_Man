@@ -5,7 +5,7 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { DEFAULT_POLICY, PERMISSION_TABLE, decidePermission, ruleProblems, shadowedRoutingRules, type PermissionInfo, type PolicyMatch, type PolicyOutcome, type PolicyRuleSpec } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions, policyRules } from "../db/schema.js";
+import { companies, decisions, policyRules } from "../db/schema.js";
 
 export const ADD_RULE = "Add this rule";
 export const DONT_ADD_RULE = "Don't add";
@@ -122,7 +122,8 @@ export function policyRulesService(db: Db) {
 
     /** What would happen to a request from this company's agents, and which rule decides it. */
     async test(companyId: string, info: PermissionInfo) {
-      return decidePermission(info, await effective(companyId));
+      const [c] = await db.select({ on: companies.autoTempCleanup }).from(companies).where(eq(companies.id, companyId));
+      return decidePermission(info, await effective(companyId), { autoTempCleanup: c?.on !== false });
     },
 
     effective,

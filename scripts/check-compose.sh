@@ -15,11 +15,11 @@ command -v actionlint >/dev/null 2>&1 || { echo "check-compose: actionlint not i
 
 # Placeholders for the values the files require (${VAR:?...}), only where the caller has not set one. They are not secrets
 # and are never used: config -q renders the files and starts nothing.
-for v in POSTGRES_PASSWORD NTFY_BASE_URL BOSSMAN_TOOLSERVER_IMAGE PENPOT_PUBLIC_URI PENPOT_SECRET_KEY PENPOT_DB_PASSWORD; do
+for v in BOSSMAN_WORKER_IMAGE BOSSMAN_WORKER_URL POSTGRES_PASSWORD NTFY_BASE_URL BOSSMAN_TOOLSERVER_IMAGE PENPOT_PUBLIC_URI PENPOT_SECRET_KEY PENPOT_DB_PASSWORD; do
   [ -n "${!v:-}" ] || export "$v=check-compose-placeholder"
 done
 # Folders must look like absolute paths (a bind mount) and the Penpot bind must be an address, or compose reads them as volume names.
-for v in BOSSMAN_DATA BOSSMAN_DEPLOYER; do [ -n "${!v:-}" ] || export "$v=/check-compose-placeholder"; done
+for v in BOSSMAN_DATA BOSSMAN_DEPLOYER BOSSMAN_WORKER_TOKEN_FILE; do [ -n "${!v:-}" ] || export "$v=/check-compose-placeholder"; done
 [ -n "${PENPOT_BIND:-}" ] || export PENPOT_BIND=127.0.0.1
 # A stray COMPOSE_FILE or COMPOSE_PROFILES from the caller would change what -f means.
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME
@@ -37,6 +37,7 @@ sets=(
   "deploy/ntfy.yml"
   "deploy/ntfy.yml deploy/ntfy-bluegreen.yml"
   "deploy/penpot.yml"
+  "deploy/check-worker.yml"
 )
 
 failed=0 checked=0

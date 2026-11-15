@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, runners, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, deployTargets, runners, settings, tickets, wakes } from "../src/db/schema.js";
 import { RELEASE_REASON, releaseLogService } from "../src/services/release-log.js";
 
 let ctx: Awaited<ReturnType<typeof setupApp>> | undefined;
@@ -122,6 +122,26 @@ describe("release log: the Release Manager is woken when the live commit changes
     expect(await c.releaseLog.releaseManagerWakes("restarted")).toBe(1);
     const [w] = await c.db.select().from(wakes);
     expect(w!.note).toContain("restart after a hand-apply");
+  });
+
+  it("BOS-1477: a server update opens a release-log ticket only for the home company, not for one with no deploy target or one with a target", async () => {
+    const c = (ctx = await setupApp());
+    const home = await withReleaseManager(c); // oldest company: the one Boss Man's own server update deploys
+    const mk = async (name: string) => {
+      const { company } = (await c.req("POST", "/api/companies", { name })).json() as { company: { id: string } };
+      await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Releases" });
+      await c.db.insert(agents).values({ companyId: company.id, name: `Rm ${name}`, role: "worker", agentKind: "claude", title: "Release Manager" });
+      return company.id;
+    };
+    const none = await mk("No Target Co");
+    const withTarget = await mk("Target Co");
+    await c.db.insert(deployTargets).values({ companyId: withTarget, name: "site", kind: "ssh", endpoint: "deploy@example.com" });
+    for (const id of [home.companyId, none, withTarget]) await c.releaseLog.note(id, A);
+    await c.releaseLog.releaseManagerWakes("restarted");
+    await deployResult(c, { from: A, to: B });
+    await c.selfDeploy.sync();
+    const logs = (await c.db.select().from(tickets)).filter((x) => x.title.startsWith("Release log:"));
+    expect(logs.map((x) => x.companyId)).toEqual([home.companyId]);
   });
 
   it("does nothing when the company has no Release Manager", async () => {
@@ -247,6 +267,21 @@ describe("owner setup cards (DR-011)", () => {
     await c.releaseLog.note(companyId, C); // live, but not this ticket's commit
     expect(await c.releaseLog.releaseManagerWakes("restarted")).toBeGreaterThanOrEqual(0);
     expect(await setupCards(c)).toHaveLength(0);
+  });
+
+  it("DR-061 Q5: a merged ticket that is still open is placed in merge order, so a later merge's card waits for its own deploy", async () => {
+    const c = (ctx = await setupApp());
+    const { companyId, projectId } = await withReleaseManager(c);
+    // A merged first but its ticket is still open; B merged after it and is done with setup steps.
+    const open = await c.work.createTicket(projectId, { title: "Merged, still open", noCode: false });
+    await c.db.update(tickets).set({ mergeCommit: A, mergedAt: new Date("2026-11-03T11:00:00Z") }).where(eq(tickets.id, open.id));
+    await doneTicket(c, projectId, { title: "Later merge", mergeCommit: B, ownerSetup: "Settings → Funding → Add funding source", at: new Date("2026-11-03T12:00:00Z") });
+    await c.releaseLog.note(companyId, A); // the server runs A, which is before B
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(0);
+    await c.releaseLog.note(companyId, B);
+    await c.releaseLog.releaseManagerWakes("deployed");
+    expect(await setupCards(c)).toHaveLength(1);
   });
 
   it("raises one card when the live commit includes the merge, with the author's steps", async () => {

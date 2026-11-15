@@ -134,7 +134,7 @@ chmod 600 /mnt/tank/apps/boss-man/src/.env
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
 
-Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 
@@ -331,7 +331,7 @@ Leave `launcher` out of the build if you don't use it (step 7b).
 scripts/update-runner.sh
 ```
 
-The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Updates > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Updates > Runner update.
+The script returns as soon as it has asked; follow the swap in the banner or in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners (finish runs first)** in Settings > Server and runner > Updates.
 
 **Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
 
@@ -430,132 +430,13 @@ rm -rf /mnt/tank/apps/boss-man/src /mnt/tank/apps/boss-man/data
 
 ## 9a. Install the host deployer (optional)
 
-This lets you update Boss Man from its own Decisions page: when `main` moves on GitHub, Boss Man asks "Deploy abc1234?", and on your approval a root script on the NAS runs `scripts/deploy.sh`. How it works and what it refuses is in `docs/09-self-deploy.md`. Nothing here gives a container `docker.sock`.
+This lets you update Boss Man from its own Decisions page: when `main` moves on GitHub, Boss Man asks "Deploy abc1234?", and on your approval a root script on the NAS runs `scripts/deploy.sh`.
 
-Everything below is typed in a **root shell** on the NAS (TrueNAS UI > System > Shell, or `su -` over SSH), so there is no `sudo` in front of the commands. Do the steps in this order. Set the folder once in the shell, and use it in every step:
+The steps are in [docs/30-in-app-updates.md](30-in-app-updates.md), which works on any Linux host. Its "TrueNAS SCALE" section covers the differences: set `B=/mnt/tank/apps/boss-man`, add `:deploy/truenas-deployer.yml` to the end of your existing `COMPOSE_FILE`, and make the every-minute cron job in **System > Advanced > Cron Jobs**.
 
-```sh
-D=/mnt/tank/apps/boss-man/deployer
-```
+With blue/green (9d), `host.conf` can also set `SOAK_SECONDS=900`. The host publishes it in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length.
 
-**Before you start**
-- `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
-- The `src` checkout must be on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one). Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
-
-  ```sh
-  git -C /mnt/tank/apps/boss-man/src ls-remote origin refs/heads/main
-  ```
-
-**1. Get this code onto the NAS, by hand.** The change that adds the deployer edits `scripts/` and `deploy/`, which the deployer itself refuses to deploy, so the first time is yours:
-
-```sh
-cd /mnt/tank/apps/boss-man/src && scripts/deploy.sh
-```
-
-Nothing changes for Boss Man yet: the new compose file is opt-in (step 6).
-
-**2. Create the folders.** The server (uid 1000) may write only `inbox`; it reads `outbox`.
-
-```sh
-mkdir -p $D/inbox $D/outbox $D/state
-chown root:root $D $D/outbox $D/state && chmod 755 $D $D/outbox && chmod 700 $D/state
-chown 1000:1000 $D/inbox && chmod 750 $D/inbox
-ls -ld $D $D/inbox $D/outbox $D/state
-```
-
-`ls` may show `inbox` as owned by another name, such as `n8n`: TrueNAS shows uid 1000 by the name of whichever app user has it. What matters is the number 1000 (`ls -ldn $D/inbox` shows it).
-
-**3. Install the script as a copy.** Read it first (`less /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh`). Copy it; do not make a link into the checkout, because a link would let a merged PR change what root runs.
-
-```sh
-cp /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh $D/host-deployer.sh
-chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
-```
-
-When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it (scripts are infra). Read the diff, hand-deploy with `scripts/deploy.sh`, and copy it over again.
-
-Merge a PR that touches infra files on its own, after the app PRs before it are deployed. The deployer offers only the tip of `main`, so while an unapplied infra change is anywhere in that range, every later app PR is stuck behind it too, until you apply it by hand.
-
-To see whether your copy is current:
-
-```sh
-diff $D/host-deployer.sh /mnt/tank/apps/boss-man/src/scripts/host-deployer.sh && echo same
-```
-
-**4. The config file, with the alert webhook (optional: skip this step if you want no webhook).** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with that of any service that accepts a JSON `POST` (this file is optional: leave `WEBHOOK_URL` out and no webhook is sent):
-
-```sh
-cat > $D/host.conf <<'EOF'
-WEBHOOK_URL='https://PUT-YOUR-WEBHOOK-ADDRESS-HERE'
-WEBHOOK_ON_SUCCESS=1
-EOF
-chown root:root $D/host.conf && chmod 600 $D/host.conf
-```
-
-- `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
-- The script refuses to start if this file is not owned by the user running it with mode 600.
-- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay that adds it; that is untested.
-
-Test the webhook alone, with the same URL, before anything else:
-
-```sh
-. $D/host.conf && curl -fsS -X POST -H 'Content-Type: application/json' -d '{"result":"failed","message":"Test from the NAS","from_commit":"aaaaaaaa","to_commit":"bbbbbbbb","at":"2026-10-20T12:00:00Z"}' "$WEBHOOK_URL" && echo sent
-```
-
-`sent` only means the service accepted the request. Some services answer `200` even when nothing is set up to act on it, so check that the alert really arrives where you expect it.
-
-**5. Test the script.** First with no request: it reads `main` and writes what is waiting.
-
-```sh
-$D/host-deployer.sh && cat $D/outbox/available.json
-```
-
-Then rehearse a request without running anything. `--dry-run` runs every check and leaves the file where it is:
-
-```sh
-TIP=$(git -C /mnt/tank/apps/boss-man/src ls-remote origin refs/heads/main | cut -f1)
-printf '{"id":"00000000-0000-4000-8000-000000000001","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00Z","approvedBy":"me"}\n' "$TIP" > $D/inbox/request.json
-$D/host-deployer.sh --dry-run
-rm -f $D/inbox/request.json
-```
-
-You should see either `nothing_new: Nothing new: ... already deployed` (you are up to date) or `[dry-run] checks passed: would run: scripts/deploy.sh --yes --no-runner --commit ...`. A `rejected:` line says why.
-
-**6. Let the server see the folders.** This is the one compose change, and it is also yours to apply. Add the opt-in file and the folder to `.env`, then recreate the server:
-
-```sh
-cd /mnt/tank/apps/boss-man/src
-sed -i 's#^COMPOSE_FILE=.*#&:deploy/truenas-deployer.yml#' .env
-echo "BOSSMAN_DEPLOYER=$D" >> .env
-grep -E '^(COMPOSE_FILE|BOSSMAN_DEPLOYER)=' .env
-docker compose up -d server
-docker compose exec server ls /run/deployer
-```
-
-`COMPOSE_FILE` should now end in `:deploy/truenas-deployer.yml`, and the last command should list `inbox` and `outbox`. Reload Boss Man: **Settings > Server and runner** now has an **Updates** section.
-
-**7. The cron job.** In the TrueNAS UI: **System > Advanced > Cron Jobs > Add** (field names as of 25.10; UNVERIFIED, check them on your version):
-- **Description:** `Boss Man host deployer`
-- **Command:** `/mnt/tank/apps/boss-man/deployer/host-deployer.sh`
-- **Run As User:** `root`
-- **Schedule:** choose **Custom** and put `*` in every field (Minutes, Hours, Days of month, Months, Days of week), which means every minute. The **Hourly** preset is not enough: it runs once an hour, so a deploy you approve could wait up to an hour.
-- **Hide Standard Output:** ticked (the script keeps its own log). Leave **Hide Standard Error** unticked.
-- **Enabled:** ticked.
-
-Save it. A few minutes later `$D/outbox/available.json` should have a newer `checkedAt`. The log is `$D/deployer.log`.
-
-**8. Try it for real.** When `main` is ahead, a "Deploy abc1234?" decision appears (with a notification); **Settings > Server and runner > Updates > Deploy latest** raises it on demand. Approve it. Within a minute the host starts, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the NAS with `tail -f $D/deployer.log`.
-
-What you may see instead of a deploy:
-- "Rejected: this change touches deployment files": run `scripts/deploy.sh` yourself in the `src` folder.
-- "Rejected: only one server deploy every 10 minutes": wait, then press **Deploy latest**.
-- "is not the tip of main": main moved after you approved; approve the new one. The host looks at `main` at most every 5 minutes, and not while a request is waiting, so after two merges close together Boss Man can briefly offer the older one. The host refuses it, drops its note, and offers the real tip within a minute or two. To refresh the note at once: `rm -f $D/outbox/available.json` (the next cron minute writes a new one).
-- An alert saying the change touches deployment files when you have already applied it by hand: the note was written before you did. Press **Got it**; it refreshes within about 6 minutes.
-- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. Anything under `packages/shared/` counts as runner code, even text the runner never reads (such as the agents' role text); when the change is only that, **Not now** is fine.
-- Approving the runner update builds the new image, then drains: runs in progress finish and each runner is swapped when its company is idle, so there is no need to wait for quiet. Approving frees the host script within minutes; the result of the swap arrives as a Boss Man notification.
-
-**Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
+Later in this guide, `$D` means the deployer folder, here `/mnt/tank/apps/boss-man/deployer`.
 
 ## 9b. Upgrading to v1.2
 
@@ -686,7 +567,7 @@ docker compose logs server-blue | grep 'LEADER: \*\*\*'
 
 The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Server and runner > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server and runner > Server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
 
-**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server and runner > Server** then shows green Live and blue Standby, and **Settings > Server and runner > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
+**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in [docs/30, step 5](30-in-app-updates.md#5-test-the-script)) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server and runner > Server** then shows green Live and blue Standby, and **Settings > Server and runner > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
 
 **Which colour is live?**
 
@@ -807,78 +688,8 @@ If you edited `.env` after the backup, copy those changes back by hand instead o
 
 ## 10. Phone notifications (optional)
 
-Boss Man pushes pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44), run on the same Docker host as Boss Man from `deploy/ntfy.yml` (any host: TrueNAS, a Proxmox VM or container, or plain Linux). Boss Man only makes outbound requests to it. Nothing is opened at the router and nothing is exposed on your LAN.
+Boss Man pushes pages and asks to your phone through your own ntfy server, run on the same host. The steps are in [docs/31-phone-notifications.md](31-phone-notifications.md), which works on any Linux host. On TrueNAS, do section 10b first, and make the ntfy data folder under your dataset, for example `/mnt/tank/apps/boss-man/data/ntfy`.
 
-How it is set up (all in `deploy/ntfy.yml`):
-- **Off by default,** its own Compose project like Penpot. A normal `docker compose up -d` never starts it.
-- **Tailnet and https only.** No port is opened on the host. ntfy joins the private `edge` network of the Tailscale container from section 10b, and that container's Serve config publishes it to your tailnet over https on port 8443 (Boss Man's own address stays on 443). It uses the same Tailscale certificate and the same Tailscale container, so there is only one Tailscale to look after. Funnel stays off.
-
-**Do section 10b (HTTPS through Tailscale Serve) first.** This section builds on it and doesn't work without it.
-- **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
-- **Short memory.** Messages are kept for 1 hour (`NTFY_CACHE_DURATION`), then dropped.
-- **No relay.** No upstream server is set, so nothing leaves your network.
-
-Treat the topic name and the passwords as secrets: notifications will carry Approve links. Don't paste them into tickets, chat or this repository.
-
-### Your steps
-
-1. Make the data folder and give it to uid 1000. By default it is `ntfy` inside your Boss Man data folder (`$BOSSMAN_DATA`, as in section 10b), so the usual backup and move steps already cover it:
-   ```
-   sudo mkdir -p "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy" && sudo chown 1000:1000 "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy"
-   ```
-   It holds the users, tokens and cache. Keep it in your backup: restoring it on a new host keeps the tokens and the phone subscription working.
-2. Back up `.env`, then add one line. The address is the same ts.net name as in 10b, with port 8443:
-   ```
-   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
-   ```
-   Nothing else is needed. ntfy finds the `edge` network from section 10b by its default name (`boss-man_edge`). Only if you changed the Compose project name, or set `NTFY_DATA` or `NTFY_EDGE_NETWORK` yourself, add those lines too. `NTFY_DATA` and `NTFY_EDGE_NETWORK` are only for a different data folder or network; `NTFY_EDGE_NETWORK` is the name of that network, which `docker network ls` lists (it ends in `_edge`).
-3. Start it. **This needs BOS-242 (section 10b) merged with an extra port 8443 entry in `deploy/tailscale/serve.json`, `"${TS_CERT_DOMAIN}:8443"` proxying to `http://ntfy:80`, with no Funnel.** Check that the file has it before you go on: `grep -c ':8443' deploy/tailscale/serve.json` must print `1`. If it prints `0`, stop: nothing publishes ntfy yet.
-   ```
-   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
-   docker exec <tailscale container> tailscale serve status
-   ```
-   Use the Tailscale container's name from `docker ps`. The status should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it does, stop and tell me.
-4. Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make two users, one that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
-   ```
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
-   docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
-   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
-   docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
-   ```
-   The last command prints the **publish token** (it starts with `tk_`). Copy it now.
-5. Open **Notifications** in the side menu. In the **How you're told** box below the feed, tick **Send to my phone through my own ntfy server**, fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (paste the publish token from step 4), and choose **Save**. Boss Man stores the token encrypted in its secrets as "ntfy access token", so you do not add it under **Settings > Secrets** yourself. Set **Boss Man's address on your phone, so a tap opens the evidence** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If **Send a test to my phone** (it only appears after you Save) fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
-6. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the ntfy address with its port, exactly the `NTFY_BASE_URL` value from step 2 (for example `https://<host-name>.<tailnet>.ts.net:8443`), and log in as `phone-read` with its password. Subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. Boss Man's **Notifications** page shows this address under **Set up your phone**, with a link to check from the phone's browser: open `<ntfy address>/v1/health`, which should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet. A test send that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.
-7. On the **Notifications** page, choose **Send a test to my phone**. It should arrive within seconds.
-
-Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
-```
-curl -s -o /dev/null -w '%{http_code}\n' https://<host-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1
-curl -s -o /dev/null -w '%{http_code}\n' -d probe https://<host-name>.<tailnet>.ts.net:8443/<topic>
-```
-From a device that is not on your tailnet the address must not answer at all.
-
-### iPhone
-
-iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
-
-### Approve buttons
-
-ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when all of these hold: the ntfy server has a publish token; the **ntfy server** address is `https://...` or exactly the bundled `http://ntfy:80` from step 5 (any other `http://` address is refused, so the token never crosses an untrusted network in clear text); Boss Man's public URL is https; and **Approve buttons** haven't been switched off in Notifications. If one fails, Notifications says which.
-
-### Blue/green installs
-
-With blue/green the two Boss Man colours are not on the `edge` network, so they can't reach `http://ntfy:80`. Add `-f deploy/ntfy-bluegreen.yml` after `-f deploy/ntfy.yml` in step 3's `docker compose` command (and in the rollback command). It also puts ntfy on the internal `front` network, under the same name `ntfy`, so the settings in step 5 stay as they are. Use the same two `-f` files every time you start, stop or change ntfy.
-
-### Any Docker host
-
-The same steps work on plain Linux Docker, a Proxmox VM and a Proxmox container (LXC), because ntfy rides on the Tailscale container from section 10b, which runs in Tailscale's userspace mode and needs no `/dev/net/tun`. Nothing here is specific to TrueNAS. Host differences (such as how to back up or add a tun device) are in `docs/20-https-tailscale.md`. Moving to a new host: copy `$BOSSMAN_DATA` (it includes `ntfy` and `tailscale`), bring up section 10b, then run step 3 again. Users, tokens and the phone subscription carry over.
-
-### Rolling back
-
-`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down`. Port 8443 then answers with an error until you start it again; to remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Your messages are only kept for an hour and are not worth restoring. The users and tokens live in `NTFY_DATA/user.db`; copy that file first if you want to keep them.
-
-ntfy's docs site wasn't reachable when this was written, so the links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs).
 
 ## 10b. HTTPS through Tailscale Serve (tailnet only)
 

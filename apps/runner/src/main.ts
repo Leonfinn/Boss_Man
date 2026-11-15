@@ -5,6 +5,7 @@ import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { adapterBin, claudeBin, lockHash, PACK_SOURCE, readPack } from "./claude-pack.js";
 import { probeGuardWhenReady } from "./guard-probe.js";
+import { platformReport } from "./platform.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { CheckJobs } from "./check-jobs.js";
@@ -16,6 +17,7 @@ import { SessionManager } from "./session-manager.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
+import { uploadCheckBundle } from "./check-bundle-http.js";
 
 // BOS-1435 (DR-060): the same image started with BOSSMAN_ROLE=check-worker is a check worker (check-worker.ts) and none
 // of the runner below may start: no sessions, no secrets fetch, no journal. Its socket and timers keep the process alive;
@@ -48,7 +50,7 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 // the merge check share, so checks still take turns (BOS-321).
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
-const sandbox = sandboxSelfTest();
+const sandbox = { ...sandboxSelfTest(), platform: platformReport(env) };
 const checkSlots = applyCheckSlots(coordDir, env.BOSSMAN_CHECK_SLOTS);
 if (checkSlots > 1) console.log(`[runner] full checks: ${checkSlots} at a time (BOSSMAN_CHECK_SLOTS)`);
 if (checkSlots > 1) {
@@ -132,6 +134,7 @@ const sessions = new SessionManager({
   },
   stateFile: path.join(dataDir, "active-runs.json"),
   workspaces,
+  uploadCheckBundle: (jobId, file, meta) => uploadCheckBundle(httpBase, token, jobId, file, meta),
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
   coordDir,

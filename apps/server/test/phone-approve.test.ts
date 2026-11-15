@@ -508,6 +508,24 @@ describe("rule 6: claim, answer, then finish or release", () => {
     c.decisions.answer = answer;
     expect((await c.tap({ token })).json().outcome).toBe("approved");
   });
+
+  it("BOS-1535: answer() closing a card that died after the link went out gives no_longer_works, not try_again", async () => {
+    const c = await setup();
+    const d = await c.ask();
+    const { token } = await c.sync();
+    // Stands in for answer() finding the card dead (cardInvalidReason): it withdraws the card and refuses the answer.
+    c.decisions.answer = async (id: string) => {
+      await c.db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, id));
+      throw new Error("This card is no longer valid");
+    };
+    expect((await c.tap({ token })).json().outcome).toBe("no_longer_works");
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
+    expect(after!.status).toBe("withdrawn");
+    expect(after!.answer).toBeNull();
+    expect((await c.db.select().from(approveTokens))[0]!.revokedAt).not.toBeNull();
+    // A second tap on the revoked link stays refused.
+    expect((await c.tap({ token })).json().outcome).toBe("no_longer_works");
+  });
 });
 
 describe("rule 7: caps", () => {

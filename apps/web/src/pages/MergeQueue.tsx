@@ -53,6 +53,12 @@ export function clockText(iso: string, now = new Date()): string {
 /** BOS-1517: the one status line of a ticket in the merge pipeline, from the server's live view (the queue and the ticket page show the same). */
 export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
 
+/** BOS-1546: the same line as one short sentence for a board card: "Waiting for a check slot (2 ahead) · since 09:10. In the way: BOS-7 must merge first." */
+export function statusLineText(line: StatusLine): string {
+  const blocker = line.blocker ? ` In the way: ${line.blocker.replace(/\.$/, "")}.` : "";
+  return `${upFirst(line.step)} · since ${clockText(line.since)}.${blocker}`;
+}
+
 /** "Waiting for a train seat · since 20:39 (12m). Next: …. In the way: …." */
 export function StatusLineView({ line }: { line: StatusLine }) {
   return (

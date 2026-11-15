@@ -1756,6 +1756,49 @@ describe("the runner update card only when it can be acted on, and one at a time
     expect(r.json().message).toContain("running now");
   });
 
+  it("BOS-1469: a waiting request comes first, the refusal before it is only the previous attempt", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: B });
+    // The real last run, then a rate-limit refusal the host kept in its own file.
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T16:40:00Z", ended: "2026-11-14T16:50:00Z" });
+    await writeFile(path.join(c.dir, "outbox", "refused.json"), JSON.stringify({ id: "", target: "runner", result: "rejected", message: "Rejected: only one runner deploy every 10 minutes. Try again in 2 minute(s).", from_commit: B, to_commit: B, started: "2026-11-14T16:57:00Z", ended: "2026-11-14T16:57:00Z", backup: "" }));
+    let o = await c.selfDeploy.overview();
+    expect(o.status?.result).toBe("rejected");
+    expect(o.previousRun?.message).toBe("Image built.");
+    expect(o.active).toBeNull();
+    // Runner refusals get the "press again at" line too: 16:57 + 2 minutes, for the runner kind only.
+    expect(o.deployWait).toEqual({ until: "2026-11-14T16:59:00.000Z", target: "runner" });
+    // The press is accepted: a request now waits in the inbox. The refusal must not read as its answer.
+    await writeFile(path.join(c.dir, "inbox", "request.json"), JSON.stringify({ id: randomUUID(), target: "runner", commit: B }));
+    o = await c.selfDeploy.overview();
+    expect(o.active).toMatchObject({ phase: "waiting", what: "Build and update runners" });
+    expect(o.status?.message).not.toMatch(/Try again in/);
+    expect(o.previousRun?.message).toBe("Image built.");
+    expect(o.runnerImage).toEqual({ running: null, needed: B });
+    expect(o.deployWait).toBeNull(); // a newer accepted request: no "try again" for the old refusal
+  });
+
+  it("BOS-1469: a refusal older than the real run (left over from before a restart) is not the newest word", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B, tip: B });
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T17:00:00Z", ended: "2026-11-14T17:05:00Z" });
+    await writeFile(path.join(c.dir, "outbox", "refused.json"), JSON.stringify({ id: "", target: "runner", result: "rejected", message: "Rejected: only one runner deploy every 10 minutes. Try again in 2 minute(s).", from_commit: B, to_commit: B, started: "2026-11-14T16:57:00Z", ended: "2026-11-14T16:57:00Z", backup: "" }));
+    const o = await c.selfDeploy.overview();
+    expect(o.status?.result).toBe("deployed");
+    expect(o.previousRun).toBeNull();
+    expect(o.deployWait).toBeNull();
+  });
+
+  it("BOS-1469: an approval inside the host's 10-minute limit is told so at once", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-14T17:00:00Z"));
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), target: "runner", result: "deployed", message: "Image built.", to_commit: B, started: "2026-11-14T16:55:00Z", ended: "2026-11-14T16:58:00Z" });
+    await expect(c.selfDeploy.check({ type: "self_deploy", target: "runner", commit: B, fromCommit: B } as never)).rejects.toThrow(/one runner deploy every 10 minutes/);
+    // A different kind of deploy has its own limit.
+    await expect(c.selfDeploy.check({ type: "self_deploy", target: "server", commit: B, fromCommit: A } as never)).resolves.not.toThrow();
+  });
+
   it("raises no runner card while the host's 'try again in N minutes' wait is on", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-09T18:30:00Z"));

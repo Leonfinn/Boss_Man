@@ -67,7 +67,7 @@ describe("background run limit in Settings (BOS-279)", () => {
       }),
     );
     render(<RunLimits />);
-    const field = (await screen.findByLabelText(/Background \(infinite mode\) runs at once/)) as HTMLInputElement;
+    const field = (await screen.findByLabelText(/^Background agents at once \(0 to 16\) infinite mode/)) as HTMLInputElement;
     expect(field.value).toBe("2");
     expect(screen.getByText(/default 2/)).toBeTruthy();
     fireEvent.change(field, { target: { value: "3" } });

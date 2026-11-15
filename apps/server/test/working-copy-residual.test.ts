@@ -107,7 +107,7 @@ describe("a dropped CEO wake can't leave a permission card with nobody woken (fi
       }),
     );
     ctx = dropping;
-    const { d } = await ctx.ask("rm -rf /tmp/bos159-cache");
+    const { d } = await ctx.ask("rm -rf /tmp/bos159-cache && mkdir /tmp/bos159-cache");
     expect(d).not.toBeNull();
     const after = await reload(d!.id);
     expect(after).toMatchObject({ tier: "owner", status: "open" });

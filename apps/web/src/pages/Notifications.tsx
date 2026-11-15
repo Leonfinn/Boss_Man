@@ -128,6 +128,8 @@ type Form = {
   phonePush: "urgent" | "all";
   publicUrl: string;
   approveButtons: boolean;
+  /** "" = not said yet (shows both phones' steps). */
+  phoneType: "" | "android" | "iphone" | "both";
 };
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -148,6 +150,7 @@ function toForm(s: NotifySettings): Form {
     phonePush: s.phonePush === "all" ? "all" : "urgent",
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
     approveButtons: s.approveButtons !== false,
+    phoneType: s.phoneType ?? "",
   };
 }
 
@@ -198,6 +201,7 @@ function SettingsForm() {
           phonePush: form.phonePush,
           publicUrl: form.publicUrl.trim() || null,
           approveButtons: form.approveButtons,
+          phoneType: form.phoneType || null,
         },
       });
       setSaved(s);
@@ -232,7 +236,7 @@ function SettingsForm() {
       </h2>
       <MoreAbout lead="Choose how loudly Boss Man tells you about things, and whether it reaches your phone.">
         <li>Notes stay in this feed.</li>
-        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" in the sidebar.</li>
+        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" at the top of this page.</li>
         <li>In quiet hours, each notification is one step quieter: pages and asks become flags, and flags become notes.</li>
         <li>Once an agent reaches its hourly number, the rest it sends that hour become notes.</li>
         <li>Nothing is dropped: every notification still lands in this feed.</li>
@@ -294,6 +298,15 @@ function SettingsForm() {
                   Remove the saved token
                 </label>
               )}
+            </div>
+            <div className="field" style={{ maxWidth: 360 }}>
+              <label htmlFor="phone-type">My phone</label>
+              <select id="phone-type" value={form.phoneType} onChange={(e) => set({ phoneType: e.target.value === "android" || e.target.value === "iphone" || e.target.value === "both" ? e.target.value : "" })}>
+                <option value="">Not said yet (show both)</option>
+                <option value="android">Android</option>
+                <option value="iphone">iPhone</option>
+                <option value="both">Both</option>
+              </select>
             </div>
             <div className="field" style={{ maxWidth: 360 }}>
               <label htmlFor="phone-push">Send to my phone</label>
@@ -381,7 +394,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </button>
         )}
       </div>
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "android" && (
         <p className="muted" data-testid="phone-iphone-note" style={{ fontSize: 14, margin: 0 }}>
           On an iPhone, turn on Time Sensitive Notifications for ntfy (Settings → Notifications → ntfy) and add ntfy to each Focus's allowed apps. Urgent pushes may still not ring through Focus or the silent switch, so test once with a Focus on.{" "}
           <a href="https://github.com/Leonfinn/Boss_Man/blob/main/apps/site/src/guides/phone-notifications.md#iphone" target="_blank" rel="noreferrer">
@@ -389,7 +402,7 @@ docker exec ${saved?.phoneContainer ?? "NTFY_CONTAINER"} ntfy access phone-read 
           </a>
         </p>
       )}
-      {saved?.ntfy && (
+      {saved?.ntfy && form.phoneType !== "iphone" && (
         <p className="muted" data-testid="phone-android-note" style={{ fontSize: 14, margin: 0 }}>
           On Android, urgent pushes only break through Do Not Disturb after you turn on "Override Do Not Disturb" once for ntfy's max-priority channel: ntfy app → Settings → Notifications → the max-priority channel → Override Do Not Disturb. Test once with Do Not Disturb on.
         </p>
@@ -517,7 +530,7 @@ function FilterBar({ filters, companies, counts, set }: { filters: Filters; comp
   );
 }
 
-export function Notifications({ feed, onChanged, companies = null }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null }) {
+export function Notifications({ feed, onChanged, companies = null, browserPermission, onEnableBrowser }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null; browserPermission?: NotificationPermission | "unsupported"; onEnableBrowser?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(readFilters);
   // A remembered company that no longer exists goes back to All companies.
@@ -576,6 +589,16 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      {/* (BOS-1506) This button used to sit in the side menu; it shows here until the owner turns notifications on. */}
+      {browserPermission === "default" && onEnableBrowser && (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", margin: "0 0 12px" }}>
+          <button className="btn" type="button" onClick={onEnableBrowser}>
+            Turn on browser notifications
+          </button>
+          <span className="muted">Shows flags, pages and asks while Boss Man is open in a background tab.</span>
+        </div>
+      )}
+      {browserPermission === "denied" && <p className="muted">Notifications are blocked in this browser.</p>}
       <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} set={setFilters} />}

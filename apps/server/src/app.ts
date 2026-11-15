@@ -66,7 +66,7 @@ import { openSignoffCard, signoffState } from "./services/signoff.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { limitRequeue } from "./services/limit-requeue.js";
 import { record } from "./services/activity.js";
-import { closeFenceCard, closeFenceUnavailableCard } from "./services/fence-default.js";
+import { chooseFence, chooseGuard, closeFenceCard, closeFenceUnavailableCard, featureStates } from "./services/fence-default.js";
 import { workService, WorkError } from "./services/work.js";
 import { refreshBriefs } from "./services/project-brief.js";
 import { planningService } from "./services/planning.js";
@@ -103,6 +103,10 @@ import { SecretRejected, secretsService, type LiveValidator } from "./services/s
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkWorkersService } from "./services/check-workers.js";
 import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
+import { checkBundleRoutes } from "./routes/check-bundles.js";
+import { checkBundleStore } from "./services/check-bundles.js";
+import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
+import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -155,10 +159,14 @@ export type AppOptions = {
   semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
+  /** BOS-1436: where check bundles wait for their worker (else BOSSMAN_CHECK_BUNDLE_DIR, else under the OS temp folder); tests give their own. */
+  checkBundleDir?: string;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
   limits?: Partial<Limits>;
   /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
   tickOnWake?: boolean;
+  /** Hold every run until its runner's report proves the fence and the network guard (DR-049 point 1). main.ts sets it; most tests build without a runner report. */
+  requireRunnerProof?: boolean;
   /** Where runners put each ticket's workspace. */
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
@@ -324,7 +332,8 @@ export async function buildApp(opts: AppOptions) {
     if (leader.isLeader()) return;
     const path = req.url.split("?")[0]!;
     const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    // Check bundles (BOS-1436) live in the leader's folder only, so a standby refuses their downloads too.
+    const blocked = path.startsWith("/api/runner/") || path.startsWith("/api/check-worker/") || path.startsWith("/api/check-bundles/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   // The server-owned check queue (DR-003, BOS-316). Off until the owner sets check_queue_mode to server; wake is filled in once the scheduler exists.
@@ -337,14 +346,33 @@ export async function buildApp(opts: AppOptions) {
   };
   // Check workers on other machines (DR-060, BOS-1435): their own table, token and socket; they take checks the runner has no slot for.
   const checkWorkersSvc = checkWorkersService(db);
+  // BOS-1436: a worker's code comes as a git bundle the company runner packs and uploads here. Nothing in the folder
+  // outlives a restart usefully (a worker asks again), so it starts empty.
+  const bundleStore = checkBundleStore(opts.checkBundleDir ? { dir: opts.checkBundleDir } : {});
+  bundleStore.clear();
   const checks = checkDispatcher(db, {
     // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
     drainPending: async () => {
       const h = runnerCardHold(await getHold(db));
       return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
     },
-    scanList: () => privateDetails.forRunner(), scanListWarning, send: (id, c) => runners.send(id, c), isConnected: (id) => runners.isConnected(id), can: (id) => runners.can(id, "check-jobs"), wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(), workers: checkWorkersSvc, isLeader: () => leader.isLeader() });
+    scanList: () => privateDetails.forRunner(),
+    scanListWarning,
+    send: (id, c) => runners.send(id, c),
+    isConnected: (id) => runners.isConnected(id),
+    can: (id) => runners.can(id, "check-jobs"),
+    wake: (a, w) => checkWake?.(a, w) ?? Promise.resolve(),
+    workers: checkWorkersSvc,
+    bundles: {
+      store: bundleStore,
+      canPack: (id) => runners.can(id, "check-bundle"),
+      // A first (full) bundle of a large repo takes a minute or two to pack and upload.
+      pack: async (runnerId, cmd) => CheckBundleInfo.parse(await runners.request<unknown>(runnerId, (requestId) => ({ type: "check.bundle", requestId, ...cmd }), 10 * 60_000)),
+    },
+    isLeader: () => leader.isLeader(),
+  });
   await checkWorkerSocketRoutes(app, checkWorkersSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks });
+  await checkBundleRoutes(app, db, { store: bundleStore, runners, workers: checkWorkersSvc, checks });
   // After-merge checks that waited for go-live (BOS-1021) start when the server commit or the runner image catches up; review exists further down.
   let releaseGoLive: ((companyId: string) => Promise<unknown>) | undefined;
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader(), checks, onImage: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
@@ -445,6 +473,7 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
+    requireRunnerProof: opts.requireRunnerProof,
     log: (m, companyId) => (companyId ? app.log.error({ companyId }, m) : app.log.error(m)),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
     alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
@@ -783,6 +812,8 @@ export async function buildApp(opts: AppOptions) {
     featuresWithoutTickets: async () => {
       let raised = 0;
       for (const companyId of [...new Set((await db.select({ id: featuresTable.companyId }).from(featuresTable)).map((r) => r.id))]) {
+        // BOS-1388: the same pass deletes unconfirmed portal posts whose emailed link ran out.
+        await feedback.purgeUnconfirmed().catch((err) => app.log.error({ err }, "deleting expired unconfirmed portal posts failed"));
         raised += await feedback.raiseFeatureNoTicket(companyId, async (f) => {
           const column = featureHorizon(f);
           const where = column === "now" ? "on the roadmap's Now column" : column === "next" ? "on the roadmap's Next column" : "in progress";
@@ -1113,7 +1144,7 @@ export async function buildApp(opts: AppOptions) {
   const checkRequests = checkRequestService(db, { command: async (scope, projectId) => { if (scope === "quick") return "scripts/check-quick.sh"; const [p] = await db.select({ v: projects.verifyCommand }).from(projects).where(eq(projects.id, projectId)); return p?.v ?? "scripts/check-all.sh"; }, diff: (runnerId, projectId, ticketId) => runners.request<WorkspaceDiff>(runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId }), 60_000) });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons: addonFacts, selfDeployCards: () => selfDeploy.cardFacts(), checkRequests }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: async (ticketId, agentId, runId) => ((await review.keptRound(ticketId).catch(() => false)) ? undefined : scheduler.onTicketReview(ticketId, agentId, runId)), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
-  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
+  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined, mailer, portalUrl: opts.portalUrl });
 
   app.setErrorHandler((err, _req, reply) => {
     // `message` is what the web app shows, so it names the first problem and its field.
@@ -1281,7 +1312,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1295,7 +1326,7 @@ export async function buildApp(opts: AppOptions) {
       }
       // A fence mode sent from Settings is the owner's choice (BOS-940): Boss Man never changes it, and its card goes.
       const chosenAt = b.fenceMode ? new Date() : null;
-      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt } : {}) };
+      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}), ...(chosenAt ? { fenceModeChosenAt: chosenAt, fenceOffFingerprint: null } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       if (!c) return reply.code(404).send({ error: "not_found" });
       if (chosenAt) await closeFenceCard(db, id, chosenAt);
@@ -1435,7 +1466,23 @@ export async function buildApp(opts: AppOptions) {
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
       const report = await runnerReport.companyPanel(id);
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher, report };
+      // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
+      const [co] = await db.select().from(companies).where(eq(companies.id, id));
+      const safety = co ? featureStates(co, r.sandbox) : null;
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report };
+    });
+
+    // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
+    // false is "Keep agents stopped". The choice is kept with this runner's platform.
+    owner.post("/api/companies/:id/safety-choice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ feature: z.enum(["guard", "fence"]), run: z.boolean() }).parse(req.body);
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
+      if (!r) return reply.code(404).send({ error: "no_runner" });
+      const at = new Date();
+      if (b.feature === "guard") await chooseGuard(db, id, b.run, at);
+      else await chooseFence(db, id, b.run, at);
+      return { ok: true };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
@@ -1737,7 +1784,8 @@ export async function buildApp(opts: AppOptions) {
       const signoffNow = (await signoffState(db, row.t)).state;
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
+      const liveNote = row.t.systemState !== "done" && row.t.goLiveWait ? goLiveNote(row.t.goLiveWait as GoLiveWait, await openUpdateCards(db, row.t.companyId)) : null;
+      return { ...row.t, goLiveNote: liveNote, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1993,7 +2041,7 @@ export async function buildApp(opts: AppOptions) {
     objectiveRoutes(owner, db, { work, teamCheck });
 
     // Feature requests, feedback and the portal's owner settings: routes/features.ts, on this owner scope.
-    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl });
+    featureRoutes(owner, db, { feedback, work, portalUrl: opts.portalUrl, mailer });
 
     // Agents, their lasting notes and runs: routes/agents-runs.ts, on this owner scope.
     agentRunsRoutes(owner, db, { agentsSvc, notesSvc, runsSvc, scheduler, log: app.log });
@@ -2112,7 +2160,7 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Scheduling and kill switches, the runner update hold, self-deploy, restart and deploy targets (R30, R14, R15).
-    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc });
+    serverAdminRoutes(owner, { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun: (runId) => runsSvc.cancel(runId) });
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());

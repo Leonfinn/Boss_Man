@@ -33,7 +33,7 @@ You need:
 Every way of updating the server takes a database backup first. Database changes apply by themselves during the update. Each one is written so the previous code still runs against the new schema, which is why a code rollback works. The rules are in [docs/10-migrations.md](10-migrations.md).
 
 - Single server, by hand: run `scripts/deploy.sh`. It backs up, pulls, rebuilds, restarts and waits for the server to report healthy. Add `--dry-run` to see the steps first. Success is the line `The server is healthy.` The full description is in [docs/00, step 14](00-first-time-install.md#14-updating-later) and [docs/06, step 9](06-install-truenas.md#9-updates-and-checks).
-- With the host deployer: approve the "Deploy <commit>?" card on Decisions, or use Settings → Server and runner → Updates → Deploy latest. Setting it up is in [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional).
+- With the host deployer: approve the "Deploy <commit>?" card on Decisions, or use Settings → Server and runner → Updates → Deploy latest. Setting it up is in [docs/30-in-app-updates.md](30-in-app-updates.md).
 - Blue/green: `scripts/deploy.sh` refuses to run. The host deployer swaps the colours for you. See [docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional).
 
 The host deployer refuses changes to files that control how Boss Man runs or deploys: `deploy/`, the compose files, the deploy scripts and any `Dockerfile`. If an update contains one, apply it by hand. On a single server, run `scripts/deploy.sh`. On blue/green, follow "What the deployer will not do for you" in [docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional).
@@ -71,6 +71,8 @@ scripts/update-runner.sh
 With the launcher, Boss Man drains first: nothing new starts and runs in progress finish. Each runner is then swapped when its company is idle. A banner shows on every page until every runner is on the new image, and then you get a notification. To undo, run `scripts/update-runner.sh --rollback`. The details are in [docs/06, step 9](06-install-truenas.md#9-updates-and-checks) and [docs/09](09-self-deploy.md).
 
 A runner update takes no backup. Runners hold no database.
+
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
 
 ## Backups
 
