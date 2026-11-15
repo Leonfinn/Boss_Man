@@ -3,7 +3,7 @@
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
 import { commandRisks, type Risk } from "./destructive.js";
-import { autoTempCleanup, cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
+import { autoTempCleanup, cleanupScope, explainCommand, readPush, removesReservedTmpEntry, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -32,6 +32,8 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
+  /** Only matches a shell command that removes (rm, unlink, rmdir, with or without flags) one of Boss Man's reserved /tmp entries, such as a check slot (BOS-1545, removesReservedTmpEntry in explain.ts). */
+  reservedTmpRemoval?: boolean;
   /** Only matches a shell command that deletes or destroys data, judged by what each part runs (BOS-116, destructive.ts). */
   destructive?: boolean;
   /** Only matches a shell command that pushes or publishes, judged the same way. */
@@ -54,6 +56,7 @@ export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
 /** The rule name logged when a plain /tmp cleanup is allowed without a card (BOS-1453). */
 export const TEMP_CLEANUP_AUTO_RULE = "Temp-file cleanup that only deletes entries in /tmp is allowed";
+export const RESERVED_TMP_REMOVAL_RULE = "Removing Boss Man's own /tmp entries (check slots, skills) goes to the CEO first";
 export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
@@ -123,6 +126,8 @@ export const BUILTIN_GUARDS: PolicyRuleSpec[] = [
   { name: WORKING_COPY_RULE, match: { kinds: ["execute"], destructive: true, workingCopyOnly: true }, outcome: "ceo" },
   { name: "Destructive commands go to the owner", match: { destructive: true }, outcome: "owner" },
   { name: "Pushing and publishing go to the owner", match: { pushing: true }, outcome: "owner" },
+  // Plain rm, unlink and rmdir aren't "destructive", but of a check slot or another run's folder they are (BOS-1545): the CEO decides.
+  { name: RESERVED_TMP_REMOVAL_RULE, match: { kinds: ["execute"], reservedTmpRemoval: true }, outcome: "ceo" },
 ];
 
 /** Table row 6: the built-in allows. Never reached by a request a guard caught, and company routing rules never apply to them. */
@@ -266,12 +271,17 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   const shellCmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
   if (rule.tempCleanupOnly && !(typeof shellCmd === "string" && tempCleanup(shellCmd))) return false;
   if (rule.workingCopyOnly && !(typeof shellCmd === "string" && cleanupScope(shellCmd)?.workingCopy.length)) return false;
+  if (rule.reservedTmpRemoval) {
+    // A string only, like the cleanup rules; an argv array is joined so a split `rm` `/tmp/bossman…` is still seen.
+    const cmd = typeof shellCmd === "string" ? shellCmd : Array.isArray(info.rawInput && (info.rawInput as Record<string, unknown>)["command"]) ? ((info.rawInput as Record<string, unknown>)["command"] as unknown[]).join(" ") : null;
+    if (!cmd || !removesReservedTmpEntry(cmd)) return false;
+  }
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
   if (rule.bossmanCall && !isBossmanCall(info)) return false;
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall || rule.reservedTmpRemoval);
 }
 
 /**

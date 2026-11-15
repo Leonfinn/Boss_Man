@@ -80,6 +80,7 @@ import type { TraceUpdate } from "./services/chat-trace.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
+import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
 import { checkGate } from "./services/check-gate.js";
@@ -94,6 +95,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
+import { memoryLine, readRunnerAgents } from "./services/check-limit.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -105,7 +107,8 @@ import { checkWorkersService } from "./services/check-workers.js";
 import { checkWorkerSocketRoutes } from "./routes/check-worker-socket.js";
 import { checkBundleRoutes } from "./routes/check-bundles.js";
 import { checkBundleStore } from "./services/check-bundles.js";
-import { CheckBundleInfo } from "@boss-man/shared";
+import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
+import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -130,6 +133,7 @@ import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
+import { phoneLoginService } from "./services/phone-login.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -483,7 +487,7 @@ export async function buildApp(opts: AppOptions) {
     rollback: (slug) => launch.rollback(slug),
     // BOS-993: the launcher is told "Checks at once" first, so a recreate always uses the current setting (it also covers a launcher that lost it).
     recreate: async (slug) => {
-      await launch.setChecks(await checkQueueSvc.slots()).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
+      await launch.setChecks(await checkQueueSvc.slots(), await readRunnerAgents(db, scheduler.limits)).catch(() => undefined); // an older launcher has no such call: the recreate still goes ahead
       return launch.recreate(slug);
     },
     connected: async (companyId) => {
@@ -624,7 +628,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status() });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -1043,6 +1047,15 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // BOS-1489: the start hold's two counts. Merges: the Merge queue page's own figure. Quick checks: queued jobs that aren't a
+  // merge or a full check, through check_jobs_state_queued (state first), counted for the company.
+  setStartHoldCounts(async (companyId) => {
+    const [q] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.state, "queued"), eq(checkJobs.companyId, companyId), eq(checkJobs.scope, "quick"), ne(checkJobs.kind, "merge")));
+    return { merges: await mergeQueue.waitingCount(companyId), quickChecks: q?.n ?? 0 };
+  });
   // An approved server update waits for a quiet machine (BOS-420): enough free memory, no merge check in flight,
   // few runs. Its soft hold parks new checks and caps runs until the standby window ends. main.ts steps it.
   const deployWait = deployWaitService(db, {
@@ -1308,7 +1321,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), maxRunMinutes: z.number().int().min(1).max(10_080).nullable(), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), autoTempCleanup: z.boolean(), fenceMode: z.enum(FENCE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), holdStartsMergesWaiting: z.number().int().min(1).max(1000).nullable(), holdStartsQuickChecksQueued: z.number().int().min(1).max(1000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       // Enforce changes what an agent can do without asking (BOS-325): not selectable until BOS-323 has closed the git gap.
       if (b.fenceMode === "enforce" && !FENCE_ENFORCE_AVAILABLE) return reply.code(400).send({ error: "fence_enforce_locked", message: "Enforce isn't available yet: it waits for the fix that stops a fenced agent running programs outside the fence (BOS-323)." });
@@ -1333,6 +1346,9 @@ export async function buildApp(opts: AppOptions) {
         const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
         await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
       }
+      // The start hold's limits (BOS-1489) change what starts, so keep a record of who set them and to what.
+      for (const [key, label] of [["holdStartsMergesWaiting", "merges waiting"], ["holdStartsQuickChecksQueued", "quick checks queued"]] as const)
+        if (b[key] !== undefined) await record(db, { companyId: id, kind: "settings", summary: b[key] === null ? `Owner turned off holding new starts on ${label}` : `Owner set new starts to be held while ${b[key]} or more ${label}`, detail: { [key]: b[key] } });
       return c;
     });
 
@@ -1445,7 +1461,7 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
-    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()) }) });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
 
@@ -1460,12 +1476,14 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
-      if (!r) return { registered: false, launcher };
+      // BOS-1498: what this company's runner is given and why, for the wizard's runner step.
+      const memory = launcher ? memoryLine(await launch.checks(), launcher.slug) : null;
+      if (!r) return { registered: false, launcher, memoryLine: memory };
       const report = await runnerReport.companyPanel(id);
       // One entry per safety feature for Settings' cards (DR-049 point 1): proven, or the owner chose to run without it on this platform.
       const [co] = await db.select().from(companies).where(eq(companies.id, id));
       const safety = co ? featureStates(co, r.sandbox) : null;
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, safety, launcher, report, memoryLine: memory };
     });
 
     // Settings → Server and runner: the two buttons on a safety-feature card (DR-049 point 1). "run" is "Run agents without ...";
@@ -1780,7 +1798,8 @@ export async function buildApp(opts: AppOptions) {
       const signoffNow = (await signoffState(db, row.t)).state;
       // signoffWaiting keeps its BOS-471 meaning: a card is open for the button to settle.
       const signoff = !!(await openSignoffCard(db, row.t.id));
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
+      const liveNote = row.t.systemState !== "done" && row.t.goLiveWait ? goLiveNote(row.t.goLiveWait as GoLiveWait, await openUpdateCards(db, row.t.companyId)) : null;
+      return { ...row.t, goLiveNote: liveNote, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent, quotaHeldSource: heldSource, quotaHeldOther: heldOther, signoffWaiting: signoff, signoff: signoffNow === "none" ? null : signoffNow, hold: row.t.systemState === "review" ? await holdView(db, id) : null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.

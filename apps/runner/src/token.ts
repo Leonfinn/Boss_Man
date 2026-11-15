@@ -33,7 +33,16 @@ export function safeWorkerToken(env: NodeJS.ProcessEnv): string {
   delete env.BOSSMAN_CHECK_WORKER_TOKEN;
   if (plain !== undefined) throw new Error("BOSSMAN_CHECK_WORKER_TOKEN was found in the environment, where a check can read it from /proc. Remove it and set only BOSSMAN_CHECK_WORKER_TOKEN_FILE to a file.");
   const file = env.BOSSMAN_CHECK_WORKER_TOKEN_FILE;
-  const token = file ? readFileSync(file, "utf8").trim() : "";
+  let token = "";
+  if (file) {
+    try {
+      token = readFileSync(file, "utf8").trim();
+    } catch (err) {
+      // A token file the worker's user (uid 1000) can't read used to end the process with a bare EACCES stack.
+      const code = (err as NodeJS.ErrnoException).code;
+      throw new Error(`The worker token file ${file} can't be read (${code ?? "error"}). ${code === "EACCES" ? "The file must be readable by user id 1000: use the compose file from Settings → Server and runner → Checks → Add a check worker, which sets this up by itself." : "Check the path in BOSSMAN_CHECK_WORKER_TOKEN_FILE."}`);
+    }
+  }
   if (!token) throw new Error("Set BOSSMAN_CHECK_WORKER_TOKEN_FILE to a file holding the token from Settings → Server and runner → Checks → Add a check worker.");
   return token;
 }

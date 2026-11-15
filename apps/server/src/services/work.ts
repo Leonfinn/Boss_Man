@@ -1,11 +1,12 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, type GoLiveWait, effectiveDueDate, planFirstByDefault, readCriteria, type ColumnSpec, type RiskTier, type Criterion, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
+import { goLiveNote, openUpdateCards } from "./go-live-note.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, openBlockers, WorkError, type OpenBlocker } from "./ticket-links.js";
 import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
@@ -383,6 +384,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const heldFor = (t: typeof tickets.$inferSelect) => heldWakes.find((h) => h.ticketId === t.id) ?? (t.assigneeAgentId ? heldWakes.find((h) => h.agentId === t.assigneeAgentId) : undefined);
       const heldByAgent = (t: typeof tickets.$inferSelect) => !heldWakes.some((h) => h.ticketId === t.id) && !!(t.assigneeAgentId && heldWakes.some((h) => h.agentId === t.assigneeAgentId));
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
+      const updateCards = rows.some((r) => r.t.goLiveWait && r.t.systemState !== "done") ? await openUpdateCards(db, p.companyId) : { server: null, runner: null };
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
@@ -422,6 +424,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
         quotaHeldReason: heldFor(t)?.reason ?? null,
         quotaHeldAgent: heldByAgent(t),
+        // BOS-1546: a merged ticket that only waits to go live says so, so it doesn't look stuck in Blocked.
+        goLiveNote: t.systemState !== "done" ? goLiveNote(t.goLiveWait as GoLiveWait | null, updateCards) : null,
         };
       });
       return {

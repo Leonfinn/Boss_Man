@@ -912,7 +912,41 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return released;
   }
 
+  /**
+   * BOS-1509: the plan's "deadline passed" card in the states missedWork doesn't look at (Backlog, Blocked, Review).
+   * A ticket moved out of Ready or In progress used to lose its plan's deadline card for good. One card per plan.
+   */
+  async function planDeadlineOutsideWork(t: Date) {
+    const rows = await db
+      .select({ ticket: tickets, agent: agents.name })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(inArray(tickets.systemState, ["backlog", "blocked", "review"]), isNotNull(tickets.ceoPlanDeadline), isNull(tickets.ceoPlanAlertedAt), isNotNull(tickets.ceoPlan), eq(companies.paused, false), lte(tickets.ceoPlanDeadline, new Date(t.getTime() - limits.planGraceMs))));
+    let raised = 0;
+    for (const { ticket, agent } of rows) {
+      const planAt = ticket.ceoPlanDeadline!;
+      const row = await opts.alert({
+        companyId: ticket.companyId,
+        kind: "looks_stuck",
+        from: "scrum_master",
+        duty: true,
+        ticketId: ticket.id,
+        about: ticket.assigneeAgentId ? [ticket.assigneeAgentId] : [],
+        question: `The plan for "${ticket.title}" had a deadline of ${planAt.toISOString().slice(0, 16).replace("T", " ")} UTC and it has passed. The ticket is ${ticket.systemState.replace("_", " ")}${agent ? `, assigned to ${agent}` : ""}. The plan was: ${(ticket.ceoPlan ?? "").slice(0, 300)}`,
+        options: [REASSIGN, "Got it"],
+        recommended: "Got it",
+        dedupeKey: `missed:${ticket.id}:plan:${planAt.getTime()}`,
+        clearWhen: [{ kind: "ticketDone", ticketId: ticket.id }],
+      });
+      await db.update(tickets).set({ ceoPlanAlertedAt: t }).where(eq(tickets.id, ticket.id));
+      if (row) raised++;
+    }
+    return raised;
+  }
+
   async function missedWork(t: Date) {
+    const planCards = await planDeadlineOutsideWork(t);
     const msObjective = alias(objectives, "ms_objective");
     const rows = await db
       .select({ ticket: tickets, agent: agents.name, krPriority: objectives.priority, msPriority: msObjective.priority })
@@ -943,7 +977,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     // Most important objective first (a lower number is more important; no objective goes last), then idle longest.
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
     const candidates = rows.filter((c) => !busy.has(c.ticket.assigneeAgentId!)).sort((a, b) => rank(a) - rank(b) || a.ticket.lastActivityAt.getTime() - b.ticket.lastActivityAt.getTime());
-    const result = { woken: 0, gaveUp: 0 };
+    const result = { woken: 0, gaveUp: planCards };
     const done = new Set<string>();
     for (const { ticket, agent } of candidates) {
       const agentId = ticket.assigneeAgentId!;
@@ -1366,7 +1400,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const heldLines: string[] = [];
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
-        const why = scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        const why = scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
         heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.

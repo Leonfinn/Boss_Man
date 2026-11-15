@@ -8,16 +8,13 @@ It is for people who want AI agents doing real project work (code, docs, design)
 
 ## See it working
 
-![The Boss Man board showing a team of AI agents working on a made-up website project](docs/promo/poster.jpg)
+![A 10 second silent loop of the Boss Man app with made-up data: the project board, the team of AI agents, the merge queue and the roadmap](docs/promo/boss-man-promo-loop.gif)
 
-<!-- Promo video (BOS-1433): after the owner uploads boss-man-promo.mp4 through GitHub's README editor, put the
-     github.com/user-attachments/assets/... link GitHub inserts on its own line here, under the picture.
-     How the video is made: docs/promo/README.md -->
+**[▶ Watch the full video (63 seconds)](https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972)**
 
+<!-- The loop above (BOS-1554) is cut from docs/promo/boss-man-promo.mp4 and autoplays because GitHub plays animated
+     images on its own, never an MP4. How both are made: docs/promo/README.md -->
 
-https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972
-
-     
 A one-minute tour (63 seconds), recorded from the real app with made-up data: the board, the agents, their runs, the merge queue, a decision answered from a phone, and the roadmap.
 
 ## Install

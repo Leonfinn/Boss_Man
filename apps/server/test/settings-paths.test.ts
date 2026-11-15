@@ -16,7 +16,8 @@ const ARROW = /Settings\s*(?:→|->|›|>)\s*([A-Z][^,.:;"`()\n]{0,80})/g;
 /** The pages under Settings, as the store knows them. */
 const PAGES = new Set(OWNER_TABS.Settings.map(norm));
 /** The old Settings tabs (BOS-442): a string that names one of these is stale, wherever it appears (BOS-1019). */
-const RETIRED = ["server and runner", "access and funding", "reviews and ceo", "rules"];
+// ("Server and runner" is no longer one: since BOS-1492 it is the name of a group of pages, so it is a valid first part.)
+const RETIRED = ["access and funding", "reviews and ceo", "rules"];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

@@ -50,7 +50,7 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
@@ -126,7 +126,10 @@ export const OWNER_CONTROLS = {
   "Scrum Master": ["Undo", "Undoing", "Scrum Master", "Show all …"],
   // Settings itself: the tabs along the top (each tab is a screen of its own below, BOS-442).
   Settings: [
-    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions", "Server and runner", "Import and export",
+    // "Server and runner" is the name of the last group, not a page (BOS-1492); its pages are Updates … Devices and privacy.
+    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
+    "Server and runner",
     "Run the setup wizard",
   ],
   "Server and runner": [
@@ -152,6 +155,8 @@ export const OWNER_CONTROLS = {
     "Turn off", "Send test email",
     // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
+    // BOS-1550: copy the ready-filled compose file shown after adding.
+    "Copy compose file",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
@@ -201,7 +206,7 @@ export const OWNER_FIELDS = {
     "Per agent, per hour, before the rest become notes", "Send to my phone through my own ntfy server", "Send to my phone",
     "Also send flags (normal priority)", "Topic",
     "Access token", "Remove the saved token", "Boss Man's address on your phone, so a tap opens the evidence",
-    "Offer an Approve button on simple agent questions",
+    "Offer an Approve button on simple agent questions", "My phone",
   ],
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
@@ -260,6 +265,9 @@ export const OWNER_FIELDS = {
     // Settings → Server and runner → Agents at once (BOS-1029).
     "Tickets in progress per agent (leave empty for no limit)",
     "Tickets in progress, whole company (leave empty for no limit)",
+    // Settings → Server and runner → Tickets in progress: the start hold (BOS-1489).
+    "Hold new starts while this many merges are waiting (leave empty for off)",
+    "Hold new starts while this many quick checks are queued (leave empty for off)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).
@@ -315,6 +323,9 @@ export const OWNER_MENU = [
 ] as const;
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
-  Settings: ["Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions", "Server and runner", "Import and export"],
+  Settings: [
+    "Funding", "Secrets", "Tools and deploys", "Reviews", "Team and CEO", "Watchdog", "Permissions",
+    "Updates", "Limits and checks", "Runner", "Email", "This server", "Devices and privacy", "Import and export",
+  ],
   Board: ["Kanban", "Budget", "Config"],
 } as const;
