@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { portalShows } from "../src/feedback";
+import { portalShows } from "../src/feedback.js";
 
 const base = { portalVisible: true, keepOffPortal: false, status: "planned", publicTitle: null, publicSummary: "Export your data." };
 
