@@ -22,7 +22,7 @@ const columns = { id: tickets.id, state: tickets.systemState, mergedAt: tickets.
 
 /** The group of a ticket (itself included), each member with whether it has finished. */
 export async function priorityGroup(db: Db, ticketId: string): Promise<Array<{ id: string; finished: boolean }>> {
-  const seen = new Map<string, Member>();
+  const seen = new Map<string, Member>(); // shortcut: local to one call, capped at MAX_GROUP tickets, gone when the call returns
   let frontier = [ticketId];
   while (frontier.length && seen.size < MAX_GROUP) {
     const rows = await db.select(columns).from(tickets).where(inArray(tickets.id, frontier));
