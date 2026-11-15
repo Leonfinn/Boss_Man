@@ -1,6 +1,6 @@
 // BOS-1570: the toolchain fingerprint the runner and the check worker both send in hello.
 import { describe, expect, it } from "vitest";
-import { toolchainDifferences } from "@boss-man/shared";
+import { toolchainDifferences, toolchainMissing } from "@boss-man/shared";
 import { firstVersion, fingerprintOf, osRelease, readToolchain } from "../src/toolchain.js";
 
 const ANSWERS: Record<string, string> = {
@@ -37,11 +37,17 @@ describe("toolchain fingerprint", () => {
     expect(a.tools).toMatchObject({ node: "22.11.0", os: "debian-12", pnpm: "10.28.0", git: "2.39.5", shellcheck: "0.9.0", ripgrep: "13.0.0", jq: "1.6", "docker-cli": "29.9.3", "docker-compose": "5.7.0", actionlint: "1.7.12" });
   });
 
-  it("BOS-1606: a worker without playwright differs from a runner with it, and says so", async () => {
-    const runner = await readToolchain({ run, nodeVersion: "22.11.0", os: "debian-12" });
-    const worker = await readToolchain({ run: (c, a) => (c === "playwright" ? Promise.reject(new Error("gone")) : run(c, a)), nodeVersion: "22.11.0", os: "debian-12" });
-    expect(worker.fingerprint).not.toBe(runner.fingerprint);
-    expect(toolchainDifferences(worker.tools, runner.tools)).toEqual(["playwright missing here, 1.64.1 on your runner"]);
+  it("BOS-1606: playwright is compared one way, not in the fingerprint", async () => {
+    const withPw = await readToolchain({ run, nodeVersion: "22.11.0", os: "debian-12" });
+    const noPw = await readToolchain({ run: (c, a) => (c === "playwright" ? Promise.reject(new Error("gone")) : run(c, a)), nodeVersion: "22.11.0", os: "debian-12" });
+    expect(noPw.fingerprint).toBe(withPw.fingerprint);
+    // worker lacks it, runner has it: worker must stay idle and say why
+    expect(toolchainMissing(noPw.tools, withPw.tools)).toEqual(["playwright missing here, 1.64.1 on your runner"]);
+    // worker has an extra one (runner built without the add-on): fine
+    expect(toolchainMissing(withPw.tools, noPw.tools)).toEqual([]);
+    // neither has it: nothing to match
+    expect(toolchainMissing(noPw.tools, noPw.tools)).toEqual([]);
+    expect(toolchainDifferences(withPw.tools, noPw.tools)).toEqual([]);
   });
 
   it("changes when a tool changes or goes missing, but not when only the browser differs", async () => {
