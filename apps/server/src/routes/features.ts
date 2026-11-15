@@ -26,9 +26,11 @@ export function featureRoutes(
     work: ReturnType<typeof workService>;
     /** The public portal's address, as configured, so Settings can show it (trailing slashes trimmed). */
     portalUrl?: string;
+    /** Outgoing email (BOS-1387): "Confirm posts by email" can only be switched on once it is set up. */
+    mailer?: { isConfigured(): Promise<boolean> };
   },
 ) {
-  const { feedback, work, portalUrl } = deps;
+  const { feedback, work, portalUrl, mailer } = deps;
 
   // Feature requests: feedback notes, features and prioritisation.
   const Text = (max: number) => z.string().trim().min(1).max(max);
@@ -55,7 +57,7 @@ export function featureRoutes(
   owner.get("/api/companies/:id/feedback-settings", async (req) => {
     const { id } = IdParam.parse(req.params);
     const s = await feedback.settings(id);
-    return { ...s, portalUrl: portalUrl?.replace(/\/+$/, "") || null, drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
+    return { ...s, portalUrl: portalUrl?.replace(/\/+$/, "") || null, emailReady: !!mailer && (await mailer.isConfigured()), drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
   });
   owner.patch("/api/companies/:id/feedback-settings", async (req) => {
     const { id } = IdParam.parse(req.params);
@@ -74,7 +76,12 @@ export function featureRoutes(
 
   owner.patch("/api/companies/:id/portal", async (req) => {
     const { id } = IdParam.parse(req.params);
-    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable() }).partial().parse(req.body);
+    const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable(), backUrl: z.string().trim().max(2000).nullable(), backText: z.string().trim().max(40).nullable(), confirmByEmail: z.boolean(), confirmLinkHours: z.number().int().min(1).max(168), rememberAddressDays: z.number().int().min(1).max(365) }).partial().parse(req.body);
+    // BOS-1388: posts can only wait for an email once email can be sent, and a link needs the portal's own address.
+    if (b.confirmByEmail) {
+      if (!mailer || !(await mailer.isConfigured())) throw new FeedbackError(422, "Set up outgoing email first (Settings → Server and runner → Outgoing email): the confirmation links are sent from it.");
+      if (!portalUrl) throw new FeedbackError(422, "The confirmation links need the portal's public address: set BOSSMAN_PORTAL_URL (see the install guide).");
+    }
     // BOS-967: the back link must be a full https address, or empty for none.
     if (b.backUrl && !/^https:\/\/[^\s]+$/i.test(b.backUrl)) throw new FeedbackError(422, "Enter a full web address that starts with https://");
     return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}), ...(b.backUrl === "" ? { backUrl: null } : {}), ...(b.backText === "" ? { backText: null } : {}) });
