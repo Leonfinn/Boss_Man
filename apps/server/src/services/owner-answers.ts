@@ -33,8 +33,10 @@ export type OwnerAnswerHit = {
   ticketId: string | null;
   ticketRef: string | null;
   at: Date;
-  /** 0..1: the share of the ask's stemmed words the hit has anywhere. */
+  /** 0..1: the share of the ask's stemmed words the hit has anywhere (for a chat hit, with the agent's line before it). */
   score: number;
+  /** 0..1: the same share, counting only the owner's own words (differs from score for chat hits). */
+  ownerWords: number;
   /**
    * 0..1: for a card or a note, how close its own question (title) is to the ask, by the smaller word
    * count (the similarQuestion rule), so a long answer that happens to use the same words doesn't pass
@@ -60,6 +62,7 @@ type Row = {
   at: Date | string;
   shared: number;
   size: number;
+  a_shared: number;
   q_shared: number | null;
   q_size: number | null;
   rank: number;
@@ -96,15 +99,21 @@ function ownerAnswerSources(c: string, since: Date, kinds: ReadonlySet<OwnerAnsw
       from ticket_messages m
       where m.company_id = ${c} and m.author = 'owner' and m.created_at > ${since}
         and m.text !~ ${MIRRORED_ANSWER.source}`);
+  // A chat answer is searched together with the agent's line before it, as the owner often answers
+  // "here it is" (13 Nov, issue 147). That line can be a long reply, so it is never compared as the
+  // question (qv null): a chat hit is refused only when the owner's own words cover the ask.
   if (kinds.has("chat"))
     parts.push(sql`
-      select 'chat', o.id::text,
-        (select p.text from owner_chat_messages p
-          where p.company_id = o.company_id and p.agent_id is not distinct from o.agent_id and p.role = 'assistant' and p.created_at < o.created_at
-          order by p.created_at desc limit 1),
-        o.text, null::text, null::text, o.created_at, to_tsvector('english', o.text), null::tsvector
-      from owner_chat_messages o
-      where o.company_id = ${c} and o.role = 'owner' and o.created_at > ${since}`);
+      select 'chat', c.id, c.prev, c.text, null::text, null::text, c.at,
+        to_tsvector('english', coalesce(c.prev, '') || ' ' || c.text), null::tsvector
+      from (
+        select o.id::text as id, o.text, o.created_at as at,
+          (select p.text from owner_chat_messages p
+            where p.company_id = o.company_id and p.agent_id is not distinct from o.agent_id and p.role = 'assistant' and p.created_at < o.created_at
+            order by p.created_at desc limit 1) as prev
+        from owner_chat_messages o
+        where o.company_id = ${c} and o.role = 'owner' and o.created_at > ${since}
+      ) c`);
   if (kinds.has("note"))
     parts.push(sql`
       select 'note', n.id::text, n.title, n.why, n.text, n.ticket_id::text, n.created_at,
@@ -130,6 +139,7 @@ async function scoredRows(db: Db, src: ReturnType<typeof sql>, lex: string[], wh
     select s.kind, s.source_id, s.question, s.answer, s.owner_note, s.ticket_id, s.at,
       cardinality(array(select unnest(tsvector_to_array(s.v)) intersect select unnest(q.lex))) as shared,
       cardinality(tsvector_to_array(s.v)) as size,
+      cardinality(array(select unnest(tsvector_to_array(to_tsvector('english', s.answer))) intersect select unnest(q.lex))) as a_shared,
       case when s.qv is null then null else cardinality(array(select unnest(tsvector_to_array(s.qv)) intersect select unnest(q.lex))) end as q_shared,
       case when s.qv is null then null else cardinality(tsvector_to_array(s.qv)) end as q_size
     from src s, q
@@ -143,6 +153,8 @@ function hitOf(r: Row, n: number): OwnerAnswerHit {
   // A card or a note has its own question: compare like with like, by the smaller (similarQuestion's rule).
   const sameQuestion = n && r.q_size ? Number(r.q_shared ?? 0) / Math.min(n, Number(r.q_size)) : 0;
   const cover = n ? Number(r.shared) / n : 0;
+  // A chat hit's text includes the agent's line before it; only the owner's own words count towards a refusal.
+  const ownerWords = n ? Number(r.kind === "chat" ? r.a_shared : r.shared) / n : 0;
   return {
     kind: r.kind,
     sourceId: r.source_id,
@@ -153,6 +165,7 @@ function hitOf(r: Row, n: number): OwnerAnswerHit {
     ticketRef: null,
     at: new Date(r.at),
     score: Math.min(1, cover),
+    ownerWords: Math.min(1, ownerWords),
     sameQuestion: Math.min(1, sameQuestion),
     meaning: null,
     method: "words",
@@ -297,7 +310,7 @@ export const REPEAT_COVER = 0.85;
 export function isRepeat(h: OwnerAnswerHit): boolean {
   if ((h.meaning ?? 0) >= REPEAT_MEANING) return true;
   if (h.sameQuestion >= REPEAT_SAME_QUESTION) return true;
-  return h.kind !== "card" && h.score >= REPEAT_COVER;
+  return h.kind !== "card" && h.ownerWords >= REPEAT_COVER;
 }
 /** Cosine similarity at or above which a meaning match counts as the same ask (set from the BOS-1593 study). */
 export const REPEAT_MEANING = 0.85;

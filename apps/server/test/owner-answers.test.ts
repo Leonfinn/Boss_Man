@@ -164,6 +164,33 @@ describe("owner-answer memory (BOS-1593)", () => {
     }
   });
 
+  // The study rows (BOS-1593 wiki study): each is shaped like a real repeat from the cock-ups log,
+  // reworded. They pin what word search alone does with each, so a change to the scoring that loses
+  // one shows here. "refused": counts as already answered; "shown": found, but the ask goes ahead.
+  it.each([
+    { name: "answer on another ticket's card (15 Nov)", kind: "card", earlier: { question: "Make the GitHub repo public now?", answer: "Yes", note: "Done, I've made it public." }, ask: "Is the repo going public, so the CI wait switch can go on?", words: "shown" },
+    // The same ask without the extra clause: the card's question is matched, so it counts as answered.
+    { name: "answer on another ticket's card, short ask", kind: "card", earlier: { question: "Make the GitHub repo public now?", answer: "Yes", note: "Done, I've made it public." }, ask: "Is the repo going public?", words: "refused" },
+    { name: "same check asked three times (9 Nov)", kind: "card", earlier: { question: "Does the screenshot criterion pass on your phone?", answer: "Pass" }, ask: "Can you confirm the after-merge screenshot criterion passes?", words: "refused" },
+    { name: "sign-off asked again (10 Nov)", kind: "card", earlier: { question: "Approve merging T-979?", answer: "Approve" }, ask: "Sign off T-979 for merge?", words: "refused" },
+    { name: "text pasted in the next chat message (13 Nov)", kind: "chat", earlier: { question: "Is issue 147 done?", answer: "Here it is: email confirmation for portal posts, SMTP settings and a trusted proxy." }, ask: "Can you paste the text of GitHub issue 147?", words: "shown" },
+    { name: "runner already rebuilt (8 Nov)", kind: "ticket_reply", earlier: { question: null, answer: "The runner is already working, I rebuilt it at 16:00." }, ask: "Please press Build and update runners so the token fix is active.", words: "missed" },
+  ] as const)("study: $name → words $words", async ({ kind, earlier, ask, words }) => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Earlier ticket");
+    if (kind === "card") await c.answered({ question: earlier.question!, answer: earlier.answer, ticketId: t.id, ...("note" in earlier ? { note: earlier.note } : {}) });
+    if (kind === "chat")
+      await c.db.insert(ownerChatMessages).values([
+        { companyId: c.company.id, agentId: c.ceo.id, role: "assistant", text: earlier.question!, createdAt: new Date(Date.now() - 60_000) },
+        { companyId: c.company.id, agentId: c.ceo.id, role: "owner", text: earlier.answer },
+      ]);
+    if (kind === "ticket_reply") await c.db.insert(ticketMessages).values({ companyId: c.company.id, ticketId: t.id, author: "owner", text: earlier.answer });
+    // The same floor the owner_answers tool uses for "related".
+    const hits = await searchOwnerAnswers(c.db, { companyId: c.company.id, q: ask, minScore: 0.34 });
+    const got = hits.some(isRepeat) ? "refused" : hits.length ? "shown" : "missed";
+    expect(got).toBe(words);
+  });
+
   describe("meaning search (opt-in)", () => {
     const enable = async (c: Awaited<ReturnType<typeof setup>>, over: object = {}) => {
       const secret = (await c.req("POST", "/api/secrets", { name: "embeddings key", kind: "generic", value: "sk-test-embeddings-0001" })).json() as { secret: { id: string } };
