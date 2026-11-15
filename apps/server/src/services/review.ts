@@ -2298,6 +2298,12 @@ export function reviewService(
                 const stop = await gone();
                 if (stop) return stop;
               }
+              // BOS-1516: Priority 1 set (or Move to front) after this ticket joined: the tier was fixed at join, so read it again.
+              // A copy that missed the owner's switch (another server copy, a restart) still picks it up here.
+              {
+                const [mark] = await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, ticketId));
+                if (mark?.urgent) train.retier(ticketId, 0);
+              }
               const onMain = await trialClash();
               if (onMain) {
                 await lineEvent(db, t, { event: "train_clash", on: "main", with: clash ? await namedTickets(clash.with) : [], files: onMain.slice(0, TRAIN_CLASH_FILES), fileCount: onMain.length, action: "sent_back" });

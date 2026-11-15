@@ -13,7 +13,7 @@ import { checkPriority, isBackgroundLaneTitle } from "./check-gate.js";
 import { record } from "./activity.js";
 import { checkFailureFacts, FULL_LOG_RETENTION_DAYS, prepareFullLog, ticketRef } from "@boss-man/shared";
 import { softHold } from "./deploy-wait-hold.js";
-import { trainView } from "./merge-train.js";
+import { retierWaiting, trainView } from "./merge-train.js";
 
 export const CHECK_SLOTS_KEY = "check_slots";
 /** The merge train switch (BOS-1366): approved tickets land in order, each checked on main plus the ones ahead. Off by default. */
@@ -110,9 +110,14 @@ export function checkQueue(db: Db) {
    */
   async function mergePlace(db: Db, ticketId: string): Promise<{ at: Date | null; front: { at: Date; by: string | null } | null }> {
     const since = Date.now() - PLACE_KEEP_MS;
-    const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, ["queued", "running", "passed", "cancelled"])))).filter(
+    // BOS-1516: a Priority 1 ticket (the owner's urgent switch) keeps its place after a send-back: its earlier merge jobs count
+    // whatever their end (failed, stuck, cancelled) and however long ago, so it returns where it was, not at the back of the line.
+    const [mark] = await db.select({ p1: tickets.urgentByOwner, urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, ticketId));
+    const keepAll = !!mark?.p1 && !!mark.urgent;
+    const states = keepAll ? ["queued", "running", "passed", "cancelled", "failed", "stuck"] : ["queued", "running", "passed", "cancelled"];
+    const earlier = (await db.select().from(checkJobs).where(and(eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), inArray(checkJobs.state, states as Array<CheckJob["state"]>)))).filter(
       // A cancel lends its place only when it was the "newer commit" drop (main moved or a restart); a deliberate cancel does not.
-      (j) => j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
+      (j) => keepAll || j.state === "queued" || j.state === "running" || (j.endedAt && j.endedAt.getTime() >= since && (j.state === "passed" || j.reason === SUPERSEDED_TEXT)),
     );
     let at: Date | null = null;
     let front: { at: Date; by: string | null } | null = null;
@@ -335,6 +340,19 @@ export function checkQueue(db: Db) {
       await record(db, { companyId, ticketId, kind: "reorganised", summary: `${by} moved this ${what} to the front of the line${reason ? `: ${reason}` : ""}`, detail: { jobId: row.id, kind: row.kind, by, reason: reason ?? null }, at: now });
     }
     return rows.find((r) => r.kind === "merge") ?? rows[0] ?? null;
+  }
+
+  /**
+   * BOS-1516: "Move to front" for a ticket still waiting for a merge train seat. It has no check job to mark yet, so the move is
+   * made on the train: the ticket is seated ahead of every other waiting ticket (below a merge-line fix). True when it moved,
+   * false when it isn't waiting for a seat (not joined yet, already seated, or already first in tier). Nothing is skipped: it
+   * still runs its whole check once seated.
+   */
+  async function moveSeatWaiter(companyId: string, ticketId: string, by: string, reason?: string, now = new Date()): Promise<boolean> {
+    const [t] = await db.select({ projectId: tickets.projectId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+    if (!t || !retierWaiting(t.projectId, ticketId, 0)) return false;
+    await record(db, { companyId, ticketId, kind: "reorganised", summary: `${by} moved this merge to the front of the merge train${reason ? `: ${reason}` : ""}`, detail: { by, reason: reason ?? null, where: "train" }, at: now });
+    return true;
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
@@ -578,5 +596,5 @@ export function checkQueue(db: Db) {
 
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }

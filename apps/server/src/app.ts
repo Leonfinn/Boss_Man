@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, featureHorizon, formatDate, usdToMicros, ruleFor, PERMISSION_JUDGE_MODES, FENCE_MODES, FENCE_ENFORCE_AVAILABLE } from "@boss-man/shared";
@@ -113,6 +113,7 @@ import { CheckBundleInfo, type GoLiveWait } from "@boss-man/shared";
 import { goLiveNote, openUpdateCards } from "./services/go-live-note.js";
 import { checkRequestService } from "./services/check-request.js";
 import { checkQueue, type CheckQueueMode } from "./services/check-queue.js";
+import { retierWaiting } from "./services/merge-train.js";
 import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.js";
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
@@ -1950,8 +1951,11 @@ export async function buildApp(opts: AppOptions) {
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
       const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
-      const job = await checkQueueSvc.moveToFront(id, ticketId, await ownerName(req), "owner chose Move to front");
-      if (!job) return reply.code(409).send({ error: "That merge isn't waiting for a check slot, so there is nothing to move." });
+      const by = await ownerName(req);
+      const job = await checkQueueSvc.moveToFront(id, ticketId, by, "owner chose Move to front");
+      // BOS-1516: a ticket still waiting for a train seat has no job to mark: move it on the train instead.
+      const seat = await checkQueueSvc.moveSeatWaiter(id, ticketId, by, "owner chose Move to front");
+      if (!job && !seat) return reply.code(409).send({ error: "That merge isn't waiting for a check slot or a place in the merge train, so there is nothing to move." });
       return { ok: true };
     });
 
@@ -2035,7 +2039,27 @@ export async function buildApp(opts: AppOptions) {
       const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
       // A per-ticket spend ceiling across all its runs (R53); null falls back to the project's default.
       if (costCapUsd !== undefined) await db.update(tickets).set({ costCapMicros: costCapUsd === null ? null : usdToMicros(costCapUsd) }).where(eq(tickets.id, id));
-      return work.updateTicket(id, fields);
+      // BOS-1516: the owner's urgent switch is "Priority 1": it records that the owner set it, and a ticket already waiting for a
+      // merge train seat moves up now (the landing's wait loop would also notice within a poll).
+      const updated = await work.updateTicket(id, fields.urgent === undefined ? fields : { ...fields, urgentByOwner: fields.urgent });
+      if (fields.urgent) retierWaiting(updated.projectId, id, 0);
+      return updated;
+    });
+
+    // BOS-1516: the owner's "Priority 1" switch on a feature: every open ticket of it carries the owner's urgent mark (new ones
+    // too, see createTicket). Turning it off clears only the marks the owner set; done and cancelled tickets are left alone.
+    owner.put("/api/features/:id/priority-one", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { on } = z.object({ on: z.boolean() }).parse(req.body);
+      const [f] = await db.select({ id: featuresTable.id }).from(featuresTable).where(eq(featuresTable.id, id));
+      if (!f) return reply.code(404).send({ error: "not_found" });
+      await db.update(featuresTable).set({ priorityOne: on }).where(eq(featuresTable.id, id));
+      const open = and(eq(tickets.featureId, id), ne(tickets.systemState, "done"));
+      const changed = on
+        ? await db.update(tickets).set({ urgent: true, urgentByOwner: true, version: sql`${tickets.version} + 1` }).where(and(open, or(eq(tickets.urgent, false), eq(tickets.urgentByOwner, false)))).returning({ id: tickets.id, projectId: tickets.projectId })
+        : await db.update(tickets).set({ urgent: false, urgentByOwner: false, version: sql`${tickets.version} + 1` }).where(and(open, eq(tickets.urgentByOwner, true))).returning({ id: tickets.id, projectId: tickets.projectId });
+      if (on) for (const c of changed) retierWaiting(c.projectId, c.id, 0);
+      return { ok: true, priorityOne: on, tickets: changed.length };
     });
 
     // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.

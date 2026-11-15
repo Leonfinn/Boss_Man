@@ -349,8 +349,10 @@ export function registerDecisionTools(
           const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
           if (!t) return fail("No such ticket in your company.");
           const job = await checkQueue(db).moveToFront(scope.companyId, input.ticketId, me.name, input.reason.trim());
-          if (!job) return fail("That ticket has no merge or quick check waiting for a check slot (it may be running, held, or not queued yet), so there is nothing to move.");
-          const what = job.kind === "merge" ? "merge" : "quick check";
+          // BOS-1516: a ticket still waiting for a merge train seat has no job yet: it moves on the train.
+          const seat = await checkQueue(db).moveSeatWaiter(scope.companyId, input.ticketId, me.name, input.reason.trim());
+          if (!job && !seat) return fail("That ticket has no merge or quick check waiting for a check slot, and isn't waiting for a merge train seat (it may be running, held, or not queued yet), so there is nothing to move.");
+          const what = job ? (job.kind === "merge" ? "merge" : "quick check") : "merge (it waits for a train seat)";
           return text(`This ${what} is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a check already running is not stopped.`);
         }
         if (input.action === "release_hold" || input.action === "cancel_hold") {
