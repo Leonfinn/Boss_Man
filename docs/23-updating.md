@@ -44,7 +44,7 @@ If the health check fails, the script changes nothing by itself and prints the c
 
 Skip this step if you do not use the host deployer.
 
-The host deployer runs from its own copy of `scripts/host-deployer.sh`. A good deploy (`scripts/deploy.sh`, or a blue/green swap by the deployer) now refreshes that copy by itself with `scripts/install-deployer.sh`: it writes the new file beside the old one, keeps the owner and mode, and renames it over, so the new version is used from the deployer's next run. You only need the hand copy below if the deploy output says "the deployer copy was not refreshed", or for the first update that brings this feature in. To check, set `D` to your deployer folder and compare the two copies:
+The host deployer runs from its own copy of `scripts/host-deployer.sh`. A change to that script is never deployed from the panel (it is what root runs), so you apply it by hand with `scripts/deploy.sh` as the card says. That deploy now refreshes the copy by itself with `scripts/install-deployer.sh`, so no separate copy command is needed: it writes the new file beside the old one, keeps the owner and mode, and renames it over, so the new version is used from the deployer's next run. You only need the hand copy below if the deploy output says "the deployer copy was not refreshed", or for the first update that brings this feature in. To check, set `D` to your deployer folder and compare the two copies:
 
 ```sh
 cmp scripts/host-deployer.sh $D/host-deployer.sh

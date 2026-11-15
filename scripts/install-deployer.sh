@@ -36,6 +36,9 @@ if (((8#$dmode) & 8#022)); then echo "install-deployer: $D is writable by others
 if [[ $(id -u) != 0 && $(stat -c %u "$DEST") != "$(id -u)" ]]; then
   echo "install-deployer: $DEST belongs to another user; run this as root to refresh it." >&2; exit 1
 fi
+if [[ $(id -u) == 0 && ( $(stat -c %u "$D") != 0 || $(stat -c %u "$DEST") != 0 ) ]]; then
+  echo "install-deployer: $D or $DEST is not owned by root; not touching it as root." >&2; exit 1
+fi
 bash -n "$SRC" || { echo "install-deployer: $SRC does not parse; the old copy is kept." >&2; exit 1; }
 if ((DRY)); then echo "[dry-run] would replace $DEST with $SRC"; exit 0; fi
 
