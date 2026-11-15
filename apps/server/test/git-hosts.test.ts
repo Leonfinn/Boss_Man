@@ -1,5 +1,6 @@
+import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { GitHostError, gitHostService } from "../src/services/git-hosts.js";
+import { GitHostError, gitHostService, MAX_LOG_CHARS } from "../src/services/git-hosts.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
@@ -71,5 +72,50 @@ describe("checks on a commit (DR-024 #2)", () => {
   });
   it("says so when the token can't read checks", async () => {
     await expect(host(403, { message: "Resource not accessible by personal access token" }).checks(cfg("github"), "t", "a".repeat(40))).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe("reading a branch's Actions runs (BOS-1072)", () => {
+  const host = (answer: (path: string) => Response) => gitHostService({ fetch: (async (u: string) => answer(u.replace("https://host/api/repos/leon/site", ""))) as unknown as typeof fetch });
+
+  it("reads the runs, the jobs with their steps, and says nothing on Gitea", async () => {
+    const h = host((p) =>
+      p.startsWith("/actions/runs?")
+        ? json(200, { workflow_runs: [{ id: 5, run_attempt: 2, name: "CI", event: "schedule", status: "completed", conclusion: "failure", head_sha: "a".repeat(40), head_commit: { message: "Merge x" }, html_url: "https://gh/run/5", created_at: "t1" }] })
+        : json(200, { jobs: [{ id: 9, name: "test", status: "completed", conclusion: "failure", html_url: "https://gh/job/9", steps: [{ number: 1, name: "Run tests", status: "completed", conclusion: "failure" }] }] }),
+    );
+    const [run] = await h.workflowRuns(cfg("github"), "t", "main");
+    expect(run).toMatchObject({ id: 5, attempt: 2, event: "schedule", conclusion: "failure", headMessage: "Merge x", url: "https://gh/run/5" });
+    const [job] = await h.runJobs(cfg("github"), "t", 5);
+    expect(job).toMatchObject({ id: 9, name: "test", steps: [{ name: "Run tests", conclusion: "failure" }] });
+    expect(await h.workflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
+  });
+
+  it("throws a GitHostError when the token can't read the runs", async () => {
+    await expect(host(() => json(403, { message: "Resource not accessible" })).workflowRuns(cfg("github"), "t", "main")).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("reads a job log whether GitHub sends a zip or plain text", async () => {
+    const zip = zipSync({ "2_b.txt": strToU8("second"), "1_a.txt": strToU8("first") });
+    expect(await host(() => new Response(zip)).jobLog(cfg("github"), "t", 9)).toBe("first\nsecond");
+    expect(await host(() => new Response("plain log")).jobLog(cfg("github"), "t", 9)).toBe("plain log");
+  });
+
+  it("keeps only the end of a very long log, and skips a step log that is too big", async () => {
+    const big = "x".repeat(MAX_LOG_CHARS + 500) + "THE END";
+    const tail = await host(() => new Response(big)).jobLog(cfg("github"), "t", 9);
+    expect(tail).toHaveLength(MAX_LOG_CHARS);
+    expect(tail.endsWith("THE END")).toBe(true);
+    const zip = zipSync({ "1_big.txt": strToU8("y".repeat(MAX_LOG_CHARS + 1)), "2_ok.txt": strToU8("kept") });
+    expect(await host(() => new Response(zip)).jobLog(cfg("github"), "t", 9)).toBe("kept");
+  });
+
+  it("collects the error annotations of failed check runs only", async () => {
+    const h = host((p) =>
+      p.startsWith("/commits/")
+        ? json(200, { check_runs: [{ id: 1, name: "test", conclusion: "failure" }, { id: 2, name: "lint", conclusion: "success" }] })
+        : json(200, [{ path: "a.ts", start_line: 3, message: "boom" }]),
+    );
+    expect(await h.commitAnnotations(cfg("github"), "t", "a".repeat(40))).toEqual([{ name: "test", lines: ["a.ts:3 boom"] }]);
   });
 });
