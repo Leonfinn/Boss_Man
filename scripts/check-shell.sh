@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
-# ShellCheck for every shell script CI checks. CI runs this; run it yourself before handing work in.
-# A new script under scripts/ or skills/ goes on this list.
+# ShellCheck for every tracked *.sh (git ls-files), so a new script is checked without anyone adding it to a list.
+# CI runs this; run it yourself before handing work in. Arguments replace the file list (used by check-shell.test.sh).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/deploy-staging.sh scripts/deploy-staging.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh scripts/install-deployer.sh scripts/install-deployer.test.sh scripts/update-runner.sh scripts/update-runner.test.sh scripts/rebuild-live.sh scripts/rebuild-live.test.sh scripts/caddy-edge.test.sh scripts/backup-penpot.sh scripts/backup-penpot.test.sh scripts/restore-test.sh scripts/restore-test.test.sh skills/penpot/scripts/penpot.sh skills/penpot/scripts/penpot.test.sh skills/penpot/scripts/penpot.write.test.sh scripts/check-all.sh scripts/check-all.test.sh scripts/check-slot.sh scripts/check-quick.sh scripts/check-quick.test.sh scripts/check-compose.sh scripts/check-compose.test.sh scripts/image-tests.sh scripts/publish-images.sh scripts/publish-images.test.sh scripts/sweep-tmp.sh scripts/sweep-tmp.test.sh scripts/test-shell.sh scripts/test-shell.test.sh scripts/rehearse/tailscale.sh scripts/browser-check.sh scripts/browser-check.test.sh apps/netguard/netguard.sh apps/netguard/netguard.test.sh
+# Skip list: one "path  # reason" per entry. Keep it short; an entry without a reason is a bug.
+skip=(
+  # (empty: every tracked shell script is checked)
+)
+if [ "$#" -gt 0 ]; then
+  files=("$@")
+else
+  files=()
+  while IFS= read -r f; do
+    for s in ${skip[@]+"${skip[@]}"}; do [ "$f" != "$s" ] || continue 2; done
+    files+=("$f")
+  done < <(git ls-files '*.sh')
+fi
+[ "${#files[@]}" -gt 0 ] || { echo "check-shell: no shell scripts found" >&2; exit 1; }
+shellcheck "${files[@]}"

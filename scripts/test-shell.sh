@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# The shell scripts' own tests (none needs Docker). CI and scripts/check-all.sh both run this; a new *.test.sh goes here.
+# The shell scripts' own tests (none needs Docker). CI and scripts/check-all.sh both run this; every tracked *.test.sh runs.
 # Each test runs in a scrubbed environment (DR-025): only PATH, HOME, TMPDIR and LANG, so a variable the merge gate
 # sets (such as BOSSMAN_MERGE_CHECK) cannot change a test's result. Arguments replace the default test list (used by test-shell.test.sh).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-tests=(scripts/deploy.test.sh scripts/deploy-staging.test.sh scripts/host-deployer.test.sh scripts/install-deployer.test.sh scripts/update-runner.test.sh scripts/rebuild-live.test.sh scripts/caddy-edge.test.sh scripts/backup-penpot.test.sh scripts/check-all.test.sh scripts/check-quick.test.sh scripts/check-compose.test.sh scripts/sweep-tmp.test.sh scripts/restore-test.test.sh scripts/browser-check.test.sh scripts/test-shell.test.sh skills/penpot/scripts/penpot.test.sh skills/penpot/scripts/penpot.write.test.sh apps/netguard/netguard.test.sh scripts/publish-images.test.sh)
+# Every tracked *.test.sh runs (git ls-files); nothing needs adding to a list. Skip list: one "path  # reason" per entry.
+skip=(
+  # (empty: every tracked test runs)
+)
+tests=()
+while IFS= read -r f; do
+  for s in ${skip[@]+"${skip[@]}"}; do [ "$f" != "$s" ] || continue 2; done
+  tests+=("$f")
+done < <(git ls-files '*.test.sh')
 [ "$#" -eq 0 ] || tests=("$@")
 for t in "${tests[@]}"; do
   # CADDY is the one named opt-in: caddy-edge.test.sh skips without it, and CI points it at the caddy binary.

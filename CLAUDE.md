@@ -16,7 +16,7 @@ Boss Man runs the full check before it merges approved work, so anything it repo
 
 - Changed `apps/server/src/db/schema.ts`? Generate the migration with drizzle-kit and commit it.
 - Main took your migration number? Leave it. Do not renumber by hand: the merge gate renumbers a branch whose only clash is migration bookkeeping (`rebaseMigrations`, BOS-690), and `scripts/check-quick.sh` accepts that case, printing "migration NNNN will be renumbered to MMMM by the merge gate". A real clash (code, or the same table or column changed on both sides) still fails; see `docs/10-migrations.md`.
-- Added a shell script? Add it to `scripts/check-shell.sh`. Added a `*.test.sh`? Add it to `scripts/test-shell.sh`.
+- Added a shell script or a `*.test.sh`? `git add` it: `scripts/check-shell.sh` ShellChecks every tracked `*.sh` and `scripts/test-shell.sh` runs every tracked `*.test.sh`. Only a file on a skip list in those scripts (each entry with its reason) is left out.
 
 ## Writing tests: they must pass on GitHub's runners too
 
