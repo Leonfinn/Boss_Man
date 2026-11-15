@@ -195,7 +195,9 @@ if [[ $1 == ps && $2 == -a && $3 == --filter && $4 == label=com.docker.compose.p
   printf 'aaa\tsrv\t%s\t%s\t2 hours ago\tsrv\tsrv\n' "${FAKE_RUN:-running}" "${FAKE_STATUS:-Up 2 hours}"
   printf 'bbb\tbm-migrate-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tmigrate\n'
   printf 'ccc\tbm-netguard-1\texited\tExited (0) 5 minutes ago\t5 minutes ago\tbm\tnetguard\n'
-  printf 'ddd\tserver-green\texited\tExited (0) 1 minute ago\t1 minute ago\tbm\tserver-green\n'
+  printf 'ddd\tserver-green\texited\tExited (%s) 1 minute ago\t1 minute ago\tbm\tserver-green\n' "${FAKE_GREEN_EXIT:-0}"
+  # BOS-1584: FAKE_BLUE=running|exited adds the other colour, to test the standby filter with a known live colour.
+  [[ -n ${FAKE_BLUE:-} ]] && printf 'bl1\tserver-blue\t%s\tUp 1 hour\t1 hour ago\tbm\tserver-blue\n' "$FAKE_BLUE"
   printf 'eee\tbm-worker-1\texited\tExited (%s) 2 hours ago\t2 hours ago\tbm\tworker\n' "${FAKE_EXIT:-137}"
   printf 'fff\tbm-cache-1\trestarting\tRestarting (255) 1 second ago\t1 minute ago\tbm\tcache\n'
   printf 'ggg\tbm-db-1\texited\tExited (0) 10 minutes ago\t10 minutes ago\tbm\tdb\n'
@@ -210,7 +212,9 @@ if [[ $1 == inspect && $2 == -f && $3 == '{{.State.ExitCode}}' ]]; then
   [[ -n ${FAKE_INSPECT_EMPTY:-} ]] && exit 0
   for id in "$@"; do
     case $id in
-      bbb|ccc|ddd|ggg) echo 0 ;;
+      ddd) echo "${FAKE_GREEN_EXIT:-0}" ;;
+      bl1) echo "${FAKE_BLUE_EXIT:-1}" ;;
+      bbb|ccc|ggg) echo 0 ;;
       eee|hhh) echo "${FAKE_EXIT:-137}" ;;
       fff) echo 255 ;;
       *) echo 0 ;;
@@ -257,6 +261,30 @@ node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=
 # A worker that exited 0 with a normal restart policy is still named, not hidden as a finished one-shot.
 FAKE_EXIT=0 "$T/fd/hd.sh" >"$T/out" 2>&1 || fail "host-deployer (all up) exited non-zero"
 node -e 'const c=require(process.argv[1]).checks.container_status;if(c.notRunning!==3)process.exit(1)' "$D/outbox/host.json" || fail "only the migrate/netguard one-shots and the standby colour should be ignored"
+# BOS-1584: with blue/green on and blue the live colour (running), the stopped green standby is meant to be stopped
+# whatever its exit code (docker stop gives 137). Blue/green is on when COMPOSE_FILE names the bluegreen file, and the
+# live colour is read from the proxy include.
+mkdir -p "$D/proxy"; printf 'reverse_proxy server-blue:3100\n' >"$D/proxy/active.caddy"
+bgnames() { COMPOSE_FILE="docker-compose.yml:deploy/truenas-bluegreen.yml" "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (standby) exited non-zero"; }
+  node -e 'const s=require(process.argv[1]).checks.container_status.stopped.map(x=>x.name+":"+x.exit);process.stdout.write(s.sort().join(","))' "$D/outbox/host.json"; }
+for gx in 0 137 143 1; do
+  [[ $(FAKE_BLUE=running FAKE_GREEN_EXIT=$gx bgnames) == "bm-cache-1:255,bm-db-1:0,bm-worker-1:137" ]] || fail "standby green (exit $gx) beside a running blue must be ignored"
+done
+# A crashed live colour is still reported: blue is live but not running, so green's stop is not "meant" and blue is named.
+names="$(FAKE_BLUE=exited FAKE_BLUE_EXIT=137 FAKE_GREEN_EXIT=137 bgnames)"
+[[ $names == *"server-blue:137"* && $names == *"server-green:137"* ]] || fail "a live colour that is down must still be reported, with its standby: $names"
+rm -f "$D/proxy/active.caddy"
+# BOS-1584: the repo probe goes over the same ssh command a deploy uses. A checkout's core.sshCommand (the deploy key)
+# must survive: the probe adds only the no-prompt options. A fake ssh records what it was given and refuses.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s/ssh.args"\nexit 255\n' "$T" >"$T/fd/fakessh"; chmod +x "$T/fd/fakessh"
+git -C "$T/src" config core.sshCommand "$T/fd/fakessh -i /keys/deploy_key -o IdentitiesOnly=yes"
+git -C "$T/src" remote set-url origin "ssh://someone@git.example.test/repo.git"
+rm -f "$D/state/repo-probe" "$T/ssh.args"; host
+has "$T/ssh.args" "-i /keys/deploy_key -o IdentitiesOnly=yes"
+has "$T/ssh.args" "BatchMode=yes"
+git -C "$T/src" config --unset core.sshCommand
+git -C "$T/src" remote set-url origin "$T/origin.git"
+rm -f "$D/state/repo-probe"; host
 # When inspect returns nothing for every container (removed between ps and inspect, or inspect denied), `exit` must
 # still be a string so host.json stays valid JSON and the panel keeps every other fact (Rod's must-fix).
 FAKE_INSPECT_EMPTY=1 "$T/fd/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (empty inspect) exited non-zero"; }
