@@ -1290,7 +1290,7 @@ hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "token add"; has "$PD/outbox/phone-log
 # PS3. Only the publish user can be set up, and phone logins cannot be made for it.
 for bad in "setup phone-read alerts $PUB" "setup admin alerts $PUB" "create bossman-publish alerts $PUB" "reset bossman-publish alerts $PUB"; do
   # shellcheck disable=SC2086
-  plreq ${bad%% $PUB} "$PUB"; : >"$PLLOG"; plhost
+  plreq ${bad%% "$PUB"} "$PUB"; : >"$PLLOG"; plhost
   [[ $(plres result) == rejected && $(plx) == 0 ]] || fail "PS3 ($bad): $(cat "$PD/outbox/phone-login.json")"
 done
 # PS4. A failing ntfy step reports failed with no sealed token.
