@@ -12,17 +12,17 @@ import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
-type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean };
-type WaitingState = "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
+type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; statusLine?: StatusLine };
+type WaitingState = "waiting_for_seat" | "waiting_for_slot" | "check_failed_retrying" | "needs_you" | "waiting_for_sign_off" | "waiting_for_check_capacity" | "checking" | "waiting_host" | "waiting_for_decision" | "waiting_for_other_ticket" | "held";
 /** Approved work held by the carried-work guard (BOS-130, BOS-766): the ticket(s) it waits for. */
 type CarriedHold = { ticketId: string | null; ref: string | null; title: string };
 /** The card a waiting merge is held by (BOS-1078): named, with who raised it and a link straight to it. */
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
-type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null };
+type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
 type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
 
-const PHASE: Record<Phase, string> = { queued: "waiting for a check slot", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
+const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
 
 /** "4 waiting to merge" for the side menu's badge, or null when nothing waits. */
@@ -43,6 +43,20 @@ export function clockText(iso: string, now = new Date()): string {
   const d = new Date(iso);
   const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return d.toDateString() === now.toDateString() ? time : `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${time}`;
+}
+
+/** BOS-1517: the one status line of a ticket in the merge pipeline, from the server's live view (the queue and the ticket page show the same). */
+export type StatusLine = { step: string; since: string; next: string; blocker: string | null };
+
+/** "Waiting for a train seat · since 20:39 (12m). Next: …. In the way: …." */
+export function StatusLineView({ line }: { line: StatusLine }) {
+  return (
+    <p className="mq-line" data-status-line="true">
+      <strong>{upFirst(line.step)}</strong> · since {clockText(line.since)} ({waited(Math.max(0, Math.round((Date.now() - new Date(line.since).getTime()) / 60_000)))}).
+      {line.next ? <span className="mq-sl-part"> Next: {line.next.replace(/\.$/, "")}.</span> : null}
+      {line.blocker ? <span className="mq-sl-part" data-in-the-way="true"> In the way: {line.blocker.replace(/\.$/, "")}.</span> : null}
+    </p>
+  );
 }
 
 /** Who is acting, in plain grammar: "you're acting", "the CEO is acting". */
@@ -144,9 +158,13 @@ function Running({ rows, slots }: { rows: RunningNow[]; slots: number }) {
                 <TicketLink id={r.ticketId} ref={r.ref} title={r.title} />
                 <span className={`tag ${r.overLimit ? "red" : "blue"}`}>{r.overLimit ? "over an hour" : "in progress"}</span>
               </div>
-              <p className="mq-line">
-                Slot {r.slot}: {PHASE[r.phase]} (the {r.what === "merge_check" ? "merge check" : "agent's own check"}). Started {waited(r.minutes)} ago at {new Date(r.startedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} by {r.startedBy}.
-              </p>
+              {r.statusLine ? (
+                <StatusLineView line={r.statusLine} />
+              ) : (
+                <p className="mq-line">
+                  Slot {r.slot}: {PHASE[r.phase]} (the {r.what === "merge_check" ? "merge check" : "agent's own check"}). Started {waited(r.minutes)} ago at {new Date(r.startedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} by {r.startedBy}.
+                </p>
+              )}
               {r.overLimit && <p className="mq-next">Next: Boss Man keeps trying by itself; if it can't finish, it puts a card in your Decisions.</p>}
             </article>
           ))}
@@ -239,11 +257,12 @@ export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; comp
                 <p className="mq-line">
                   <span className={`tag ${s.tone}`}>{s.word}</span>
                   {r.urgent && <span className="tag blue"> urgent</span>}{" "}
-                  {upFirst(r.label)}.{r.next ? ` ${r.next}` : ""}
+                  {r.statusLine ? null : `${upFirst(r.label)}.${r.next ? ` ${r.next}` : ""}`}
                   {r.actor && r.actor !== "system" ? ` (${actingText(r.actor)})` : ""}
                   {r.why ? <span className="tag grey" data-why="true"> next because: {r.why}</span> : null}
                   {companyId && onMoved && r.place && r.place > 1 && (r.state === "waiting_for_slot" || r.state === "waiting_for_check_capacity") ? <> <MoveToFront companyId={companyId} row={r} onMoved={onMoved} /></> : null}
                 </p>
+                {r.statusLine ? <StatusLineView line={r.statusLine} /> : null}
                 {/* A carried-work hold (BOS-130, BOS-766, BOS-819): name the ticket it waits for, from the typed
                     list, so the row never depends on reading a title out of the hold's sentence. */}
                 {r.carried?.length ? (
@@ -309,7 +328,7 @@ function Recent({ rows }: { rows: RecentRow[] }) {
   );
 }
 
-type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean };
+type CheckRow = { id: string; ticketId: string; ref: string | null; title: string; kind: "merge" | "quick" | "full"; requestedBy: string | null; state: "running" | "waiting"; position: number | null; minutes: number; fixesMain: boolean; why?: string | null; heldBy: string | null; heldByMain: boolean; ranOn?: string | null };
 type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: number; rows: CheckRow[] };
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
@@ -363,6 +382,8 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
                 {r.why && !r.fixesMain ? <span className="tag grey"> {r.why}</span> : null}{" "}
                 {upFirst(KIND[r.kind])}
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
+                {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
+                {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
               </p>
             </article>
           ))}

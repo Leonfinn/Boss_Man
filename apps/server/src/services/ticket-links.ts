@@ -2,8 +2,9 @@
 // and every move it makes. Rounds 8-12 closed one route at a time; this is the data layer, so a new
 // tool or service can't reopen the hole by forgetting its own check.
 import { and, eq, sql } from "drizzle-orm";
+import { unreportedAfterMerge } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions, tickets, ticketDependencies } from "../db/schema.js";
+import { decisions, engagements, tickets, ticketDependencies } from "../db/schema.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 
@@ -24,6 +25,72 @@ export class WorkError extends Error {
  */
 export function ticketBlockerFinished(d: { ticketState: string | null; mergeCommit: string | null; until: string }): boolean {
   return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
+}
+
+export { ticketBlockerOpenSql } from "./blocker-sql.js";
+
+export type OpenBlocker = { kind: "ticket" | "engagement" | "decision"; title: string | null };
+
+/**
+ * What still holds a ticket (BOS-1458): the one answer for starting it, blocking it, waking an urgent one
+ * and creating it. A blocker ticket is free by `ticketBlockerFinished` (merged counts when the link waits
+ * until merged); an engagement is open until signed off; a decision is open until answered.
+ */
+export async function openBlockers(db: Db, ticketId: string): Promise<OpenBlocker[]> {
+  const deps = await db
+    .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status, decisionStatus: decisions.status })
+    .from(ticketDependencies)
+    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(eq(ticketDependencies.blockedTicketId, ticketId));
+  const open: OpenBlocker[] = [];
+  for (const d of deps) {
+    if (d.ticketState && !ticketBlockerFinished(d)) open.push({ kind: "ticket", title: d.ticketTitle });
+    else if (d.engagementStatus && d.engagementStatus !== "signed_off") open.push({ kind: "engagement", title: null });
+    else if (d.decisionStatus === "open") open.push({ kind: "decision", title: null });
+  }
+  return open;
+}
+
+/** The open cards that name this ticket (a plan card, a permission card or a question), linked or not. */
+export async function openCardIds(db: Db, ticketId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: decisions.id })
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  return rows.map((r) => r.id);
+}
+
+/** True when the ticket has merged and still has after-merge criteria without a reported pass or fail. */
+export async function mergedAwaitingChecks(db: Db, ticketId: string): Promise<boolean> {
+  const [t] = await db.select({ mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote }).from(tickets).where(eq(tickets.id, ticketId));
+  return !!t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0;
+}
+
+export type BlockedHold = { kind: "date" | "blocker" | "card" | "checks" | "go_live" };
+
+/**
+ * DR-061 Q2a, the one answer to "is this ticket held in Blocked?" (BOS-1532): what Blocked accepts on the way in
+ * and what it must keep on the way out are the same list. Held while any of these is true: a "blocked until" time
+ * still ahead; an open blocker (`openBlockers`); an open card naming the ticket, linked or not; a merged ticket with
+ * after-merge criteria not yet reported; a go-live wait. An empty list means nothing holds it.
+ *
+ * `blockedUntil` is the date to judge: pass the one being set on the way in (null for none); leave it out to read
+ * the stored one. A date that has passed holds nothing. A state note that says "parked" is not a hold here: the
+ * scheduler's release tells the assignee about it and leaves the ticket where it is (BOS-742).
+ */
+export async function blockedHolds(db: Db, ticketId: string, opts: { now?: Date; blockedUntil?: Date | null } = {}): Promise<BlockedHold[]> {
+  const at = opts.now ?? new Date();
+  const [t] = await db.select({ blockedUntil: tickets.blockedUntil, goLiveWait: tickets.goLiveWait }).from(tickets).where(eq(tickets.id, ticketId));
+  const until = opts.blockedUntil !== undefined ? opts.blockedUntil : (t?.blockedUntil ?? null);
+  const holds: BlockedHold[] = [];
+  if (until && until.getTime() > at.getTime()) holds.push({ kind: "date" });
+  if ((await openBlockers(db, ticketId)).length) holds.push({ kind: "blocker" });
+  if ((await openCardIds(db, ticketId)).length) holds.push({ kind: "card" });
+  if (await mergedAwaitingChecks(db, ticketId)) holds.push({ kind: "checks" });
+  if (t?.goLiveWait) holds.push({ kind: "go_live" });
+  return holds;
 }
 
 /** Who is asking for the link: an agent's run, or the system acting on its own (loop guards, risk sign-off). */

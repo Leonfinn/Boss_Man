@@ -518,6 +518,28 @@ export function tempCleanup(command: string): boolean {
   return Boolean(scope && !scope.workingCopy.length);
 }
 
+/** Words that change nothing, so they may sit beside a delete in an automatic temp cleanup. */
+const NO_WRITE_WORDS = new Set(["true", "echo", "pwd", "ls", "date", "sleep"]);
+const DEVNULL_REDIRECT = /(?:(?<=^|\s)[12&])?>>?\s*\/dev\/null|2>&1/g;
+
+/**
+ * Whether a command is a temp cleanup that Boss Man may allow without asking anyone (BOS-1453). Narrower than
+ * tempCleanup, on purpose: every segment is a plain rm/rmdir/unlink of entries directly in /tmp (TEMP_DELETE:
+ * no "..", variables, globs, trailing slash or deeper path, which a symlink at the entry could carry out of /tmp,
+ * BOS-150 and BOS-165) or a word that changes nothing, with output only to /dev/null. No cd, mkdir, git or install:
+ * those can write or run code, so they keep going to the CEO. cleanupScope has already refused pushes, a working-copy
+ * path and any destructive word it can't account for.
+ */
+export function autoTempCleanup(command: string): boolean {
+  const scope = cleanupScope(command);
+  if (!scope || scope.workingCopy.length || !scope.tmp.length) return false;
+  return segments(command).every((s) => {
+    if (TEMP_DELETE.test(s)) return true;
+    const rest = s.replace(DEVNULL_REDIRECT, " ").trim();
+    return !/[<>&]/.test(rest) && NO_WRITE_WORDS.has(rest.split(/\s+/)[0] ?? "");
+  });
+}
+
 /**
  * The subcommand a package-manager segment runs (BOS-165 security round 4, simplified in round 6):
  * the word right after the program, and only that word. `pnpm --silent dlx rimraf …` reads

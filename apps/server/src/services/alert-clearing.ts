@@ -10,8 +10,10 @@ import type { Db } from "../db/client.js";
 import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
-import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
+import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
+import { runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
+import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 
 /** One machine-checkable reason a card can go: a fixed shape, never free text. */
 export type ClearWhen =
@@ -64,7 +66,9 @@ export type ClearWhen =
    * The owner's held-off-portal card (BOS-1358): the feature's portal place is settled some other way —
    * someone ticked it on, or marked it keep-off by hand — so asking is no longer needed.
    */
-  | { kind: "featurePortalSettled"; featureId: string };
+  | { kind: "featurePortalSettled"; featureId: string }
+  /** A repeated-merge-failure card (BOS-1461): no failed attempt of that reason for 30 minutes. */
+  | { kind: "mergeFailuresCalm"; companyId: string; reason: string };
 
 type Card = { id: string; companyId: string; status: string; createdAt: Date; question: string; context: unknown };
 
@@ -125,6 +129,9 @@ export function clearWhenOf(context: unknown): ClearWhen[] {
       case "featurePortalSettled":
         if (typeof c.featureId === "string") out.push({ kind: "featurePortalSettled", featureId: c.featureId });
         break;
+      case "mergeFailuresCalm":
+        if (typeof c.companyId === "string" && typeof c.reason === "string") out.push({ kind: "mergeFailuresCalm", companyId: c.companyId, reason: c.reason });
+        break;
       default:
         break;
     }
@@ -151,7 +158,7 @@ export async function clearsWhenToConditions(db: Db, companyId: string, input: C
   if (input.runnerRebuilt) out.push({ kind: "runnerRebuilt", companyId, from: await runnerImageCommit(db, companyId) });
   if (input.serverHasCommit) {
     const want = input.serverHasCommit.toLowerCase();
-    const hits = (await mergeCommitOrder(db, companyId)).filter((c) => c.startsWith(want));
+    const hits = (await allMergeOrder(db, companyId)).filter((c) => c.startsWith(want));
     if (hits.length !== 1) return { error: `clearsWhen.serverHasCommit: ${hits.length ? "that prefix matches more than one merge" : "Boss Man can't place that commit"}; give the full or a longer sha of a commit that a ticket merged as.` };
     out.push({ kind: "serverHasCommit", commit: hits[0]! });
   }
@@ -222,9 +229,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return image && image !== c.from ? "the runners were rebuilt" : null;
       }
       case "serverHasCommit": {
-        const live = deps.liveCommit?.()?.toLowerCase() ?? null;
-        if (!live || !/^[0-9a-f]{40}$/.test(live)) return null;
-        return imageContains(live, c.commit, await mergeCommitOrder(db, card.companyId)) ? "the server running now contains that change" : null;
+        // The recorded live commit decides; the commit this process was built from only stands in before any is recorded.
+        return (await commitIsLive(db, card.companyId, c.commit, "server", { serverFallback: deps.liveCommit?.() })) ? "the server running now contains that change" : null;
       }
       case "featureHasTicket": {
         const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));
@@ -282,6 +288,12 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
       }
       case "serverCalm":
         return deps.serverCalm?.(c.rule) ?? null;
+      case "mergeFailuresCalm": {
+        // Calm for the whole window, and the card itself is at least that old.
+        const since = new Date(now().getTime() - FAILURE_WINDOW_MS);
+        if (card.createdAt > since) return null;
+        return (await failedSince(db, c.companyId, c.reason, since)) ? null : "no merge has failed for that reason in the last 30 minutes";
+      }
       case "featurePortalSettled": {
         // The card asks whether a held-off feature should go on the portal. It is settled once someone
         // ticks it on (a publish by hand or by the CEO/PM), or the feature goes from record. The keep-off

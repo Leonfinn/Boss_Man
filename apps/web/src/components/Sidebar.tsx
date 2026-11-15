@@ -82,7 +82,7 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
   const [error, setError] = useState<string | null>(null);
   const status = (c: Company) => {
     const n = waiting(c.id);
-    return c.paused ? (["#5e6878", "Paused"] as const) : n ? (["#f0b75c", `${n} waiting on you`] as const) : (["#7fd3a5", `${c.agents.length} agent${c.agents.length === 1 ? "" : "s"}`] as const);
+    return c.paused ? (["#5e6878", "Paused"] as const) : n ? (["#f0b75c", `${n} ${n === 1 ? "needs" : "need"} you`] as const) : (["#7fd3a5", `${c.agents.length} agent${c.agents.length === 1 ? "" : "s"}`] as const);
   };
   const create = (e: FormEvent) => {
     e.preventDefault();
@@ -159,6 +159,8 @@ export function Sidebar(props: {
   decisions: Decision[];
   /** (BOS-969) What needs the owner now, from the same server figure the Decisions page heading shows. */
   decisionsTally?: { open: number; waiting: number } | null;
+  /** (BOS-1485) The same tally for every company, for the company switcher. */
+  companyTallies?: Record<string, { open: number; waiting: number }>;
   unread: number;
   feedback: number;
   mergeWaiting: number;
@@ -241,7 +243,9 @@ export function Sidebar(props: {
   }, [props.narrow, props.collapsed, props.onToggleCollapsed]);
   const starred = props.current?.agents.filter((a) => a.starred) ?? [];
   const starredProjects = props.current?.projects?.filter((p) => p.starred) ?? [];
-  const waiting = (companyId: string) => props.decisions.filter((d) => d.companyId === companyId).length;
+  // (BOS-1485) Each company's figure in the switcher is the server's tally for that company (the badge's
+  // own figure); until it arrives, cards not in the "Waiting, nothing to do yet" group stand in.
+  const waiting = (companyId: string) => props.companyTallies?.[companyId]?.open ?? props.decisions.filter((d) => d.companyId === companyId && !d.waiting).length;
   // (BOS-969) The top company's badge is the server's "needs you now" figure, not every open card:
   // with one company, what it shows is exactly the Decisions page's "to do". Without it, cards not in
   // the "Waiting, nothing to do yet" group stand in, so it is never the inflated number.
@@ -250,7 +254,7 @@ export function Sidebar(props: {
   const isCurrent = (id: string) => props.active === id || ((props.active === "tickets" || props.active === "board") && id === "projects");
   const label = ALL_ITEMS.find((i) => isCurrent(i.id))?.label ?? "Menu";
   const badge = (n: Item) =>
-    n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${badgeCount} waiting` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: `${props.mergeStuck} stuck`, warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
+    n.id === "decisions" && badgeCount > 0 ? { value: badgeCount, label: `${badgeCount} ${badgeCount === 1 ? "needs" : "need"} you${props.decisionsTally && props.decisionsTally.waiting > 0 ? `, ${props.decisionsTally.waiting} with the team` : ""}` } : n.id === "feedback" && props.feedback > 0 ? { value: props.feedback, label: `${props.feedback} to process` } : n.id === "merge-queue" && props.mergeStuck > 0 ? { value: props.mergeStuck, label: `${props.mergeStuck} stuck`, warn: true } : n.id === "merge-queue" && props.mergeWaiting > 0 ? { value: props.mergeWaiting, label: `${props.mergeWaiting} waiting to merge` } : n.id === "notifications" && props.unread > 0 ? { value: props.unread, label: `${props.unread} unread` } : null;
   const itemLink = (n: Item) => {
     const b = badge(n);
     return (

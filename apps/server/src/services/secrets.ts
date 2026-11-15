@@ -27,6 +27,10 @@ async function prepare(kind: SecretKind, raw: string, opts: { acceptUnusualForma
   return { value, warnings: check.problems, verified };
 }
 
+/** Env names only the server may read, and the one purpose that may read them. Agent runs and runner jobs never get them. */
+const SERVER_ONLY_ENV_NAMES = new Set(["GITHUB_WATCH_TOKEN"]);
+const SERVER_ONLY_PURPOSES = new Set(["github_watch"]);
+
 export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) {
   /** grantId -> the agents it is limited to; a grant missing from the map goes to every agent. */
   const agentsByGrant = async (grantIds: string[]) => {
@@ -191,8 +195,10 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       const [run] = runId ? await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, companyId))) : [];
       const limited = await agentsByGrant(rows.map((r) => r.grantId));
       const granted = runId ? rows.filter((r) => !limited.has(r.grantId) || (!!run?.agentId && limited.get(r.grantId)!.includes(run.agentId))) : rows;
+      // Server-only grants (the GitHub watcher's token) go to the server job that reads them and to no runner job or agent run (BOS-1450).
+      const visible = granted.filter((r) => !SERVER_ONLY_ENV_NAMES.has(r.envName) || SERVER_ONLY_PURPOSES.has(purpose));
       const env: Record<string, string> = {};
-      for (const r of granted) env[r.envName] = decryptSecret(master, r);
+      for (const r of visible) env[r.envName] = decryptSecret(master, r);
       // A run the scheduler placed on one of the owner's Claude subscriptions carries that account's login instead of the company's default (BOS-383). Never logged; sent only to the runner.
       const [chosen] = runId
         ? await db
@@ -206,9 +212,9 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
         env.CLAUDE_CODE_OAUTH_TOKEN = decryptSecret(master, chosen);
         await db.insert(secretAccessLog).values({ grantId: null, secretId: chosen.id, companyId, runId: runId ?? null, purpose: "claude_account" });
       }
-      if (granted.length > 0) {
+      if (visible.length > 0) {
         await db.insert(secretAccessLog).values(
-          granted.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),
+          visible.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),
         );
       }
       return env;

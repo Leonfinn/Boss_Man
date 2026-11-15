@@ -19,6 +19,25 @@ Boss Man is free and open source under the Apache 2.0 licence. You pay for your 
 
 The accounts you choose. Agents run Claude Code, Codex or OpenCode, so you can use a Claude Pro or Max plan, a ChatGPT plan, an Anthropic key, or any OpenAI-compatible API key, such as OpenRouter, Synthetic or Ollama. You can mix them in one company.
 
+## What happens when my Claude plan runs out?
+
+Your agents pause, then carry on by themselves when the plan's allowance resets. You don't need to restart anything.
+
+A Claude Pro or Max plan comes with a usage allowance that Anthropic sets and resets on its own schedule. Every agent on the plan draws from the same allowance. By default, Boss Man pauses routine work when 95% of it is used, and tells you. Chats with you and reviews keep running. When the allowance resets, the paused work starts again.
+
+To see what is paused, look at your tasks. The board says **Held by the quota hold**, and the task's own page says which agent is paused and until when. To start one task anyway, choose **Run now**, or mark it urgent.
+
+If the pauses get in your way, you can:
+
+- change the 95% level, or let urgent work carry on using your plan's extra usage, on **Settings > Funding**
+- add a second Claude plan, so new work moves to whichever plan has room
+
+Both are explained in [Agents and models](/guides/agents-and-models#when-a-plan-is-nearly-used-up).
+
+## How many agents should I start with?
+
+Start with the CEO and one or two agents. All of them share one plan's allowance, so a small team gets more done before a pause. Once you know how far your plan goes, hire more on the **Agents** page.
+
 ## What do I need to run it?
 
 A 64-bit Linux machine with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or any OpenAI-compatible API key. You need to be comfortable copying commands into a shell. Each company's runner uses up to 4 GB of memory by default.

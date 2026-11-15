@@ -1,0 +1,10 @@
+{
+  "name": "boss-man-claude-pack",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Claude Code and its ACP adapter, installed on a runner's first start into a content-addressed folder on a named volume (DR-050). Not a pnpm workspace package.",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.91.0",
+    "@anthropic-ai/claude-code": "2.1.316"
+  }
+}

@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "auto_temp_cleanup" boolean DEFAULT true NOT NULL;

@@ -101,7 +101,7 @@ function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
             Asked as a {n.requested}, sent as a {n.level}: {n.demotedBy === "cap" ? "the agent was over its hourly cap" : "quiet hours"}.
           </span>
         )}
-        {n.pushedAt && <span className="muted">Sent to your phone.</span>}
+        {n.pushedAt && <span className="muted">Accepted by ntfy at {new Date(n.pushedAt).toLocaleTimeString()}.</span>}
         {n.pushError && <span className="error">Phone push failed: {n.pushError}</span>}
         {!n.readAt && (
           <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => onRead(n.id)}>
