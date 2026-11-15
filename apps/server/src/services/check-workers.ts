@@ -73,7 +73,7 @@ export function checkWorkersService(db: Db) {
     if (!connected.has(w.id) && bad && Date.now() - bad.at.getTime() < 10 * 60_000) {
       return `Out of date: worker code too old (it speaks protocol ${bad.protocol}, your server needs ${PROTOCOL_VERSION}). Redeploy this worker so it rebuilds from the current source; no file edit is needed.`;
     }
-    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet.";
+    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet. If its log says \"Can't find the address\" (ENOTFOUND), that machine can't look up the address in its file: if it is a Tailscale name, the machine isn't on your tailnet, so put Boss Man's local network address in BOSSMAN_URL and redeploy it.";
     const feats = features.get(w.id) ?? [];
     if (!feats.includes("check-jobs")) return "Its image can't run queued checks: update this machine.";
     if (!feats.includes(BUNDLE_FEATURE)) return "Its image can't fetch the code to check yet (needs a newer image), so it gets no checks.";
