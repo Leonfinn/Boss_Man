@@ -26,7 +26,7 @@ const card: Decision = {
   ageReason: "",
   dueDate: null,
   context: null,
-} as Decision;
+} as unknown as Decision;
 
 const render = (decisions: Decision[]) =>
   renderToStaticMarkup(
