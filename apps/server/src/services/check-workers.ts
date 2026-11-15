@@ -51,7 +51,8 @@ export function checkWorkersService(db: Db) {
   // shortcut: live sockets on this process (only the leader holds any); lost on restart, harmless because a worker redials, like a runner.
   const connected = new Map<string, { send: WorkerSender; close: (code: number, why: string) => void }>();
   // BOS-1570: a worker whose code speaks another protocol is refused at hello and never "connects"; remember what it said so
-  // the panel can show "worker code too old" instead of a bare "Offline". Lost on restart; the worker redials within seconds.
+  // the panel can show "worker code too old" instead of a bare "Offline".
+  // shortcut: one entry per worker id, this process only; lost on restart, harmless because the worker redials within seconds and is refused again.
   const refused = new Map<string, { protocol: number; at: Date }>();
   // shortcut: per live socket; lost on restart, harmless because a worker sends its features again in hello.
   const features = new Map<string, string[]>();
