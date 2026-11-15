@@ -58,6 +58,17 @@ These are lines already in the file; change them in place. None has a host-speci
 
 Sizing rule of thumb: a check wants about 4 threads and 4 GB when it is busy; leave the host enough to do its own job.
 
+## Which checks each machine takes
+
+In Settings → Server and runner → Checks, the company runner and each worker have two settings:
+
+- **Takes:** merges and quick checks (the default), merges only, or quick checks only. "Quick checks" are the checks agents ask for before review, including the rare full one.
+- **Kept for merges:** with "merges and quick checks", how many of that machine's slots only ever run the merge check before a merge (0 to its slot count). The rest take either kind.
+
+Example: a fast main machine and a slower NAS. Company runner: 3 checks at once, 2 kept for merges. NAS worker: 2 checks at once, quick checks only. Merges then always run on the fast machine, quick checks go to the NAS first, and the runner's third slot takes a quick check when one is waiting, otherwise a merge.
+
+How a check is placed: a merge goes to a kept slot first, then to a free either slot on a machine that takes merges. A quick check goes to a quick-checks-only machine first, then to a free either slot. On a machine with kept slots, a merge doesn't take the last free either slot while a quick check waits (merges already have their kept slots); with nothing set, the older rule stands: a merge never takes a machine's last free slot while a quick check waits. The merge train seats one ticket per slot that can run a merge, so a quick-checks-only worker adds no seat. A waiting check says why on the Merge queue page's Queued checks tab, for example "waiting for a merge slot: 3 of 3 busy", or that no ready machine takes its kind.
+
 ## Per-host notes
 
 ### Plain Linux (VM or bare metal)

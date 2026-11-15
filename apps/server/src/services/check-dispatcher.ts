@@ -8,7 +8,7 @@ import { fullLogPointer, HEARTBEAT_MS, type CheckBundleInfo, type CheckLimits, t
 import type { Db } from "../db/client.js";
 import { checkJobs, runners } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
-import { checkQueue, type CheckJob } from "./check-queue.js";
+import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
@@ -198,20 +198,43 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       if (!runnerUp && !workers.length) continue;
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
-      // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
-      // limit is also capped by the slots it reported in hello.
-      if (runnerUp)
-        for (const job of await queue.claimNext(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id))) {
-          const sent = deps.send(runner!.id, runCommand(job, list));
-          if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
-        }
-      // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
-      // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
-      // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
-      // never holds up the line); a job this worker couldn't get the code for is left to the others.
-      for (const w of workers)
-        for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id))) track(codeFor(job, w, list, packer!, false));
+      // BOS-1602: two passes. The first fills only slots set aside for one kind (kept for merges, a merges-only or a
+      // checks-only machine), so a merge goes to a kept slot and a quick check to a checks-only machine before either takes
+      // an "either" slot. The second fills the either slots as before. With nothing set there are no such slots, the first
+      // pass claims nothing and this is the old order: the runner first, then each worker.
+      const split = !isDefaultPolicy(await queue.runnerPolicy()) || workers.some((w) => w.policy && !isDefaultPolicy(w.policy));
+      for (const dedicatedOnly of split ? [true, false] : [false]) {
+        // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
+        // limit is also capped by the slots it reported in hello.
+        if (runnerUp)
+          for (const job of await queue.claimNext(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id), { dedicatedOnly })) {
+            const sent = deps.send(runner!.id, runCommand(job, list));
+            if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
+          }
+        // BOS-1435: then each ready worker. A merge job carries the owner's list here too: a worker has the runner's trust for
+        // checks (it already sees the source), the socket is TLS like the runner's, and the list is never logged.
+        // BOS-1436: the job starts on the worker once the runner has packed its code (not awaited, so a 190 MB first bundle
+        // never holds up the line); a job this worker couldn't get the code for is left to the others.
+        for (const w of workers)
+          for (const job of await queue.claimOn({ workerId: w.id }, w.limit, new Date(), companyId, (id) => !!noCodeOn.get(id)?.has(w.id), { policy: w.policy, dedicatedOnly }))
+            track(codeFor(job, w, list, packer!, false));
+      }
     }
+  }
+
+  /** BOS-1602: the company's ready machines with their limits and splits, for "why it waits" on the queue view. */
+  async function machines(companyId: string): Promise<MachineView[]> {
+    const workers = (await packerFor(companyId)) ? ((await deps.workers?.eligible(companyId)) ?? []) : [];
+    return [{ workerId: null, limit: await queue.slots(), policy: await queue.runnerPolicy() }, ...workers.map((w) => ({ workerId: w.id, limit: w.limit, policy: w.policy ?? DEFAULT_SLOT_POLICY }))];
+  }
+
+  /**
+   * BOS-1602: the merge train seats one member per slot that can run a merge check (DR-059), so a checks-only machine adds
+   * no seat. Never below one, so the train still lands one at a time if the owner set every machine to checks only.
+   */
+  async function mergeCapacity(companyId: string): Promise<number> {
+    const n = (await machines(companyId)).reduce((sum, m) => sum + (m.policy.takes === "checks" ? 0 : m.limit), 0);
+    return Math.max(1, n);
   }
 
   /**
@@ -237,6 +260,8 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   return {
     pump,
     capacity,
+    mergeCapacity,
+    machines,
 
     /** Resolves once no worker's code is being packed (it keeps waiting while new ones start). */
     async settled() {
