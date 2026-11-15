@@ -5,6 +5,7 @@ import { DEVICE_UNITS, isRenderableProfile, runLabel, staleNoteWhy, tallestReadi
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { heldReadyTickets } from "./agent-wip.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
@@ -134,7 +135,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const ids = mine.map((t) => t.id);
     const deps = ids.length
       ? await db
-          .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, ticket: tickets.title, ticketState: tickets.systemState, eng: engagements.title, engStatus: engagements.status, dec: decisions.question, decId: decisions.id, decStatus: decisions.status })
+          .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, ticket: tickets.title, ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, eng: engagements.title, engStatus: engagements.status, dec: decisions.question, decId: decisions.id, decStatus: decisions.status })
           .from(ticketDependencies)
           .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
           .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
@@ -144,7 +145,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const waitsOn = (id: string) =>
       deps
         .filter((d) => d.blocked === id)
-        .flatMap((d) => (d.blocker ? (d.ticketState !== "done" ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
+        .flatMap((d) => (d.blocker ? (!ticketBlockerFinished(d) ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
     const myLines = mine.map((t) => {
       const w = waitsOn(t.id);
       return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}`;

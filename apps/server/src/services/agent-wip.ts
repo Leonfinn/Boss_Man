@@ -4,7 +4,7 @@
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
 import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { openBlockers } from "./ticket-links.js";
+import { openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
 import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
@@ -37,7 +37,7 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
 type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
 export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
-          where d.blocked_ticket_id = ${t.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
+          where d.blocked_ticket_id = ${t.id} and ${ticketBlockerOpenSql("d", "b")})
   or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
   or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
 )`;

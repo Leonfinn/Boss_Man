@@ -26,6 +26,13 @@ export function ticketBlockerFinished(d: { ticketState: string | null; mergeComm
   return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
 }
 
+/**
+ * The SQL twin of `!ticketBlockerFinished` (DR-061 Q1) for set queries that can't call the function: true while the
+ * blocker ticket (alias `b`) still holds the link (alias `d`). The aliases are fixed names written by the caller,
+ * never user input. A parity test runs it over the same rows as the TS function.
+ */
+export const ticketBlockerOpenSql = (d: string, b: string) => sql`(${sql.raw(b)}.system_state <> 'done' and not (${sql.raw(d)}.until = 'merged' and ${sql.raw(b)}.merge_commit is not null))`;
+
 export type OpenBlocker = { kind: "ticket" | "engagement" | "decision"; title: string | null };
 
 /**
