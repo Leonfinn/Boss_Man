@@ -103,14 +103,15 @@ describe("a run can't start a ticket it shouldn't (BOS-254)", () => {
   it("startRefusal reads a waiting ticket, a handed-over backlog ticket and overrides", () => {
     const created = new Date("2026-10-01T00:00:00Z");
     const same = { createdAt: created, lastActivityAt: created };
-    expect(startRefusal({ systemState: "ready", ...same }, [{ ticketState: "review", engagementStatus: null }], { agentId: "a", role: "worker" })).toMatch(/waits on/i);
-    expect(startRefusal({ systemState: "ready", ...same }, [{ ticketState: "done", engagementStatus: null }], { agentId: "a", role: "worker" })).toBeNull();
+    expect(startRefusal({ systemState: "ready", ...same }, [{ kind: "ticket", title: "Merge train" }], { agentId: "a", role: "worker" })).toMatch(/waits on "Merge train"/i);
+    expect(startRefusal({ systemState: "ready", ...same }, [], { agentId: "a", role: "worker" })).toBeNull();
+    expect(startRefusal({ systemState: "ready", ...same }, [{ kind: "decision", title: null }], { agentId: "a", role: "worker" })).toBeNull();
     expect(startRefusal({ systemState: "backlog", ...same }, [], { agentId: "a", role: "worker" })).toMatch(/Backlog/i);
     // A hand-over moves lastActivityAt past createdAt.
     expect(startRefusal({ systemState: "backlog", createdAt: created, lastActivityAt: new Date("2026-10-02T00:00:00Z") }, [], { agentId: "a", role: "worker" })).toBeNull();
     // The owner (no agent), the CEO and managers may start anything.
     expect(startRefusal({ systemState: "backlog", ...same }, [], { agentId: null })).toBeNull();
-    expect(startRefusal({ systemState: "ready", ...same }, [{ ticketState: "in_progress", engagementStatus: null }], { agentId: "c", role: "ceo" })).toBeNull();
-    expect(startRefusal({ systemState: "ready", ...same }, [{ ticketState: "in_progress", engagementStatus: null }], { agentId: "m", role: "manager" })).toBeNull();
+    expect(startRefusal({ systemState: "ready", ...same }, [{ kind: "ticket", title: null }], { agentId: "c", role: "ceo" })).toBeNull();
+    expect(startRefusal({ systemState: "ready", ...same }, [{ kind: "ticket", title: null }], { agentId: "m", role: "manager" })).toBeNull();
   });
 });

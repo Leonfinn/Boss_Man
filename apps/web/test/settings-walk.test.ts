@@ -152,7 +152,7 @@ const MAP: Record<string, string[]> = {
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
   // "Server and runner" is six pages (BOS-1492); each of its old panels is on the page the BOS-1491 table gives it.
-  updates: ["Stop all work", "Runner update"],
+  updates: ["Updates", "Stop all work"],
   limits: ["Agents at once", "Tickets in progress", "Checks"],
   runner: ["Runner", "Workspace disk"],
   email: ["Outgoing email"],

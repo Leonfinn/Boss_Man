@@ -19,9 +19,11 @@ export const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(
 type Place = { route: string; screen: OwnerScreen | null; tabs: readonly string[]; projects?: boolean };
 
 const isScreen = (s: string): s is OwnerScreen => Object.hasOwn(OWNER_CONTROLS, s);
+/** Menu entries whose label is longer than their screen's name (BOS-1494: plain words on the menu). */
+const MENU_SCREEN: Record<string, OwnerScreen> = { "Scrum Master log": "Scrum Master", "Workflow report": "Workflow" };
 const top = (name: string): Place => ({
   route: name,
-  screen: isScreen(name) ? name : null,
+  screen: MENU_SCREEN[name] ?? (isScreen(name) ? name : null),
   tabs: name === "Settings" ? OWNER_TABS.Settings : [],
   ...(name === "Projects" ? { projects: true } : {}),
 });
@@ -49,6 +51,8 @@ const SERVER_AND_RUNNER: Place = {
 const PLACES = (() => {
   const out = new Map<string, Place>(); // not state: local to the PLACES lookup-table builder
   for (const m of OWNER_MENU) out.set(norm(m), top(m));
+  // The menu's names before BOS-1494, so a step that still says "Scrum Master" or "Workflow" finds its page.
+  for (const [label, screen] of Object.entries(MENU_SCREEN)) out.set(norm(screen), top(label));
   out.set("project", top("Projects"));
   const setup: Place = { route: "Setup (Settings → Run the setup wizard)", screen: "Setup", tabs: [] };
   out.set("setup", setup);

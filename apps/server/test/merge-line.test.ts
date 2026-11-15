@@ -95,9 +95,10 @@ describe("the merge line's timeline (BOS-769)", () => {
     const c = await setup({ verify: FAIL });
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
     const rows = await c.line();
-    expect(events(rows)).toEqual(["approved", "attempt", "check_queued", "check_started", "check_ended", "left"]);
+    expect(events(rows)).toEqual(["approved", "attempt", "check_queued", "check_started", "check_ended", "left", "attempt_failed"]);
     expect(rows[4]!.detail).toMatchObject({ passed: false });
     expect(rows[5]!.detail).toMatchObject({ event: "left", to: "in_progress" });
+    expect(rows[6]!.detail).toMatchObject({ event: "attempt_failed", reason: "check_failed" });
   });
 
   it("records a carried-work hold with the tickets it waits on, once, and ends it when the merge goes ahead", async () => {
@@ -148,7 +149,7 @@ describe("the merge line's timeline (BOS-769)", () => {
   });
 
   it("takes a queued check's wait, start and end from its job in the server check queue", async () => {
-    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40) };
+    const prepared = { status: "prepared", commit: "f".repeat(40), tree: "9".repeat(40), targetSha: "1".repeat(40), branchSha: "b".repeat(40) };
     const c = await setup({ merge: (x: { phase?: string }) => (x.phase === "prepare" ? prepared : { status: "merged", commit: prepared.commit }) });
     await c.db.insert(settings).values({ key: "check_queue_mode", value: "server" });
     const res = approveAndWait(c.req, c.ticket.id);

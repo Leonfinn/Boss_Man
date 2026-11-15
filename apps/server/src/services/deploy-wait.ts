@@ -116,7 +116,7 @@ export function deployWaitService(db: Db, deps: DeployWaitDeps) {
       .from(decisions)
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'deploy_wait'`));
     for (const d of open) {
-      await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(eq(decisions.id, d.id));
+      await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, d.id), eq(decisions.status, "open")));
       await markDecisionNotificationRead(db, d.id);
     }
   }

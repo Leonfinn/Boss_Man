@@ -105,6 +105,64 @@ describe("merging a ticket's branch (R46)", () => {
     expect(git(o.url, "show", "main:feature.txt")).toBe("new");
     expect(git(o.url, "show", "main:late.txt")).toBe("late");
   });
+
+  describe("pinned to the reviewed head (BOS-1413)", () => {
+    const commitLate = (dir: string) => {
+      writeFileSync(path.join(dir, "late.txt"), "late\n");
+      git(dir, "add", ".");
+      git(dir, "commit", "-qm", "late work");
+    };
+
+    it("prepares and finishes while the branch is at the pin, and names the branch commit it built from", async () => {
+      const o = origin();
+      const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+      const pin = git(w.path, "rev-parse", "HEAD");
+      const prepared = await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" }, pin);
+      expect(prepared).toMatchObject({ status: "prepared", branchSha: pin });
+      const { commit, tree } = prepared as { commit: string; tree: string };
+      expect((await ws.merge(spec, "main", "Merge", {}, null, { phase: "finish", commit, tree }, pin)).status).toBe("merged");
+      expect(o.mainSha()).toBe(commit);
+    });
+
+    it("refuses a commit made after the pin at prepare: nothing kept, nothing pushed", async () => {
+      const o = origin();
+      const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+      const pin = git(w.path, "rev-parse", "HEAD");
+      const before = o.mainSha();
+      commitLate(w.path);
+      const r = await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" }, pin);
+      expect(r).toEqual({ status: "branch_moved", head: git(w.path, "rev-parse", "HEAD"), pinned: pin });
+      expect(git(w.path, "for-each-ref", "refs/bossman/merge/")).toBe("");
+      expect(o.mainSha()).toBe(before);
+    });
+
+    it("refuses at finish when a commit came in after prepare, even if the merged tree would match", async () => {
+      const o = origin();
+      const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+      const pin = git(w.path, "rev-parse", "HEAD");
+      const prepared = (await ws.merge(spec, "main", "Merge", {}, null, { phase: "prepare" }, pin)) as { commit: string; tree: string };
+      const before = o.mainSha();
+      git(w.path, "commit", "-q", "--allow-empty", "-m", "empty late commit"); // same tree, new commit
+      const r = await ws.merge(spec, "main", "Merge", {}, null, { phase: "finish", commit: prepared.commit, tree: prepared.tree }, pin);
+      expect(r.status).toBe("branch_moved");
+      expect(o.mainSha()).toBe(before);
+    });
+
+    it("refuses in the plain and the checked merge too, before any check runs", async () => {
+      const o = origin();
+      const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+      const pin = git(w.path, "rev-parse", "HEAD");
+      const before = o.mainSha();
+      commitLate(w.path);
+      expect((await ws.merge(spec, "main", "Merge", {}, null, null, pin)).status).toBe("branch_moved");
+      // A check that would leave a marker if it ran.
+      const marker = path.join(tmp("bm-marker-"), "ran");
+      const checked = await ws.merge(spec, "main", "Merge", {}, { commands: [`touch ${marker}`] }, null, pin);
+      expect(checked.status).toBe("branch_moved");
+      expect(() => execFileSync("test", ["-e", marker])).toThrow();
+      expect(o.mainSha()).toBe(before);
+    });
+  });
 });
 
 describe("pushing a ticket's branch for a pull request (R59)", () => {
@@ -119,6 +177,19 @@ describe("pushing a ticket's branch for a pull request (R59)", () => {
 
     writeFileSync(path.join(w.path, "draft.txt"), "not committed\n");
     expect(await ws.pushForReview(spec, "main")).toEqual({ status: "uncommitted", files: ["draft.txt"] });
+  });
+
+  it("pushes the pinned head, and refuses a commit made after the pin: nothing is pushed (BOS-1413 follow-up)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const pin = git(w.path, "rev-parse", "HEAD");
+    expect(await ws.pushForReview(spec, "main", {}, pin)).toMatchObject({ status: "pushed", commit: pin });
+    writeFileSync(path.join(w.path, "late.txt"), "late\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "late work");
+    const r = await ws.pushForReview(spec, "main", {}, pin);
+    expect(r).toEqual({ status: "branch_moved", head: git(w.path, "rev-parse", "HEAD"), pinned: pin });
+    expect(git(o.url, "rev-parse", `bossman/${ids.t}`)).toBe(pin);
   });
 
   it("reports conflicts with the target instead of pushing", async () => {

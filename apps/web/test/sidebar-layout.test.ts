@@ -31,27 +31,43 @@ async function menu(page: Page) {
 
 describe.skipIf(skip)("side menu layout (rendered on the real page)", () => {
   it("reaches the window's bottom when 100dvh is shorter than the window, like a phone toolbar showing", async () => {
-    const page = await openApp(browser!, server!, { width: 840, height: 900, pixelRatio: 2.6, hasTouch: true, sideCollapsed: true, toolbarGap: 130 });
+    // A short window (600px), so the menu's content is taller than it whatever the menu holds
+    // (at 900px the BOS-1506 menu fits without scrolling and "taller content scrolls" had nothing to prove).
+    const page = await openApp(browser!, server!, { width: 840, height: 600, pixelRatio: 2.6, hasTouch: true, sideCollapsed: true, toolbarGap: 130 });
     try {
       const m = await menu(page);
       // The menu's box must reach the window's bottom: no blank strip underneath.
       expect(Math.round(m.bottom)).toBe(m.winH);
       // It can still be as tall as the window (100vh), not the shorter dynamic viewport.
       expect(Math.round(m.height)).toBe(m.winH);
-      // Taller content scrolls inside the menu rather than spilling past the window.
-      expect(m.overflowY).toBe("auto");
-      expect(m.scrollH).toBeGreaterThan(m.height);
-      // Rod's optional point: with 100vh the menu can run under the phone's toolbar, so the last
-      // item must still be reachable by scrolling the menu itself (not stuck out of view).
-      const reachable = await page.evaluate(() => {
+      // Since BOS-1506 the list scrolls in `.nav-scroll` and the pinned row (Log out) stays put below it,
+      // so the box itself never overflows; the list inside must scroll when the window is short.
+      const inner = await page.evaluate(() => {
         const nav = document.querySelector("nav.side") as HTMLElement;
-        nav.scrollTop = nav.scrollHeight;
-        const last = (nav.querySelector(".nav-groups .foot") ?? nav.lastElementChild) as HTMLElement;
-        const r = last.getBoundingClientRect();
+        const list = nav.querySelector(".nav-scroll") as HTMLElement;
+        const pinned = nav.querySelector(".side-pinned") as HTMLElement;
         const box = nav.getBoundingClientRect();
-        return r.bottom <= box.bottom + 1 && r.top >= box.top - 1;
+        const overflowY = getComputedStyle(list).overflowY;
+        const tall = list.scrollHeight > list.clientHeight;
+        // Rod's optional point: with 100vh the menu can run under the phone's toolbar, so the last
+        // item must still be reachable by scrolling the list itself, and the pinned row stays in the box.
+        list.scrollTop = list.scrollHeight;
+        const items = list.querySelectorAll("a.nav, button.nav");
+        const last = items[items.length - 1] as HTMLElement;
+        const r = last.getBoundingClientRect();
+        const lb = list.getBoundingClientRect();
+        const p = pinned.getBoundingClientRect();
+        return {
+          overflowY,
+          tall,
+          reachable: r.bottom <= lb.bottom + 1 && r.top >= lb.top - 1,
+          pinnedInside: p.bottom <= box.bottom + 1 && p.top >= box.top - 1,
+        };
       });
-      expect(reachable).toBe(true);
+      expect(inner.overflowY).toBe("auto");
+      expect(inner.tall).toBe(true);
+      expect(inner.reachable).toBe(true);
+      expect(inner.pinnedInside).toBe(true);
     } finally {
       await page.close();
     }

@@ -14,7 +14,7 @@ const TOKEN = `bmr_${"t".repeat(43)}`;
 /** A stand-in Docker that keeps containers in memory and records each call. */
 function fakeDocker() {
   const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string; startedAt: number; health?: string; exitCode?: number; networks: Set<string> }>();
-  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, connect: false, pause: false, guardImage: false, noPrevious: false };
+  const fail = { guard: false, nft: false, bad: false, hang: false, slow: false, connect: false, pack: false, pause: false, guardImage: false, noPrevious: false };
   /** BOS-576: for each runner start, whether it was on a network then, and whether a guard was in its namespace and healthy when it joined one. */
   const timeline: string[] = [];
   const byId = (id: string) => [...containers.values()].find((c) => c.id === id);
@@ -35,6 +35,9 @@ function fakeDocker() {
       calls.push(`inspect ${name}`);
       const c = containers.get(name);
       return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state, StartedAt: new Date(c.startedAt).toISOString(), ExitCode: c.exitCode, ...(c.health ? { Health: { Status: c.health } } : {}) }, NetworkSettings: { Networks: Object.fromEntries([...c.networks].map((n) => [n, {}])) } } as ContainerInfo) : null;
+    },
+    async hostInfo() {
+      return { dockerVersion: "27.0.1", osType: "linux" };
     },
     async imageId(ref) {
       if (fail.guardImage && ref.includes("netguard")) return null;
@@ -70,9 +73,17 @@ function fakeDocker() {
         if (c.id !== id) continue;
         Object.assign(c, { state: "running", startedAt: ++clock * 1000 });
         if (c.labels["boss-man.netguard"]) Object.assign(c, fail.nft ? { state: "exited", exitCode: 3 } : fail.bad ? { state: "exited", exitCode: 4 } : fail.hang ? { health: "starting" } : { health: "healthy" });
+        // The Claude pack installer (DR-050) is a one-shot: it runs and exits at once, never a "runner start".
+        else if (c.labels["boss-man.claude-pack"]) Object.assign(c, { state: "exited", exitCode: fail.pack ? 1 : 0 });
         // A runner starting on a network is reachable at once: its guard (if any) is in its old namespace.
         else timeline.push(c.networks.size ? `runner ${id} started on a network` : `runner ${id} started off the network`);
       }
+    },
+    // The one-shot installer's exit: the fake records it as stopped at once, so ensurePack sees its exit code.
+    async wait(id) {
+      calls.push(`wait ${id}`);
+      const c = byId(id);
+      return { stopped: true, exitCode: c?.exitCode ?? 0 };
     },
     async restart(id) {
       calls.push(`restart ${id}`);
@@ -133,7 +144,7 @@ describe("the runner launcher (R55)", () => {
     expect(containerSpec({ dataRoot: "/mnt/data", network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4294967296, pidsLimit: 4096 }, "app-co")).toEqual({
       Image: "boss-man-runner:current",
       User: "1000:1000",
-      Env: ["BOSSMAN_URL=ws://server:3100/api/runner/connect", "BOSSMAN_RUNNER_TOKEN_FILE=/run/secrets/runner_token"],
+      Env: ["BOSSMAN_URL=ws://server:3100/api/runner/connect", "BOSSMAN_RUNNER_TOKEN_FILE=/run/secrets/runner_token", "BOSSMAN_CLAUDE_PACK=/opt/bossman-claude"],
       Labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" },
       HostConfig: {
         Binds: [
@@ -142,6 +153,7 @@ describe("the runner launcher (R55)", () => {
           "/mnt/data/companies/app-co/claude:/home/node/.claude",
           "/mnt/data/companies/app-co/opencode:/home/node/.local/share/opencode",
           "/mnt/data/companies/app-co/runner.token:/run/secrets/runner_token:ro",
+          "boss-man-claude-pack:/opt/bossman-claude:ro",
         ],
         NetworkMode: "boss-man_default",
         CapDrop: ["ALL"],
@@ -223,10 +235,11 @@ describe("the runner launcher (R55)", () => {
     expect(statSync(file).mode & 0o777).toBe(0o600);
     for (const sub of ["workspaces", "runner-data", "claude", "opencode"]) expect(existsSync(path.join(s.cfg.dataRoot, "companies/app-co", sub))).toBe(true);
     // BOS-576: off the network before it starts, on it only after the guard is healthy; then the guard is woken.
-    expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "disconnect id1", "start id1", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id2", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co", "connect id1", "inspect boss-man-netguard-app-co", "signal id2 USR1"]);
+    // DR-050: the Claude pack installer (a one-shot) runs first, before the runner is made.
+    expect(s.calls).toEqual(["inspect boss-man-claude-pack-app-co", "create boss-man-claude-pack-app-co", "start id1", "wait id1", "remove id1", "inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "disconnect id2", "start id2", "inspect boss-man-netguard-app-co", "create boss-man-netguard-app-co", "start id3", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co", "connect id2", "inspect boss-man-netguard-app-co", "signal id3 USR1"]);
 
     await s.call("PUT", "/runners/app-co", { token: TOKEN });
-    expect(s.calls.slice(12)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "disconnect id3", "start id3", "inspect boss-man-netguard-app-co", "remove id2", "create boss-man-netguard-app-co", "start id4", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co", "connect id3", "inspect boss-man-netguard-app-co", "signal id4 USR1"]);
+    expect(s.calls.slice(17)).toEqual(["inspect boss-man-claude-pack-app-co", "create boss-man-claude-pack-app-co", "start id4", "wait id4", "remove id4", "inspect boss-man-runner-app-co", "remove id2", "create boss-man-runner-app-co", "disconnect id5", "start id5", "inspect boss-man-netguard-app-co", "remove id3", "create boss-man-netguard-app-co", "start id6", "inspect boss-man-netguard-app-co", "inspect boss-man-runner-app-co", "connect id5", "inspect boss-man-netguard-app-co", "signal id6 USR1"]);
     expect(await (await s.call("GET", "/runners")).json()).toEqual([{ slug: "app-co", state: "running", status: "running", image: "boss-man-runner:current", current: true, guard: "on" }]);
 
     // Every call is logged, never the token.
@@ -473,7 +486,7 @@ describe("the runner launcher (R55)", () => {
     expect((await api.list()).map((r) => [r.slug, r.current])).toEqual([["app-co", false], ["homelab", false]]);
     fake.calls.length = 0;
     expect(await api.recreate("app-co")).toMatchObject({ slug: "app-co" });
-    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-claude-pack-app-co", "create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
     expect((await api.list()).map((r) => [r.slug, r.current])).toEqual([["homelab", false], ["app-co", true]]);
     await expect(api.recreate("nobody")).rejects.toMatchObject({ status: 404 });
   });
@@ -490,7 +503,7 @@ describe("the runner launcher (R55)", () => {
     fake.containers.delete("boss-man-runner-app-co");
     fake.calls.length = 0;
     expect(await api.rollback("app-co")).toMatchObject({ slug: "app-co", image: "boss-man-runner:previous" });
-    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-claude-pack-app-co", "create boss-man-runner-app-co", "create boss-man-netguard-app-co"]);
     expect((fake.containers.get("boss-man-runner-app-co")!.spec as { Image: string }).Image).toBe("boss-man-runner:previous");
     fake.fail.noPrevious = true;
     await expect(api.rollback("app-co")).rejects.toMatchObject({ status: 409 });
@@ -759,7 +772,8 @@ describe("the runner launcher (R55)", () => {
       const off = fakeDocker();
       await launcher({ ...config(), guardMode: "off" }, off.docker).put("app-co", TOKEN);
       expect(off.calls.filter((c) => /^(disconnect|connect|signal)/.test(c))).toEqual([]);
-      expect(off.timeline).toEqual(["runner id1 started on a network"]);
+      // The installer runs first (id1), then the runner (id2) starts on the network, with the guard off.
+      expect(off.timeline).toEqual(["runner id2 started on a network"]);
 
       const auto = fakeDocker();
       auto.fail.nft = true;

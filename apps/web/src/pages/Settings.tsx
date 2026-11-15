@@ -10,9 +10,9 @@ import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
-import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
+import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction } from "./settings/System";
+import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -24,9 +24,9 @@ export { ToolServers, DeployTargets } from "./settings/Tools";
 export { Funding, ProjectBudgets } from "./settings/Funding";
 export { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 export { Watchdog } from "./settings/Watchdog";
-export { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting } from "./settings/Team";
+export { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 export { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-export { RunnerUpdate, WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, WrapUpAction, TrialLines, useNow } from "./settings/System";
+export { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy, TrialLines, useNow } from "./settings/System";
 export { ServerPanel, ThisHost, NetguardAllow, deployerScriptLine } from "./settings/ThisHost";
 export { Devices } from "./settings/Devices";
 export { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -281,6 +281,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
       <div key={company.id} style={{ display: "contents" }}>
         <div className="embedded-page">{children}</div>
         <PermissionJudgeSetting company={company} onChanged={onChanged} />
+        <AutoTempCleanupSetting company={company} onChanged={onChanged} />
         <SecondOpinionSetting company={company} />
         <FenceSetting company={company} onChanged={onChanged} />
       </div>
@@ -289,9 +290,8 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ),
     updates: (
       <>
-        <StopAllWork />
         <SelfDeploy go={go} />
-        <RunnerUpdate />
+        <StopAllWork />
       </>
     ),
     limits: (
