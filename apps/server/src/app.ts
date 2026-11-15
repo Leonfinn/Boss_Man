@@ -131,6 +131,7 @@ import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService } from "./services/policy-rules.js";
 import { notificationsService } from "./services/notifications.js";
 import { phoneApproveService } from "./services/phone-approve.js";
+import { phoneLoginService } from "./services/phone-login.js";
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
@@ -1446,7 +1447,7 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
-    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts });
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()) }) });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
 

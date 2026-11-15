@@ -425,6 +425,8 @@ export type NotifySettings = {
   phoneAddress?: string | null;
   /** The ntfy container's name on the host (for `docker exec`); null when the host doesn't report it. */
   phoneContainer?: string | null;
+  /** Whether the "Create phone login" button can work on this host, and if not why (BOS-1004). */
+  phoneLogin?: { available: true } | { available: false; why: string };
   /** The last test push: when sent, and when the phone tapped Got it (null: not tapped). */
   phoneTest?: { sentAt: string; confirmedAt: string | null } | null;
 };
