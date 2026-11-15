@@ -991,6 +991,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .merges-banner-sym { flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; background: var(--red-ink); color: var(--red-soft); }
 .merges-banner-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .merges-banner-go { flex: none; font-weight: 600; text-decoration: underline; }
+/* Merging but slowly (BOS-1594): not an alarm, so the neutral card colours with the blue accent, never red or amber. */
+.merges-banner.merges-banner-slow { background: var(--card); border-color: var(--line-strong); color: var(--ink); }
+.merges-banner-slow .merges-banner-sym { background: var(--accent-soft); color: var(--accent-ink); }
 .dash-lead { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
 @media (min-width: 1000px) { .dash-lead { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); } .dash-lead .dash-needs { grid-column: 1; grid-row: 1; } .dash-lead .dash-right { grid-column: 2; grid-row: 1; } }
 .dash-panel { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }

@@ -12,6 +12,7 @@ import { softHold } from "./deploy-wait-hold.js";
 import { holdView, mergeHolds } from "./review-holds.js";
 import { holdsMergeSql } from "./ticket-links.js";
 import { clashWords } from "./merge-line.js";
+import { mergeLineHealth, type MergeLineHealth } from "./merge-line-health.js";
 
 /** How many recently finished items the screen shows. */
 export const RECENT_LIMIT = 10;
@@ -134,6 +135,8 @@ export type MergeQueueView = {
   waitingCount: number;
   /** How many items look stuck: running past the limit, or waiting rows flagged stuck (BOS-767). */
   stuckCount: number;
+  /** BOS-1594: the one verdict on the line's health (healthy, stuck, or merging but slowly); the banner and the jam alert both read it. */
+  line: MergeLineHealth;
 };
 
 /** One plain line from a check's last output: the first error-looking line, or the last line. */
@@ -280,6 +283,10 @@ export function mergeQueueService(
     launcherOn?: () => boolean;
     /** BOS-1486: what holds the check slots and whether a red main holds checks back (server mode only). */
     queueDetail?: (companyId: string) => Promise<{ slots: number; busy: Array<{ ref: string | null; title: string; kind: string }>; mainRed: boolean; fixRef: string | null; /** BOS-1517: merges whose check is held until the ticket has a merge-train seat. */ seatWait?: string[]; /** BOS-1515: tickets held to land on main alone, with the clash (refs and files). */ heldAlone?: HeldAloneView[] }>;
+    /** BOS-1594: when a merge-train seat went empty (epoch ms), or null; the merge stall alarm's own clock. */
+    emptySeatSince?: (companyId: string) => Promise<number | null>;
+    /** BOS-1594: whether a check worker is connected and ready for this company; the capacity advice names a worker only when it is not. */
+    workerReady?: (companyId: string) => Promise<boolean>;
     now?: () => Date;
   },
 ) {
@@ -670,15 +677,20 @@ export function mergeQueueService(
       }
       waiting.sort((a, b) => (a.place ?? Infinity) - (b.place ?? Infinity) || Number(b.urgent) - Number(a.urgent) || b.minutes - a.minutes);
 
+      const recentRows = await recent(companyId, prefix, t);
+      const slots = queue?.slots ?? limit;
+      const emptySeatSince = deps.emptySeatSince ? await deps.emptySeatSince(companyId).catch(() => null) : null;
+      const workerReady = deps.workerReady ? await deps.workerReady(companyId).catch(() => undefined) : undefined;
       return {
         companyId,
         mode: queue?.mode ?? "legacy",
-        slots: queue?.slots ?? limit,
+        slots,
         running,
         waiting,
-        recent: await recent(companyId, prefix, t),
+        recent: recentRows,
         waitingCount: waiting.length,
         stuckCount: running.filter((r) => r.overLimit).length + waiting.filter((w) => w.stuck).length,
+        line: mergeLineHealth({ running, waiting, recent: recentRows, slots }, { now: t, emptySeatSince, workerReady }),
       };
     },
     /** BOS-1517: a ticket's status line for its page: from the same live view as the queue, or null when it isn't in the merge pipeline. */

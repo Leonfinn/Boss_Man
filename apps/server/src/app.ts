@@ -1049,6 +1049,12 @@ export async function buildApp(opts: AppOptions) {
       return !!h && h.kind !== "wrapup";
     },
     launcherOn: () => launch.enabled,
+    // BOS-1594: the stuck/over-capacity verdict's two live facts: an empty train seat (the restart seed wait excluded), and a check worker.
+    emptySeatSince: async (companyId) => {
+      const since = (await mergeTrainStatus(db, companyId).catch(() => [])).filter((p) => !p.seeding && p.emptySeatSince).map((p) => new Date(p.emptySeatSince!).getTime());
+      return since.length ? Math.min(...since) : null;
+    },
+    workerReady: async (companyId) => (await checkWorkersSvc.list()).some((w) => w.enabled && w.connected && w.companies.some((c) => c.id === companyId && c.ready)),
     queueDetail: async (companyId) => {
       const q = await checkQueueSvc.list(companyId);
       const fix = q.rows.find((r) => r.fixesMain);
