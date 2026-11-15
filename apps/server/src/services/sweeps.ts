@@ -18,6 +18,7 @@ import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
 import { agentWipHold, canStartNow, cantMoveFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { openBlockers } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
 import { getHold } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
@@ -1048,14 +1049,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     for (const { ticket } of rows) {
       const agentId = ticket.assigneeAgentId!;
       if (busy.has(agentId)) continue;
-      const deps = await db
-        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-        .from(ticketDependencies)
-        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(eq(ticketDependencies.blockedTicketId, ticket.id));
-      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) continue;
+      if ((await openBlockers(db, ticket.id)).length) continue;
       const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
       if (ticketRuns.some((r) => !r.endedAt)) continue;
       const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
