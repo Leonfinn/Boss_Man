@@ -232,7 +232,9 @@ export function checkQueue(db: Db) {
     const queued = await db.select().from(checkJobs).where(eq(checkJobs.state, "queued"));
     const red = new Set((await db.select({ id: projects.id }).from(projects).where(eq(projects.mainState, "red"))).map((p) => p.id));
     // DR-056: a quick pre-review job that has waited QUICK_AGE_MS sorts with the merges, by queue time, so a long line of quick checks drains.
-    const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS);
+    // BOS-1519: an urgent (top-tier) or moved-to-front quick check sorts there from the moment it is queued. Otherwise it sorted
+    // below every aged quick check for its first QUICK_AGE_MS, so urgency and Move to front did nothing in a long line.
+    const withMerges = (j: CheckJob) => j.kind === "merge" || (!isLong(j) && (now.getTime() - j.queuedAt.getTime() >= QUICK_AGE_MS || !!j.frontAt || prio(j) === 0));
     // BOS-1504, merge train on: the train decides which landing goes next, so the queue follows it. A merge job of a ticket still
     // waiting for a seat is held back (it keeps its place: it stays queued, and its landing's own job replaces it once seated). The
     // seated members' merge jobs are served as one block in seat order, at the block's best place: the latest Move to front and
@@ -319,15 +321,20 @@ export function checkQueue(db: Db) {
   /**
    * BOS-1384: put a waiting merge next in line (below a fix for a red main). Only a merge job still queued can move; a running one is
    * never touched, and nothing here skips a check: the job runs in full when it is served. Returns the job, or null if none waits.
+   * BOS-1519: a queued quick pre-review check moves too (it then sorts with the merges at once, see `serving`). A full pre-review
+   * check does not: the ticket asked for quick ones, and a full one holds a long-job slot for 15 minutes or more.
    */
   async function moveToFront(companyId: string, ticketId: string, by: string, reason?: string, now = new Date()): Promise<CheckJob | null> {
-    const [row] = await db
+    const rows = await db
       .update(checkJobs)
       .set({ frontAt: now, frontBy: by })
-      .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.ticketId, ticketId), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "queued")))
+      .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.ticketId, ticketId), or(eq(checkJobs.kind, "merge"), eq(checkJobs.scope, "quick")), eq(checkJobs.state, "queued")))
       .returning();
-    if (row) await record(db, { companyId, ticketId, kind: "reorganised", summary: `${by} moved this merge to the front of the line${reason ? `: ${reason}` : ""}`, detail: { jobId: row.id, by, reason: reason ?? null }, at: now });
-    return row ?? null;
+    for (const row of rows) {
+      const what = row.kind === "merge" ? "merge" : "quick check";
+      await record(db, { companyId, ticketId, kind: "reorganised", summary: `${by} moved this ${what} to the front of the line${reason ? `: ${reason}` : ""}`, detail: { jobId: row.id, kind: row.kind, by, reason: reason ?? null }, at: now });
+    }
+    return rows.find((r) => r.kind === "merge") ?? rows[0] ?? null;
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
@@ -340,12 +347,13 @@ export function checkQueue(db: Db) {
    * BOS-1435: claim for one machine with its own slot limit. A company runner's running jobs are counted per company (worker
    * jobs left out), exactly as before; a check worker's are counted across every company, since its slots are shared.
    */
-  async function claimOn(machine: Machine, limit: number, now = new Date(), companyId?: string): Promise<CheckJob[]> {
+  async function claimOn(machine: Machine, limit: number, now = new Date(), companyId?: string, skip?: (jobId: string) => boolean): Promise<CheckJob[]> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
     if ((await softHold(db, now)).on) return [];
     const worker = isWorker(machine) ? machine.workerId : null;
-    const candidates = (await servable(now, limit >= 2)).filter((j) => !companyId || j.companyId === companyId);
+    // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
+    const candidates = (await servable(now, limit >= 2)).filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id));
     const onMachine = worker ? eq(checkJobs.workerId, worker) : and(isNull(checkJobs.workerId), companyId ? eq(checkJobs.companyId, companyId) : undefined);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
@@ -460,8 +468,9 @@ export function checkQueue(db: Db) {
   }
 
   /** One running job goes back in line, with the reason recorded. */
-  async function requeue(jobId: string, why: string): Promise<CheckJob | null> {
-    const [row] = await db.update(checkJobs).set({ state: "queued", runnerId: null, workerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"))).returning();
+  /** Back in line. With `on` (BOS-1436), only while it still runs on that machine, so a late call can't move a job given elsewhere. */
+  async function requeue(jobId: string, why: string, on?: Machine): Promise<CheckJob | null> {
+    const [row] = await db.update(checkJobs).set({ state: "queued", runnerId: null, workerId: null, startedAt: null, reason: why }).where(and(eq(checkJobs.id, jobId), eq(checkJobs.state, "running"), on === undefined ? undefined : sentTo(on))).returning();
     return row ?? null;
   }
 
@@ -541,6 +550,8 @@ export function checkQueue(db: Db) {
         // BOS-1384: why this one is ahead of the others, in the owner's words (null for an ordinary place).
         why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
         heldBy,
+        // BOS-1517: held because the ticket has no merge-train seat yet (its check isn't waiting for a slot at all).
+        heldBySeat: j.state === "queued" && served.trainHeld.has(j.id),
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
         // BOS-1435: where a running check runs: the company's runner, or a check worker by name.

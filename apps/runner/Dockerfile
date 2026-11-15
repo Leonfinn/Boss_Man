@@ -101,14 +101,20 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
 # and confirm it in server_status (runners show their harness versions).
 # Claude Code's version lives in apps/runner/claude-pack/package.json, not here (DR-050).
 ARG OPENCODE_VERSION=1.19.3
+# Check worker image (DR-060): build with --build-arg WITH_HARNESS=0 to leave out Claude Code and OpenCode. A worker only
+# runs checks, never an agent, so it needs neither, and the image then holds no Anthropic code (it can be published, DR-050).
+# The default (1) builds the runner exactly as before. The CLAUDE_CODE_EXECUTABLE path below then points at nothing, which is harmless: no agent run starts on a worker.
+ARG WITH_HARNESS=1
 USER node
 ENV HOME=/home/node \
     NPM_CONFIG_PREFIX=/home/node/.npm-global \
     PATH=/home/node/.npm-global/bin:$PATH
 RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
- && npm install -g --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
- && opencode --version
+ && if [ "$WITH_HARNESS" = 1 ]; then \
+      npm install -g --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
+   && opencode --version; \
+    else ! command -v claude && ! command -v opencode; fi
 # Claude Code keeps its session transcripts here; it's a volume so a recovery run can reopen
 # an interrupted session after the container is recreated (R42). CLAUDE_CODE_EXECUTABLE is NOT
 # set here: the runner points it at the ready pack at start (DR-050).

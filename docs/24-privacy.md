@@ -24,6 +24,15 @@ Only what you set up yourself:
 - **Agents can read web pages** while they work. What else they may run or reach is set by your permission rules (see Guide 6 on the website).
 - **Installing and updating** downloads Docker images and software packages from their usual public sources, like any other download.
 
+## Visitors to your feedback portal
+
+If you tick **Confirm posts by email** (Feedback → Feedback portal), visitors give an email address, and Boss Man emails them one confirmation link through the outgoing email you set up.
+
+- **Unconfirmed posts** are saved out of sight (not shown to you, your agents or other visitors, and not counted) and deleted when the link runs out (24 hours unless you change it).
+- **The address** is kept on the post only until the visitor clicks the link. If they gave a name, the name and address then become a customer on the Feedback page; if not, the address is not kept at all.
+- **Confirmed browsers** are remembered for 90 days (you can change it) by a cookie, and Boss Man stores only a one-way hash of the address and of the cookie's secret, never the address itself. Expired ones are deleted.
+- **Other visitors** never see an address. Your agents see a customer's address only inside a block marked as coming from outside.
+
 ## How we checked
 
 We searched Boss Man's server, web and runner code for every outside web address and for analytics tools, on 9 November 2026. This was a search of the code, not a watch of a running server's network traffic, and it does not cover what other people's software does on its own.

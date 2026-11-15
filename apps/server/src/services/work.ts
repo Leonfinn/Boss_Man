@@ -13,7 +13,7 @@ import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
 import { fixesLiveProblem } from "./decisions.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
-import { wipExemptKind } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun, wipExemptKind } from "./agent-wip.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 import { checkQueue } from "./check-queue.js";
 import { checkPlace, CARRY_ON_NOTE, hhmm, ownLiveCheck, pendingFallback } from "./check-wording.js";
@@ -238,7 +238,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     const col = target.columnId ? cols.find((c) => c.id === target.columnId) : cols.find((c) => c.systemState === (target.state ?? "backlog"));
     if (!col) throw new WorkError(422, "That column isn't on this project's board.");
     if (col.wipLimit != null && !opts.overLimit) {
-      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState)));
+      // The same counting rule as ticket-moves.ts and the agent's limit: in progress, tickets that can't move don't count.
+      const inCol = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.columnId, col.id), eq(tickets.systemState, col.systemState), col.systemState === "in_progress" ? sql`not ${cantMoveSql}` : undefined));
       if (inCol.filter((t) => t.id !== opts.ticketId).length >= col.wipLimit) {
         throw new WorkError(409, `"${col.name}" is at its limit of ${col.wipLimit}.`);
       }
@@ -425,8 +426,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       });
       return {
         project: p,
-        // Same source as the Dashboard's "agents working": every agent with a run going.
-        workingAgents: new Set(everyLive.map((r) => r.agentId)).size,
+        // Same rule as the Dashboard's "agents working" and the Agents page (DR-061 Q3): every agent with a run going that isn't a chat.
+        workingAgents: new Set(everyLive.filter(isWorkingRun).map((r) => r.agentId)).size,
         withoutTicket: withoutCard.map((r) => ({ id: r.id, agent: r.agent, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt.toISOString() })),
         columns: cols.map((c) => ({
           ...c,

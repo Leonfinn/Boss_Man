@@ -72,6 +72,8 @@ With the launcher, Boss Man drains first: nothing new starts and runs in progres
 
 A runner update takes no backup. Runners hold no database.
 
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
+
 ## Backups
 
 A server update always takes a backup first. `scripts/deploy.sh`, the host deployer and `scripts/rebuild-live.sh` each write one to the install folder, the folder above the checkout. The file is named `bossman-YYYY-MM-DD-HHMM.sql.gz`. `scripts/deploy.sh` keeps the newest 14. `BOSSMAN_BACKUP_DIR` and `BOSSMAN_BACKUP_KEEP` change the folder and the number.
@@ -143,7 +145,7 @@ The launcher reads `.env` only when it is recreated. Recreate it, then recreate 
 docker compose up -d launcher && scripts/update-runner.sh --settings
 ```
 
-Settings → Server and runner lists the entries the launcher is using. How the guard works, and how to turn it off, is in [docs/20-netguard.md](20-netguard.md).
+Settings → Server and runner lists the entries the launcher is using. How the guard works, and how to turn it off, is in [docs/27-netguard.md](27-netguard.md).
 
 ## Where release notes are
 

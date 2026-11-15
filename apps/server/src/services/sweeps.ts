@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, max, ne, or, sql } from "drizzle-orm";
-import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef, unreportedAfterMerge } from "@boss-man/shared";
+import { ageWords, isInfiniteModel, MERGE_MISSED_AFTER_MS, parkedOnPurpose, ticketRef } from "@boss-man/shared";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
@@ -17,18 +17,18 @@ import type { alertClearing } from "./alert-clearing.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { raiseHeldPortalCards } from "./feature-portal.js";
 import { record } from "./activity.js";
-import { agentWipHold, canStartNow, cantMoveFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
-import { openBlockers } from "./ticket-links.js";
+import { agentWipHold, busyAgentIds, canStartNow, cantMoveFor, cantMoveSql, nothingToDoFor, readWipLimits, ticketIsBlocked, WIP_REFUSED_REASON } from "./agent-wip.js";
+import { blockedHolds, openBlockers, ticketBlockerOpenSql } from "./ticket-links.js";
 import { checkPriority } from "./check-gate.js";
-import { getHold } from "./maintenance.js";
+import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
-import { heldTicketIds, wakeReadyHolds } from "./review-holds.js";
-import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
+import { heldTicketIds, mergeHolds, wakeReadyHolds } from "./review-holds.js";
+import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
-import { fenceDefaultSweep } from "./fence-default.js";
+import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -154,7 +154,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
 
   async function withdraw(ids: string[]) {
     if (!ids.length) return;
-    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(inArray(decisions.id, ids));
+    await db.update(decisions).set({ status: "withdrawn", dedupeKey: null }).where(and(inArray(decisions.id, ids), eq(decisions.status, "open")));
     // Withdrawn without an answer: their notifications are read now (BOS-413).
     await db.update(notifications).set({ readAt: now() }).where(and(inArray(notifications.decisionId, ids), isNull(notifications.readAt)));
   }
@@ -549,12 +549,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * a time, so only idle agents are considered, and each is woken about one ticket per pass.
    */
   // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.
-  async function busyAgents() {
-    return new Set([
-      ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`)))).map((r) => r.id),
-      ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
-    ]);
-  }
+  // The rule lives in agent-wip.ts (`agentBusy`, DR-061 Q3); this is its many-agents form.
+  const busyAgents = () => busyAgentIds(db);
 
   /** A review whose turn it is, with an idle reviewer and no verdict: wake the reviewer again, then tell the owner. */
   const clashAskedAt = new Map<string, number>(); // review id -> when the runner was last asked about a clash (BOS-426); lost on restart, harmless because the sweep just asks once more
@@ -575,7 +571,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (heldIds.has(ticket.id)) continue;
       for (const r of activeRows(await latestRows(db, ticket.id))) {
         const agentId = r.reviewerAgentId;
-        if (!agentId || busy.has(agentId) || done.has(agentId)) continue;
+        if (!agentId || done.has(agentId)) continue;
+        // A review held by a stand-in (nobody else could take it) is chased even when its holder is busy:
+        // the CEO almost always is, and nothing else would ever ask again (BOS-1526).
+        const standIn = await fallbackReason(db, ticket, r);
+        if (busy.has(agentId) && !standIn) continue;
         const [reviewer] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, agentId));
         if (!reviewer || reviewer.paused || reviewer.retiredAt) continue;
         // A run that ended after the request counts as the reviewer having looked; give it the usual
@@ -584,7 +584,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const roundStart = (await roundStartedAt(db, ticket.id)) ?? r.createdAt;
         const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(and(eq(runs.agentId, agentId), endedNormallySql(runs.outcome)));
         const lastActive = later(roundStart, last?.at)!;
-        if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
+        // A stand-in's other runs don't count as having looked at this review: only the round's age does.
+        if (t.getTime() - (standIn ? roundStart : lastActive).getTime() < limits.missedAfterMs) continue;
         // "Leave it another hour" holds this review for another quiet period, starting from the answer,
         // so the CEO's choice isn't re-asked within a minute (BOS-426, BOS-433 fix B).
         const waited = await reviewWaitedSince(db, r.id);
@@ -629,7 +630,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
             continue;
           }
         }
-        if (recent.length > MISSED_NUDGES_PER_DAY) {
+        // A stand-in's review gets the card after an hour (the first wake, then one chase at 30 minutes), not after three nudges.
+        if (recent.length > MISSED_NUDGES_PER_DAY || (standIn && recent.length >= 1 && t.getTime() - roundStart.getTime() >= 2 * limits.missedAfterMs)) {
           // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
           // should only see this if the CEO doesn't settle it (BOS-119). Real actions on the review,
           // not "Got it": the CEO can take it over, give it to another reviewer, send it back to the
@@ -653,7 +655,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           agentId,
           reason: REVIEW_REASON,
           priority: 3,
-          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.${standIn ? `\n  You hold the ${r.kind} review as a stand-in, not as its usual reviewer: ${standIn}.` : ""}\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
         });
         done.add(agentId);
         result.woken++;
@@ -683,20 +685,23 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .innerJoin(companies, eq(companies.id, tickets.companyId))
       .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
     const out: Array<(typeof stuck)[number] & { approvedAt: number }> = [];
-    // A reviewer's hold (BOS-808): neither a merge retry nor a merge-stuck card for a ticket that is held on purpose.
-    const heldIds = await heldTicketIds(db, stuck.map((s) => s.id));
     for (const ticket of stuck) {
-      if (heldIds.has(ticket.id)) continue;
       const rows = await latestRows(db, ticket.id);
       if (!rows.length || evaluate(rows) !== "passed") continue;
       // A merge that is alive holds the sweep back. Chat, chases and note refreshes on the ticket don't count (BOS-362).
       if (opts.landingActive?.(ticket.id)) continue;
-      const [signoff] = await db
+      // Held at the merge gate (DR-061 Q2b, mergeHolds): the owner's sign-off, a reviewer's hold (BOS-808), a card that
+      // holds the merge or a wait on another ticket. Neither a merge retry nor a merge-stuck card for a ticket held on
+      // purpose. A plain question linked to the ticket holds nothing, so it no longer stops the sweep.
+      if ((await mergeHolds(db, ticket.id)).length) continue;
+      // The carried-work card ("merge that one first") is left out of mergeHolds on purpose (BOS-733), but the sweep still
+      // waits for it: the merge starts again by itself once the carried ticket lands.
+      const [carriedCard] = await db
         .select({ id: decisions.id })
         .from(ticketDependencies)
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
-      if (signoff) continue;
+        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'carried'`));
+      if (carriedCard) continue;
       // Owed the owner's sign-off, card or not: never retried as a merge; the sign-off sweep raises a lost card (BOS-503, DR-021).
       const [full] = await db.select().from(tickets).where(eq(tickets.id, ticket.id));
       if (!full) continue;
@@ -722,7 +727,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   const resumed = new Set<string>();
   async function resumeMergesOnPromotion(promotedAt: Date) {
     if (!opts.resumeLand) return { started: 0, waiting: 0 };
-    if (await getHold(db)) return { started: 0, waiting: 1 };
+    if (holdBlocksStarts(await getHold(db), now())) return { started: 0, waiting: 1 };
     if (resumedFor !== promotedAt.getTime()) {
       resumedFor = promotedAt.getTime();
       resumed.clear();
@@ -839,7 +844,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId, stateNote: tickets.stateNote, blockedUntil: tickets.blockedUntil })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and b.system_state <> 'done' and not (td.until = 'merged' and b.merge_commit is not null))`,
+      .where(and(inArray(tickets.systemState, ["backlog", "blocked"]), eq(companies.paused, false), sql`exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`, sql`not exists (select 1 from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id} and ${ticketBlockerOpenSql("td", "b")})`,
         // Only if the last blocker finished after the ticket last changed state: a ticket put back in backlog on purpose stays there.
         // A blocker waited on "until merged" finishes at its merge, which stamps its last activity (BOS-989).
         sql`(select max(greatest(b.state_changed_at, case when td.until = 'merged' and b.merge_commit is not null then b.last_activity_at end)) from ticket_dependencies td join tickets b on b.id = td.blocker_ticket_id where td.blocked_ticket_id = ${tickets.id}) > ${tickets.stateChangedAt}`));
@@ -883,15 +888,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    */
   async function releaseStrandedBlocked(t: Date) {
     const rows = await db
-      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, mergeCommit: tickets.mergeCommit, criteria: tickets.acceptanceCriteria, note: tickets.stateNote })
+      .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "blocked"), isNull(tickets.blockedUntil), isNull(tickets.goLiveWait), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
-        sql`not exists (select 1 from ticket_dependencies td where td.blocked_ticket_id = ${tickets.id})`,
-        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`));
+      .where(and(eq(tickets.systemState, "blocked"), eq(companies.paused, false), lte(tickets.stateChangedAt, new Date(t.getTime() - 10 * 60 * 1000)),
+        // Cheap prefilter so the per-ticket rule below only runs for tickets that might be free (BOS-409: reads must not
+        // grow with live dependencies). Each line is a hold blockedHolds also finds; it stays the one judge.
+        or(isNull(tickets.blockedUntil), lte(tickets.blockedUntil, t)),
+        isNull(tickets.goLiveWait),
+        sql`not exists (select 1 from decisions d where d.status = 'open' and d.context->>'ticketId' = ${tickets.id}::text)`,
+        sql`not exists (select 1 from ticket_dependencies td left join tickets b on b.id = td.blocker_ticket_id left join engagements e on e.id = td.blocker_engagement_id left join decisions dd on dd.id = td.blocker_decision_id
+          where td.blocked_ticket_id = ${tickets.id} and ((b.id is not null and ${ticketBlockerOpenSql("td", "b")}) or (e.id is not null and e.status <> 'signed_off') or dd.status = 'open'))`));
     let released = 0;
     for (const r of rows) {
-      if (r.mergeCommit && unreportedAfterMerge(r.criteria, r.note).length > 0) continue;
+      // The one "held in Blocked" rule (DR-061 Q2a, BOS-1532), the same one Blocked is accepted by.
+      if ((await blockedHolds(db, r.id, { now: t })).length) continue;
       const [name] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.assigneeAgentId ?? ""));
       const moved = await systemMoveTicket(db, { ticketId: r.id, from: ["blocked"], to: "ready", reason: "Boss Man: nothing holds it any more", now: t, stateNote: `Ready: nothing is holding it any more. Starts when ${name?.name ?? "its assignee"} has a free slot.` });
       if (!moved) continue;
@@ -956,6 +967,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs)),
           // Waiting on a scheduled check is a plan, not missed work.
           isNull(tickets.monitorAt),
+          // Work that can't move (waiting on an unfinished ticket, a plan, a go-live check) isn't forgotten work (DR-061 Q3).
+          sql`not ${cantMoveSql}`,
           // A watched tree that has stopped is the watcher's to handle: it was woken about this exact state (watch_stopped_fp is cleared when the tree moves).
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
         ),
@@ -970,14 +983,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const agentId = ticket.assigneeAgentId!;
       if (done.has(agentId)) continue;
       // Blocked the way decisions.ts decides it: any dependency not yet resolved.
-      const deps = await db
-        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-        .from(ticketDependencies)
-        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-        .where(eq(ticketDependencies.blockedTicketId, ticket.id));
-      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) continue;
+      if ((await openBlockers(db, ticket.id)).length) continue;
       // Active means a run on this ticket that hasn't ended; the last run's end counts as activity.
       const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
       if (ticketRuns.some((r) => !r.endedAt)) continue;
@@ -1075,6 +1081,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.urgentIdleAfterMs)),
           isNull(tickets.monitorAt),
+          sql`not ${cantMoveSql}`,
         ),
       )
       .orderBy(asc(tickets.lastActivityAt));
@@ -1159,6 +1166,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs)),
           // A booked check is a plan (DR-027): that agent is woken when it is due.
           isNull(tickets.monitorAt),
+          sql`not ${cantMoveSql}`,
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
         ),
       );
@@ -1254,7 +1262,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           or(isNotNull(tickets.wipHeldAt), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.idleFillAfterMs))),
           isNull(tickets.monitorAt),
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
-          or(isNotNull(tickets.wipHeldAt), sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null and not ${cantMoveFor(doing)})`),
+          or(isNotNull(tickets.wipHeldAt), sql`not exists (select 1 from tickets doing where doing.assignee_agent_id = ${tickets.assigneeAgentId} and doing.system_state = 'in_progress' and doing.monitor_at is null and not ${nothingToDoFor(doing)})`),
         ),
       );
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
@@ -1328,7 +1336,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           isNull(agents.retiredAt),
           eq(companies.paused, false),
           // Work that can't move (waiting on an unmerged fix, a plan, a go-live check) doesn't make an agent busy (BOS-1172's rule, BOS-1180).
-          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not ${cantMoveFor(mine)} and not ${heldByCompany})`,
+          // Same excuses as tier 2 (readySlots): a booked check (an in-progress ticket parked on one), and a ticket held by a card or engagement.
+          sql`not exists (select 1 from tickets mine where mine.assignee_agent_id = ${agents.id} and mine.system_state in ('ready', 'in_progress') and not (mine.system_state = 'in_progress' and mine.monitor_at is not null) and not ${nothingToDoFor(mine)} and not ${heldByCompany})`,
           sql`not exists (select 1 from review_requests owed join tickets reviewed on reviewed.id = owed.ticket_id where owed.reviewer_agent_id = ${agents.id} and owed.status = 'pending' and reviewed.system_state = 'review')`,
         ),
       )
@@ -1492,6 +1501,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // The fence cards: one asking about an old unchosen Off (BOS-940), one per episode of agent work held because
       // the runner can't fence (BOS-373), which goes by itself when the episode ends.
       await fenceDefaultSweep(db, t).catch(() => ({ raised: 0, heldCards: 0, released: 0 }));
+      // And one per episode of a runner whose network guard isn't proven on (DR-049 point 1, BOS-938).
+      await guardHoldSweep(db, t).catch(() => ({ raised: 0, released: 0 }));
       await opts.expireAdvice?.();
       // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
       const phoneApprove = await sweepPhoneApprove(db, t);
@@ -1500,7 +1511,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);
       // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
-      const held = await getHold(db);
+      const held = holdBlocksStarts(await getHold(db), t);
       // Cards whose cause has gone close themselves here (DR-016, BOS-470), on any tier: a limit that
       // has reset, an agent that has run cleanly since, a ticket that has finished.
       const closedCards = await opts.clearAlerts?.();

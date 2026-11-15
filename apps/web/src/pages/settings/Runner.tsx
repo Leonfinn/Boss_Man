@@ -5,7 +5,7 @@ import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
-import { UpdateHistory, type UpdateRow } from "./updates";
+import type { UpdateRow } from "./updates";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen" } | null; error?: string } | null;
@@ -13,7 +13,7 @@ type Launched = { slug: string; container: { state: string; status: string; imag
 type RunnerLiveState = "connected" | "updating" | "paused" | "failed" | "offline" | "none";
 type CompanyReport = { live: { ok: boolean; text: string; state?: RunnerLiveState }; last: UpdateRow | null };
 const liveTag = (l: CompanyReport["live"]) => (l.state === "updating" ? "tag amber" : l.ok ? undefined : "tag red");
-type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; report?: CompanyReport | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false; report?: CompanyReport | null } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null; sandbox?: { guard?: { state: "on" | "absent"; reason: string } } | null; safety?: Safety; report?: CompanyReport | null }) & { launcher?: Launched };
 
 function RunnerAddons({ report }: { report: AddonReport[] | null }) {
   return (
@@ -34,7 +34,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
+                  To add it, put the line <code className="mono">RUNNER_ADDONS={a.id}</code> in the server's <code className="mono">.env</code> file, then run <code className="mono">scripts/update-runner.sh</code> on the server as root (the administrator account). Skills that need it are left out of runs until then.
                 </p>
               )}
             </li>
@@ -73,6 +73,52 @@ function GuardWarning({ guard }: { guard: "off" | "unavailable" | "down" }) {
     <p className="error" role="alert" data-testid="guard-warning">
       {what} {fix}
     </p>
+  );
+}
+
+type Safety = { fingerprint: string | null; fence: { proven: boolean; runWithout: boolean }; guard: { proven: boolean; runWithout: boolean; reason: string | null } } | null;
+
+/**
+ * One card per safety feature the runner hasn't proven (DR-049 point 1): agents stay stopped unless the owner chooses
+ * to run them without it. The choice is kept with the runner's platform, so a new host or kernel asks again.
+ */
+export function SafetyCards({ companyId, safety, connected, onChanged }: { companyId: string; safety: Safety | undefined; connected: boolean; onChanged: () => void }) {
+  const act = useAction();
+  if (!safety) return null;
+  const choose = (feature: "guard" | "fence", run: boolean) =>
+    act.run(async () => {
+      await api(`/api/companies/${companyId}/safety-choice`, { method: "POST", body: { feature, run } });
+      onChanged();
+      return run ? "Agents will run without it on this host." : "Agents stay stopped until it works.";
+    });
+  const cards = [
+    { feature: "guard" as const, state: safety.guard, name: "network guard", what: "keeps agents off your home network", note: safety.guard.reason ? `The runner's own check says: ${safety.guard.reason}.` : "The runner hasn't proven its network guard yet." },
+    { feature: "fence" as const, state: safety.fence, name: "fence", what: "keeps agents out of each other's files and keys", note: "The runner's own check says it can't fence agents (its kernel has no usable Landlock, or the container blocks it)." },
+  ].filter((f) => !f.state.proven);
+  if (!connected || cards.length === 0) return null;
+  return (
+    <div data-testid="safety-cards">
+      {cards.map((f) => (
+        <div key={f.feature} className="card" role="group" aria-label={`Missing: ${f.name}`} data-testid={`safety-card-${f.feature}`} style={{ marginTop: 12 }}>
+          <p>
+            <strong>This runner has no proven {f.name}.</strong> The {f.name} {f.what}. {f.note}{" "}
+            {f.state.runWithout ? "You chose to run agents without it on this host." : "Agents are stopped until it works or you choose otherwise."}
+          </p>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Your choice is kept for this host{safety.fingerprint ? ` (${safety.fingerprint})` : ""}; a new host or kernel asks again.
+          </p>
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className={f.state.runWithout ? "btn" : "btn primary"} disabled={act.busy} onClick={() => void choose(f.feature, false)} aria-pressed={!f.state.runWithout}>
+              Keep agents stopped
+            </button>
+            <button type="button" className={f.state.runWithout ? "btn primary" : "btn"} disabled={act.busy} onClick={() => void choose(f.feature, true)} aria-pressed={f.state.runWithout}>
+              {f.feature === "guard" ? "Run agents without the network guard" : "Run agents without the fence"}
+            </button>
+          </div>
+        </div>
+      ))}
+      {act.view}
+    </div>
   );
 }
 
@@ -150,11 +196,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           )}
         </dl>
         {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
-        {s?.report?.last && (
-          <div data-testid="company-update-history">
-            <UpdateHistory r={s.report.last} />
-          </div>
-        )}
+        <SafetyCards companyId={company.id} safety={s?.registered ? s.safety : null} connected={!!connected} onChanged={status.reload} />
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -215,11 +257,6 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           )}
         </dl>
       )}
-      {s?.registered && s.report?.last && (
-        <div data-testid="company-update-history">
-          <UpdateHistory r={s.report.last} />
-        </div>
-      )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <p>
@@ -241,6 +278,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           {s?.registered ? "Issue a new runner token" : "Register a runner"}
         </button>
       )}
+      {s?.registered && <SafetyCards companyId={company.id} safety={s.safety} connected={s.connected} onChanged={status.reload} />}
       {s?.registered && <RunnerAddons report={s.addons} />}
       {act.view}
     </Section>

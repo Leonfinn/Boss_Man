@@ -5,9 +5,9 @@
 // The hold is one `settings` row, so there is no migration and a restart keeps it.
 import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
+import { agents, checkWorkers, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
@@ -288,6 +288,17 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     }
   }
 
+  /**
+   * BOS-1437 (DR-060): check workers run on other hosts, so this swap doesn't touch them, and a worker built from an older commit
+   * than the runner sits idle until it is updated. The done card says so with the steps; empty when no worker is set up.
+   */
+  async function workerUpdateSteps(): Promise<string> {
+    const rows = await db.select({ name: checkWorkers.name }).from(checkWorkers).where(eq(checkWorkers.enabled, true));
+    if (!rows.length) return "";
+    const names = rows.map((w) => w.name).join(", ");
+    return ` Check workers are not swapped by this update and take no checks until they match (${names}). On each worker host: build or pull the new worker image, set BOSSMAN_WORKER_IMAGE in its env file to it, and run docker compose -p boss-man-check-worker --env-file check-worker.env -f deploy/check-worker.yml up -d. The steps are in docs/26-check-workers.md; the Checks panel shows which workers are out of date.`;
+  }
+
   async function end(title: string, level: NotifyInput["level"], body: string) {
     const h = await getHold(db);
     const last: LastUpdate = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body, ...(h?.swapped ? { swapped: h.swapped } : {}) };
@@ -465,6 +476,25 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     },
 
     /**
+     * "Stop N and carry on with the update" (BOS-1238): which of the runs the owner was shown may be stopped. The
+     * scope is fixed here, not by the page: only runs that were told to wrap up (`wrapTold`), only once the hold's
+     * deadline has passed, and only those still going now. A run that has since ended is skipped; an id that was
+     * never told is never returned, whatever the request says. It stops nothing itself: the caller ends each id
+     * through the same per-run stop as BOS-929's Stop this run.
+     */
+    async stragglers(shown: string[]): Promise<{ ok: true; ids: string[]; skipped: number } | { ok: false; reason: "no_wrapup" | "too_early" }> {
+      const h = await getHold(db);
+      if (!h || !(h.kind === "wrapup" || h.wrapSince)) return { ok: false, reason: "no_wrapup" };
+      if (now() < new Date(h.deadline)) return { ok: false, reason: "too_early" };
+      const told = new Set(Object.keys(h.wrapTold ?? {}));
+      const asked = [...new Set(shown)].filter((id) => told.has(id));
+      if (!asked.length) return { ok: true, ids: [], skipped: shown.length };
+      const live = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.id, asked), isNull(runs.endedAt)));
+      const ids = live.map((r) => r.id);
+      return { ok: true, ids, skipped: shown.length - ids.length };
+    },
+
+    /**
      * Stops exactly these runs through the per-run Stop (BOS-1377; BOS-1238's button calls this too): only ids the hold
      * told at wrap-up that are still going are stopped, so a run that ended since is skipped and a run that started later
      * is never touched. No lane pause, no ticket moves, no dropped wakes: the stopped tickets wake after the hold lifts.
@@ -638,7 +668,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const settingsDone = h.kind === "settings";
       if (bad.length) await end(settingsDone ? "Runner restart for a setting change finished with problems" : "Runner update finished with problems", "page", `${bad.join("; ")}. New runs have started again. Check Settings > Runner for those companies.`);
       else if (settingsDone) await end("Runners restarted with the new settings", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " was" : "s were"}` : "No runners were"} recreated after their runs finished. New runs have started again.`);
-      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.`);
+      else await end("Runners updated", "note", `${after.length ? `All ${after.length} runner${after.length === 1 ? " is" : "s are"}` : "No runners were"} on the new image. New runs have started again.${await workerUpdateSteps()}`);
     },
   };
   return self;

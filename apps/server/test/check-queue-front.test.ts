@@ -75,3 +75,67 @@ describe("merge line order (BOS-1384)", () => {
     expect(again.frontAt).not.toBeNull();
   });
 });
+
+// BOS-1519: an urgent or moved-to-front quick check ranks with the aged quick checks (DR-056's "with the merges" group) from
+// the moment it is queued, and Move to front works on quick checks too.
+describe("urgent and moved-to-front quick checks (BOS-1519)", () => {
+  async function quick(s: Awaited<ReturnType<typeof setup>>, opts: { urgent?: boolean; minutesAgo: number; scope?: "quick" | "full" }) {
+    const [p] = await s.db.select().from(projects).where(eq(projects.companyId, s.co.id));
+    const n = Math.floor(Math.random() * 1e9);
+    const [t] = await s.db.insert(tickets).values({ companyId: s.co.id, projectId: p!.id, title: `Q${n}`, number: n, urgent: opts.urgent ?? false }).returning();
+    const { job } = await s.q.enqueue({ companyId: s.co.id, projectId: p!.id, ticketId: t!.id, kind: "pre_review", scope: opts.scope ?? "quick", commit: `q${n}`, tree: `qt${n}`, priority: 1 });
+    await s.db.update(checkJobs).set({ queuedAt: new Date(Date.now() - opts.minutesAgo * 60_000) }).where(eq(checkJobs.id, job.id));
+    return { ticketId: t!.id, jobId: job.id };
+  }
+
+  it("an urgent quick check queued just now sorts ahead of older aged quick checks and ordinary merges", async () => {
+    const s = await setup();
+    const aged1 = await quick(s, { minutesAgo: 40 });
+    const aged2 = await quick(s, { minutesAgo: 20 });
+    const merge = await s.merge({ minutesAgo: 30 });
+    const fresh = await quick(s, { minutesAgo: 1 });
+    const urgent = await quick(s, { minutesAgo: 0, urgent: true });
+    // Urgent joins the with-merges group at once and is top tier there; the fresh ordinary one keeps DR-056's place, last.
+    expect(await s.order()).toEqual([urgent.ticketId, aged1.ticketId, merge.ticketId, aged2.ticketId, fresh.ticketId]);
+    // Clearing urgency puts it back below the aged group until it ages itself (it was queued after `fresh`).
+    await s.db.update(tickets).set({ urgent: false }).where(eq(tickets.id, urgent.ticketId));
+    expect(await s.order()).toEqual([aged1.ticketId, merge.ticketId, aged2.ticketId, fresh.ticketId, urgent.ticketId]);
+  });
+
+  it("ordinary quick checks keep DR-056's order: fresh ones wait below the aged ones", async () => {
+    const s = await setup();
+    const fresh = await quick(s, { minutesAgo: 2 });
+    const aged = await quick(s, { minutesAgo: 15 });
+    const merge = await s.merge({ minutesAgo: 12 });
+    expect(await s.order()).toEqual([aged.ticketId, merge.ticketId, fresh.ticketId]);
+  });
+
+  it("Move to front puts a queued quick check next, and logs it as a quick check", async () => {
+    const s = await setup();
+    const aged = await quick(s, { minutesAgo: 30 });
+    const merge = await s.merge({ minutesAgo: 25 });
+    const fresh = await quick(s, { minutesAgo: 1 });
+    expect(await s.order()).toEqual([aged.ticketId, merge.ticketId, fresh.ticketId]);
+    const moved = await s.q.moveToFront(s.co.id, fresh.ticketId, "Sam", "needed now");
+    expect(moved?.id).toBe(fresh.jobId);
+    expect(await s.order()).toEqual([fresh.ticketId, aged.ticketId, merge.ticketId]);
+    const rows = (await s.q.list(s.co.id)).rows;
+    expect(rows.find((r) => r.ticketId === fresh.ticketId)!.why).toBe("moved to front by Sam");
+    const log = await s.db.select().from(activity).where(eq(activity.ticketId, fresh.ticketId));
+    expect(log.some((a) => a.summary === "Sam moved this quick check to the front of the line: needed now")).toBe(true);
+    // It is claimed first.
+    const [run] = await s.q.claimNext(null);
+    expect(run!.id).toBe(fresh.jobId);
+  });
+
+  it("Move to front leaves a full pre-review check and a running quick check alone", async () => {
+    const s = await setup();
+    const full = await quick(s, { minutesAgo: 5, scope: "full" });
+    expect(await s.q.moveToFront(s.co.id, full.ticketId, "Sam")).toBeNull();
+    await s.db.delete(checkJobs);
+    const q1 = await quick(s, { minutesAgo: 5 });
+    const [run] = await s.q.claimNext(null);
+    expect(run!.id).toBe(q1.jobId);
+    expect(await s.q.moveToFront(s.co.id, q1.ticketId, "Sam")).toBeNull();
+  });
+});

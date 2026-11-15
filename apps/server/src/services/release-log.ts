@@ -9,7 +9,8 @@ import { agents, decisions, projects, settings, ticketMessages, tickets, wakes }
 import { OWNER_SETUP_FIX_PREFIX, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
 import type { OwnerSetupFacts } from "./owner-setup-check.js";
 import type { NotifyInput } from "./notifications.js";
-import { isRunnerOnlyStep, mergeCommitOrder, splitSteps, stepKey } from "./runner-image.js";
+import { allMergeOrder } from "./go-live-wait.js";
+import { isRunnerOnlyStep, splitSteps, stepKey } from "./runner-image.js";
 import { moveTicket } from "./ticket-moves.js";
 
 /** The Release Manager's wake reason. */
@@ -242,7 +243,8 @@ export const releaseLogService = (
       // Not live any more: a step-back to before its merge (the live commit is an earlier merge, or not a
       // merge at all, so a rollback went back past it). A ticket whose own merge commit Boss Man can't
       // place is left alone rather than guessed at.
-      if (at >= 0 && (steppedBack || (liveAt >= 0 && at > liveAt))) {
+      if (at < 0) continue; // left alone: no card, no withdrawal (DR-061 Q5; it used to fall through and get a card)
+      if (steppedBack || (liveAt >= 0 && at > liveAt)) {
         if (t.ownerSetupDecisionId) withdrawing.add(t.ownerSetupDecisionId);
         continue;
       }
@@ -316,7 +318,7 @@ export const releaseLogService = (
    * order of merge times. It includes tickets whose setup card is already raised, so a switch-back can
    * still place them.
    */
-  const mergeOrder = (companyId: string) => mergeCommitOrder(db, companyId);
+  const mergeOrder = (companyId: string) => allMergeOrder(db, companyId);
 
   /** Whether the CEO has an open card to fix a live ticket's setup steps (DR-052). */
   async function hasOpenSetupFix(companyId: string) {
