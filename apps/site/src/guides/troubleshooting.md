@@ -78,7 +78,7 @@ From: [Guide 9](/guides/add-ons).
 
 This only happens if you run the runner without the launcher, which the guides do not do. The runner's token file is empty. Follow [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), step 7, "The runner token". With the launcher (`BOSSMAN_LAUNCHER=1` in `.env`, as [Guide 2](/guides/install-boss-man) sets), Boss Man fills in the token for you.
 
-From: [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md), Troubleshooting.
+From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
 ## Agents not starting
 
@@ -215,7 +215,7 @@ From: [Guide 10](/guides/updates-and-backups).
 
 Check with `df -h $B` and `docker system df`. **Settings > Server and runner** shows the size of the runner's **Workspaces**. Each company has a disk limit, 20 GB by default. Boss Man tells you at most once a day while a company is over it. This is only a warning: nothing is stopped. To raise the limit, open **Settings > Reviews and CEO > Workspace disk** and set **Disk cap (GB)** higher. Boss Man also clears the workspaces of tickets that finished more than 7 days ago. Before it clears one, it keeps any uncommitted work as a patch, and the ticket's branch stays. Building runner images also uses space, so check `docker system df` before you remove anything.
 
-From: [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md), Troubleshooting.
+From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
 ### I cannot find my backups.
 
@@ -233,7 +233,7 @@ find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.
 
 Lock them down by running the same command with `-exec chmod 600 {} +` in place of `-print`. Then run the first command again: it should print nothing. If you set `BOSSMAN_BACKUP_DIR`, use that folder in place of `$B`.
 
-From: [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md), Troubleshooting.
+From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
 ## Add-ons
 
