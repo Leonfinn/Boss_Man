@@ -74,7 +74,7 @@ Read it first (`less $B/src/scripts/host-deployer.sh`). Copy it. Do not link to 
 cp $B/src/scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
 
-When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it. Read the change, update by hand with `scripts/deploy.sh`, and copy the script over again. [docs/23-updating.md, step 3](23-updating.md#3-copy-the-deployer-script-if-it-changed) shows how to tell.
+A change to `scripts/host-deployer.sh` deploys like any other: after a good deploy, `scripts/install-deployer.sh` replaces this copy by itself (atomically; the new version runs from the next minute). [docs/23-updating.md, step 3](23-updating.md#3-the-deployer-script-copies-itself) says when a hand copy is still needed.
 
 ## 4. Add an alert webhook (optional)
 
