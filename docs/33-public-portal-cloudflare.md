@@ -19,7 +19,11 @@ Works on any Docker host (plain Linux, a Proxmox VM or LXC, TrueNAS). Nothing he
 | `BOSSMAN_PORTAL_CLIENT_HEADER` | `cf-connecting-ip` | Cloudflare sets this header and removes any copy a visitor sent |
 | `BOSSMAN_PORTAL_TRUSTED_PROXY` | `172.16.0.0/12` | the Docker networks the tunnel container and Caddy sit on, so real visitor addresses are used for rate limits |
 
-Keep `BOSSMAN_PORTAL_BIND` at its default (`127.0.0.1`): the portal port is then reachable only from the host and from the Docker networks, never from the LAN. `172.16.0.0/12` is Docker's default address range; if your Docker uses another range (`docker network ls`, then `docker network inspect <name>`), list that instead. Never list a range that includes the internet.
+Keep `BOSSMAN_PORTAL_BIND` at its default (`127.0.0.1`): the portal port is then reachable only from the host and from the Docker networks, never from the LAN. `172.16.0.0/12` is Docker's default address range; if your Docker uses another range (`docker network ls`, then `docker network inspect <name>`), list that instead. Never list a range that includes the internet. `172.16.0.0/12` is wide: it covers every Docker network on the host, so another container there could present its own `cf-connecting-ip` and get a fresh rate-limit key. Once you know the real subnet of the network the tunnel and the server share (the `Subnet` line in `docker network inspect`), narrow the value to it. The subnet of your host is not known in advance; find it with that command, do not guess.
+
+## Updating cloudflared
+
+The image in `deploy/cloudflared.yml` is pinned by version and digest. To bump it, pick the new release tag on Docker Hub (`cloudflare/cloudflared`), copy the digest of its multi-arch index, put both into the `image:` line, and run `scripts/check-compose.sh`.
 
 ## Cloudflare dashboard (Zero Trust)
 
