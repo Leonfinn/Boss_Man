@@ -887,6 +887,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <strong>Fixes a live problem:</strong> {t.fixesLive.trim()}. When this merges, its update card is marked urgent.
               </p>
             )}
+            {t.ceoPlan?.trim() && (
+              // BOS-1509: the CEO's plan, so the assignee and the owner see what the ticket is held to.
+              <p className="ceo-plan" style={{ margin: 0 }}>
+                <strong>CEO plan{t.ceoPlanDeadline ? ` (due ${new Date(t.ceoPlanDeadline).toLocaleString()})` : ""}:</strong> {t.ceoPlan.trim()}
+              </p>
+            )}
             <OwnerSetup t={t} patch={patch} busy={busy} />
 
             <DetailRow title="What it produced" count={producedCount(outputs.data, t, outputs.error ? "couldn't load" : null)}>

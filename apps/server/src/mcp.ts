@@ -21,6 +21,7 @@ import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-w
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
+import { ceoPlanText } from "./services/ceo-plan.js";
 import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
 import type { SelfDeployFacts } from "./services/steps.js";
 import type { hostFactsService } from "./services/host-facts.js";
@@ -140,7 +141,7 @@ export type McpHooks = {
   onTicketReview?: (ticketId: string, byAgentId: string | null, causedByRunId: string) => Promise<unknown>;
   nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
   /** Wakes an agent, e.g. the CEO for a note request. */
-  wake?: (agentId: string, input: { reason: string; note: string }) => Promise<unknown>;
+  wake?: (agentId: string, input: { reason: string; note: string; ticketId?: string | null; causedByRunId?: string | null }) => Promise<unknown>;
   /** A run with no ticket touched one: record it as the run's ticket so the Runs list shows it (BOS-254). */
   onRunTicket?: (ticketId: string, runId: string) => Promise<unknown>;
 };
@@ -1197,6 +1198,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           : []),
         ...(t.ownerSetup?.trim() ? ["", "## After it goes live, the owner will need to", ...t.ownerSetup.trim().split(/\r?\n/).map((l) => `- ${l.trim()}`)] : []),
         ...(t.fixesLive?.trim() ? ["", "## Fixes live", `${t.fixesLive.trim()} (when it merges, the deploy card is marked urgent and the owner is paged once).`] : []),
+        ...(ceoPlanText(t, new Date(), 2000) ? ["", "## CEO plan", ceoPlanText(t, new Date(), 2000)!] : []),
         ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", t.plan] : []),
         "",
         "## What it produced",
