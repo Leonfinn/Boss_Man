@@ -57,7 +57,7 @@ import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 import { ADDONS, type AddonFacts } from "./services/addons.js";
-import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, urgentHeldMessage, withNote, type Scope } from "./mcp-common.js";
+import { CAP, criteriaWarning, criterionArg, criterionAt, criterionLines, cut, fail, findProject, FIXES_LIVE_HELP, managerIn, REF, refsOf, stagingTexts, stagingWarning, STATES, text, thinTicketWarning, TREE_REASON, TREE_ROOT_LINE, treeRefusal, urgentHeldMessage, withNote, type Scope } from "./mcp-common.js";
 import { registerClearCheck, registerScheduleCheck, registerTicketAdmin, registerTicketMoves } from "./mcp-tickets.js";
 import { registerAgentAdminTools } from "./mcp-agent-admin.js";
 import { buildPaServer } from "./mcp-pa.js";
@@ -1440,7 +1440,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
         // A code ticket nobody can pick up cleanly gets a nudge, but it is still created (BOS-595).
         const thin = input.noCode ? "" : thinTicketWarning(input.body, input.assignee);
-        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${thin}`);
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.${await wipQueuedNote(db, t.id)}${criteriaWarning(input.acceptanceCriteria)}${await stagingWarning(db, scope.companyId, stagingTexts(input.acceptanceCriteria, input.body))}${thin}`);
       } catch (err) {
         return workFail(err);
       }
