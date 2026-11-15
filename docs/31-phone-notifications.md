@@ -100,6 +100,17 @@ From a device that is not on your tailnet the address must not answer at all.
 
 iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
 
+## After you restart ntfy (Android)
+
+The Android app does not use Google's push service with a self-hosted server. It keeps its own long connection open to your ntfy address (the "Listening for instant notifications" entry in the notification shade) and only fetches by hand when you open it. Restarting ntfy (an update, or adding `deploy/ntfy-bluegreen.yml`) most likely cuts that connection. If the app does not reconnect by itself, messages wait on the server and show only when you open the app, even though Boss Man reports the push as accepted. This happened on 14 Nov (BOS-1481): fully closing and reopening the app fixed it. That is the only evidence so far. The ntfy server log from that restart was not read, so the cause is not proven; the `deploy/ntfy-bluegreen.yml` file does not change the route from the phone to ntfy. An automatic check is planned in a follow-up (BOS-1481 comments).
+
+The step is the same however ntfy was restarted (the deployer, the blue/green switch, or by hand). An iPhone that uses `NTFY_UPSTREAM_BASE_URL` is woken through ntfy.sh instead, so it should not need it, but the test in step 2 is worth sending there too.
+
+After every ntfy restart:
+1. On the phone, open the ntfy app, then swipe it away from recent apps and open it again.
+2. In Boss Man, open Notifications and choose **Send a test to my phone**, with the app closed and the screen off. It should pop up without you opening the app.
+3. If it only appears when you open the app: in the app's Settings turn on "Instant delivery in doze mode", turn on "Instant delivery" on that subscription, and in Android Settings → Apps → ntfy → Battery choose "Unrestricted".
+
 ## Approve buttons
 
 The buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet. The Approve button only turns on when all of these hold:
