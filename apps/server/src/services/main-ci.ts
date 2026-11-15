@@ -124,6 +124,7 @@ export function mainCiService(
   const firstBad = (runs: WorkflowRun[], from: WorkflowRun) => {
     let first = from;
     for (const r of runs.slice(runs.indexOf(from) + 1, runs.indexOf(from) + 1 + LOOK_BACK)) {
+      if (r.name !== from.name) continue;
       if (r.status !== "completed") continue;
       if (BAD.has(String(r.conclusion))) first = r;
       else break;

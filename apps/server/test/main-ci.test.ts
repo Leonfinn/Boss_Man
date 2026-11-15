@@ -117,6 +117,29 @@ describe("the main-CI watcher", () => {
     expect(t).toBeTruthy();
   });
 
+  it("finds the breaking commit within the failing workflow only, ignoring other workflows' runs", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const colId = (await c.work.board(c.project.id)).columns.at(-1)!.id;
+    const base = { companyId: c.company.id, projectId: c.project.id, systemState: "done" as const, columnId: colId };
+    const [other] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Omar", role: "worker", agentKind: "claude" }).returning();
+    await c.db.insert(tickets).values({ ...base, title: "Broke CI", assigneeAgentId: c.dev.id, mergeCommit: sha("c") });
+    await c.db.insert(tickets).values({ ...base, title: "Newest change", assigneeAgentId: other!.id, mergeCommit: sha("d") });
+    // Newest first. CI failed on c and d; the nightly passed on d (would cut a mixed walk short) and failed on b (would stretch it back).
+    c.gh.runs = [
+      run(30, "failure", sha("d")),
+      run(29, "success", sha("d"), { name: "Nightly" }),
+      run(28, "failure", sha("c")),
+      run(27, "failure", sha("b"), { name: "Nightly" }),
+      run(26, "success", sha("a")),
+    ];
+    c.gh.jobs[30] = [job("test", [["Run tests", "failure"]])];
+    await c.service.run();
+    const [made] = await c.failingTickets();
+    expect(made!.assigneeAgentId).toBe(c.dev.id);
+    expect(made!.body).toContain("Broke CI");
+  });
+
   it("gives the ticket to the CEO, urgent, when the breaking ticket can't be told", async () => {
     ctx = await setup();
     failedRun(ctx, 12, sha("c"));
