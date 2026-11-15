@@ -43,7 +43,7 @@ export const OWNER_WAIT_NOTE_AGE_MS = 60 * 60_000;
  * the hourly pass repeats nothing; a server restart may tell once more, which is harmless.
  */
 export function ownerWaitWatch(db: Db, tellCeo: (companyId: string, note: string) => Promise<unknown>, now: () => Date = () => new Date()) {
-  const told = new Map<string, string>();
+  const told = new Map<string, string>(); // shortcut: lost on restart, harmless because the CEO is then told once more about a note that still has no card.
   let lastRun = 0;
   return {
     async run(force = false): Promise<{ flagged: number }> {
