@@ -84,7 +84,21 @@ jobs:
           # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
           BOSSMAN_SCRATCH: ${{ runner.temp }}
         run: |
+          # The failing test names are repeated as an error annotation, which anyone can read through the public
+          # check-runs API (the raw job log needs a login). Without it a red run said only "exit code 1" (BOS-1590).
+          set +e
           pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
+          rc=$?
+          set -e
+          if [ "$rc" != 0 ]; then
+            node -e '
+              let r; try { r = require(process.argv[1]); } catch { console.log("::error title=web tests failed::no JSON report was written"); process.exit(0); }
+              const bad = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status === "failed").map((t) => `${f.name.split("/").pop()}: ${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}`));
+              const lost = r.testResults.filter((f) => f.status === "failed" && !f.assertionResults.length).map((f) => `${f.name.split("/").pop()}: ${(f.message || "").split("\n")[0]}`);
+              console.log(`::error title=web tests failed::${[...bad, ...lost].slice(0, 12).join(" | ").replace(/[\r\n%]/g, " ").slice(0, 1500)}`);
+            ' "$RUNNER_TEMP/web-tests.json"
+            exit "$rc"
+          fi
           node -e '
             const r = require(process.argv[1]);
             const skipped = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status !== "passed" && t.status !== "failed").map((t) => `${f.name}: ${t.fullName}`));
