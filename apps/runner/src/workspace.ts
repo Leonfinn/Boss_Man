@@ -208,6 +208,11 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/** BOS-1413: a merge pinned to the reviewed head refuses any other branch commit. No pin (an older server) keeps the old behaviour. */
+function pinMoved(branchSha: string, pin: string | undefined): { status: "branch_moved"; head: string; pinned: string } | null {
+  return pin && branchSha !== pin ? { status: "branch_moved", head: branchSha, pinned: pin } : null;
+}
+
 /** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
 export class RepoLockTimeout extends Error {
   constructor(projectId: string) {
@@ -1831,9 +1836,9 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null): Promise<MergeResult> {
-    if (phase) return this.mergePhase(spec, target, message, secrets, phase);
-    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string): Promise<MergeResult> {
+    if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, pin);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -1847,6 +1852,8 @@ export class Workspaces {
       for (let attempt = 0; attempt < 2; attempt++) {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         const { tree, targetSha, branchSha } = tried;
         // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
@@ -1867,7 +1874,7 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
     const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
@@ -1886,13 +1893,16 @@ export class Workspaces {
       // and nothing is pushed. With the tip equal to the base, the checked commit's parents match, so it is pushed itself.
       const tried = await this.tryMerge(repo, branch, target, auth, base ? { base, exact: phase.phase === "finish" } : undefined);
       if (tried.status !== "clean") return tried;
+      // BOS-1413: both phases refuse a branch that is not at the head the reviews covered, before anything is kept or pushed.
+      const moved = pinMoved(tried.branchSha, pin);
+      if (moved) return moved;
       const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
       const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
       if (problems.length) return { status: "migration_journal" as const, problems };
       if (phase.phase === "prepare") {
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         await this.git(["update-ref", keep, commit], { cwd: repo });
-        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
+        return { status: "prepared", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha, ...(tried.renamed ? { renamed: tried.renamed } : {}) };
       }
       // The target moved to something whose merge differs from what was checked: check again.
       if (tried.tree !== phase.tree) return { status: "main_moved" };
@@ -1920,7 +1930,7 @@ export class Workspaces {
    * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
    * a changed one is checked again (three checks at most, then main_moved so the caller retries).
    */
-  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number): Promise<MergeResult> {
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
@@ -1945,6 +1955,8 @@ export class Workspaces {
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        const moved = pinMoved(tried.branchSha, pin);
+        if (moved) return moved;
         // Same journal rule as the plain merge (BOS-360): a refused branch builds and pushes nothing.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
         const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);

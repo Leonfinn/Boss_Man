@@ -58,7 +58,7 @@ function fakeGit() {
       const has = [...new Set([...g.has(on), ticket])];
       const commit = hex(n++);
       commits.set(commit, { base: on, has });
-      return { status: "prepared", commit, tree: g.treeOf(has), targetSha: on };
+      return { status: "prepared", commit, tree: g.treeOf(has), targetSha: on, branchSha: DIFF.head };
     },
     finish(ticket: string, commit: string, tree: string, expectBase?: string) {
       if (expectBase && g.main !== expectBase) return { status: "main_moved" };
@@ -107,7 +107,7 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
       reply(x.phase === "prepare" ? git.prepare(who, x.base) : git.finish(who, x.commit!, x.tree!, x.expectBase));
     }
     return true;
-  }, opts.features ?? ["carried-check", "check-jobs", "merge-base"]);
+  }, opts.features ?? ["carried-check", "check-jobs", "merge-base", "merge-pin"]);
   await db.insert(settings).values({ key: "check_queue_mode", value: "server" });
   await db.insert(settings).values({ key: "check_slots", value: opts.slots ?? 3 });
   if (opts.train !== false) await db.insert(settings).values({ key: "merge_train", value: true });

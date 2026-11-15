@@ -720,7 +720,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null, command.pin),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
