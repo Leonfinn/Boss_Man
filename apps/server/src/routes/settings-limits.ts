@@ -13,6 +13,7 @@ import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
 import { CHECK_MEMORY_CEILING_BYTES, limitReason } from "../services/check-limit.js";
 import type { checkDispatcher } from "../services/check-dispatcher.js";
+import type { mainCiService } from "../services/main-ci.js";
 import { MEMORY_MB_MAX, MEMORY_MB_MIN, THREADS_MAX, type CheckWorkersService } from "../services/check-workers.js";
 import { WORKER_OFF_CLOSE } from "./check-worker-socket.js";
 import type { launcherService } from "../services/launcher.js";
@@ -34,11 +35,12 @@ export function settingsLimitsRoutes(
     checks: ReturnType<typeof checkDispatcher>;
     review: ReturnType<typeof reviewService>;
     runners: ReturnType<typeof runnersService>;
+    mainCi: ReturnType<typeof mainCiService>;
     /** BOS-1435: check workers; absent in older test set-ups, then the panel lists none and the worker routes say so. */
     checkWorkers?: CheckWorkersService;
   },
 ) {
-  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, checkWorkers } = deps;
+  const { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, mainCi, checkWorkers } = deps;
 
   /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
   // With ?companyId the reviewer and sign-off come from that company's review policy.
@@ -161,6 +163,13 @@ export function settingsLimitsRoutes(
         if (await checks.cancel(id, "The owner switched the check queue off (back to legacy), so this queued check will not run. Run scripts/check-quick.sh yourself, as before.")) cancelled++;
     if (b.mode === "server") await checks.pump();
     return { ...(await checkQueueView()), cancelled, applying };
+  });
+  // BOS-1072: the main-CI watcher's switch and the plain line it keeps for each project.
+  const mainCiView = async () => ({ on: await mainCi.isOn(), projects: await mainCi.statuses() });
+  owner.get("/api/settings/main-ci", async () => mainCiView());
+  owner.put("/api/settings/main-ci", async (req) => {
+    await mainCi.setOn(z.object({ on: z.boolean() }).parse(req.body).on);
+    return mainCiView();
   });
   // BOS-1435 (DR-060): Settings → Server and runner → Checks → Check workers. Owner only. The token is in the answer to the
   // add, once; only its hash is kept. Turning a worker off or removing it puts its running checks back in line at once

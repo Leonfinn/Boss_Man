@@ -1,0 +1,229 @@
+import { randomBytes } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
+import { buildApp } from "../src/app.js";
+import { openPglite } from "../src/db/client.js";
+import { agents, projects, ticketMessages, tickets } from "../src/db/schema.js";
+import { errorLines, mainCiService, NEVER_WEAKEN } from "../src/services/main-ci.js";
+import { GitHostError, type WorkflowJob, type WorkflowRun } from "../src/services/git-hosts.js";
+
+const sha = (c: string) => c.repeat(40);
+const run = (id: number, conclusion: string | null, head: string, extra: Partial<WorkflowRun> = {}): WorkflowRun => ({
+  id,
+  attempt: 1,
+  name: "CI",
+  event: "push",
+  status: conclusion ? "completed" : "in_progress",
+  conclusion,
+  headSha: head,
+  headMessage: "Merge something",
+  url: `https://github.com/leon/site/actions/runs/${id}`,
+  createdAt: "2026-11-11T03:17:00Z",
+  updatedAt: "2026-11-11T03:20:00Z",
+  ...extra,
+});
+const job = (name: string, steps: Array<[string, string]>): WorkflowJob => ({
+  id: 900 + name.length,
+  name,
+  status: "completed",
+  conclusion: steps.some(([, c]) => c === "failure") ? "failure" : "success",
+  url: `https://github.com/leon/site/actions/jobs/${name}`,
+  steps: steps.map(([n, c], i) => ({ number: i + 1, name: n, status: "completed", conclusion: c })),
+});
+
+let ctx: Awaited<ReturnType<typeof setup>> | undefined;
+afterEach(async () => {
+  await ctx?.app.close();
+  await ctx?.close();
+  ctx = undefined;
+});
+
+async function setup(opts: { token?: string | undefined; github?: boolean } = {}) {
+  const { db, close } = await openPglite();
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+  const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
+  await db
+    .update(projects)
+    .set(opts.github === false ? { repoUrl: "https://git.example.com/leon/site.git", gitHost: "gitea", gitApiBase: "https://git.example.com/api/v1" } : { repoUrl: "https://github.com/leon/site.git", gitHost: "github", gitApiBase: "https://api.github.com" })
+    .where(eq(projects.id, project.id));
+  const [dev] = await db.insert(agents).values({ companyId: company.id, name: "Dana", role: "worker", agentKind: "claude" }).returning();
+  const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, company.id), eq(agents.role, "ceo")));
+
+  // A fake GitHub: the runs, jobs and logs the test sets.
+  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", runsError: null as Error | null, calls: 0 };
+  const gitHosts = {
+    workflowRuns: async () => {
+      gh.calls++;
+      if (gh.runsError) throw gh.runsError;
+      return gh.runs;
+    },
+    runJobs: async (_c: unknown, _t: unknown, id: number) => gh.jobs[id] ?? [],
+    jobLog: async () => gh.log,
+    commitAnnotations: async () => [],
+  };
+  const woken: Array<{ agentId: string; ticketId: string }> = [];
+  const service = mainCiService(db, {
+    gitHosts: gitHosts as never,
+    gitToken: async () => ("token" in opts ? opts.token : "tok"),
+    createTicket: (projectId, input) => built.work.createTicket(projectId, input),
+    notify: async (agentId, input) => void woken.push({ agentId, ticketId: input.ticketId }),
+  });
+  const failingTickets = async () => (await db.select().from(tickets).where(eq(tickets.projectId, project.id))).filter((t) => t.title.startsWith("Main's CI is failing"));
+  const notesOn = async (ticketId: string) => (await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, ticketId))).map((m) => m.text);
+  return { ...built, db, close, req, company, project, dev: dev!, ceo: ceo!, gh, service, woken, failingTickets, notesOn };
+}
+
+const failedRun = (c: Awaited<ReturnType<typeof setup>>, id: number, head: string, steps: Array<[string, string]> = [["Run tests", "failure"]]) => {
+  c.gh.runs.unshift(run(id, "failure", head));
+  c.gh.jobs[id] = [job("test", [["Set up", "success"], ...steps])];
+};
+
+describe("errorLines", () => {
+  it("keeps the error-looking lines, drops timestamps and redacts secrets", () => {
+    // Built at run time so the source holds no token-shaped string for the secrets scan to flag.
+    const fakeToken = ["ghp", "_", "abcdefghijklmnopqrstuvwxyz", "0123456789ABCD"].join("");
+    const log = ["2026-11-11T03:17:01.1234567Z all good", "2026-11-11T03:17:02.0000000Z FAIL test/a.test.ts > adds", "2026-11-11T03:17:03.0000000Z AssertionError: expected 1 to be 2", `token ${fakeToken} failed`].join("\n");
+    const lines = errorLines(log);
+    expect(lines).toContain("FAIL test/a.test.ts > adds");
+    expect(lines.some((l) => l.includes("all good"))).toBe(false);
+    expect(lines.join("\n")).not.toContain(fakeToken);
+  });
+});
+
+describe("the main-CI watcher", () => {
+  it("opens one ticket for a failing step, assigned to the ticket whose merge broke it, with the run link and the rule", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [t] = await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Add widgets", systemState: "done", columnId: (await c.work.board(c.project.id)).columns.at(-1)!.id, assigneeAgentId: c.dev.id, mergeCommit: sha("b") }).returning();
+    failedRun(c, 11, sha("b"));
+    c.gh.log = "2026-11-11T03:17:02Z FAIL test/a.test.ts > adds\n2026-11-11T03:17:03Z Error: expected 1 to be 2";
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.assigneeAgentId).toBe(c.dev.id);
+    expect(made[0]!.urgent).toBe(false);
+    expect(made[0]!.body).toContain("https://github.com/leon/site/actions/runs/11");
+    expect(made[0]!.body).toContain("test");
+    expect(made[0]!.body).toContain("Run tests");
+    expect(made[0]!.body).toContain("expected 1 to be 2");
+    expect(made[0]!.body).toContain("Add widgets");
+    expect(made[0]!.body).toContain(NEVER_WEAKEN);
+    expect(c.woken).toEqual([{ agentId: c.dev.id, ticketId: made[0]!.id }]);
+    expect(t).toBeTruthy();
+  });
+
+  it("gives the ticket to the CEO, urgent, when the breaking ticket can't be told", async () => {
+    ctx = await setup();
+    failedRun(ctx, 12, sha("c"));
+    await ctx.service.run();
+    const [made] = await ctx.failingTickets();
+    expect(made!.assigneeAgentId).toBe(ctx.ceo.id);
+    expect(made!.urgent).toBe(true);
+  });
+
+  it("adds a later failed run to the open ticket instead of opening another", async () => {
+    ctx = await setup();
+    failedRun(ctx, 13, sha("c"));
+    await ctx.service.run();
+    failedRun(ctx, 14, sha("d"));
+    await ctx.service.run();
+    const made = await ctx.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(await ctx.notesOn(made[0]!.id)).toEqual([expect.stringContaining("actions/runs/14")]);
+    // The same run read again changes nothing.
+    await ctx.service.run();
+    expect(await ctx.notesOn(made[0]!.id)).toHaveLength(1);
+  });
+
+  it("opens a separate ticket for each distinct failing step", async () => {
+    ctx = await setup();
+    failedRun(ctx, 15, sha("e"), [["Typecheck", "failure"], ["Run tests", "failure"]]);
+    await ctx.service.run();
+    const made = await ctx.failingTickets();
+    expect(made.map((t) => t.title).sort()).toEqual(["Main's CI is failing: CI / test / Run tests", "Main's CI is failing: CI / test / Typecheck"]);
+  });
+
+  it("doesn't open a duplicate when a pass fails part-way through several new tickets", async () => {
+    ctx = await setup();
+    const c = ctx;
+    failedRun(c, 30, sha("e"), [["Typecheck", "failure"], ["Run tests", "failure"]]);
+    let calls = 0;
+    const flaky = mainCiService(c.db, {
+      gitHosts: { workflowRuns: async () => c.gh.runs, runJobs: async (_a: unknown, _b: unknown, id: number) => c.gh.jobs[id] ?? [], jobLog: async () => "", commitAnnotations: async () => [] } as never,
+      gitToken: async () => "tok",
+      createTicket: (projectId, input) => {
+        if (++calls === 2) throw new Error("db hiccup");
+        return c.work.createTicket(projectId, input);
+      },
+    });
+    await flaky.run();
+    expect(await c.failingTickets()).toHaveLength(1);
+    await c.service.run();
+    expect(await c.failingTickets()).toHaveLength(2);
+  });
+
+  it("says on the ticket when main is green again, and a second break opens a new ticket", async () => {
+    ctx = await setup();
+    failedRun(ctx, 16, sha("c"));
+    await ctx.service.run();
+    ctx.gh.runs.unshift(run(17, "success", sha("d")));
+    await ctx.service.run();
+    const [first] = await ctx.failingTickets();
+    expect((await ctx.notesOn(first!.id)).join("\n")).toContain("green again");
+    // Green stays quiet on the next pass.
+    await ctx.service.run();
+    expect(await ctx.notesOn(first!.id)).toHaveLength(1);
+    // Breaks again: the old ticket is still open but was told it's green, so a fresh one opens.
+    failedRun(ctx, 18, sha("e"));
+    await ctx.service.run();
+    expect(await ctx.failingTickets()).toHaveLength(2);
+  });
+
+  it("ignores pull request runs and runs that are still going", async () => {
+    ctx = await setup();
+    ctx.gh.runs.unshift(run(19, "failure", sha("a"), { event: "pull_request" }), run(20, null, sha("b")));
+    await ctx.service.run();
+    expect(await ctx.failingTickets()).toHaveLength(0);
+  });
+
+  it("stays quiet and says why when there's no GitHub, no token or the token can't read runs", async () => {
+    ctx = await setup({ github: false });
+    await ctx.service.run();
+    expect(ctx.gh.calls).toBe(0);
+    expect((await ctx.service.statuses())[0]!.status.state).toBe("no_github");
+    await ctx.app.close();
+    await ctx.close();
+
+    ctx = await setup({ token: undefined });
+    await ctx.service.run();
+    expect(ctx.gh.calls).toBe(0);
+    expect((await ctx.service.statuses())[0]!.status.state).toBe("no_token");
+    await ctx.app.close();
+    await ctx.close();
+
+    ctx = await setup();
+    ctx.gh.runsError = new GitHostError(403, "Resource not accessible by integration");
+    await ctx.service.run();
+    const [s] = await ctx.service.statuses();
+    expect(s!.status.state).toBe("unreadable");
+    expect(await ctx.failingTickets()).toHaveLength(0);
+  });
+
+  it("does nothing while the owner's switch is off, and the switch is on by default", async () => {
+    ctx = await setup();
+    expect(await ctx.service.isOn()).toBe(true);
+    await ctx.service.setOn(false);
+    failedRun(ctx, 21, sha("c"));
+    await ctx.service.run();
+    expect(ctx.gh.calls).toBe(0);
+    expect(await ctx.failingTickets()).toHaveLength(0);
+    expect((await ctx.service.statuses())[0]!.status.state).toBe("off");
+    const r = await ctx.req("PUT", "/api/settings/main-ci", { on: true });
+    expect(r.json()).toMatchObject({ on: true });
+  });
+});

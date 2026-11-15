@@ -28,7 +28,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mainCi, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -92,6 +92,8 @@ const bg = createBackground(
     { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
+    // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
+    { name: "main CI watch", everyMs: Number(env.BOSSMAN_MAIN_CI_MS ?? 10 * 60_000), run: async () => { await mainCi.run(); } },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.

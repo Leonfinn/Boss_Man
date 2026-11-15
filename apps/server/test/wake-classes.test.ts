@@ -341,6 +341,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/engagements.ts": DROP_RECORDED,
     "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
+    "services/main-ci.ts": CHECKS_OUTCOME + " (a dropped wake is skipped: the ticket is already open and the assignee finds it in its list)",
     "services/retro.ts": NEVER_DROPPED,
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
     "services/release-log.ts": CHECKS_OUTCOME + " (a dropped release wake is logged and retried next pass)",

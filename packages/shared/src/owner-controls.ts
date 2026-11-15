@@ -256,6 +256,8 @@ export const OWNER_FIELDS = {
     // Settings → Server and runner → Agents at once (BOS-1029).
     "Tickets in progress per agent (leave empty for no limit)",
     "Tickets in progress, whole company (leave empty for no limit)",
+    // Settings → Server and runner → Main's CI (BOS-1072).
+    "Watch main's CI and open tickets for failures",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).

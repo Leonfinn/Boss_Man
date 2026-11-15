@@ -229,6 +229,7 @@ sections:
   - Checks
   - Extra lines from your.env
   - Facts only you can give
+  - Main's CI
   - Network guard
   - Now running
   - Other actions
@@ -262,6 +263,7 @@ reads:
   - /api/self-deploy/wait
   - /api/settings/check-queue
   - /api/settings/email
+  - /api/settings/main-ci
   - /api/wip-limits
 
 ## #/settings/<company>/team
