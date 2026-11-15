@@ -147,6 +147,15 @@ describe("which agents get a key", () => {
     expect(await t.secrets.resolveCompanyEnv(s.c, "run", s.rb)).toHaveProperty("LIMITED_KEY");
   });
 
+  it("keeps GITHUB_WATCH_TOKEN out of agent runs and runner jobs; only the watcher purpose reads it (BOS-1450)", async () => {
+    const s = await setup();
+    await s.grant("Watch", "GITHUB_WATCH_TOKEN");
+    await s.grant("Open", "OPEN_KEY");
+    expect(await t.secrets.resolveCompanyEnv(s.c, "run", s.ra)).toEqual({ OPEN_KEY: "v-OPEN_KEY" });
+    expect(await t.secrets.resolveCompanyEnv(s.c, "merge")).toEqual({ OPEN_KEY: "v-OPEN_KEY" });
+    expect(await t.secrets.resolveCompanyEnv(s.c, "github_watch")).toEqual({ GITHUB_WATCH_TOKEN: "v-GITHUB_WATCH_TOKEN", OPEN_KEY: "v-OPEN_KEY" });
+  });
+
   it("refuses an agent from another company, and an unknown grant", async () => {
     const s = await setup();
     const g = await s.grant("Key", "SOME_KEY");

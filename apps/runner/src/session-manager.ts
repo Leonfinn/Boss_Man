@@ -284,7 +284,7 @@ export const stderrTail = (stderr: string) =>
 
 // The add-ons' settings from the image (docs/12) go through too: without them an agent's agent-browser
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
-export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
+export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "BOSSMAN_CLAUDE_PACK", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
 /**
  * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
@@ -321,9 +321,18 @@ export function withoutGitCredentials(secrets: Record<string, string>): Record<s
 const require = createRequire(import.meta.url);
 /** OpenCode is its own ACP agent: `opencode acp`, from the opencode-ai npm package (the Dockerfile puts it on PATH). */
 export const adapterArgs = (agentKind: string): string[] => (agentKind === "opencode" ? ["acp"] : []);
-export function defaultBin(agentKind: string): string {
+/**
+ * The ACP adapter to run for an agent kind. Claude's adapter lives in the ready Claude pack, not in the
+ * runner's node_modules (DR-050): the pack's bin comes in as `claudeAdapter` (from main.ts). Without a
+ * ready pack, a Claude run says Claude isn't installed here rather than failing on a missing module.
+ */
+export function defaultBin(agentKind: string, claudeAdapter?: string): string {
   if (agentKind === "opencode") return "opencode";
-  const pkg = agentKind === "claude" ? "@agentclientprotocol/claude-agent-acp" : agentKind === "codex" ? "@agentclientprotocol/codex-acp" : null;
+  if (agentKind === "claude") {
+    if (claudeAdapter) return claudeAdapter;
+    throw new Error("Claude Code isn't installed on this runner: there's no ready Claude pack yet (the runner installs it on first start; an air-gapped host has no Claude agents until it can reach npm).");
+  }
+  const pkg = agentKind === "codex" ? "@agentclientprotocol/codex-acp" : null;
   if (!pkg) throw new Error(`No ACP adapter is registered for agent kind "${agentKind}".`);
   const manifest = require(`${pkg}/package.json`) as { bin: Record<string, string> | string };
   const rel = typeof manifest.bin === "string" ? manifest.bin : Object.values(manifest.bin)[0]!;
@@ -927,6 +936,9 @@ export class SessionManager {
       skillsDir,
       real(onPath(bin)) && path.dirname(real(onPath(bin))!),
       real(base.CLAUDE_CODE_EXECUTABLE) && path.dirname(real(base.CLAUDE_CODE_EXECUTABLE)!),
+      // The Claude pack (DR-050): the adapter and Claude Code live here, mounted read-only into the
+      // container. Granted read-only, so an agent can't change the binary it runs (BOS-972).
+      real(base.BOSSMAN_CLAUDE_PACK),
       base.NPM_CONFIG_PREFIX,
       base.PLAYWRIGHT_BROWSERS_PATH,
       ...(base.NODE_PATH ?? "").split(":"),

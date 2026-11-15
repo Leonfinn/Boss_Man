@@ -24,6 +24,20 @@ export function runnerToken(env: NodeJS.ProcessEnv): { token: string | undefined
  * the plain copy would stay readable, so that is refused too (BOS-394). Returns the token to use, or
  * throws with what to do instead.
  */
+/**
+ * A check worker's token (BOS-1435), from BOSSMAN_CHECK_WORKER_TOKEN_FILE only, for the same reason as the runner's: a
+ * token in the environment stays readable in /proc. A plain BOSSMAN_CHECK_WORKER_TOKEN is cleared and refused.
+ */
+export function safeWorkerToken(env: NodeJS.ProcessEnv): string {
+  const plain = env.BOSSMAN_CHECK_WORKER_TOKEN?.trim();
+  delete env.BOSSMAN_CHECK_WORKER_TOKEN;
+  if (plain !== undefined) throw new Error("BOSSMAN_CHECK_WORKER_TOKEN was found in the environment, where a check can read it from /proc. Remove it and set only BOSSMAN_CHECK_WORKER_TOKEN_FILE to a file.");
+  const file = env.BOSSMAN_CHECK_WORKER_TOKEN_FILE;
+  const token = file ? readFileSync(file, "utf8").trim() : "";
+  if (!token) throw new Error("Set BOSSMAN_CHECK_WORKER_TOKEN_FILE to a file holding the token from Settings → Server and runner → Checks → Add a check worker.");
+  return token;
+}
+
 export function safeRunnerToken(env: NodeJS.ProcessEnv): string {
   const { token, fromEnv } = runnerToken(env);
   if (fromEnv) throw new Error("BOSSMAN_RUNNER_TOKEN was found in the environment, where a session can read it from /proc. Remove it and set only BOSSMAN_RUNNER_TOKEN_FILE to a file.");

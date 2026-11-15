@@ -725,8 +725,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
-            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
+            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
+            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
@@ -1088,6 +1088,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>How to roll back</p>
                         <div style={{ fontSize: 14 }}><StepText text={d.context.rollback} refs={d.refs} /></div>
+                      </div>
+                    )}
+                    {d.context?.quiet && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>{d.context.quiet.ready ? "Ready: the machine is quiet" : "Making room on the machine"}</p>
+                        <p style={{ fontSize: 14 }}>
+                          {d.context.quiet.ready ? "You can apply the update now." : `Not yet: ${d.context.quiet.why.join("; ")}.`} {d.context.quiet.runs} runs going, {d.context.quiet.checks} merge checks running
+                          {d.context.quiet.freeMb != null && d.context.quiet.needMb != null ? `, ${(d.context.quiet.freeMb / 1024).toFixed(1)} GB of memory free (the update needs ${(d.context.quiet.needMb / 1024).toFixed(1)} GB)` : ""}.
+                        </p>
+                        <p className="muted" style={{ fontSize: 12 }}>Checked {when(d.context.quiet.at)}</p>
                       </div>
                     )}
                     {d.context?.lastFailure && (

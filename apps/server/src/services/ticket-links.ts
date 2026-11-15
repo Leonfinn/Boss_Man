@@ -3,7 +3,7 @@
 // tool or service can't reopen the hole by forgetting its own check.
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { decisions, tickets, ticketDependencies } from "../db/schema.js";
+import { decisions, engagements, tickets, ticketDependencies } from "../db/schema.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 
@@ -24,6 +24,30 @@ export class WorkError extends Error {
  */
 export function ticketBlockerFinished(d: { ticketState: string | null; mergeCommit: string | null; until: string }): boolean {
   return d.ticketState === "done" || (d.until === "merged" && !!d.mergeCommit);
+}
+
+export type OpenBlocker = { kind: "ticket" | "engagement" | "decision"; title: string | null };
+
+/**
+ * What still holds a ticket (BOS-1458): the one answer for starting it, blocking it, waking an urgent one
+ * and creating it. A blocker ticket is free by `ticketBlockerFinished` (merged counts when the link waits
+ * until merged); an engagement is open until signed off; a decision is open until answered.
+ */
+export async function openBlockers(db: Db, ticketId: string): Promise<OpenBlocker[]> {
+  const deps = await db
+    .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until, engagementStatus: engagements.status, decisionStatus: decisions.status })
+    .from(ticketDependencies)
+    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(eq(ticketDependencies.blockedTicketId, ticketId));
+  const open: OpenBlocker[] = [];
+  for (const d of deps) {
+    if (d.ticketState && !ticketBlockerFinished(d)) open.push({ kind: "ticket", title: d.ticketTitle });
+    else if (d.engagementStatus && d.engagementStatus !== "signed_off") open.push({ kind: "engagement", title: null });
+    else if (d.decisionStatus === "open") open.push({ kind: "decision", title: null });
+  }
+  return open;
 }
 
 /** Who is asking for the link: an agent's run, or the system acting on its own (loop guards, risk sign-off). */

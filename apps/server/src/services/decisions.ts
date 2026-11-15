@@ -62,7 +62,7 @@ import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, 
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
-import { addTicketDependency } from "./ticket-links.js";
+import { addTicketDependency, openBlockers } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -225,7 +225,7 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate; /** Owner cards that must be done first, because this update restarts the server (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice; /** A server update's quiet-machine check, while the owner waits to apply it by hand (BOS-420). */ quiet?: { ready: boolean; runs: number; checks: number; freeMb: number | null; needMb: number | null; why: string[]; at: string } }
   /**
    * The owner's setup steps for a ticket, raised by Boss Man once the ticket's change is live (DR-011).
    * `ticketId` links it back; `commit` is the live commit it was raised on, so a later switch-back to
@@ -237,7 +237,9 @@ export type DecisionContext =
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
-  | { type: "maintenance"; since: string }
+  | { type: "maintenance"; since: string; /** BOS-1377: the runs the card listed; "Stop these" touches no others. Absent on an older card. */ runIds?: string[] }
+  /** An approved server update still waiting for a quiet machine (services/deploy-wait.ts, BOS-420): keep waiting, update now, or cancel. */
+  | { type: "deploy_wait"; approvedAt: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
   /** A review woken this round again and again with no verdict (BOS-404, BOS-426): the CEO acts on it. */
   | { type: "review_stall"; ticketId: string; reviewId: string; reviewerAgentId: string; kind: string }
@@ -311,6 +313,8 @@ export const TODO_DONE = "Done, it's applied";
 export const TODO_FAILED = "A step failed";
 /** The approval for a change that has to be applied by hand: approving it leaves a to-do rather than deploying. */
 export const APPROVE_HAND_APPLY = "Approve";
+/** A hand-applied server update's to-do (BOS-420): make room on the machine before the owner applies it. */
+export const QUIET_FIRST = "Quiet the machine first";
 
 /** Who ended a card without answering it, and why (BOS-149): the CEO clears a stale or duplicate card, or the product does. */
 /** The "replaced by" fields of a withdraw call, as the tool received them (DR-058 B). */
@@ -375,6 +379,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "owner_todo",
   "owner_setup",
   "maintenance",
+  "deploy_wait",
   "hire",
   "instructions",
   "rename",
@@ -551,7 +556,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[] },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate; doAfter?: OrderLink[]; /** Offer "Quiet the machine first" (a hand-applied server update, BOS-420). */ quietFirst?: boolean },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -559,8 +564,8 @@ export async function raiseOwnerTodo(
       companyId: t.companyId,
       kind: "question",
       question: t.question,
-      options: [TODO_DONE, TODO_FAILED],
-      recommendedOption: TODO_DONE,
+      options: t.quietFirst ? [QUIET_FIRST, TODO_DONE, TODO_FAILED] : [TODO_DONE, TODO_FAILED],
+      recommendedOption: t.quietFirst ? QUIET_FIRST : TODO_DONE,
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
@@ -734,6 +739,13 @@ export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
 export const CANCEL_UPDATE = "Cancel the update";
+/** BOS-1377: the runner update's deadline card. Stop only the runs the card listed (each through the per-run Stop), wait 10 more minutes, or cancel the update. */
+export const STOP_THESE_CARRY_ON = "Stop these and carry on";
+export const WAIT_TEN_MORE = "Wait 10 more minutes";
+export const CANCEL_RUNNER_UPDATE = "Cancel the runner update";
+export const DEADLINE_WAIT_MINUTES = 10;
+/** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
+export const UPDATE_NOW_ANYWAY = "Update now anyway";
 
 export class AnswerError extends Error {}
 
@@ -1030,9 +1042,15 @@ export type LoopHooks = {
   signoffStale?(ticketId: string, cardHead: string): Promise<string | null>;
 };
 
-export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
+export type MaintenanceHook = { answered(answer: string, ctx?: { runIds?: string[] }): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
-export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, thenRunners?: boolean): Promise<unknown> };
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, opts?: { override?: boolean; thenRunners?: boolean }): Promise<unknown> };
+/** The quiet-machine wait of a server update (BOS-420, deploy-wait.ts). */
+export type DeployWaitHook = {
+  get(): Promise<{ decisionId: string; origin: "approve" | "hand" } | null>;
+  begin(input: { decisionId: string; commit: string; fromCommit: string; origin?: "approve" | "hand"; thenRunners?: boolean }): Promise<unknown>;
+  answered(answer: string): Promise<unknown>;
+};
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
@@ -1226,6 +1244,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onSkill: SkillHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
+  let deployWait: DeployWaitHook | null = null;
   let maintenance: MaintenanceHook | null = null;
 
   // (BOS-996) The tally, kept for a few seconds per view so the badge, the page heading and the
@@ -1272,15 +1291,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
-    const deps = await db
-      .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
-    if (open) return null;
+    if ((await openBlockers(db, ticketId)).length) return null;
     const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
@@ -1292,6 +1303,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS)) {
       if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
       await selfDeploy.check(ctx);
+      // One server update at a time (BOS-420): one already waiting for a quiet machine, or in its window, holds the line.
+      const w = ctx.target === "server" ? await deployWait?.get() : null;
+      if (w && w.decisionId !== d.id) throw new AnswerError("Another server update is waiting for a quiet machine or is in its standby window. Cancel it in Settings → Server and runner → Updates first, or wait for it to finish.");
+    }
+    if (ctx.type === "owner_todo" && answer === QUIET_FIRST) {
+      if (!deployWait) throw new AnswerError("The quiet-machine wait is not set up on this install.");
+      if (ctx.target !== "server" || !ctx.commit || !ctx.fromCommit) throw new AnswerError("Only a server update can wait for a quiet machine.");
+      const w = await deployWait.get();
+      if (w && w.decisionId !== ctx.ofDecisionId) throw new AnswerError("Another server update is already waiting for a quiet machine. Cancel it in Settings → Server and runner → Updates first.");
     }
     if (ctx.type === "stale_blocker" && answer === REASSIGN) {
       if (!ctx.blockerTicketId) throw new AnswerError("Only a ticket can be reassigned.");
@@ -2207,6 +2227,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setSelfDeployHook(hook: SelfDeployHook) {
       selfDeploy = hook;
+    },
+
+    setDeployWaitHook(hook: DeployWaitHook) {
+      deployWait = hook;
     },
 
     setPermissionLog(l: PermissionLog) {
@@ -3344,10 +3368,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             fromCommit: ctx.fromCommit,
             update: ctx.update,
             doAfter: ctx.doAfter,
+            quietFirst: ctx.target === "server" && !!deployWait,
           });
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS || answer === DEPLOY_AND_RUNNERS) {
           try {
-            await selfDeploy!.send(ctx, id, answer === DEPLOY_AND_RUNNERS);
+            // A server update waits for a quiet machine (BOS-420); it is sent at once when the machine is quiet already.
+            // Runner updates have their own drain (DR-006) and go as before.
+            const thenRunners = answer === DEPLOY_AND_RUNNERS;
+            if (ctx.target === "server" && deployWait) await deployWait.begin({ decisionId: id, commit: ctx.commit, fromCommit: ctx.fromCommit, thenRunners });
+            else await selfDeploy!.send(ctx, id, { thenRunners });
           } catch (err) {
             // Nothing reached the host, so the question stays open for another try.
             await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
@@ -3359,7 +3388,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // the change isn't applied yet, so the card stays on the owner's queue. Keep what the owner said
         // so it shows on the card, and tell someone who can help: the agent that raised it is woken below;
         // a to-do raised by the system itself goes to the CEO.
-        if (answer === TODO_FAILED) {
+        if (answer === QUIET_FIRST) {
+          // Make room before the owner applies a server update by hand (BOS-420). The to-do stays open; the wait
+          // writes how quiet the machine is onto it, and nothing is sent to the host.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          await deployWait!.begin({ decisionId: ctx.ofDecisionId, commit: ctx.commit!, fromCommit: ctx.fromCommit!, origin: "hand" });
+        } else if (answer === TODO_FAILED) {
           const note = (extra.note ?? "").trim() || "No details given.";
           // Reopening restores the pre-answer context: only the keys answering wrote (settled, a handled advice) are put back.
           const hadAdvice = (ctx as { advice?: unknown }).advice !== undefined;
@@ -3380,7 +3414,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
         }
       } else if (ctx.type === "maintenance") {
-        await maintenance?.answered(answer);
+        await maintenance?.answered(answer, { runIds: ctx.runIds });
+      } else if (ctx.type === "deploy_wait") {
+        await deployWait?.answered(answer);
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);

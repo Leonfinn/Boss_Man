@@ -335,7 +335,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // The approval clears, and an owner to-do takes its place on the queue.
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("answered");
     const [todo] = await c.todos();
-    expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Done, it's applied", "A step failed"], recommendedOption: "Done, it's applied" });
+    // A server update offers to quiet the machine first (BOS-420).
+    expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Quiet the machine first", "Done, it's applied", "A step failed"], recommendedOption: "Quiet the machine first" });
     expect(todo!.context).toMatchObject({ type: "owner_todo", ofDecisionId: d!.id, target: "server", commit: B, fromCommit: A });
     const steps = (todo!.context as { steps: string[] }).steps;
     expect(steps.length).toBeGreaterThan(1);
@@ -354,7 +355,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
     // The card still checks that the new server took charge, and how to recover it.
     expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
-    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader (or single on a server that runs one copy)") });
+    // No fixed claim about the watchdog (a per-company setting an update never changes) or a vague Reviews look.
+    expect((todo!.context as { check: string }).check).not.toMatch(/watchdog|look as expected/i);
     expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("\n(umask 022 && cd /srv/bm/src && git checkout " + A + " && scripts/rebuild-live.sh)\n") });
   });
 
@@ -596,6 +599,36 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     // Nothing new yet: the host is asked to look at main on its next tick, in case something has just merged.
     expect(up.json().message).toContain("Looking at main again now");
     expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
+  });
+
+  it("refuses the runner update while a merged fix to the runner update itself is not live, and names the ticket (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    // Merged (C, after the live B) with a change to scripts/update-runner.sh; the server still runs B.
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Fix update-runner.sh", number: 1417, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: true });
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Earlier merge", number: 1400, mergeCommit: B, mergedAt: new Date(Date.now() - 60_000) });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(409);
+    expect(r.json().message).toBe("Waiting for BOS-1417 to go live: it fixes the runner update itself.");
+    // Refused, not queued, and no card raised.
+    expect(await c.open()).toHaveLength(0);
+    // Once the server runs it, the press goes through.
+    await c.db.update(settings).set({ value: { old: B, new: C } }).where(eq(settings.key, `live_release:${co!.id}`));
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
+  });
+
+  it("does not refuse for a merge that never touched the runner update path (BOS-1467)", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const [co] = await c.db.select().from(companies).limit(1);
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Other fix", number: 1418, mergeCommit: C, mergedAt: new Date(), touchesRunnerUpdate: false });
+    await c.db.insert(settings).values({ key: `live_release:${co!.id}`, value: { old: B, new: B } });
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).statusCode).toBe(200);
   });
 
   it("builds the runners from what is deployed, on request", async () => {
@@ -1252,6 +1285,66 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
   });
 });
 
+// BOS-420: the Deploy button and the hand-apply to-do go through the quiet-machine wait (deploy-wait.ts).
+describe("self-deploy waits for a quiet machine (BOS-420)", () => {
+  const headroom = (c: Awaited<ReturnType<typeof setup>>, availableMb: number) =>
+    writeFile(path.join(c.dir, "outbox", "headroom.json"), JSON.stringify({ version: 1, writtenAt: new Date().toISOString(), availableMb, needMb: 4096 }));
+  const waitRow = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(settings).where(eq(settings.key, "deploy_wait")))[0]?.value as { phase: string; origin: string; decisionId: string } | undefined;
+
+  it("Deploy on a machine short of memory writes no request; the wait sends it once memory is free", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    expect(await waitRow(c)).toMatchObject({ phase: "waiting", origin: "approve", decisionId: d!.id });
+    expect((await c.req("GET", "/api/self-deploy/wait")).json()).toMatchObject({ on: true, phase: "waiting", quiet: { ready: false } });
+
+    await headroom(c, 8192);
+    await c.deployWait.step();
+    // The request, plus the checked-merges list BOS-753 writes beside every server request.
+    expect((await readdir(path.join(c.dir, "inbox"))).sort()).toEqual(["checked", "request.json"]);
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ id: d!.id, commit: B });
+    expect((await waitRow(c))?.phase).toBe("sent");
+  });
+
+  it("the owner can cancel a waiting update from Settings; nothing reaches the host", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    expect((await c.req("POST", "/api/self-deploy/wait/cancel")).json()).toEqual({ cancelled: true });
+    expect(await waitRow(c)).toBeUndefined();
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+  });
+
+  it("Quiet the machine first on a hand-apply to-do starts a hand wait, keeps the to-do open and shows how quiet it is", async () => {
+    const c = (ctx = await setup());
+    await headroom(c, 1024);
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...LAYOUT });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    expect((await c.req("POST", `/api/decisions/${todo!.id}/answer`, { answer: "Quiet the machine first" })).statusCode).toBe(200);
+    expect(await waitRow(c)).toMatchObject({ phase: "waiting", origin: "hand", decisionId: d!.id });
+    const [still] = await c.todos();
+    expect(still!.id).toBe(todo!.id);
+    expect((still!.context as { quiet?: { ready: boolean; freeMb: number } }).quiet).toMatchObject({ ready: false, freeMb: 1024 });
+    // Nothing is ever sent for a hand-applied update.
+    await headroom(c, 8192);
+    await c.deployWait.step();
+    expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    const [ready] = await c.todos();
+    expect((ready!.context as { quiet?: { ready: boolean } }).quiet?.ready).toBe(true);
+    expect((await c.db.select().from(notifications)).some((n) => n.title === "Ready: the machine is quiet")).toBe(true);
+  });
+});
+
 // BOS-639: on 6–7 Nov the BOS-410 memory fix merged at 08:44, but its deploy card looked like every other
 // one, and the live server stayed on the old code for 12 hours. A ticket marked "fixes live" now heads the
 // card, pages the owner once and sorts first; an unmarked card is unchanged.
@@ -1340,6 +1433,46 @@ describe("a deploy card carrying the fix for a live problem (BOS-639)", () => {
     await c.notes.syncDecisions();
     expect((await c.db.select().from(notifications)).find((n) => n.decisionId === d!.id)).toMatchObject({ requested: "ask", level: "ask", title: "App Co needs a decision" });
     expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((q) => q.id)).toEqual([newer.id, d!.id]);
+  });
+
+  // BOS-1462: a live fix whose only step is the runner update used to get a silent, routine runner card.
+  it("a runner card carries the heading and pages once when a fixes-live ticket only needs the runners rebuilt", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [fix] = await c.db
+      .insert(tickets)
+      .values({ companyId: co!.id, projectId: p!.id, title: "Runner fix", number: 410, systemState: "done", mergeCommit: B, ownerSetup: "Build and update runners", fixesLive: "server freezes as memory climbs." })
+      .returning();
+    // The server card carries no marked ticket itself; the fix is only in the runner image.
+    await c.available({ runnerChanged: true, commits: [{ sha: B, subject: "Add rate limiting" }] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
+    await rm(path.join(c.dir, "inbox", "request.json"));
+    await c.status({ id: d!.id, result: "deployed", message: "Deployed aaaaaaaa to bbbbbbbb." });
+    await c.available({ deployed: B, tip: B });
+    await c.selfDeploy.sync();
+    const [runner] = await c.open();
+    expect(runner).toMatchObject({ context: { type: "self_deploy", target: "runner", commit: B } });
+    expect(runner!.question.split("\n\n")[0]).toBe(`${HEADING}.`);
+    expect(urgentOf(runner!)).toEqual({ heading: HEADING, fixes: [{ ticketId: fix!.id, ref: "BOS-410", symptom: "server freezes as memory climbs." }] });
+    await c.notes.syncDecisions();
+    const sent = await c.db.select().from(notifications);
+    expect(sent.find((n) => n.decisionId === runner!.id)).toMatchObject({ requested: "page", level: "page", title: HEADING });
+
+    // A second runner card for the same fix (the owner said "Not now", then pressed the button) is a repeat: it
+    // keeps the heading text but is routine again, so the owner is not paged twice for one fix.
+    await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Not now" });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const [again] = (await c.open()).filter((d) => (d.context as { target?: string }).target === "runner");
+    expect(again!.id).not.toBe(runner!.id);
+    expect(urgentOf(again!)).toMatchObject({ heading: HEADING, repeat: true });
+    await c.notes.syncDecisions();
+    const all = await c.db.select().from(notifications);
+    expect(all.filter((n) => n.requested === "page")).toHaveLength(1);
+    expect(all.find((n) => n.decisionId === again!.id)).toMatchObject({ requested: "ask", title: HEADING });
   });
 });
 

@@ -7,7 +7,7 @@ import { liveRuns } from "./runs.js";
 import { passedReviewTickets, REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { PHASE_LABEL, type MergePhase } from "./merge-queue.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
-import { addTicketDependency, WorkError } from "./ticket-links.js";
+import { addTicketDependency, openBlockers, WorkError, type OpenBlocker } from "./ticket-links.js";
 import { moveTicket, staleVersionMessage } from "./ticket-moves.js";
 import { derivedSignoff } from "./signoff.js";
 import { heldTicketIds, holdView, type HoldView } from "./review-holds.js";
@@ -112,16 +112,17 @@ const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
  */
 export function startRefusal(
   t: { systemState: SystemState; createdAt: Date | null; lastActivityAt: Date | null },
-  deps: Array<{ ticketState: string | null; ticketTitle?: string | null; engagementStatus: string | null }>,
+  /** What still holds the ticket, from `openBlockers` (BOS-1458); an open decision doesn't stop a start. */
+  open: OpenBlocker[],
   actor: { agentId?: string | null; role?: string | null },
 ): string | null {
   if (t.systemState === "in_progress" || t.systemState === "review" || t.systemState === "done") return null;
   // The owner (no agent), the CEO and a manager may start anything.
   if (!actor.agentId) return null;
   if (actor.role && START_OVERRIDE_ROLES.has(actor.role)) return null;
-  const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+  const waiting = open.filter((d) => d.kind !== "decision");
   if (waiting.length) {
-    const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
+    const names = waiting.map((d) => (d.title ? `"${d.title}"` : "another ticket"));
     return `This ticket still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished, so you can't start work on it yet. Finish or drop that first, or ask your CEO to move it on.`;
   }
   // Backlog is for work nobody has picked up: only a hand-over (the owner, a manager or a wake that
@@ -657,12 +658,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Starting work (BOS-254): a run can't begin a ticket that still waits on something unfinished,
       // or one in the Backlog nobody handed it. The owner, the CEO and managers override.
       if (target === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
-        const deps = await db
-          .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
-          .from(ticketDependencies)
-          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-          .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-          .where(eq(ticketDependencies.blockedTicketId, ticketId));
+        const deps = await openBlockers(db, ticketId);
         const [who] = patch.byAgentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, patch.byAgentId)) : [];
         const refusal = startRefusal({ systemState: t.systemState, createdAt: t.createdAt, lastActivityAt: t.lastActivityAt }, deps, { agentId: patch.byAgentId, role: who?.role ?? null });
         if (refusal) throw new WorkError(409, refusal);
