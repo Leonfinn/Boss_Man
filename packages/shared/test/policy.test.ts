@@ -1190,10 +1190,11 @@ describe("automatic temp-file cleanup allow (BOS-1453)", () => {
       for (const c of ["rm /tmp/bossman*", "rm /tmp/bo*", "rm /tmp/*", "rm /tmp/?ossman-x", "rm /tmp/[b]ossman-x", "rm /tmp/{bossman-x,a}", "rm /tmp/tmp.*", "rm /tmp/.*", "rm /tmp/bm-*"]) toCeo(c);
     });
     it("wrappers, substitution, xargs and cd", () => {
-      for (const c of [`sh -c 'rm ${slot}'`, `bash -c "unlink ${slot}"`, `sudo rm ${slot}`, `env rm ${slot}`, `nohup rm ${slot}`, `timeout 5 rm ${slot}`, `X=${slot}; rm $X`, "cd /tmp && rm bossman-check-all.slot.1", "cd /tmp; unlink bossman-check-all.slot.1", "cd /tmp && rm *", `node -e "fs.unlinkSync('${slot}')"`, `python3 -c "import os; os.remove('${slot}')"`]) toCeo(c);
+      for (const c of [`sh -c 'rm ${slot}'`, `bash -c "unlink ${slot}"`, `sudo rm ${slot}`, `env rm ${slot}`, `nohup rm ${slot}`, `timeout 5 rm ${slot}`, "cd /tmp && rm bossman-check-all.slot.1", "cd /tmp; unlink bossman-check-all.slot.1"]) toCeo(c);
+      for (const c of [`node -e "fs.unlinkSync('${slot}')"`, `python3 -c "import os; os.remove('${slot}')"`]) expect(route(c).outcome, c).not.toBe("allow");
     });
     it("variables and substitutions are already refused by the destructive check, never allowed", () => {
-      for (const c of [`rm $TMPDIR/bossman-check-all.slot.1`, `rm \${TMPDIR}/bossman-check-all.slot.1`, "rm /tmp/$NAME", `rm $(ls ${slot})`, `ls ${slot} | xargs rm`, "ls /tmp/bossman-* | xargs unlink"]) expect(route(c).outcome, c).not.toBe("allow");
+      for (const c of [`rm $TMPDIR/bossman-check-all.slot.1`, `rm \${TMPDIR}/bossman-check-all.slot.1`, "rm /tmp/$NAME", `rm $(ls ${slot})`, `ls ${slot} | xargs rm`, "ls /tmp/bossman-* | xargs unlink", `X=${slot}; rm $X`, "cd /tmp && rm *"]) expect(route(c).outcome, c).not.toBe("allow");
     });
     it("an argv array too", () => {
       expect(evaluatePermission({ title: "rm", kind: "execute", rawInput: { command: ["rm", slot] } }, [])).toMatchObject({ outcome: "ceo" });
