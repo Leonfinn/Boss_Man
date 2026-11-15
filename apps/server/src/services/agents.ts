@@ -5,7 +5,7 @@ import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, INFINITE_M
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
-import { readWipLimits } from "./agent-wip.js";
+import { cantMoveSql, isWorkingRun, readWipLimits } from "./agent-wip.js";
 import { pictureType } from "./company-import.js";
 import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
@@ -603,7 +603,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       const wip = await db
         .select({ agentId: tickets.assigneeAgentId, n: sql<number>`count(*)::int` })
         .from(tickets)
-        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "in_progress")))
+        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`))
         .groupBy(tickets.assigneeAgentId);
       const [pa] = await db
         .select({ total: sql<number>`count(*)::int`, posted: sql<number>`(count(*) filter (where ${paAnswers.outcome} = 'posted'))::int`, wrong: sql<number>`(count(*) filter (where ${paAnswers.verdict} = 'wrong'))::int` })
@@ -611,7 +611,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
         .where(eq(paAnswers.companyId, companyId));
       return rows
         .map(({ a, funding, fundingKind }) => {
-          const working = live.find((r) => r.agentId === a.id && r.purpose !== "chat");
+          const working = live.find((r) => r.agentId === a.id && isWorkingRun(r));
           return {
             ...a,
             funding,

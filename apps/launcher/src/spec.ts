@@ -174,7 +174,7 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
 }
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
-export function containerSpec(cfg: LauncherConfig, slug: string, image?: string) {
+export function containerSpec(cfg: LauncherConfig, slug: string, image?: string, host?: { dockerVersion: string; osType: string } | null) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const plan = planChecks(cfg);
   if (cfg.network === "host" || cfg.network === "none" || cfg.network.startsWith("container:")) throw new Error("bad network");
@@ -190,6 +190,8 @@ export function containerSpec(cfg: LauncherConfig, slug: string, image?: string)
       ...(plan.slots > 1 ? [`BOSSMAN_CHECK_SLOTS=${plan.slots}`] : []),
       ...(cfg.opencodeSessionDays !== undefined ? [`BOSSMAN_OPENCODE_SESSION_DAYS=${cfg.opencodeSessionDays}`] : []),
       ...(cfg.pnpmStoreDir ? [`PNPM_STORE_DIR=${cfg.pnpmStoreDir}`] : []),
+      // The runner has no Docker socket; it reports these with its kernel as the platform fingerprint (DR-049 point 1).
+      ...(host ? [`BOSSMAN_HOST_DOCKER=${host.dockerVersion}`, `BOSSMAN_HOST_OS=${host.osType}`] : []),
     ],
     Labels: { [LABEL]: "1", [COMPANY_LABEL]: slug, ...stackLabels(cfg.stack) },
     HostConfig: {

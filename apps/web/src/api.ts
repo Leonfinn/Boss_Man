@@ -1,7 +1,7 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
 import { reportAnswered, reportFailure, reportSlow } from "./server-watch";
 import { sharedGet } from "./shared-get";
-import type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport } from "@boss-man/shared";
+import type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport, PortalShowVerdict } from "@boss-man/shared";
 
 export type { Criterion, DeviceMeasures, DeviceProfile, DeviceReport };
 
@@ -75,7 +75,7 @@ export async function apiOnce<T>(path: string, init: { method?: string; body?: u
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; fenceMode?: "off" | "watch" | "enforce"; fenceModeChosenAt?: string | null; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; maxRunMinutes?: number | null; standingRules?: string | null; standingRulesBy?: string | null; standingRulesAt?: string | null; permissionJudge?: "off" | "watch" | "advise"; autoTempCleanup?: boolean; fenceMode?: "off" | "watch" | "enforce"; fenceModeChosenAt?: string | null; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -272,6 +272,8 @@ export type Ticket = {
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
   reviewWait?: string | null;
+  /** BOS-1546: a merged ticket that only waits to go live, in plain words, and the owner's open update card if there is one. */
+  goLiveNote?: { text: string; cardId: string | null } | null;
   /** In review and not the owner's to act on: still with its reviewers, or approved by all of them and only merging (BOS-667). */
   reviewStage?: "awaiting_review" | "merging" | "held" | null;
   /** A reviewer passed it but holds the merge (BOS-808). */
@@ -523,6 +525,8 @@ export type Feature = {
   showPublicly: boolean;
   /** Why the feature is on or off the portal: onPortal, or the reason it is held off (BOS-957). */
   portal?: { onPortal: boolean; reason: "sensitive" | "security" | "needs public summary" | null };
+  /** Whether visitors actually see it, by the portal's own rule (BOS-1496). */
+  portalShow?: PortalShowVerdict;
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
@@ -539,7 +543,7 @@ export type Feature = {
   tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
-export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; drivers: Driver[]; areas: FeatureArea[] };
+export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; portalBackUrl: string | null; portalBackText: string | null; hasLogo: boolean; portalUrl: string | null; confirmByEmail: boolean; confirmLinkHours: number; rememberAddressDays: number; emailReady: boolean; drivers: Driver[]; areas: FeatureArea[] };
 export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
 export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
 export type NoteDetail = {

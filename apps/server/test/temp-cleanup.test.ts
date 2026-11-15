@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, projects, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, notifications, projects, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import type { Ladder } from "../src/services/alert-ladder.js";
 
@@ -132,7 +132,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     expect((await ctx.decisions.queue()).map((q) => q.id)).toContain(d!.id);
     expect((await ownerNotified(d!.id)).length).toBe(1);
 
-    const { d: d2 } = await ctx.ask("rm -rf /tmp/other-agents-cache");
+    const { d: d2 } = await ctx.ask("rm -rf /tmp/other-agents-cache && mkdir /tmp/other-agents-cache");
     const ceo = await client(ctx.ceo.id);
     // A permission card now needs the CEO's advice before it reaches the owner (BOS-233): what it's for and
     // what a Deny stops.
@@ -276,5 +276,52 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
       "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "echo x >/tmp/lnk; rm -rf dist", "rm -rf dist && mkdir -p /tmp/lnk", "rm -rf dist && echo x >/tmp/lnk"]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "owner" });
     }
+  });
+});
+
+describe("a plain /tmp cleanup is allowed with no card (BOS-1453)", () => {
+  it("allows it at once: no card, no wake for the CEO, no notice for the owner, and the owner's feed names the agent and the command", async () => {
+    const { d, runId, requestId } = await ctx.ask("rm -rf /tmp/rv86 /tmp/rv86-install.log");
+    expect(d).toBeUndefined();
+    expect(ctx.sent).toEqual([{ type: "permission.decide", runId, requestId, verdict: "allow" }]);
+    expect(await ctx.db.select().from(wakes)).toEqual([]);
+    expect((await ctx.decisions.queue()).length).toBe(0);
+    const feed = await ctx.db.select().from(activity).where(eq(activity.kind, "temp_cleanup_allowed"));
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({ companyId: ctx.companyId, agentId: ctx.dev.id, detail: { command: "rm -rf /tmp/rv86 /tmp/rv86-install.log" } });
+    expect(feed[0]!.summary).toContain("Senior Developer");
+    expect(feed[0]!.summary).toContain("rm -rf /tmp/rv86 /tmp/rv86-install.log");
+  });
+
+  it("allows the CEO's own plain cleanup too: there is no card to send to the owner", async () => {
+    const { d } = await ctx.ask("rm -rf /tmp/rv86", ctx.ceo.id);
+    expect(d).toBeUndefined();
+    expect(ctx.sent).toHaveLength(1);
+  });
+
+  it("goes to the CEO first, as before, when the company turned it off", async () => {
+    await ctx.db.update(companies).set({ autoTempCleanup: false }).where(eq(companies.id, ctx.companyId));
+    const { d } = await ctx.ask("rm -rf /tmp/rv86");
+    expect(d).toMatchObject({ tier: "ceo", status: "open" });
+    expect(ctx.sent).toEqual([]);
+    expect(await ctx.db.select().from(activity).where(eq(activity.kind, "temp_cleanup_allowed"))).toEqual([]);
+  });
+
+  it("is on for a new company, and the owner can switch it off and on from Settings", async () => {
+    const get = async () => ((await ctx.req("GET", "/api/companies")).json() as Array<{ id: string; autoTempCleanup: boolean }>).find((c) => c.id === ctx.companyId)!.autoTempCleanup;
+    expect(await get()).toBe(true);
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { autoTempCleanup: false })).statusCode).toBe(200);
+    expect(await get()).toBe(false);
+    expect((await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { autoTempCleanup: true })).statusCode).toBe(200);
+    expect(await get()).toBe(true);
+  });
+
+  it("still sends every refused shape to the CEO or owner, never allowing it", async () => {
+    for (const c of ["rm -rf /tmp/a/b", "rm -rf /tmp/a/", "rm -rf /tmp/*", "rm -rf $TMPDIR/a", "rm -rf /tmp/a /home/x", "rm -rf /tmp/../home", "rm -rf .git", "rm -rf /tmp/a && git worktree add /tmp/a origin/main"]) {
+      const { d } = await ctx.ask(c);
+      expect(d, c).toBeDefined();
+      expect(d!.status, c).toBe("open");
+    }
+    expect(ctx.sent).toEqual([]);
   });
 });

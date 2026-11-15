@@ -7,7 +7,7 @@ lead: This guide takes you from an empty Linux machine to the Boss Man web page 
 time: About 20 minutes. You need a Linux machine with Docker and a web browser on the same network.
 ---
 
-The full install was not re-run on a fresh machine for this guide, so the exact command output is unverified. The full reference, with TrueNAS notes and memory limits, is [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) in the repository.
+The full install was not re-run on a fresh machine for this guide, so the exact command output is unverified. The full reference, with TrueNAS notes, is [`docs/00-first-time-install.md`](@repo/blob/main/docs/00-first-time-install.md) in the repository. Memory limits and other tuning are in [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md). On Proxmox, use a VM, not an LXC container: see [`docs/32-proxmox.md`](@repo/blob/main/docs/32-proxmox.md).
 
 ![What you install: the Boss Man server, its database, a launcher and one runner per company. Runners connect out to the server, so nothing needs an open port.](/img/what-you-install.svg =1160x800 narrow=/img/what-you-install-narrow.svg:360x1530 "What you are installing. Everything runs on one machine, and the runners dial out, so you open no ports for them.")
 

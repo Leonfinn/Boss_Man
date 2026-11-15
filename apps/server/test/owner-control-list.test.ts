@@ -39,7 +39,7 @@ describe("R7: a card names a button that doesn't exist", () => {
       "Open the ticket and press Approve and merge.",
       'Click "Request changes" and write what is wrong.',
       "Click Settings, then click Server and runner.",
-      "Press the Deploy latest button.",
+      "Press the Review and deploy button.",
       "Press Save again, then press Enter.",
       "Click Open Acme's Kanban.",
       "Press Update runners (finish runs first).",
@@ -168,8 +168,6 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>CheckQueueSetting": "Server and runner",
   "pages/Settings.tsx>PrivateDetails": "Server and runner",
   "pages/Settings.tsx>Runner": "Server and runner",
-  "pages/Settings.tsx>RunnerUpdate": "Server and runner",
-  "pages/settings/System.tsx>WrapUpAction": "Server and runner",
   "pages/Settings.tsx>Devices": "Server and runner",
   "pages/Settings.tsx>EmailSetting": "Server and runner",
   "pages/Settings.tsx>ImportCompany": "Import and export",
@@ -189,6 +187,7 @@ const SITE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Settings.tsx>AdviceTimeout": "Team and CEO",
   "pages/Settings.tsx>StandingRules": "Team and CEO",
   "pages/Settings.tsx>PermissionJudgeSetting": "Permissions",
+  "pages/Settings.tsx>AutoTempCleanupSetting": "Permissions",
   "pages/Settings.tsx>FenceSetting": "Permissions",
   "pages/Settings.tsx>SecondOpinionSetting": "Permissions",
   "pages/Settings.tsx>Watchdog": "Watchdog",
@@ -219,6 +218,9 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   Board: ["Working now"],
   // The Unread and Read filter chips are drawn by one helper (chip) that adds the count, so their text is a variable (BOS-1277).
   Notifications: ["Unread", "Read"],
+  // The Updates card's buttons come from updateStatus() in settings/updates.tsx as `label:` values and are drawn by
+  // one loop in System.tsx, so no <button> holds their text (BOS-1238). The tests in updates.test.tsx check the labels.
+  "Server and runner": ["Review and deploy", "Check for updates now", "Cancel queued runner update", "Cancel the update", "Stop making room", "Lift the hold now"],
 };
 
 function skipString(s: string, i: number): number {
@@ -468,5 +470,26 @@ describe("OWNER_CONTROLS matches the web app", () => {
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );
     expect(stale, `remove from packages/shared/src/owner-controls.ts, or fix FILE_SCREEN, PAGE_SCREEN or SITE_SCREEN: ${stale.join(" | ")}`).toEqual([]);
+  });
+});
+
+// BOS-1494 (Morph's review, item 10): developer words may stay in help text or boxed technical names, never in a label.
+describe("owner labels use plain words", () => {
+  const DEVELOPER_WORDS = /\blegacy\b|merge train|leader lock|worktrees?\b|quota hold|no funding set|RUNNER_ADDONS|server queue/i;
+
+  it("no button, field label, menu entry or tab uses a developer word", () => {
+    const labels = [
+      ...tsx.flatMap((f) => {
+        const src = readFileSync(f, "utf8");
+        return [...buttonLabels(src), ...fieldLabels(src)].map((l) => `${rel(f)}: ${l}`);
+      }),
+      ...Object.values(OWNER_CONTROLS).flat(),
+      ...Object.values(OWNER_FIELDS).flat(),
+      ...OWNER_MENU,
+      ...Object.values(OWNER_TABS).flat(),
+    ];
+    expect(labels.length).toBeGreaterThan(500); // the scan found the app's labels, so an empty pass can't hide a miss
+    const bad = labels.filter((l) => DEVELOPER_WORDS.test(l.replace(/^[^:]+\.tsx: /, "")));
+    expect(bad).toEqual([]);
   });
 });

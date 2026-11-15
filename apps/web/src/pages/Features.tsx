@@ -387,6 +387,20 @@ function VisitorsWillSee({ f }: { f: Feature }) {
 function PortalTick({ f, onPatch, word }: { f: Feature; onPatch: Patch; word?: boolean }) {
   const reason = f.portal?.reason ?? null;
   const hint = !f.portalVisible && (reason === "security" || reason === "sensitive") ? `kept off: ${reason}` : reason === "needs public summary" ? "needs public summary" : null;
+  // Ticked but the portal won't show it: say so, with the reason and the fix (BOS-1496).
+  const notShown = f.portalShow && !f.portalShow.shown && f.portalShow.ticked ? f.portalShow : null;
+  if (notShown) {
+    const fix = notShown.reason === "needs public summary" ? "write a public summary" : notShown.reason === "looks like security work" ? "reword the public summary" : notShown.reason === "kept off (sensitive)" ? "untick \"Keep off the portal\" in the feature" : "check the feature's status";
+    return (
+      <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+        <label className={word ? "portal-tick-word" : undefined} style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
+          <input type="checkbox" aria-label={`On portal: ${f.title}`} checked={f.portalVisible} onChange={(e) => onPatch(f.id, { portalVisible: e.target.checked })} />
+          <span className="muted" style={{ fontSize: 13 }}>Not shown yet</span>
+        </label>
+        <small className="muted" style={{ fontSize: 11 }}>{notShown.reason}: {fix}</small>
+      </span>
+    );
+  }
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
       <label className={word ? "portal-tick-word" : undefined} style={{ display: "inline-flex", alignItems: "center", gap: 4 }} title="Show on the feedback portal, where visitors can vote on it">
@@ -593,6 +607,11 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
               {showHelp ? "Less" : "How the portal works"}
             </button>
           </p>
+          {d && (() => {
+            const ticked = d.features.filter((f) => f.portalVisible).length;
+            const showing = d.features.filter((f) => f.portalShow?.shown).length;
+            return <p className="muted" style={{ fontSize: 13 }} data-testid="portal-count">{showing} of {ticked} ticked showing on the portal</p>;
+          })()}
           {showHelp && (
             <ul id="features-portal-help" className="muted" style={{ fontSize: 13, marginTop: 4, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
               <li>Tick "On portal" on a row to put a feature on the portal or take it off.</li>

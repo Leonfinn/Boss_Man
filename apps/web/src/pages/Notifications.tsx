@@ -331,7 +331,7 @@ function SettingsForm() {
       </h2>
       <MoreAbout lead="Choose how loudly Boss Man tells you about things, and whether it reaches your phone.">
         <li>Notes stay in this feed.</li>
-        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" in the sidebar.</li>
+        <li>Flags, pages and asks also show as browser notifications while Boss Man is open in a background tab. Turn these on with "Turn on browser notifications" at the top of this page.</li>
         <li>In quiet hours, each notification is one step quieter: pages and asks become flags, and flags become notes.</li>
         <li>Once an agent reaches its hourly number, the rest it sends that hour become notes.</li>
         <li>Nothing is dropped: every notification still lands in this feed.</li>
@@ -620,7 +620,7 @@ function FilterBar({ filters, companies, counts, set }: { filters: Filters; comp
   );
 }
 
-export function Notifications({ feed, onChanged, companies = null }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null }) {
+export function Notifications({ feed, onChanged, companies = null, browserPermission, onEnableBrowser }: { feed: NoticeFeed | null; onChanged: () => void; companies?: Company[] | null; browserPermission?: NotificationPermission | "unsupported"; onEnableBrowser?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(readFilters);
   // A remembered company that no longer exists goes back to All companies.
@@ -679,6 +679,16 @@ export function Notifications({ feed, onChanged, companies = null }: { feed: Not
               </button>
             )}
       </header>
+      {/* (BOS-1506) This button used to sit in the side menu; it shows here until the owner turns notifications on. */}
+      {browserPermission === "default" && onEnableBrowser && (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", margin: "0 0 12px" }}>
+          <button className="btn" type="button" onClick={onEnableBrowser}>
+            Turn on browser notifications
+          </button>
+          <span className="muted">Shows flags, pages and asks while Boss Man is open in a background tab.</span>
+        </div>
+      )}
+      {browserPermission === "denied" && <p className="muted">Notifications are blocked in this browser.</p>}
       <RecentPhonePushes />
       {error && <p className="error">{error}</p>}
       {!neverAny && <FilterBar filters={filters} companies={companies ?? []} counts={feed?.counts} set={setFilters} />}

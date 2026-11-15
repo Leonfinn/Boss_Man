@@ -3,7 +3,7 @@
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
 import { commandRisks, type Risk } from "./destructive.js";
-import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
+import { autoTempCleanup, cleanupScope, explainCommand, readPush, removesReservedTmpEntry, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -32,6 +32,8 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
+  /** Only matches a shell command that removes (rm, unlink, rmdir, with or without flags) one of Boss Man's reserved /tmp entries, such as a check slot (BOS-1545, removesReservedTmpEntry in explain.ts). */
+  reservedTmpRemoval?: boolean;
   /** Only matches a shell command that deletes or destroys data, judged by what each part runs (BOS-116, destructive.ts). */
   destructive?: boolean;
   /** Only matches a shell command that pushes or publishes, judged the same way. */
@@ -52,6 +54,9 @@ export const DESTRUCTIVE = String.raw`\brm\s+(?:[^\s;&|]+\s+)*?(?:-[a-zA-Z]*[rf]
 export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
+/** The rule name logged when a plain /tmp cleanup is allowed without a card (BOS-1453). */
+export const TEMP_CLEANUP_AUTO_RULE = "Temp-file cleanup that only deletes entries in /tmp is allowed";
+export const RESERVED_TMP_REMOVAL_RULE = "Removing Boss Man's own /tmp entries (check slots, skills) goes to the CEO first";
 export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
 
 // Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
@@ -121,6 +126,8 @@ export const BUILTIN_GUARDS: PolicyRuleSpec[] = [
   { name: WORKING_COPY_RULE, match: { kinds: ["execute"], destructive: true, workingCopyOnly: true }, outcome: "ceo" },
   { name: "Destructive commands go to the owner", match: { destructive: true }, outcome: "owner" },
   { name: "Pushing and publishing go to the owner", match: { pushing: true }, outcome: "owner" },
+  // Plain rm, unlink and rmdir aren't "destructive", but of a check slot or another run's folder they are (BOS-1545): the CEO decides.
+  { name: RESERVED_TMP_REMOVAL_RULE, match: { kinds: ["execute"], reservedTmpRemoval: true }, outcome: "ceo" },
 ];
 
 /** Table row 6: the built-in allows. Never reached by a request a guard caught, and company routing rules never apply to them. */
@@ -141,7 +148,7 @@ export const DEFAULT_POLICY: PolicyRuleSpec[] = [...BUILTIN_GUARDS, ...BUILTIN_A
 export const PERMISSION_TABLE: ReadonlyArray<{ row: number; name: string; why: string }> = [
   { row: 1, name: "Network guard", why: "Fetching from the home network is denied; nothing may lift it." },
   { row: 2, name: "Owner chat and plan approval", why: "Decided by the server before this table (chat: board tools only)." },
-  { row: 3, name: "Built-in guards", why: "Destructive, push and cleanup requests ask the owner or CEO. A company allow cannot lift them, except the owner's /tmp-only switch." },
+  { row: 3, name: "Built-in guards", why: "Destructive, push and cleanup requests ask the owner or CEO. A company allow cannot lift them, except the owner's /tmp-only switch. A plain delete of entries directly in /tmp is allowed by the built-in cleanup rule unless the company turned it off (BOS-1453)." },
   { row: 4, name: "Company deny rules", why: "The owner's own denials beat every allow below the network guard." },
   { row: 5, name: "Company allow rules", why: "In the owner's order, shared with row 7: the first matching allow or routing rule decides. They cannot lift a guard." },
   { row: 6, name: "Built-in allows", why: "Boss Man's tools, reading, editing, plain shell." },
@@ -264,12 +271,17 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   const shellCmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
   if (rule.tempCleanupOnly && !(typeof shellCmd === "string" && tempCleanup(shellCmd))) return false;
   if (rule.workingCopyOnly && !(typeof shellCmd === "string" && cleanupScope(shellCmd)?.workingCopy.length)) return false;
+  if (rule.reservedTmpRemoval) {
+    // A string only, like the cleanup rules; an argv array is joined so a split `rm` `/tmp/bossman…` is still seen.
+    const cmd = typeof shellCmd === "string" ? shellCmd : Array.isArray(info.rawInput && (info.rawInput as Record<string, unknown>)["command"]) ? ((info.rawInput as Record<string, unknown>)["command"] as unknown[]).join(" ") : null;
+    if (!cmd || !removesReservedTmpEntry(cmd)) return false;
+  }
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
   if (rule.bossmanCall && !isBossmanCall(info)) return false;
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing || rule.bossmanCall || rule.reservedTmpRemoval);
 }
 
 /**
@@ -434,9 +446,11 @@ export function reachesPrivateNetwork(info: PermissionInfo): boolean {
 }
 
 export type PermissionDecision = { outcome: PolicyOutcome; rule: string; row: number };
+/** autoTempCleanup: the company's switch for allowing plain /tmp cleanups without a card (BOS-1453); on unless false. */
+export type DecideOptions = { autoTempCleanup?: boolean };
 
 /** Applies PERMISSION_TABLE (rows 1 and 3 to 8) to one request. `rules` are the company's rules, then global ones, each in the owner's order. */
-export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): PermissionDecision {
+export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[], opts: DecideOptions = {}): PermissionDecision {
   // Row 1. Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, row: 1 };
   // Not a tool at all (BOS-495): refused before any rule, so no allow rule can turn it into a card or an allow.
@@ -451,6 +465,10 @@ export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]):
   const first = rules.find((r) => ((r.outcome === "allow" && (!guard || r.match.scratchOnly)) || isRoute(r)) && matches(r.match, info));
   if (first && first.outcome === "allow") return { outcome: "allow", rule: first.name, row: 5 };
   // Row 7 may change who is asked about a guarded request, never turn it into an allow.
+  // BOS-1453: a cleanup that only deletes plain entries directly in /tmp is allowed by the rules, with no card. On unless the company turned it off;
+  // an owner's own routing rule for it (first) still decides, and anything autoTempCleanup doesn't recognise keeps today's CEO-first route.
+  const shellCmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
+  if (guard?.name === TEMP_CLEANUP_RULE && !first && opts.autoTempCleanup !== false && typeof shellCmd === "string" && autoTempCleanup(shellCmd)) return { outcome: "allow", rule: TEMP_CLEANUP_AUTO_RULE, row: 3 };
   if (guard) return first ? { outcome: first.outcome, rule: first.name, row: 7 } : { outcome: guard.outcome, rule: guard.name, row: 3 };
   // Row 6: built-in allows. Company routing never reaches a request they allow (BOS-307; this replaces BOS-292's skip list).
   const builtin = BUILTIN_ALLOWS.find((r) => matches(r.match, info));
@@ -470,8 +488,8 @@ export function shadowedRoutingRules<T extends PolicyRuleSpec>(rules: T[]): T[] 
 }
 
 /** The table applied for callers that log the position or only read the outcome. `position` is the deciding row (0 when nothing in the table matched); it replaces the old list index BOS-306 logged. */
-export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string; position: number } {
-  const { outcome, rule, row } = decidePermission(info, rules);
+export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[], opts: DecideOptions = {}): { outcome: PolicyOutcome; rule: string; position: number } {
+  const { outcome, rule, row } = decidePermission(info, rules, opts);
   return { outcome, rule, position: outcome === "owner" && row === 8 ? 0 : row };
 }
 

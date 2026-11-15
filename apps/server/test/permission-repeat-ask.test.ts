@@ -67,7 +67,8 @@ describe("one Allow once covers the one tool call (BOS-334)", () => {
     const first = await folder("call-1");
     await ctx.decisions.answer(first.d!.id, "Allow once");
     // Another command and another title are not this call.
-    expect((await ctx.ask("rm -rf /tmp/other", "call-2")).d).toBeDefined();
+    // Re-creates the folder, so it still raises a card: a plain delete of /tmp entries is allowed with none (BOS-1453).
+    expect((await ctx.ask("rm -rf /tmp/other && mkdir /tmp/other", "call-2")).d).toBeDefined();
     expect((await ctx.ask(CMD, "call-1", "Something else")).d).toBeDefined();
     // A folder ask carries a different input from the command ask (it lists the folder), so without the
     // tool call id it is not the same exact request and raises its own card (BOS-376 security review).
@@ -166,7 +167,7 @@ describe("an identical repeat in the same run is settled by the Allow once (BOS-
   it("does not carry an Allow over to a different command, or to another run", async () => {
     const first = await ctx.ask(CMD, undefined);
     await ctx.decisions.answer(first.d!.id, "Allow once");
-    expect((await ctx.ask("rm -rf /tmp/other", undefined)).d).toBeDefined();
+    expect((await ctx.ask("rm -rf /tmp/other && mkdir /tmp/other", undefined)).d).toBeDefined();
     const otherRun = randomUUID();
     await ctx.emit({ type: "run.started", runId: otherRun, agentId: ctx.ceo.id, acpSessionId: "s2", model: null });
     const requestId = randomUUID();

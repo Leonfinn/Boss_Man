@@ -5,6 +5,7 @@
 import { and, asc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { closeCardBySystem } from "./card-validity.js";
 import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
 
 export class EngagementError extends Error {
@@ -91,6 +92,12 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
   async function setStatus(e: Engagement, status: Engagement["status"], extra: Partial<Engagement> = {}) {
     const [row] = await db.update(engagements).set({ status, ...extra }).where(eq(engagements.id, e.id)).returning();
     return row!;
+  }
+
+  /** The owner's approval row dies with the engagement: closed by Boss Man, never answered (DR-061 Q4). */
+  async function closeApprovalCards(e: Engagement) {
+    const open = await db.select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question }).from(decisions).where(and(eq(decisions.kind, "engagement"), eq(decisions.status, "open"), eq(decisions.companyId, e.providerCompanyId), sql`${decisions.context}->>'engagementId' = ${e.id}`));
+    for (const d of open) await closeCardBySystem(db, d, `the engagement "${e.title}" is ${e.status.replace("_", " ")}`, { release: deps.release, now });
   }
 
   async function startWork(e: Engagement, causedByRunId?: string | null) {
@@ -185,6 +192,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         case "reject":
           guard(a.message);
           e = await setStatus(e, "rejected");
+          await closeApprovalCards(e);
           await post(e, actor.companyId, "rejected", a.message ?? "Declined.");
           await wakeCeo(other, e, `${await companyName(actor.companyId)} declined.\n${await from(actor.companyId, a.message ?? "No reason given.")}\nFind another way, or drop the dependency on it.`, actor.runId);
           return { engagement: e, note: "Declined." };
@@ -211,6 +219,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         case "withdraw":
           guard(a.message);
           e = await setStatus(e, "rejected");
+          await closeApprovalCards(e);
           await post(e, actor.companyId, "withdrawn", a.message ?? "Withdrawn.");
           await wakeCeo(other, e, "the requester withdrew it. Stop any work on it.", actor.runId);
           return { engagement: e, note: "Withdrawn." };

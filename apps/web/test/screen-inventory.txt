@@ -37,6 +37,7 @@ sections:
   - Your review
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/objectives
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
@@ -163,7 +164,7 @@ reads:
 ## #/scrum-master
 sections: 
   - Open now…
-  - Scrum Master
+  - Scrum Master log
 reads: 
   - /api/companies/:id/watchdog
   - /api/companies/:id/watchdog/actions
@@ -195,6 +196,7 @@ sections:
   - Advice on permission cards
   - Agent fence
   - Built-in defaults
+  - Cleaning up temp files
   - Decision rules
   - Second opinion from a model (optional)
   - Try a command
@@ -231,11 +233,12 @@ sections:
   - Extra lines from your.env
   - Facts only you can give
   - Network guard
-  - Now
+  - Now running
+  - Other actions
   - Outgoing email
   - Private details to block
+  - Recent updates
   - Runner
-  - Runner update
   - Server
   - Stop all work
   - This host
@@ -258,6 +261,7 @@ reads:
   - /api/run-limits
   - /api/runner-report
   - /api/self-deploy
+  - /api/self-deploy/history
   - /api/self-deploy/wait
   - /api/settings/check-queue
   - /api/settings/email
@@ -302,17 +306,14 @@ reads:
 
 ## #/setup
 sections: 
-  - Add-ons
   - Funding sources
   - GitHub (fine-grained personal access token)
   - Gitea (self-hosted, e.g. http://192.0.2.10:3003)
-  - Runner
 reads: 
   - /api/companies/:id/grants
   - /api/companies/:id/projects
   - /api/companies/:id/review-policy
   - /api/companies/:id/runner
-  - /api/companies/:id/runner/:id
   - /api/companies/:id/setup-checklist
   - /api/funding-sources
   - /api/secrets
@@ -341,6 +342,7 @@ sections:
   - Work
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue/:id/status
   - /api/companies/:id/objectives
   - /api/companies/:id/open-tickets
   - /api/companies/:id/watchdog/actions
@@ -378,7 +380,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
-  - Workflow
+  - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
   - /api/companies/:id/workflow

@@ -8,7 +8,8 @@ import { Section, useAction } from "./shared";
 type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
 type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
 type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
-const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
+/** The server's role in plain words (BOS-1494); the technical name follows in small boxed text. */
+const ROLE_LABEL = { leader: "In charge", standby: "Standing by: another copy is in charge, so changes here are refused", single: "The only server" };
 
 /** Kept in the browser (BOS-924): the owner folds the reported facts away, and the choice stays as they left it. */
 const HOST_FACTS_OPEN_KEY = "bossman.hostFacts.open";
@@ -298,8 +299,7 @@ export function ServerPanel() {
       <dl className="facts" data-testid="server-role">
         <dt>Role</dt>
         <dd>
-          <strong>{role}</strong>
-          {ROLE_NOTE[role]}
+          <strong>{ROLE_LABEL[role]}</strong> <code className="mono">role: {role}</code>
         </dd>
         <dt>Version</dt>
         <dd>

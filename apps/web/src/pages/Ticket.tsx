@@ -23,6 +23,7 @@ import { away } from "../server-watch";
 type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
 import { ago } from "./Dashboard";
+import { StatusLineView, type StatusLine } from "./MergeQueue";
 
 /** The mark for one verdict on a "Done when" checklist row. */
 const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
@@ -394,6 +395,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const startEdit = () => setDraft(readDraft(editDraftKey) || (t?.body ?? ""));
   const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers(ticket.data?.companyId);
+  // BOS-1517: the same live status line the Merge queue shows; asked only while the ticket is in review (where it can be merging).
+  const inReview = ticket.data?.systemState === "review";
+  const statusLine = usePoll((signal) => (inReview && ticket.data ? api<{ statusLine: StatusLine | null }>(`/api/companies/${ticket.data.companyId}/merge-queue/${id}/status`, { signal }) : Promise.resolve({ statusLine: null })), 20_000, `sl-${id}-${inReview}`);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   // Fetched here so the Details card's Roadmap row can count what it waits on (BOS-1195).
@@ -739,6 +743,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
+      {statusLine.data?.statusLine && (
+        <div className="card" role="status" data-ticket-status-line="true" style={{ marginBottom: 16 }}>
+          <StatusLineView line={statusLine.data.statusLine} />
+        </div>
+      )}
+
+      {t.goLiveNote && (
+        <div className="card" role="status" data-ticket-go-live-note="true" style={{ marginBottom: 16 }}>
+          <strong>{t.goLiveNote.text}</strong>{" "}
+          {t.goLiveNote.cardId && <a href={`#/decisions/${t.goLiveNote.cardId}`}>Open the card</a>}
+        </div>
+      )}
+
       {t.hold && t.systemState === "review" && (
         <div className="card review-hold" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
@@ -856,7 +873,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
             <span>
-              Urgent <span className="muted">(always runs through the subscription quota hold)</span>
+              Urgent<span className="muted">: runs even when the subscription is close to its limit</span> <code className="mono">quota hold</code>
             </span>
           </label>
 
