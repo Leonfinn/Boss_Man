@@ -151,7 +151,13 @@ const MAP: Record<string, string[]> = {
   team: ["Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references"],
   watchdog: ["Watchdog"],
   permissions: ["Advice on permission cards", "Second opinion from a model (optional)", "Agent fence"],
-  system: ["Stop all work", "Runner update", "Runner", "Workspace disk", "Agents at once", "Tickets in progress", "Checks", "Server", "This host", "Your devices"],
+  // "Server and runner" is six pages (BOS-1492); each of its old panels is on the page the BOS-1491 table gives it.
+  updates: ["Stop all work", "Runner update"],
+  limits: ["Agents at once", "Tickets in progress", "Checks"],
+  runner: ["Runner", "Workspace disk"],
+  email: ["Outgoing email"],
+  server: ["Server", "This host", "Network guard"],
+  devices: ["Your devices", "Private details to block"],
   transfer: ["Import a company"],
 };
 const SIZES = [
@@ -206,7 +212,7 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
     try {
       for (const vp of SIZES) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, hasTouch: vp.touch });
-        for (const id of ["team", "permissions", "system"]) {
+        for (const id of ["team", "permissions"]) {
           await page.goto(`${base}/#/settings/c1/${id}`);
           await page.waitForSelector(".set-jump a", { timeout: 8000 });
           await new Promise((r) => setTimeout(r, 500));
@@ -244,10 +250,6 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
             }
             expect(await page.evaluate(() => location.hash), `${vp.name}/${id}: route after ${target}`).toBe(`#/settings/c1/${id}`);
             expect(inView, `${vp.name}/${id}: section ${target}`).toBe("ok");
-            // Proof pictures on request: BOSSMAN_SHOT_DIR=<folder> saves the page after the Checks jump.
-            if (process.env.BOSSMAN_SHOT_DIR && id === "system" && target === "check-queue-h") {
-              await page.screenshot({ path: path.join(process.env.BOSSMAN_SHOT_DIR, `after-checks-${vp.name}.png`) });
-            }
           }
         }
         await page.close();
@@ -279,6 +281,8 @@ describe.skipIf(!built)("BOS-1020 every old setting is on its new Settings page"
       ["settings/c1/workflow", "settings/c1/reviews"],
       ["rules/c1", "settings/c1/permissions"],
       ["settings/c1/gone", "settings"],
+      // BOS-1492: the one-page "Server and runner" opens the front page, where its six pages are one click away.
+      ["settings/c1/system", "settings"],
     ]);
   }, 60_000);
 

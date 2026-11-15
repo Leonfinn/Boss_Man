@@ -212,6 +212,8 @@ const NOT_FROM_BUTTONS: Partial<Record<OwnerScreen, string[]>> = {
   "Merge queue": ["Merges", "Queued checks"],
   // Retire is an item in the row's ⋯ menu (RowMenu), whose label is built from the agent's name (BOS-1256).
   Agents: ["Retire"],
+  // The heading of the last Settings group (BOS-1492): cards still say "Click Settings, then click Server and runner".
+  Settings: ["Server and runner"],
   // The Board's filters panel (BOS-1194): Working now is the panel's switch, labelled by a heading span, so its
   // text is not a <button>'s. The test checks the switch is still in FilterPanel.tsx instead.
   Board: ["Working now"],
