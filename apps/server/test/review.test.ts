@@ -290,27 +290,27 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
   });
 
-  it("sends a ticket back when a migration number is already taken, and never merges it (BOS-219)", async () => {
-    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }, migrations: { needed: true, number: 75, next: 76, why: ["0075_mine shares its number with 0075_theirs on another branch"], others: [] } } }));
+  // BOS-1540: main already holding the branch's number must not bounce it before the merge; the runner renumbers it.
+  it("merges a ticket whose migration number main already holds, and records the renumber (BOS-690, BOS-1540)", async () => {
+    const c = (ctx = await setup({ answers: {
+      verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 },
+      migrations: { needed: true, number: 75, next: 76, why: ["0075_mine shares its number with 0075_theirs on another branch"], others: [] },
+      merge: { status: "merged", commit: "c".repeat(40), renamed: [{ from: "0075_mine", to: "0076_mine" }] },
+    } }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
-    expect((await approve(c)).json()).toMatchObject({ outcome: "verify_failed" });
-    expect(c.sent.some((x) => x.type === "workspace.merge")).toBe(false);
-    expect(await state(c)).toMatchObject({ systemState: "in_progress", mergeCommit: null });
-    const [w] = await c.db.select().from(wakes);
-    expect(w).toMatchObject({ reason: "migration number taken", agentId: c.worker.id });
-    expect(w!.note).toContain("0075_mine");
-    expect(w!.note).toContain("0076");
-    expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop" });
+    expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.sent.some((x) => x.type === "workspace.merge")).toBe(true);
+    expect(c.sent.some((x) => x.type === "workspace.migrations")).toBe(false);
+    expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
+    expect((await c.db.select().from(wakes)).some((w) => w.reason === "migration number taken")).toBe(false);
   });
 
-  it("checking at merge time compares against the default branch only, so two clashing tickets don't keep sending each other back (BOS-219)", async () => {
-    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+  it("puts the renumber's refusal reason in the conflicts send-back (BOS-1540)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }, merge: { status: "conflicts", files: ["apps/server/src/db/schema.ts"], why: "the migration edits a table main also changed" } } }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
-    // Another open ticket on the same project picked the same number. It must not be looked at here.
-    const open = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Another migration", assigneeAgentId: c.worker.id, state: "in_progress" })).json() as { id: string };
-    await c.db.update(tickets).set({ branch: `bossman/${open.id}` }).where(eq(tickets.id, open.id));
-    expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
-    expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop", others: [] });
+    expect((await approve(c)).json()).toMatchObject({ outcome: "conflicts" });
+    const [w] = await c.db.select().from(wakes);
+    expect(w!.note).toContain("refused: the migration edits a table main also changed");
   });
 
   it("closes a ticket that changed nothing in the repository, without running the check or merging", async () => {

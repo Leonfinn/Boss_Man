@@ -105,7 +105,7 @@ describe("decision queue", () => {
     expect(screen.queryByText("What the score means")).toBeNull();
     expect(screen.getByText("Holds up APP-3")).toBeTruthy();
     // The list really is newest first, so the subtitle says so rather than "ranked by what they unblock".
-    expect(screen.getByText(`1 decision to do in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
+    expect(screen.getByText(`1 needs you in ${company.name}, newest first.`, { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80, recommended" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());

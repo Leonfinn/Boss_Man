@@ -10,7 +10,8 @@ import type { Db } from "../db/client.js";
 import { decisions, features, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { signoffClearedReason } from "./signoff.js";
-import { imageContains, mergeCommitOrder, runnerImageCommit } from "./runner-image.js";
+import { allMergeOrder, commitIsLive } from "./go-live-wait.js";
+import { runnerImageCommit } from "./runner-image.js";
 import { ADDON_LABELS, ADDONS, type Addon, type AddonFacts } from "./addons.js";
 import { FAILURE_WINDOW_MS, failedSince } from "./merge-failures.js";
 
@@ -157,7 +158,7 @@ export async function clearsWhenToConditions(db: Db, companyId: string, input: C
   if (input.runnerRebuilt) out.push({ kind: "runnerRebuilt", companyId, from: await runnerImageCommit(db, companyId) });
   if (input.serverHasCommit) {
     const want = input.serverHasCommit.toLowerCase();
-    const hits = (await mergeCommitOrder(db, companyId)).filter((c) => c.startsWith(want));
+    const hits = (await allMergeOrder(db, companyId)).filter((c) => c.startsWith(want));
     if (hits.length !== 1) return { error: `clearsWhen.serverHasCommit: ${hits.length ? "that prefix matches more than one merge" : "Boss Man can't place that commit"}; give the full or a longer sha of a commit that a ticket merged as.` };
     out.push({ kind: "serverHasCommit", commit: hits[0]! });
   }
@@ -228,9 +229,8 @@ export function alertClearing(db: Db, deps: AlertClearingDeps) {
         return image && image !== c.from ? "the runners were rebuilt" : null;
       }
       case "serverHasCommit": {
-        const live = deps.liveCommit?.()?.toLowerCase() ?? null;
-        if (!live || !/^[0-9a-f]{40}$/.test(live)) return null;
-        return imageContains(live, c.commit, await mergeCommitOrder(db, card.companyId)) ? "the server running now contains that change" : null;
+        // The recorded live commit decides; the commit this process was built from only stands in before any is recorded.
+        return (await commitIsLive(db, card.companyId, c.commit, "server", { serverFallback: deps.liveCommit?.() })) ? "the server running now contains that change" : null;
       }
       case "featureHasTicket": {
         const [f] = await db.select({ title: features.title }).from(features).where(eq(features.id, c.featureId));

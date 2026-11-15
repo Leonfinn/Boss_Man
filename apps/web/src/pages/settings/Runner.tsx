@@ -5,7 +5,7 @@ import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
 import { Section, useAction } from "./shared";
-import { UpdateHistory, type UpdateRow } from "./updates";
+import type { UpdateRow } from "./updates";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string; guard?: "on" | "off" | "unavailable" | "down" | "retrying" | "frozen" } | null; error?: string } | null;
@@ -34,7 +34,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
               {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
               {!r && (
                 <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
-                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">scripts/update-runner.sh</code> as root in a root shell on that server. Skills that need it stay out of runs until then.
+                  To add it, put the line <code className="mono">RUNNER_ADDONS={a.id}</code> in the server's <code className="mono">.env</code> file, then run <code className="mono">scripts/update-runner.sh</code> on the server as root (the administrator account). Skills that need it are left out of runs until then.
                 </p>
               )}
             </li>
@@ -150,11 +150,6 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           )}
         </dl>
         {c && (c.guard === "off" || c.guard === "unavailable" || c.guard === "down") && <GuardWarning guard={c.guard} />}
-        {s?.report?.last && (
-          <div data-testid="company-update-history">
-            <UpdateHistory r={s.report.last} />
-          </div>
-        )}
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -214,11 +209,6 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </dl>
-      )}
-      {s?.registered && s.report?.last && (
-        <div data-testid="company-update-history">
-          <UpdateHistory r={s.report.last} />
-        </div>
       )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

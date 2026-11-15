@@ -330,7 +330,7 @@ describe("an add-on's setup card closes itself once the add-on works (DR-023 D, 
     await ctx.sweeps.run(); // running, after the card
     const after = await row(ctx, card.id);
     expect(after.status).toBe("withdrawn");
-    expect((after.context as { withdrawn?: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringMatching(/^ntfy is running \(the last phone push went through, at \d\d:\d\d\)$/) });
+    expect((after.context as { withdrawn?: { by: string; note: string } }).withdrawn).toMatchObject({ by: "system", note: expect.stringMatching(/^ntfy is running \(ntfy accepted the last push, which doesn't show the phone got it, at \d\d:\d\d\)$/) });
     const [freed] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(freed!.systemState).toBe("ready");
   });
