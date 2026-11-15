@@ -59,7 +59,7 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 
 ## If export fails
 
-`export` logs in as the agent account (PENPOT_EMAIL and PENPOT_PASSWORD, granted like the token) because Penpot's export service needs a session, not a token. If it says those are missing or refused, tell the owner on the ticket; they can fix the secrets. Don't try other ways around it.
+`export` logs in as the agent account (PENPOT_EMAIL and PENPOT_PASSWORD, granted like the token) because Penpot's export service needs a session, not a token. If it says those are missing or refused, tell the owner on the ticket; they can fix them in Settings → Tools → Penpot. Don't try other ways around it.
 
 ## Limits
 

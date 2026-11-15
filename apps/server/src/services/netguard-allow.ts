@@ -8,15 +8,17 @@
 // with what it is and the company it is for, and any of those the guard now drops because it resolves to a private
 // address (BOS-708), so a missing tool server is visible rather than silently absent.
 
-export type CoveredBy = "tool server" | "git host";
+// BOS-1582: and each company's Penpot, from the PENPOT_URL the owner saved, so the old hand line for it can go too.
+
+export type CoveredBy = "tool server" | "git host" | "Penpot";
 export type AllowEntry = { entry: string; coveredBy: CoveredBy[]; note: string | null };
 
 /** What one address the guard opens by itself is: the kind, the company it is for, and the reason it is dropped. */
 export type AutomaticEntry = {
   address: string;
-  /** A tool server, or a project's git host. */
-  kind: "tool server" | "git host";
-  /** The tool server's name, or the project's name for a git host. Never a path or a token. */
+  /** A tool server, a project's git host, or the company's Penpot (BOS-1582). */
+  kind: "tool server" | "git host" | "Penpot";
+  /** The tool server's name, the project's name for a git host, or "Penpot". Never a path or a token. */
   name: string;
   /** The company whose runners can reach it; null for a git host whose project is unknown. */
   company: string | null;
@@ -55,7 +57,7 @@ export const DROPPED_TIED_TO_SERVER = "Not allowed. Boss Man allows this name, b
 export const DROPPED_PRIVATE = "Not allowed. Boss Man allows this name, but it now points at a private address on your home network. The guard drops it unless you allowed a private address for it on purpose: add a tool server at the private address itself, or set the project's repo address to it.";
 
 /** A known kind wins over a plain tool server when two sources claim the same host:port. */
-const PRIORITY = { "tool server": 0, "git host": 1 } as const;
+const PRIORITY = { "tool server": 0, "git host": 1, Penpot: 2 } as const;
 
 /** Builds the report from what the launcher, the host and Boss Man's own lists say. Pure, so it is tested on its own. */
 export function netguardAllowReport(input: {
@@ -63,16 +65,22 @@ export function netguardAllowReport(input: {
   env: { envFound: boolean; lines: string[][]; reportedAt: string } | null;
   toolServers: string[];
   gitHosts: string[];
+  /** Each company's Penpot host:port the guard opens (BOS-1582). */
+  penpot?: string[];
   /** What the guard opens by itself, per address (BOS-791): null when it couldn't be worked out. */
   automatic?: AutomaticEntry[] | null;
 }): NetguardAllowReport {
-  const tool = new Set(input.toolServers.map(key));
-  const git = new Set(input.gitHosts.map(key));
-  const covers = (e: string): CoveredBy[] => [...(tool.has(key(e)) ? (["tool server"] as const) : []), ...(git.has(key(e)) ? (["git host"] as const) : [])];
+  const sets: [CoveredBy, Set<string>][] = [
+    ["tool server", new Set(input.toolServers.map(key))],
+    ["git host", new Set(input.gitHosts.map(key))],
+    ["Penpot", new Set((input.penpot ?? []).map(key))],
+  ];
+  const covers = (e: string): CoveredBy[] => sets.filter(([, s]) => s.has(key(e))).map(([k]) => k);
   const allow = input.launcher?.allow ?? null;
   const entries = allow?.map((entry) => {
     const coveredBy = covers(entry);
-    return { entry, coveredBy, note: coveredBy.length ? (allow.length === 1 ? COVERED_NOTE : `Already allowed by Boss Man (a ${coveredBy.join(" and a ")}); this entry can go from the line.`) : null };
+    const what = coveredBy.map((k) => (k === "Penpot" ? "the Penpot set in Settings" : `a ${k}`)).join(" and ");
+    return { entry, coveredBy, note: coveredBy.length ? (allow.length === 1 ? COVERED_NOTE : `Already allowed by Boss Man (${what}); this entry can go from the line.`) : null };
   }) ?? null;
   const warnings: string[] = [];
   const lines = input.env?.lines ?? [];
