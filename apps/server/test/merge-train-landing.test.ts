@@ -52,6 +52,8 @@ function fakeGit() {
     /** BOS-1515: who had a trial merge on main, and whether the runner answers it. */
     trials: [] as string[],
     clashUnknown: false,
+    /** BOS-1604: tickets whose next finish pushes but whose answer is lost. */
+    cutOff: new Set<string>(),
     clashesOnMain: (ticket: string) => g.clashes.some(([x, y]) => (x === ticket && g.has(g.main).includes(y)) || (y === ticket && g.has(g.main).includes(x))),
     treeOf: (has: string[]) => `tree:${[...has].sort().join(",")}`,
     has: (c: string) => commits.get(c)?.has ?? [],
@@ -119,7 +121,10 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
       const x = c as unknown as { ticketId: string; phase?: string; tree?: string; commit?: string; base?: string; expectBase?: string };
       const who = names.get(x.ticketId)!;
       git.seen.push({ phase: x.phase ?? "", ticket: who, ...(x.base ? { base: x.base } : {}), ...(x.expectBase ? { expectBase: x.expectBase } : {}) });
-      reply(x.phase === "prepare" ? git.prepare(who, x.base) : git.finish(who, x.commit!, x.tree!, x.expectBase));
+      const out = x.phase === "prepare" ? git.prepare(who, x.base) : git.finish(who, x.commit!, x.tree!, x.expectBase);
+      // BOS-1604: the push happened, but the answer never comes back (the runner was updated mid-merge).
+      if (x.phase === "finish" && git.cutOff.delete(who)) queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: false, error: "The runner restarted." }));
+      else reply(out);
     }
     return true;
   }, opts.features ?? ["carried-check", "check-jobs", "merge-base", "merge-pin"]);
@@ -422,6 +427,23 @@ describe("merge train landings (BOS-1366)", () => {
     expect(c.git.has(c.git.main).sort()).toEqual(["A", "B", "X"]);
     expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A", "B"]);
   });
+
+  it("a push that lands while its answer is cut off (BOS-1604, 15 Nov): the ticket behind lands, with no restack loop", async () => {
+    const c = await setup();
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await approveInOrder(c, [a, b]);
+    expect(await c.waitFor(async () => (await c.db.select().from(checkJobs)).length === 2)).toBe(true);
+    // A's finish reaches main, then the runner goes away before it answers: A's landing ends without "merged" and A leaves
+    // the train, its commit (now main's tip) marked lost. Before the fix B then went stale at every poll, for ever.
+    c.git.cutOff.add("A");
+    const stop = c.runJobs(() => false);
+    expect(await c.outcome(b)).toBe("merged");
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A", "B"]);
+    expect(c.git.has(c.git.main).sort()).toEqual(["A", "B"]);
+    // B restacked once (its base A left the train), then landed on main = A.
+    expect((await c.events(b, "restacked")).length).toBe(1);
+  }, 60_000);
 
   it("turning the switch off mid-train: members already in it still land on their exact base, a new arrival takes today's path", async () => {
     const c = await setup();
