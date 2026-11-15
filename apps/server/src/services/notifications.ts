@@ -430,7 +430,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? "A deploy that carries the fix for a live problem" : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
         // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
         // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
-        const routineRunner = c.type === "self_deploy" && c.target === "runner";
+        // BOS-1462: unless it carries a live fix that pages (urgentFix, not a repeat): then it pages like a server card.
+        const routineRunner = c.type === "self_deploy" && c.target === "runner" && !(urgentFix && !urgentFix.repeat);
         await notify({ companyId: d.companyId, agentId: null, level, ...(urgentReason ? { urgentReason } : {}), title: d.tier === "ceo" ? `${company}: for the CEO` : urgentFix ? urgentFix.heading : `${company} needs a decision`, body: d.question, link: evidenceLink(c), decisionId: d.id, ...(routineRunner ? { noPush: true } : {}) });
       }
       return open.length;
