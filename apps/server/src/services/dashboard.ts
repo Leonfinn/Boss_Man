@@ -4,6 +4,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runners as runnersTable, runs, tickets, wakes } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
+import { isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
 
 export const DAYS = 14;
@@ -204,7 +205,7 @@ export function dashboardService(
         agents: agentCards,
         stats: {
           agents: team.length,
-          running: new Set(live.map((r) => r.agentId)).size,
+          running: new Set(live.filter(isWorkingRun).map((r) => r.agentId)).size,
           paused: team.filter((a) => a.paused).length,
           inProgress: count("in_progress"),
           inReview: count("review"),

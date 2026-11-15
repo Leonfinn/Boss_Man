@@ -60,6 +60,12 @@ export function dockerClient(socketPath = "/var/run/docker.sock", wait: { pollMs
       if (r.status === 404) return null;
       return r.status === 200 && r.json ? r.json : fail(r, "Inspecting the container failed");
     },
+    /** The daemon's version and OS type, for the runner's platform fingerprint (DR-049); null if it won't say. */
+    async hostInfo(): Promise<{ dockerVersion: string; osType: string } | null> {
+      const r = await call<{ ServerVersion?: string; OSType?: string }>("GET", "/info");
+      if (r.status !== 200 || !r.json) return null;
+      return { dockerVersion: r.json.ServerVersion ?? "unknown", osType: r.json.OSType ?? "unknown" };
+    },
     /** The id an image tag points at now, or null if there is no such image. */
     async imageId(ref: string): Promise<string | null> {
       const r = await call<{ Id: string }>("GET", `/images/${encodeURIComponent(ref)}/json`);

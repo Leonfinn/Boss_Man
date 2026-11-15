@@ -33,10 +33,10 @@ cd $B/src && scripts/update-runner.sh
 It builds a new runner image and checks it with networking off. If the check fails, the script says "The canary failed", and the runners keep the old image. If the check passes, the script also rebuilds the launcher, the part that starts each company's runner. Then the runners move to the new image:
 
 - **With the host deployer set up** (see below), Boss Man stops starting new runs, lets the current ones finish, and swaps each company's runner when it is idle.
-- **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Runner update**, and choose **Update runners (finish runs first)**.
+- **Without the host deployer**, the runners stay on the old image until you start the swap. Open **Settings > Server and runner**, find **Updates**, and choose **Update runners (finish runs first)**.
 - **If no launcher is running**, the script restarts the runners at once. This cuts off any runs in progress.
 
-Follow the swap in **Runner update**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow the swap in **Updates**, which also has **Cancel the update**. To undo, run `scripts/update-runner.sh --rollback`.
 
 ## Update from the web page (optional)
 

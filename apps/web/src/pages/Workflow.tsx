@@ -171,7 +171,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
       <header className="page-head">
         <div>
           <p className="label">{company.name}</p>
-          <h1>Workflow</h1>
+          <h1>Workflow report</h1>
           <p className="sub">How work moves through the team, and where it waits. Times only count tickets that moved after this page was released.</p>
         </div>
         <select aria-label="Period" value={days} onChange={(e) => setDays(Number(e.target.value))}>

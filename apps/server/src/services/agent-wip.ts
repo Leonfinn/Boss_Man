@@ -4,6 +4,8 @@
 // review, blocked and done don't). moveTicket asks `agentWipHold` on every move into in_progress.
 import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { openBlockers } from "./ticket-links.js";
+import { ticketBlockerOpenSql } from "./blocker-sql.js";
 import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
@@ -36,11 +38,25 @@ export async function countWip(db: Db, where: SQL | undefined, exceptId?: string
 type TicketsOrAlias = Record<"id" | "planFirst" | "planApprovedAt" | "plan" | "mergedAt" | "goLiveWait", SQLWrapper>;
 export const cantMoveFor = (t: TicketsOrAlias) => sql`(
   exists (select 1 from ticket_dependencies d join tickets b on b.id = d.blocker_ticket_id
-          where d.blocked_ticket_id = ${t.id} and b.system_state <> 'done' and not (d.until = 'merged' and b.merge_commit is not null))
+          where d.blocked_ticket_id = ${t.id} and ${ticketBlockerOpenSql("d", "b")})
   or (${t.planFirst} and ${t.planApprovedAt} is null and ${t.plan} is not null)
   or (${t.mergedAt} is not null and ${t.goLiveWait} is not null)
 )`;
 export const cantMoveSql = cantMoveFor(tickets);
+
+/**
+ * The SQL twin of the non-ticket half of `openBlockers`: an open decision or an engagement not signed off holds the
+ * ticket (nothing will start it), so an agent whose only work is held that way is idle, not busy (DR-061 Q3). Kept out of
+ * `cantMoveFor` so the WIP count, which only the ticket links and plan/go-live waits free, doesn't move.
+ */
+export const heldByCardFor = (t: Pick<TicketsOrAlias, "id">) => sql`exists (
+  select 1 from ticket_dependencies hd
+  left join decisions hdec on hdec.id = hd.blocker_decision_id
+  left join engagements heng on heng.id = hd.blocker_engagement_id
+  where hd.blocked_ticket_id = ${t.id} and (hdec.status = 'open' or (heng.id is not null and heng.status <> 'signed_off'))
+)`;
+/** Whether an in-progress or ready ticket is something nobody can work on now: it can't move, or a card or engagement holds it. */
+export const nothingToDoFor = (t: TicketsOrAlias) => sql`(${cantMoveFor(t)} or ${heldByCardFor(t)})`;
 
 /**
  * The ticket's request_check job is queued or running (BOS-1479): it has nothing to do but wait for the check line,
@@ -124,22 +140,42 @@ export async function wipQueuedNote(db: Db, ticketId: string | null | undefined)
   return hold ? ` Queued in Ready: the agent is at its WIP limit (${hold.limit} in-progress ticket${hold.limit === 1 ? "" : "s"}), so this has not started; it starts when one of their tickets finishes.` : "";
 }
 
-/** The agent's oldest unfinished in-progress ticket: the one a held start wakes it on instead. */
-export async function oldestInProgress(db: Db, agentId: string): Promise<string | null> {
-  const [r] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.assigneeAgentId, agentId), eq(tickets.systemState, "in_progress"))).orderBy(asc(tickets.createdAt)).limit(1);
+/**
+ * The agent's oldest in-progress ticket that can move (not cantMoveSql: waiting on an unfinished ticket, a plan, a
+ * go-live check): the one a held start tells it to carry on with. Never names a ticket nobody can work on (DR-061 Q3).
+ */
+export async function oldestMovableInProgress(db: Db, agentId: string): Promise<string | null> {
+  const [r] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.assigneeAgentId, agentId), eq(tickets.systemState, "in_progress"), sql`not ${cantMoveSql}`)).orderBy(asc(tickets.createdAt)).limit(1);
   return r?.id ?? null;
+}
+
+/** A run that makes an agent busy: a live run that isn't a chat. The one definition (SQL, JS and the sets below agree). */
+export const isWorkingRun = (r: { purpose: string | null }): boolean => r.purpose !== "chat";
+const workingRunSql = or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`);
+
+/**
+ * Whether the agent is busy (DR-061 Q3): a live run that isn't a chat, or any queued or deferred wake. `ticketId`
+ * also counts a live run on that ticket by another agent. Every "is this agent idle?" question asks this one answer.
+ */
+export async function agentBusy(db: Db, agentId: string, ticketId?: string): Promise<boolean> {
+  const [live] = await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), ticketId ? or(eq(runs.agentId, agentId), eq(runs.ticketId, ticketId)) : eq(runs.agentId, agentId), workingRunSql)).limit(1);
+  if (live) return true;
+  const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, agentId), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+  return !!queued;
+}
+
+/** Every busy agent at once (the same rule as `agentBusy`), for sweeps that look at many agents. */
+export async function busyAgentIds(db: Db): Promise<Set<string | null>> {
+  const ids = [
+    ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), workingRunSql))).map((r) => r.id),
+    ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
+  ];
+  return new Set(ids.filter((id): id is string => !!id));
 }
 
 /** Whether the ticket has an unresolved dependency: a ticket not done, an engagement not signed off, or an open decision. */
 export async function ticketIsBlocked(db: Db, ticketId: string): Promise<boolean> {
-  const deps = await db
-    .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-    .from(ticketDependencies)
-    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-    .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-    .where(eq(ticketDependencies.blockedTicketId, ticketId));
-  return deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
+  return (await openBlockers(db, ticketId)).length > 0;
 }
 
 /**
@@ -150,10 +186,7 @@ export async function ticketIsBlocked(db: Db, ticketId: string): Promise<boolean
 export async function canStartNow(db: Db, t: typeof tickets.$inferSelect): Promise<boolean> {
   if (t.systemState !== "ready" || !t.assigneeAgentId) return false;
   if (t.planFirst && !t.planApprovedAt) return false;
-  const [live] = await db.select({ id: runs.id }).from(runs).where(and(isNull(runs.endedAt), or(eq(runs.agentId, t.assigneeAgentId), eq(runs.ticketId, t.id)), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`))).limit(1);
-  if (live) return false;
-  const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, t.assigneeAgentId), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
-  if (queued) return false;
+  if (await agentBusy(db, t.assigneeAgentId, t.id)) return false;
   if ((await agentWipHold(db, t)).hold) return false;
   return !(await ticketIsBlocked(db, t.id));
 }

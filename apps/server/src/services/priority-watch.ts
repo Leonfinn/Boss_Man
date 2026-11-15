@@ -17,6 +17,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { ageWords, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { ticketBlockerFinished } from "./ticket-links.js";
 import { activity, agents, checkJobs, companies, decisions, notifications, reviewRequests, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CHECK_SLOTS_KEY, DEFAULT_CHECK_SLOTS } from "./check-queue.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
@@ -159,11 +160,11 @@ export function priorityWatchService(
       .from(decisions)
       .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'ticketId' = ${t.id}`));
     const deps2 = await db
-      .select({ ticketState: tickets.systemState })
+      .select({ ticketState: tickets.systemState, mergeCommit: tickets.mergeCommit, until: ticketDependencies.until })
       .from(ticketDependencies)
       .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
       .where(eq(ticketDependencies.blockedTicketId, t.id));
-    const openWaitsOn = deps2.filter((d) => !d.ticketState || d.ticketState !== "done").length;
+    const openWaitsOn = deps2.filter((d) => !ticketBlockerFinished(d)).length;
     const lineRows = await db
       .select({ id: activity.id, at: activity.at, detail: activity.detail })
       .from(activity)

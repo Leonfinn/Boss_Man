@@ -28,7 +28,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -36,6 +36,8 @@ const { app, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, r
   secureCookies: trustedProxies.length ? "auto" : env.BOSSMAN_INSECURE_COOKIES === "1" ? false : true,
   trustedProxies,
   leader,
+  // DR-049 point 1: an agent run starts only when its runner has proven the fence and the network guard (or the owner chose otherwise).
+  requireRunnerProof: true,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
   deployerDir: env.BOSSMAN_DEPLOYER_DIR,
@@ -162,6 +164,6 @@ if (env.BOSSMAN_PORTAL_PORT) {
   // BOSSMAN_PORTAL_CLIENT_HEADER: which header names the visitor; default X-Forwarded-For, cf-connecting-ip only for Cloudflare.
   const portalHeader = parseClientHeader(env.BOSSMAN_PORTAL_CLIENT_HEADER);
   if (portalHeader.bad) console.warn(`BOSSMAN_PORTAL_CLIENT_HEADER: "${portalHeader.bad}" is not x-forwarded-for or cf-connecting-ip, using x-forwarded-for`);
-  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header });
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true, trustedProxies: (env.BOSSMAN_PORTAL_TRUSTED_PROXY ?? "").split(/[\s,]+/).filter(Boolean), clientHeader: portalHeader.header, mailer, portalUrl: env.BOSSMAN_PORTAL_URL });
   await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
 }

@@ -53,6 +53,8 @@ export type SessionManagerOptions = {
   stateFile?: string;
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
+  /** BOS-1436: streams a check job's bundle to the server (PUT /api/check-bundles/<jobId>, runner token). */
+  uploadCheckBundle?: (jobId: string, file: string, meta: { bytes: number; sha256: string }) => Promise<void>;
   /** How long a run keeps retrying when only the repo lock timed out (default 30 minutes). */
   lockRetryMs?: number;
   /** The pause between those retries (default 5-10 seconds, random so queued runs don't move in step). */
@@ -551,6 +553,25 @@ export class SessionManager {
       case "check.ack":
         this.opts.checkJobs?.acknowledge(command.jobId);
         return;
+      case "check.bundle": {
+        // BOS-1436: pack a job's code for a check worker and upload it; the reply carries only sizes, hashes and refs.
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        const upload = this.opts.uploadCheckBundle;
+        if (!ws || !upload) {
+          reply(command.requestId, { ok: false, error: "This runner can't pack code for check workers." });
+          return;
+        }
+        const started = Date.now();
+        ws.makeCheckBundle(command, (file, meta) => upload(command.jobId, file, meta)).then(
+          (data) => {
+            this.opts.emit({ type: "runner.log", level: "info", message: `check job ${command.jobId}: ${data.empty ? "the worker already had the code" : `sent ${command.full || !command.haves.length ? "a full" : "a thin"} bundle of ${data.bytes} bytes`} (${Math.round((Date.now() - started) / 1000)} s)` });
+            reply(command.requestId, { ok: true, data });
+          },
+          (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+        );
+        return;
+      }
       case "run.cancel": {
         const run = this.runs.get(command.runId);
         if (!run) {
@@ -633,6 +654,21 @@ export class SessionManager {
           );
         return;
       }
+      case "workspace.mergeLine": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.mergeLineConflicts({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.branches, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
       case "workspace.clash": {
         const reply = this.opts.reply ?? (() => {});
         const ws = this.opts.workspaces;
@@ -684,7 +720,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null, command.pin),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),

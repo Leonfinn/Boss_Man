@@ -113,14 +113,14 @@ describe("the Details card (BOS-1195)", () => {
   it("counts what it waits on, and says none", async () => {
     const waits = stub({}, { links: { waitsOn: [{ dependencyId: "d1", kind: "ticket", id: "x", title: "BOS-1 Fix", state: "ready", open: true, link: "#/tickets/1" }], blocks: [], blockedBy: [] } });
     await screen.findByText("Roadmap and dependencies");
-    expect(countIn(waits.container, "Roadmap and dependencies")).toBe("waits on 1");
+    await waitFor(() => expect(countIn(waits.container, "Roadmap and dependencies")).toBe("waits on 1"));
     // The row's own body still lists it.
     expect(screen.getByText("BOS-1 Fix")).toBeTruthy();
     cleanup();
     vi.unstubAllGlobals();
     const none = stub({});
     await screen.findByText("Roadmap and dependencies");
-    expect(countIn(none.container, "Roadmap and dependencies")).toBe("none");
+    await waitFor(() => expect(countIn(none.container, "Roadmap and dependencies")).toBe("none"));
   });
 
   it("says couldn't load when the row's own request fails", async () => {
