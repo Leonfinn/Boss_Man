@@ -1,5 +1,5 @@
 {
-  "id": "7ad2f1fe-bcdb-480b-8a44-67c6d7ab86ec",
+  "id": "e677a483-8243-440e-ae3f-82c7fb7b1b57",
   "prevId": "4a418ce9-efc7-4556-97ca-8761ad926014",
   "version": "7",
   "dialect": "postgresql",
@@ -1991,24 +1991,6 @@
         "fence_mode_chosen_at": {
           "name": "fence_mode_chosen_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "fence_off_fingerprint": {
-          "name": "fence_off_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "guard_off_chosen_at": {
-          "name": "guard_off_chosen_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "guard_off_fingerprint": {
-          "name": "guard_off_fingerprint",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -9837,6 +9819,13 @@
         },
         "acceptance_criteria": {
           "name": "acceptance_criteria",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "diff_files": {
+          "name": "diff_files",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,

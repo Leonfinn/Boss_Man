@@ -209,8 +209,8 @@ export function Dashboard({ company }: { company: Company | undefined }) {
         </a>
         <a className="card stat" href="#/decisions">
           <strong>{s.decisionsWaiting}</strong>
-          <span>Decisions waiting</span>
-          <small className="muted">{s.decisionsWaiting ? "Need your answer" : "Nothing needs you"}</small>
+          <span>{s.decisionsWaiting === 1 ? "Needs you" : "Need you"}</span>
+          <small className="muted">{s.decisionsWaiting ? "Decisions waiting for your answer" : "Nothing needs you"}</small>
         </a>
       </section>
 

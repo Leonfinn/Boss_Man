@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { RISK_TIERS, SENIOR_DEV, riskSummary } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { stagingReachable } from "../mcp-common.js";
 import { agents, companies, runners as runnersTable, settings } from "../db/schema.js";
 import { DEFAULT_AGENT_WIP_LIMIT, readWipLimits } from "../services/agent-wip.js";
 import { checkQueue, DEFAULT_CHECK_SLOTS, MAX_CHECK_SLOTS } from "../services/check-queue.js";
@@ -43,12 +44,14 @@ export function settingsLimitsRoutes(
   // With ?companyId the reviewer and sign-off come from that company's review policy.
   owner.get("/api/risk-tiers", async (req) => {
     const { companyId } = z.object({ companyId: Uuid.optional() }).parse(req.query);
-    if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+    // The staging promise is made only for a company with a staging target (BOS-1473).
+    if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, undefined, undefined, false) }));
     const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
-    if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+    if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, undefined, undefined, false) }));
+    const staging = await stagingReachable(db, companyId);
     const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
     const who = (ref: string | string[]): string => (Array.isArray(ref) ? ref.map((r) => names.get(r) ?? "the CEO").filter((n, i, all) => all.indexOf(n) === i).join(" or ") : ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
-    return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
+    return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer), staging) }));
   });
 
   // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.

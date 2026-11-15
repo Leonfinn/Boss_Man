@@ -231,6 +231,12 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Whether the ticket's branch still merges into the target, without merging it (BOS-426). */
   z.object({ type: z.literal("workspace.clash"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
+  /**
+   * Which other approved branches in the merge line really conflict with this ticket's branch (BOS-1411): a
+   * read-only merge-tree of `base` (the one ahead, or the target) with each branch. `branches` are the tickets
+   * above this one in the line, oldest first; nothing is built, pushed or linked.
+   */
+  z.object({ type: z.literal("workspace.mergeLine"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), branches: z.array(z.object({ ticketId: Uuid, branch: z.string().min(1) })).max(500) }),
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
@@ -336,8 +342,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). A check worker (BOS-1435) announces WORKER_FEATURES instead, plus "check-bundle" once it can fetch code itself (BOS-1436). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). A check worker (BOS-1435) announces WORKER_FEATURES instead, plus "check-bundle" once it can fetch code itself (BOS-1436). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-conflicts"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -466,6 +472,13 @@ export type CarriedTicket = { ticketId: string; branch: string; contained?: bool
 
 /** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
 export type CarriedResult = { carried: CarriedTicket[] };
+
+/** One approved branch in the merge line and what a merge-tree of this ticket's branch on top of it makes (BOS-1411). */
+/** `ahead`: true when the branch sat above this ticket in the line at the time. Files is what clashes; empty when clean. */
+export type MergeLineConflict = { ticketId: string; branch: string; ahead: boolean; clashes: boolean; files: string[] };
+
+/** The answer to workspace.mergeLine (BOS-1411): only the branches that really conflict, with their files. */
+export type MergeLineConflictsResult = { conflicts: MergeLineConflict[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | Uncommitted;

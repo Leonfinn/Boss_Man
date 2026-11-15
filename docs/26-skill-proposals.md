@@ -1,4 +1,4 @@
-# 18 · Skill proposals (BOS-86)
+# 26 · Skill proposals (BOS-86)
 
 The CEO can propose a skill; nothing reaches the library without the owner's decision.
 

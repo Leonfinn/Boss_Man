@@ -15,13 +15,13 @@ export const stagingFirst = serious;
 export const planFirstByDefault = serious;
 
 /** What a tier means for the owner, in one line, built from the same rules the server applies (R61). */
-export function riskSummary(risk: RiskTier | null | undefined, signoff = serious(risk), reviewer = "the CEO"): string {
+export function riskSummary(risk: RiskTier | null | undefined, signoff = serious(risk), reviewer = "the CEO", staging = true): string {
   const tier = riskOf(risk);
   const plan = { trivial: "no plan needed", low: "a one-line approach first", medium: "a short plan first", high: "a full plan first", critical: "a full plan first" }[tier];
   const parts = [
     `${reviewer} reviews it${signoff ? " and you sign it off" : ""}`,
     deepChecks(tier) ? "the project's check and its deeper check run before it merges" : "the project's check runs before it merges",
-    ...(stagingFirst(tier) ? ["it goes to staging before production"] : []),
+    ...(staging && stagingFirst(tier) ? ["it goes to staging before production"] : []),
     plan,
   ];
   const line = parts.join("; ");
