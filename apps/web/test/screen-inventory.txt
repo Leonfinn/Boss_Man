@@ -338,6 +338,7 @@ sections:
   - Work
 reads: 
   - /api/companies/:id/features
+  - /api/companies/:id/merge-queue/:id/status
   - /api/companies/:id/objectives
   - /api/companies/:id/open-tickets
   - /api/companies/:id/watchdog/actions
