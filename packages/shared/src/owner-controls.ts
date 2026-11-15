@@ -19,7 +19,7 @@ export const OWNER_CONTROLS = {
   // browser's own confirm dialog (window.confirm) that many deletes use.
   "Any screen": [
     "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Plan", "Wiki", "Features", "Feedback",
-    "Agents", "Skills", "Runs", "Merge queue", "Scrum Master", "Workflow", "Engagements", "Settings",
+    "Agents", "Skills", "Runs", "Merge queue", "Scrum Master log", "Workflow report", "Engagements", "Settings",
     "Switch company", "Create", "New company", "Close menu", "Menu …", "Turn on browser notifications", "Log out",
     "Save", "Saving", "Saved", "Attach file", "Attaching", "Remove", "Try again", "OK", "Cancel",
     // The owner's message box (Ticket, Board, Chat, Decisions and Run show it).
@@ -250,20 +250,20 @@ export const OWNER_FIELDS = {
   ],
   "Server and runner": [
     "Across all companies (1 to 32)", "In one company (1 to 16, no more than the number above)",
-    "Background (infinite mode) runs at once (0 to 16)",
+    "Background agents at once (0 to 16)",
     // Settings → Server and runner → Private details to block (BOS-979).
     "New list (replaces the saved one; leave empty and save to clear it)",
     // Settings → Server and runner → Agents at once (BOS-1029).
     "Tickets in progress per agent (leave empty for no limit)",
     "Tickets in progress, whole company (leave empty for no limit)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
-    "Agents run their own (legacy)", "Boss Man runs them (server queue)", "Checks at once (1 to",
+    "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
     // Settings → Checks: the merge train switch (BOS-1366).
-    "Land approved merges in order (merge train)",
+    "Merge approved work in the order it was approved",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
     // Workspace disk.
-    "Disk cap (GB)",
+    "Most disk to use (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).
     "Server", "Port", "Security", "Username", "Password or token", "From address", "From name (optional)", "Send a test email to",
   ],
@@ -307,7 +307,7 @@ export const OWNER_FIELDS = {
 /** The side menu, in order (Sidebar.tsx). */
 export const OWNER_MENU = [
   "Dashboard", "Decisions", "Notifications", "Chat", "Projects", "Roadmap", "Merge queue", "Plan", "Wiki", "Features",
-  "Feedback", "Agents", "Skills", "Runs", "Scrum Master", "Workflow", "Engagements", "Settings",
+  "Feedback", "Agents", "Skills", "Runs", "Scrum Master log", "Workflow report", "Engagements", "Settings",
 ] as const;
 /** The tabs along the top of a screen (Settings.tsx TABS, Board.tsx PROJECT_TABS). */
 export const OWNER_TABS = {
