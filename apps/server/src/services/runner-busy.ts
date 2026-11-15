@@ -63,6 +63,7 @@ export async function runnerChecks(db: Db, at: Date): Promise<RunnerCheck[]> {
     .from(checkJobs)
     .where(and(eq(checkJobs.state, "running"), isNull(checkJobs.workerId)))
     .orderBy(checkJobs.startedAt);
+  // lost on restart, harmless because it is a per-call cache local to this function, rebuilt on every call
   const usual = new Map<string, number | null>();
   const out: RunnerCheck[] = [];
   for (const j of live) {
