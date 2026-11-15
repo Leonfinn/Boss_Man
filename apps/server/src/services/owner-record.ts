@@ -22,7 +22,8 @@ export type OwnerRecordFacts = {
 };
 
 export async function ownerSetupFacts(db: Db, companyId: string): Promise<OwnerRecordFacts> {
-  const workers = await db.select({ lastSeenAt: checkWorkers.lastSeenAt }).from(checkWorkers);
+  // Only workers granted to this company count as its setup; a worker with no companies runs nobody's checks.
+  const workers = (await db.select({ lastSeenAt: checkWorkers.lastSeenAt, companyIds: checkWorkers.companyIds }).from(checkWorkers)).filter((w) => w.companyIds.includes(companyId));
   const [runner] = await db.select({ lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
   return {
     checkWorkers: { added: workers.length, everConnected: workers.filter((w) => w.lastSeenAt).length, online: onlineWorkerCount() },
@@ -69,7 +70,7 @@ const FACT_TABLE: FactRow[] = [
     claims: [
       new RegExp(String.raw`${NOT_AN_INSTRUCTION}\b(?:your|existing|current|installed|set[- ]up)\s+(?:check[- ])?workers?\b`, "i"),
       /\b(?:check[- ])?workers?\b[^.\n]{0,30}\b(?:set up but idle|sits? idle|sitting idle|(?:is|are|went|goes|gone) idle|already (?:set up|installed|connected))\b/i,
-      /\bsecond machine\b/i,
+      new RegExp(String.raw`${NOT_AN_INSTRUCTION}\bsecond machine\b`, "i"), // "add a second machine", "do you have a second machine?" ask for one
     ],
     contradicted: (f) => f.checkWorkers.everConnected === 0,
     live: (f) => workersLine(f),
@@ -89,5 +90,5 @@ export async function ownerFactHeld(db: Db, companyId: string, ...texts: Array<s
   const facts = await ownerSetupFacts(db, companyId);
   const bad = hits.filter((r) => r.contradicted(facts));
   if (!bad.length) return null;
-  return `Not sent. This text says the owner has a check worker installed, existing, set up or idle (or a second machine), but the record says: ${bad.map((r) => r.live(facts)).join("; ")}. A worker counts as installed only once it has connected, and none ever has. Say what the record says, or, if you have newer proof than the record, say how you know. Source: server_status ownerSetup.`;
+  return `Not sent. This text says the owner has a check worker installed, existing, set up or idle (or a second machine), but the record says: ${bad.map((r) => r.live(facts)).join("; ")}. A worker counts as installed only once it has connected, and none ever has. Say what the record says. If the record itself is wrong (for example a worker that connected but was never recorded), fix the record first. Source: server_status ownerSetup.`;
 }

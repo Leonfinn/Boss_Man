@@ -368,7 +368,7 @@ describe("owner-facing text the record contradicts (BOS-1596)", () => {
     expect(textOf(await c.callTool({ name: "notify_owner", arguments: { level: "note", title: "Worker", body: claim } }))).toMatch(/Not sent/);
     const card = await c.callTool({ name: "raise_decision", arguments: { question: claim, options: ["Redo it", "Leave it"], recommended: "Leave it", triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
     expect(textOf(card)).toMatch(/Not sent/);
-    await ctx.db.insert(checkWorkers).values({ name: "box", tokenHash: randomUUID(), lastSeenAt: new Date() });
+    await ctx.db.insert(checkWorkers).values({ name: "box", tokenHash: randomUUID(), lastSeenAt: new Date(), companyIds: [cid()] });
     expect(textOf(await c.callTool({ name: "notify_owner", arguments: { level: "note", title: "Worker", body: claim } }))).toMatch(/Sent as/);
     await c.close();
   });

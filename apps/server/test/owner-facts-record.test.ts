@@ -16,7 +16,7 @@ async function setup() {
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const co = (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json() as { company: { id: string } };
-  const addWorker = (lastSeenAt: Date | null) => db.insert(checkWorkers).values({ name: `w-${randomUUID().slice(0, 4)}`, tokenHash: randomUUID(), lastSeenAt });
+  const addWorker = (lastSeenAt: Date | null, companyIds: string[] = [co.company.id]) => db.insert(checkWorkers).values({ name: `w-${randomUUID().slice(0, 4)}`, tokenHash: randomUUID(), lastSeenAt, companyIds });
   return { ...built, db, close, companyId: co.company.id, addWorker };
 }
 beforeEach(async () => {
@@ -56,7 +56,21 @@ describe("contradiction hold", () => {
     expect(held).toContain("Check workers: 0 added · 0 ever connected · 0 online");
     await ctx.addWorker(null); // added but never connected: still not installed
     expect(await ownerFactHeld(ctx.db, ctx.companyId, "Your worker is idle.")).toMatch(/1 added · 0 ever connected/);
-    expect(await ownerFactHeld(ctx.db, ctx.companyId, "Do you have a second machine free?")).toMatch(/Not sent/);
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, "The second machine is ready.")).toMatch(/Not sent/);
+  });
+
+  it("lets first-install wording about a second machine through", async () => {
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, "Add a second machine in Settings.")).toBeNull();
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, "Do you have a second machine free?")).toBeNull();
+  });
+
+  it("counts only workers granted to this company", async () => {
+    await ctx.addWorker(new Date(), ["00000000-0000-0000-0000-000000000000"]); // another company's worker
+    await ctx.addWorker(new Date(), []); // granted to nobody
+    expect((await ownerSetupFacts(ctx.db, ctx.companyId)).checkWorkers).toMatchObject({ added: 0, everConnected: 0 });
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, IDLE)).toMatch(/Not sent/);
+    await ctx.addWorker(new Date());
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, IDLE)).toBeNull();
   });
 
   it("lets the text through when the record agrees, the claim is an instruction, or it is about something else", async () => {
