@@ -1858,10 +1858,12 @@ export class Workspaces {
     const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
     // When the only trouble is migration bookkeeping, the gate renumbers the branch's migration itself (BOS-690, DR-037).
     // Anything it can't do safely comes back "refused" and the merge result is what it was before.
+    let refusedWhy: string | undefined;
     const rebuild = async () => {
       const mb = await this.gitCode(["merge-base", targetSha, branchSha], { cwd: repo });
       if (mb.code !== 0 || !mb.stdout) return null;
       const r = await rebaseMigrations((args, env) => this.gitCode(args, { cwd: repo, env }), { base: mb.stdout, branch: branchSha, main: targetSha });
+      if (r.status === "refused") refusedWhy = r.reason;
       return r.status === "rebuilt" ? r : null;
     };
     if (tried.code === 1) {
@@ -1869,7 +1871,7 @@ export class Workspaces {
       const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
       const rebuilt = await rebuild();
       if (rebuilt) return { status: "clean" as const, tree: rebuilt.tree, targetSha, branchSha, renamed: rebuilt.renamed };
-      return { status: "conflicts" as const, files };
+      return { status: "conflicts" as const, files, ...(refusedWhy ? { why: refusedWhy } : {}) };
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
     const tree = tried.stdout.split("\n")[0]!;
