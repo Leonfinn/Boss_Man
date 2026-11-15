@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { goLiveWaitWords, ownerApprovedFiles, touchesRunnerCode, touchesRunnerUpdate } from "@boss-man/shared";
+import { goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -622,7 +622,7 @@ export function reviewService(
    */
   async function releaseGoLive(t: typeof tickets.$inferSelect, marked: string | null): Promise<boolean> {
     // Claim it first: a second pass (the server update and a runner hello can land together) must not wake twice.
-    const [claimed] = await db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null }).where(and(eq(tickets.id, t.id), isNotNull(tickets.goLiveWait))).returning({ id: tickets.id });
+    const [claimed] = await db.update(tickets).set({ goLiveWait: null, goLiveWaitSince: null, liveAt: new Date() }).where(and(eq(tickets.id, t.id), isNotNull(tickets.goLiveWait))).returning({ id: tickets.id });
     if (!claimed) return false;
     const left = unreportedAfterMerge(t.acceptanceCriteria, t.stateNote);
     const quoted = left.map((c) => `"${c}"`).join(", ");
@@ -921,6 +921,14 @@ export function reviewService(
       if (input.lesson?.trim() && !lesson) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
       const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
       if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
+      // BOS-1571 usability gate: an agent's approval of a feature, of work with owner setup steps, or of a change to what the
+      // owner installs carries a written "Real use:" walk-through. The code and infra reviews (and the CEO approving a
+      // ticket with no review rows) carry it; security and adversarial keep their own focus; the owner is never asked.
+      if (input.verdict === "approved" && input.reviewerAgentId && !realUseWalkthrough(input.summary)) {
+        const openKinds = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind)).map((r) => r.kind);
+        const carries = !rows.length || openKinds.some((k) => k === "code" || k === "infra");
+        if (carries && (usabilityGated(t) || touchesInstallSurface(await this.diff(ticketId).then((d) => d.files.map((f) => f.path), () => [] as string[])))) throw new ReviewError(422, REAL_USE_REFUSAL);
+      }
       // Each lesson becomes exactly one CEO decision (BOS-105): nothing reaches the brief without it, and the owner is told the outcome.
       if (lesson) {
         const question = `Add this lesson to ${projectName}'s brief? "${lesson}"\n\nIt came from the review of ticket "${t.title}" (${ticketId}).\n\n${await lessonsForCeo(db, t.companyId, t.projectId)}\n\nJudge whether it overlaps a lesson already there and whether it is worth a line. Answer with a one-line reason as the note.`;
@@ -1213,7 +1221,7 @@ export function reviewService(
       if (!t.mergeCommit) throw new ReviewError(409, "This ticket hasn't merged, so there is nothing to mark live.");
       if (await serverIsGoLive(db, companyId)) throw new ReviewError(409, "This company's work goes live with the Boss Man server update, and Boss Man sees that itself when the server runs the merge. Nothing to mark.");
       const at = new Date();
-      await db.update(tickets).set({ liveMarkedAt: at, liveEvidence: evidence }).where(eq(tickets.id, t.id));
+      await db.update(tickets).set({ liveMarkedAt: at, liveEvidence: evidence, liveAt: at }).where(eq(tickets.id, t.id));
       await record(db, { companyId, ticketId: t.id, kind: "go_live_marked", summary: `${input.by} marked the merge ${t.mergeCommit.slice(0, 12)} live. Evidence: ${evidence}` });
       await db.insert(ticketMessages).values({ companyId, ticketId: t.id, author: "system", text: `${input.by} marked this ticket's merge live. Evidence: ${evidence}` });
       const woken = t.goLiveWait ? await releaseGoLive({ ...t, liveMarkedAt: at }, evidence) : false;

@@ -150,6 +150,36 @@ score = W_block * Σ (priority_weight(objective of t))  for t in tickets transit
 - The answer wakes the agent that asked.
 - Any ticket that was waiting on the decision moves forward automatically.
 
+## Usability gate (BOS-1571)
+
+A feature has to deliver its value in real use, without the owner on hand. Working once is not enough. The rules are in `packages/shared/src/usability-gate.ts`.
+
+**Which tickets it covers.** Every code ticket in a feature, and every code ticket with owner setup steps.
+- It is added when the ticket is created or edited.
+- Any ticket that still lacks it gets it when it moves to review.
+- It goes in as a built-in "Usability gate" acceptance criterion. The author reports it pass or fail at review, like any other criterion.
+
+**The fail rule.** The gate fails if:
+- the owner must repeat a manual step routinely, for example after every update, or
+- the feature works only while someone watches it.
+
+One-time setup is fine.
+
+**What a reviewer must write.** A code or infra review that approves one of these tickets must include a `Real use:` walk-through in its summary. Without one, the approval is refused. The walk-through covers:
+- day 1
+- after the next update or runner rebuild
+- after a restart
+- a week on
+- the owner away
+- every step the owner repeats, and how often
+
+The same applies to a change that touches what the owner installs: compose files, `deploy/`, a Dockerfile, or install and update docs.
+
+**What the owner sees.** Nothing new to do: the owner's own approvals and sign-offs are never refused.
+- The review diff lists any wording in the change or the setup steps that reads as a routine owner duty, such as "after every update" or "until then … idle".
+- The setup-steps check warns on that wording, but doesn't refuse it.
+- A plan for a covered ticket ends with the walk-through. `submit_plan` refuses a plan without one, and a plan card sent without one says so on the card.
+
 ## Engagement lifecycle
 
 ```mermaid

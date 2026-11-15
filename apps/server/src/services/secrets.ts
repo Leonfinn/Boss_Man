@@ -31,7 +31,17 @@ async function prepare(kind: SecretKind, raw: string, opts: { acceptUnusualForma
 const SERVER_ONLY_ENV_NAMES = new Set(["GITHUB_WATCH_TOKEN"]);
 const SERVER_ONLY_PURPOSES = new Set(["github_watch"]);
 
+/** Told which company grants changed (granted, revoked, re-valued or deleted with their secret), by env name. */
+export type GrantChangeListener = (change: { companyId: string; envName: string }) => void;
+
 export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) {
+  // BOS-1582: the network guard opens the address in a company's PENPOT_URL grant, so it must hear when that grant or its
+  // value changes, from whichever route made the change (the Secrets page, the Penpot form, a grant revoke).
+  const listeners: GrantChangeListener[] = [];
+  const changed = (rows: { companyId: string; envName: string }[]) => {
+    for (const r of rows) for (const l of listeners) l({ companyId: r.companyId, envName: r.envName });
+  };
+  const grantsOf = (secretId: string) => db.select({ companyId: secretGrants.companyId, envName: secretGrants.envName }).from(secretGrants).where(eq(secretGrants.secretId, secretId));
   /** grantId -> the agents it is limited to; a grant missing from the map goes to every agent. */
   const agentsByGrant = async (grantIds: string[]) => {
     const map = new Map<string, string[]>();
@@ -76,6 +86,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
         .set({ ...sealed, hint: secretHint(value), version: existing.version + 1, updatedAt: new Date() })
         .where(eq(secrets.id, id))
         .returning(publicFields);
+      changed(await grantsOf(id));
       return { secret: row!, warnings, verified };
     },
 
@@ -94,8 +105,30 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     },
 
     async remove(id: string) {
+      // Read the grants first: deleting the secret cascades them away.
+      const grants = await grantsOf(id);
       const rows = await db.delete(secrets).where(eq(secrets.id, id)).returning({ id: secrets.id });
+      if (rows.length) changed(grants);
       return rows.length > 0;
+    },
+
+    /** Hears every grant change (see GrantChangeListener). */
+    onGrantChange(listener: GrantChangeListener) {
+      listeners.push(listener);
+    },
+
+    /**
+     * The value of the company's company-wide grant under this env name, for the server's own use (BOS-1582: the network
+     * guard reads PENPOT_URL to open Penpot's host:port). Not a run's access, so not written to the access log; never sent
+     * to a client. Null when there is no such grant.
+     */
+    async grantedValue(companyId: string, envName: string): Promise<string | null> {
+      const [row] = await db
+        .select({ ciphertext: secrets.ciphertext, wrappedKey: secrets.wrappedKey })
+        .from(secretGrants)
+        .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
+        .where(and(eq(secretGrants.companyId, companyId), eq(secretGrants.envName, envName), isNull(secretGrants.deployTargetId)));
+      return row ? decryptSecret(master, row) : null;
     },
 
     /** A grant tied to a deploy target is only handed to runs carrying out an approved deploy there. */
@@ -105,11 +138,13 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
         if (!t) throw new Error("That deploy target isn't in this company.");
       }
       const [row] = await db.insert(secretGrants).values({ secretId, companyId, envName, deployTargetId: deployTargetId ?? null }).returning();
+      changed([row!]);
       return row!;
     },
 
     async revoke(grantId: string) {
-      const rows = await db.delete(secretGrants).where(eq(secretGrants.id, grantId)).returning({ id: secretGrants.id });
+      const rows = await db.delete(secretGrants).where(eq(secretGrants.id, grantId)).returning({ id: secretGrants.id, companyId: secretGrants.companyId, envName: secretGrants.envName });
+      changed(rows);
       return rows.length > 0;
     },
 

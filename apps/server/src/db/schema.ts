@@ -368,6 +368,8 @@ export const tickets = pgTable(
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
     liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    /** BOS-1586: when the merge went live (the go-live wait ended). Null when none was recorded; readers fall back to mergedAt. A host report older than this proves nothing about the new code. */
+    liveAt: timestamp("live_at", { withTimezone: true }),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
@@ -1066,6 +1068,10 @@ export const checkWorkers = pgTable("check_workers", {
   companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
   /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
   slots: integer("slots").notNull().default(1),
+  /** BOS-1602: what kinds of check this machine takes: "both", "merge" (merge checks only) or "checks" (pre-review checks only). */
+  takes: text("takes").notNull().default("both"),
+  /** BOS-1602: how many of its slots only ever run merge checks (with takes "both"); 0 = none kept. */
+  mergeKept: integer("merge_kept").notNull().default(0),
   /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
   checkThreads: integer("check_threads"),
   checkMemoryMb: integer("check_memory_mb"),

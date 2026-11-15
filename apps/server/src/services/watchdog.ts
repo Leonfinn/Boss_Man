@@ -12,7 +12,7 @@ import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
-import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
+import { answeredBefore, quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { busyAgentIds } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
@@ -1388,8 +1388,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
-        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
-        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: input.question });
+        const earlier = await answeredBefore(db, { companyId, ticketId: t.id, question: input.question });
         if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");

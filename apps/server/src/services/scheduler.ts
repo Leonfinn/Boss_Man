@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
+import { REAL_USE_LABEL, agentIdentity, BUILT_IN_RULES, formatDate, isDaemonOnlySecret, isInfiniteModel, parkedOnPurpose, planningGuidance, quietHoursEnd, sinceHours, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowHasReset, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import { agentHold } from "./fence-default.js";
@@ -117,6 +117,8 @@ export const PLAIN_SUMMARY_RULE =
 /** Reviewer guidance for every company (BOS-1465): the owner often found a sibling of a fault already fixed. */
 export const TWIN_PATHS_GUIDANCE =
   "For a fix to a fault the owner reported, list its twin paths and states, and for each say \"covered by test X\" or \"follow-up BOS-n\": server and runner, chat and ticket run, every company, after a restart or rebuild, every form of that kind, the state the owner presses it in.";
+/** The usability gate for every company (BOS-1571): not only "is it safe, does it work once", but "does it keep delivering with the owner's real life". */
+export const USABILITY_GATE_GUIDANCE = `Usability gate, for every change, fix or feature: walk the owner's life with it, day 1, after the next update or runner rebuild, after a restart, a week on, the owner away. A step the owner must repeat routinely, or a feature that works only while someone watches it, fails: request changes. On a feature ticket, one with owner setup steps or one that changes what the owner installs, your code or infra approval needs a "${REAL_USE_LABEL}" paragraph saying this, or Boss Man refuses it.`;
 const WATCH_LINE =/^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -229,10 +231,13 @@ type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "comp
 
 /** The plan-first instruction, by harness: only Claude Code is in plan mode and has ExitPlanMode; OpenCode runs in build mode and has no plan tool (BOS-531). */
 export function planFirstText(agentKind: string): string {
-  if (agentKind === "claude") return "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.";
+  if (agentKind === "claude") return `This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved. ${PLAN_REAL_USE_LINE}`;
   // Any harness but Claude Code (today OpenCode) has no plan mode, so it submits its plan through the bossman submit_plan tool.
-  return "This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer.";
+  return `This ticket is plan-first, and you have no plan mode or ExitPlanMode here. Investigate without changing anything, then call submit_plan (with this ticket's id and your plan) so the plan approver gets a card to answer. Do not change code until the plan is approved; stop and wait for the answer. ${PLAN_REAL_USE_LINE}`;
 }
+
+/** BOS-1571: the plan approver reads how the owner lives with a feature before any code is written. */
+const PLAN_REAL_USE_LINE = `If the ticket has a "Usability gate" criterion, end the plan with a "${REAL_USE_LABEL}" walk-through: day 1, after routine updates and restarts, a week on, the owner away, and every step the owner repeats with how often.`;
 
 export function schedulerService(
   db: Db,
@@ -834,7 +839,7 @@ export function schedulerService(
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
     if (w.reason === RETRO_REASON) lines.push("", ...RETRO_DUTY);
     if (w.reason === REVIEW_REASON) {
-      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):", TWIN_PATHS_GUIDANCE);
+      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):", TWIN_PATHS_GUIDANCE, USABILITY_GATE_GUIDANCE);
       const copy = await reviewCopy(w);
       if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included, with its packages installed from the shared store. Read the code around the change and run one related test with \`pnpm vitest run <path/to/that.test.ts>\` there (no permission card) before you give your verdict; nothing you change there reaches the ticket. If the install didn't happen (node_modules is missing or the test command can't find vitest), run \`pnpm install --frozen-lockfile --prefer-offline --store-dir "$(pnpm store path)"\` in that folder first, then run the test. For any other ticket listed, use the review tool's diff and tickets read.`);
     }

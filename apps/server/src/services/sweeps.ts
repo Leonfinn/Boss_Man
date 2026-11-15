@@ -24,6 +24,7 @@ import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { sweepPhoneApprove } from "./approve-tokens.js";
 import { heldTicketIds, mergeHolds, wakeReadyHolds } from "./review-holds.js";
 import { activeRows, endedNormally, endedNormallySql, evaluate, latestRows, fallbackReason, reviewAskPattern, reviewWaitedSince, roundStartedAt } from "./review-kinds.js";
+import { ownerWaitWatch } from "./owner-todo.js";
 import { derivedSignoff, refreshSignoffCards, sweepMissingSignoffs, type SignoffCover } from "./signoff.js";
 import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
@@ -151,6 +152,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   // Repeat review rounds already judged this server run (BOS-1173), so the runner isn't asked about each one every minute.
   // shortcut: in memory; a restart judges each open round once more, which is harmless.
   const judgedRounds = new Set<string>();
+
+  const ownerWait = ownerWaitWatch(db, (companyId, note) => tellCeo(companyId, note), now);
 
   async function withdraw(ids: string[]) {
     if (!ids.length) return;
@@ -1530,6 +1533,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A card for older code is moved or replaced first, so the owner never holds one that is bound to fail (BOS-734).
       if (opts.branchHead && opts.signoffCovers) await refreshSignoffCards(db, { headOf: opts.branchHead, covers: opts.signoffCovers, withdraw: opts.signoffWithdraw ?? (async () => undefined) }).catch(() => 0);
       const signoffCards = await sweepMissingSignoffs(db, tellCeo);
+      // An owner-wait note with no card (BOS-1576): hourly backup for notes written before the rule or left by a withdrawn card. It wakes the CEO, so not during a hold.
+      if (!held) await ownerWait.run().catch(() => undefined);
       // The merge line jam alert (BOS-766): after the sign-off sweep, so a ticket that just got its card is
       // the card's to alert and not this sweep's. A failing read must not take the pass down (as above).
       const jam = opts.mergeJam ? await opts.mergeJam().catch(() => ({ alerted: 0, reminded: 0, cleared: 0 })) : { alerted: 0, reminded: 0, cleared: 0 };

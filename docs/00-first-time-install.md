@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is sized at 16 GB of memory for one check slot, less on a smaller host.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. There is no measured minimum for RAM or disk yet (BOS-212); the website's install guide gives estimates under "What machine do I need". With the launcher, each runner gets 2 GB, plus 1 GB per agent at once, plus 3 GB per check: 11 GB with the defaults (6 agents, 1 check). It is kept within the host's memory less 2 GB. See [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits).
 - **On Proxmox, a VM, not an LXC container.** Install Docker in the VM and follow these steps inside it. Why: [docs/32-proxmox.md](32-proxmox.md).
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.

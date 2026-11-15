@@ -72,7 +72,7 @@ With the launcher, Boss Man drains first: nothing new starts and runs in progres
 
 A runner update takes no backup. Runners hold no database.
 
-**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/34](34-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
 
 ## Backups
 
