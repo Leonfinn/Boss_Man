@@ -24,9 +24,11 @@ export function serverAdminRoutes(
     selfDeploy: ReturnType<typeof selfDeployService>;
     deployWait: ReturnType<typeof deployWaitService>;
     deploysSvc: ReturnType<typeof deploysService>;
+    /** The per-run stop (runsService.cancel). */
+    cancelRun: (runId: string) => Promise<unknown>;
   },
 ) {
-  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc } = deps;
+  const { scheduler, maintenance, runnerReport, launch, selfDeploy, deployWait, deploysSvc, cancelRun } = deps;
 
   // Scheduling and kill switches (R30).
   owner.post("/api/agents/:id/wake", async (req, reply) => {
@@ -72,8 +74,34 @@ export function serverAdminRoutes(
   // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
   owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
 
+  // "Stop N and carry on with the update" (BOS-1238): the runs shown as still going after the wrap-up deadline. The
+  // server fixes the scope (maintenance.stragglers): runs that were told to wrap up and are still going, never others.
+  // Each is ended through the same per-run stop as BOS-929's Stop this run; no lane is paused, no ticket moved.
+  owner.post("/api/maintenance/stop-stragglers", async (req, reply) => {
+    const { runIds } = z.object({ runIds: z.array(Uuid).min(1).max(200) }).parse(req.body ?? {});
+    const r = await maintenance.stragglers(runIds);
+    if (!r.ok) return reply.code(409).send({ error: r.reason, message: r.reason === "too_early" ? "The wrap-up deadline has not passed yet, so nothing is stopped." : "No wrap-up is waiting, so there is nothing to stop." });
+    const stopped: string[] = [];
+    const failed: string[] = [];
+    for (const id of r.ids) {
+      try {
+        await cancelRun(id);
+        stopped.push(id);
+      } catch {
+        // Ended on its own between the list and the stop, or could not be stopped: either way it is not counted.
+        failed.push(id);
+      }
+    }
+    return { stopped: stopped.length, skipped: r.skipped + failed.length };
+  });
+
   // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
   owner.get("/api/self-deploy", async () => selfDeploy.overview());
+  // The panel's Recent updates (BOS-1238): the newest answered update cards. Owner login only (this is the owner scope).
+  owner.get("/api/self-deploy/history", async (req) => {
+    const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(20).default(5) }).parse(req.query ?? {});
+    return selfDeploy.history(limit);
+  });
   owner.post("/api/self-deploy/deploy-latest", async (_req, reply) => {
     const r = await selfDeploy.deployLatest();
     return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;

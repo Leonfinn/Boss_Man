@@ -345,6 +345,8 @@ export const tickets = pgTable(
     /** When it merged, and whether the merge changed runner code (BOS-1021); null touches = not known. */
     mergedAt: timestamp("merged_at", { withTimezone: true }),
     touchesRunner: boolean("touches_runner"),
+    /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
+    touchesRunnerUpdate: boolean("touches_runner_update"),
     /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
@@ -396,6 +398,8 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty ones); a plain string is checked at review, `{ text, after: "merge" }` once the work is live. Empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<Criterion[]>().notNull().default([]),
+    /** The files the branch changed when its diff was last read for a landing (BOS-1411): the plan-overlap warning reads them, so it needs no runner call. */
+    diffFiles: jsonb("diff_files").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
     /** What the owner has to do once this is live, in plain words by button path (DR-011); the setup card is raised from it at go-live. */
@@ -1527,7 +1531,27 @@ export const feedbackSettings = pgTable("feedback_settings", {
   /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
   portalLogo: bytea("portal_logo"),
   portalLogoType: text("portal_logo_type"),
+  /** BOS-1388: posts, comments and votes count only after the visitor clicks an emailed link. Off by default. */
+  confirmByEmail: boolean("confirm_by_email").notNull().default(false),
+  /** How long an emailed link works, in hours. */
+  confirmLinkHours: integer("confirm_link_hours").notNull().default(24),
+  /** How long a confirmed browser may post without confirming again, in days. */
+  rememberAddressDays: integer("remember_address_days").notNull().default(90),
 });
+
+/** BOS-1388: a browser that confirmed an address. Hashes only: the cookie holds the secret, never this table. */
+export const portalConfirmedAddresses = pgTable(
+  "portal_confirmed_addresses",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    emailHash: text("email_hash").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("portal_confirmed_secret").on(t.secretHash), index("portal_confirmed_expires").on(t.expiresAt)],
+);
 
 /** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */
 export const featureDrivers = pgTable("feature_drivers", {
@@ -1623,10 +1647,17 @@ export const feedbackNotes = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
     portalVoter: text("portal_voter"),
+    /** BOS-1388: set while the visitor has not yet clicked the emailed link (SHA-256 of the link's token). Such a
+     * note is hidden from everyone and counts for nothing; confirming clears it. Null means counted. */
+    confirmTokenHash: text("confirm_token_hash"),
+    confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+    /** The address and name the visitor gave, kept only until they confirm (then they move to the customer, if a name was given). */
+    confirmEmail: text("confirm_email"),
+    confirmName: text("confirm_name"),
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
-  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt)],
+  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt), uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash)],
 );
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */

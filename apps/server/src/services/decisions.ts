@@ -58,11 +58,12 @@ import { record } from "./activity.js";
 import { systemMoveTicket } from "./ticket-transition.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { signoffFacts, type SignoffFacts } from "./signoff-facts.js";
+import { planOverlapNote as overlapNoteOf, planOverlaps } from "./merge-line-conflicts.js";
 import { type CardLint, type HostFacts, type LintFinding, type SelfDeployFacts, NOT_OVERRIDABLE, THIS_HOST_POINTER, fillHostTokens, fillServerHost, lintLines, lintOwnerSteps, parseProof } from "./steps.js";
 import { HOST_TOKEN_HELP, type OwnerSetupFacts, checkOwnerSetup } from "./owner-setup-check.js";
 import { type CompanyFacts, fillCompanyFacts, loadCompanyFacts } from "./company-facts.js";
 import type { Addon, AddonFacts } from "./addons.js";
-import { addTicketDependency } from "./ticket-links.js";
+import { addTicketDependency, openBlockers } from "./ticket-links.js";
 import { revokeApproveTokens } from "./approve-tokens.js";
 import { ATTACHMENT_LINK } from "./ticket-images.js";
 import type { Ladder } from "./alert-ladder.js";
@@ -78,7 +79,7 @@ import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similar
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
-import { cardInvalidReason, closeCardBySystem, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
+import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
 import { runCapabilities } from "./run-capabilities.js";
 
@@ -237,7 +238,7 @@ export type DecisionContext =
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; /** Runner card only (DR-042 point 5): the live tickets whose only setup step is the runner update and whose merge the runners lack, named when the card was raised. */ tickets?: { ticketId: string; title: string }[]; /** Runner card only: raised by the owner's Build and update runners button, so it is never closed under them. */ requested?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; /** It carries the fix for a live problem (BOS-639): headed, paged once and sorted first. */ urgent?: DeployUrgent; result?: { result: string; message: string; at: string }; /** Owner cards to do first, because this update restarts Boss Man (BOS-551). */ doAfter?: OrderLink[]; /** When the owner last opened its hand-apply steps (BOS-739). */ ownerOpenedAt?: string; /** Why Boss Man closed it, shown where it was (BOS-739). */ closedNotice?: ClosedNotice }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
-  | { type: "maintenance"; since: string }
+  | { type: "maintenance"; since: string; /** BOS-1377: the runs the card listed; "Stop these" touches no others. Absent on an older card. */ runIds?: string[] }
   /** An approved server update still waiting for a quiet machine (services/deploy-wait.ts, BOS-420): keep waiting, update now, or cancel. */
   | { type: "deploy_wait"; approvedAt: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string; /** The failed checks the "move to after the merge" choice would move (BOS-422). */ movable?: string[] }
@@ -256,7 +257,7 @@ export type DecisionContext =
    * The owner's sign-off (R48). `head` and `risk` are what was reviewed when the card was raised; "Approve and merge"
    * by the owner copies them into `signedOff`, so a later round on the same commit reuses it (DR-013).
    */
-  | ({ type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" } } & Partial<SignoffFacts>)
+  | ({ type: "risk_review"; ticketId: string; reviewer: string; head?: string; risk?: string; signedOff?: { head: string; risk: string | null; at: string; by: "owner" }; /** A real conflict with a branch ahead in the merge line (BOS-1411): one line, never a hold. */ conflictsBecause?: string } & Partial<SignoffFacts>)
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
@@ -739,6 +740,11 @@ export const NOT_NOW = "Not now";
 export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
 export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
 export const CANCEL_UPDATE = "Cancel the update";
+/** BOS-1377: the runner update's deadline card. Stop only the runs the card listed (each through the per-run Stop), wait 10 more minutes, or cancel the update. */
+export const STOP_THESE_CARRY_ON = "Stop these and carry on";
+export const WAIT_TEN_MORE = "Wait 10 more minutes";
+export const CANCEL_RUNNER_UPDATE = "Cancel the runner update";
+export const DEADLINE_WAIT_MINUTES = 10;
 /** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
 export const UPDATE_NOW_ANYWAY = "Update now anyway";
 
@@ -1037,7 +1043,7 @@ export type LoopHooks = {
   signoffStale?(ticketId: string, cardHead: string): Promise<string | null>;
 };
 
-export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
+export type MaintenanceHook = { answered(answer: string, ctx?: { runIds?: string[] }): Promise<unknown> };
 type SelfDeployCtx = Extract<DecisionContext, { type: "self_deploy" }>;
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string, opts?: { override?: boolean; thenRunners?: boolean }): Promise<unknown> };
 /** The quiet-machine wait of a server update (BOS-420, deploy-wait.ts). */
@@ -1220,6 +1226,13 @@ async function recordOwnerHostChecks(db: Db, d: { question: string; answer: stri
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
+  /** The plan-overlap note for an approval (BOS-1411, warning 1): the words the asker reads when its plan is approved. */
+  async function planApprovalOverlapNote(ticketId: string, planText: string): Promise<string> {
+    const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+    if (!t) return "";
+    // The ExitPlanMode card carries the plan text; a submit_plan card stores the plan on the ticket instead.
+    return overlapNoteOf(await planOverlaps(db, t, planText || t.plan || ""));
+  }
   // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
   let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
@@ -1286,15 +1299,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true, answered?: { question: string; answer: string; keepNote?: boolean }) {
-    const deps = await db
-      .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
-      .from(ticketDependencies)
-      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
-      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
-      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
-      .where(eq(ticketDependencies.blockedTicketId, ticketId));
-    const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
-    if (open) return null;
+    if ((await openBlockers(db, ticketId)).length) return null;
     const t = await systemMoveTicket(db, { ticketId, from: ["blocked"], to: "ready", reason: "Boss Man: its last blocker finished", now: now(), stateNote: await releasedNote(db, ticketId, answered) });
     if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
@@ -1710,20 +1715,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (c.ladder?.ticketId) return `ticket:${c.ladder.ticketId}`;
     const own = (c as { ticketId?: unknown }).ticketId;
     return typeof own === "string" ? `ticket:${own}` : null;
-  }
-
-  /** Its ticket is done or cancelled, so the card no longer asks for anything (BOS-149). */
-  async function isStale(d: typeof decisions.$inferSelect): Promise<boolean> {
-    const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
-    const ids = new Set<string>();
-    const own = (c as { ticketId?: unknown }).ticketId;
-    if (typeof own === "string") ids.add(own);
-    if (c.ladder?.ticketId) ids.add(c.ladder.ticketId);
-    const blocked = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-    for (const b of blocked) ids.add(b.ticketId);
-    if (!ids.size) return false;
-    const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
-    return rows.length === ids.size && rows.every((r) => r.systemState === "done");
   }
 
   /**
@@ -2996,11 +2987,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // without their seeing it, exactly what the ladder exists to prevent (BOS-149). The one exception
       // is a plain "Got it" system card about an agent's run (not the owner's own choice): once it is
       // stale, the CEO may clear it, as it could before the ladder handed it over (BOS-469 point 4).
-      // A folded account card (account_limit) can name several agents' live failures, and `isStale` sees only
+      // A folded account card (account_limit) can name several agents' live failures, and `cardInvalidReason` sees only
       // its first raise's ticket, so it stays out of this: it closes itself once the cause is gone (BOS-469).
       const ownerTierInfo = ctx.ladder?.rung === "owner" && isSystemCard(d) && ctx.type !== "check_stuck" && !OWNER_ONLY_ANSWER_TYPES.has(ctx.type) && !STALE_ONLY_WITHDRAW_TYPES.has(ctx.type) && (ctx as { decisionsKind?: string }).decisionsKind !== "alert:account_limit";
       if (ctx.ladder?.rung === "owner" && !ownerTierInfo) throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
-      if (ownerTierInfo && !(await isStale(d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or cancelled).");
+      if (ownerTierInfo && !(await cardInvalidReason(db, d))) throw new AnswerError("This alert is with the owner. Clear it only once it is stale (its ticket is done or merged, or the card is otherwise dead).");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       // BOS-1193: except a plan card whose run has ended. Nothing is waiting on it any more, and it is the CEO's to close
@@ -3016,11 +3007,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (staleOnly) {
         // Two open sign-offs or loop cards for one ticket are normal (one per round), so a duplicate
         // is not a reason to clear one of the owner's own cards: only a finished ticket is.
-        if (!(await isStale(d))) {
-          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
+        if (!(await cardInvalidReason(db, d))) {
+          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished or merged.");
         }
-      } else if (!direct && !inRecheck && !(await isStale(d)) && !(await isDuplicate(d))) {
-        throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
+      } else if (!direct && !inRecheck && !(await cardInvalidReason(db, d)) && !(await isDuplicate(d))) {
+        throw new AnswerError("This card is the owner's. Withdraw it only when it is dead (its ticket is finished or merged) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       // DR-058 B, after the checks above so a card the CEO may not withdraw is refused for that reason first.
@@ -3152,6 +3143,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           if (row?.status === "answered" && (row.context as DecisionContext).type === "risk_review") return { settled: "already" };
         }
         return null;
+      }
+      // DR-061 Q4: a card Boss Man can see is dead (a newer plan, a ticket already in review, a withdrawn engagement) is closed here
+      // rather than answered, so a press before the next sweep can't set planApprovedAt or start work nobody asked for.
+      if (isCheckableCard(d)) {
+        const dead = await cardInvalidReason(db, d);
+        if (dead) {
+          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now });
+          throw new AnswerError(`This card is no longer valid (${dead}), so Boss Man closed it instead of taking the answer.`);
+        }
       }
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
@@ -3417,7 +3417,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
         }
       } else if (ctx.type === "maintenance") {
-        await maintenance?.answered(answer);
+        await maintenance?.answered(answer, { runIds: ctx.runIds });
       } else if (ctx.type === "deploy_wait") {
         await deployWait?.answered(answer);
       } else if (ctx.type === "team_plan") {
@@ -3593,7 +3593,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // An answer in the owner's own words can carry pictures or files (BOS-759): say so plainly, so
         // the agent opens them with open_attachment instead of reading the links as part of the answer.
         const pictures = ownWords && ATTACHMENT_LINK.test(answer) ? " It includes picture(s) or file(s) they attached; open each with open_attachment." : "";
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}` });
+        // A plan approved (BOS-1411, warning 1): the approved plan's files are compared with other open work, and a
+        // match is said here, where waiting still saves the build. Read-only; nothing is linked.
+        const plan = (ctx as { plan?: boolean; planText?: string | null; ticketId?: string | null });
+        const overlap = plan.plan && plan.ticketId && answer === APPROVE_PLAN ? await planApprovalOverlapNote(plan.ticketId, plan.planText ?? "").catch(() => "") : "";
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}${pictures}${overlap ? ` ${overlap}` : ""}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });

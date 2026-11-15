@@ -331,7 +331,7 @@ Leave `launcher` out of the build if you don't use it (step 7b).
 scripts/update-runner.sh
 ```
 
-The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Updates > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Updates > Runner update.
+The script returns as soon as it has asked; follow the swap in the banner or in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners (finish runs first)** in Settings > Server and runner > Updates.
 
 **Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
 
@@ -904,6 +904,8 @@ grep -E '^BOSSMAN_PORTAL_' .env
 ```
 
 `BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI.
+
+**Behind a reverse proxy (optional).** If the portal is reached through a reverse proxy (Nginx Proxy Manager, Cloudflare, Caddy, Traefik), the portal only sees the proxy's address, so every visitor would share one limit (120 reads a minute, 40 writes an hour). `BOSSMAN_PORTAL_TRUSTED_PROXY` fixes that: a comma-separated list of the proxy's **own** addresses or CIDRs, for example `BOSSMAN_PORTAL_TRUSTED_PROXY=203.0.113.10, 10.0.0.0/8`. Only a connection from a listed address may say who the visitor is, by the right-most address in `X-Forwarded-For` that is not itself listed (most proxies add it). From any other address the headers are ignored. `BOSSMAN_PORTAL_CLIENT_HEADER` chooses the header: empty or `x-forwarded-for` (default), or `cf-connecting-ip`, which you set only when Cloudflare is the proxy that connects to the portal (Cloudflare sets it and removes any copy a visitor sent). Only the chosen header is read, because Nginx Proxy Manager, Caddy and Traefik pass a visitor-sent `CF-Connecting-IP` through unchanged and a visitor could then pick their own address and dodge the limits. A malformed header or list entry is ignored too (a `/0` entry is refused), and an empty setting (the default) means the connecting address is the visitor, as before. List only the proxy, never a range that includes the internet, and keep the portal port reachable only through the proxy. Worked example for a proxy container on the NAS's Docker network 172.16.0.0/12 in front of `192.168.1.50:3111`: `setenv BOSSMAN_PORTAL_TRUSTED_PROXY 172.16.0.0/12`, then recreate the server as below.
 
 Then recreate the server so it picks up the new port (single-server install), and check it:
 

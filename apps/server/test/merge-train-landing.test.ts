@@ -4,7 +4,7 @@
 // runner too, passing or failing queued jobs by the tickets in their tree.
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 
 vi.hoisted(() => {
   process.env.BOSSMAN_CHECK_JOB_POLL_MS = "15";
@@ -144,14 +144,15 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
   const runJobs = (fails: (has: string[], who: string, run: number) => boolean) => {
     void (async () => {
       while (!stop) {
-        const queued = await db.select().from(checkJobs).where(and(eq(checkJobs.state, "queued"), eq(checkJobs.kind, "merge"))).orderBy(asc(checkJobs.queuedAt));
+        // Running too: a dispatcher pump (after a cancel, BOS-1504) may have sent a job to the fake runner, which ignores it.
+        const queued = await db.select().from(checkJobs).where(and(inArray(checkJobs.state, ["queued", "running"]), eq(checkJobs.kind, "merge"))).orderBy(asc(checkJobs.queuedAt));
         for (const j of queued) {
           const who = names.get(j.ticketId!)!;
           const run = (runs.get(who) ?? 0) + 1;
           runs.set(who, run);
           const has = j.tree.replace(/^tree:/, "").split(",");
           const bad = fails(has, who, run);
-          await db.update(checkJobs).set({ state: bad ? "failed" : "passed", exitCode: bad ? 1 : 0, logTail: bad ? "1 test failed" : "ok", startedAt: new Date(), endedAt: new Date() }).where(and(eq(checkJobs.id, j.id), eq(checkJobs.state, "queued")));
+          await db.update(checkJobs).set({ state: bad ? "failed" : "passed", exitCode: bad ? 1 : 0, logTail: bad ? "1 test failed" : "ok", startedAt: new Date(), endedAt: new Date() }).where(and(eq(checkJobs.id, j.id), inArray(checkJobs.state, ["queued", "running"])));
         }
         await new Promise((r) => setTimeout(r, 30));
       }
@@ -245,8 +246,52 @@ describe("merge train landings (BOS-1366)", () => {
     // B's first try was stacked on A; the one that landed was on main.
     const bPrepares = c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B");
     expect(bPrepares[0]!.base).toBeDefined();
+    // BOS-1518: right after the stacked clash it is asked on main alone; clean there, so it waits rather than goes back.
+    expect(bPrepares[1]!.base).toBeUndefined();
     expect(bPrepares.at(-1)!.base).toBeUndefined();
   });
+
+  it("a clash with main itself is sent back at once, not after the train drains (BOS-1518)", async () => {
+    const c = await setup();
+    c.git.outside("X");
+    c.git.clashes.push(["A", "B"], ["X", "B"]);
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    // No check runs yet: A's check stays queued, so the train can't drain. B must still get its answer now.
+    expect(await c.outcome(b)).toBe("conflicts");
+    expect(c.git.pushes).toEqual([]);
+    expect((await c.db.select({ s: checkJobs.state }).from(checkJobs).where(eq(checkJobs.ticketId, a)))[0]?.s).toBe("queued");
+    // One stacked try, one on main alone, and no check job or head-only wait for B.
+    const bPrepares = c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B");
+    expect(bPrepares.map((s) => !!s.base)).toEqual([true, false]);
+    expect((await c.db.select().from(checkJobs).where(eq(checkJobs.ticketId, b))).length).toBe(0);
+    expect((await c.events(b, "hold_started")).filter((d) => /main alone/.test(String(d.note)))).toEqual([]);
+    const stop = c.runJobs(() => false);
+    expect(await c.outcome(a)).toBe("merged");
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A"]);
+  });
+
+  it("a member moved out of review gives up its seat at once: its check is cancelled and the ones behind restack and land (BOS-1504)", async () => {
+    const c = await setup();
+    const [a, b, d] = [await c.ticket("A"), await c.ticket("B"), await c.ticket("C")];
+    await approveInOrder(c, [a, b, d]);
+    expect(await c.waitFor(async () => (await c.db.select().from(checkJobs)).length === 3)).toBe(true);
+    // Sent back by hand while its check waits: no check result will ever come for it.
+    await c.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, a));
+    expect(await c.waitFor(async () => (await c.db.select({ s: checkJobs.state }).from(checkJobs).where(eq(checkJobs.ticketId, a)))[0]?.s === "cancelled"), "A's job cancelled").toBe(true);
+    const stop = c.runJobs(() => false);
+    expect(await c.outcome(a), "A's outcome").toBe("check_stuck");
+    expect([await c.outcome(b), await c.outcome(d)]).toEqual(["merged", "merged"]);
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["B", "C"]);
+    expect(c.git.has(c.git.main).sort()).toEqual(["B", "C"]);
+    expect(c.runs.get("A")).toBeUndefined();
+    expect((await c.events(b, "restacked")).length).toBeGreaterThan(0);
+    expect(await c.events(a, "check_ended")).toEqual([expect.objectContaining({ why: "the ticket left review" })]);
+  }, 60_000);
 
   it("main moving outside the train: the head prepares again on the new main and everyone behind restacks, then all land", async () => {
     const c = await setup();
