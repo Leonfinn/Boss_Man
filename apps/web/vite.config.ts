@@ -22,6 +22,6 @@ export default defineConfig({
   build: {
     outDir: "dist",
     assetsInlineLimit: 0,
-    rollupOptions: { input: { main: fileURLToPath(new URL("index.html", import.meta.url)), portal: fileURLToPath(new URL("portal.html", import.meta.url)) } },
+    rollupOptions: { input: { main: fileURLToPath(new URL("index.html", import.meta.url)), portal: fileURLToPath(new URL("portal.html", import.meta.url)), confirm: fileURLToPath(new URL("confirm.html", import.meta.url)) } },
   },
 });

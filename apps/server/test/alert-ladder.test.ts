@@ -666,7 +666,8 @@ describe("permission cards carry the CEO's advice (BOS-233)", () => {
 describe("a re-asked permission card and the CEO's handover clock (DR-048 #3)", () => {
   // Temp-file cleanup: a destructive command whose only paths are entries directly in /tmp, so the built-in
   // guard sends it to the CEO first (TEMP_CLEANUP_RULE). This is the shape of card DR-048 describes.
-  const CMD = "rm -rf /tmp/kit-0aefe522-export /tmp/kit-0aefe522-export.log";
+  // It re-creates the folder, so it still needs the CEO: a plain delete of /tmp entries is allowed with no card (BOS-1453).
+  const CMD = "rm -rf /tmp/kit-0aefe522-export /tmp/kit-0aefe522-export.log && mkdir /tmp/kit-0aefe522-export";
   // The runners deny a request after 10 minutes (session-manager.ts); the ladder's outer cap is 20 minutes from
   // the raise (CEO_OUTER_CAP_MINUTES), which is the one that must reach the owner when the CEO never settles it.
 

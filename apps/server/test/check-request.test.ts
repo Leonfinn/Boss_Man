@@ -120,4 +120,10 @@ describe("request_check", () => {
     const dirty = await setup(diff({ commits: [], files: [{ path: "a", added: 1, removed: 0 }] }));
     await expect(dirty.svc.request({ companyId: dirty.co, agentId: dirty.agent, ticketId: dirty.ticket })).rejects.toThrow(/commit your work first/);
   });
+
+  it("refuses, queuing nothing, when the runner says head isn't in its shared repo, and passes on why (BOS-1544)", async () => {
+    const s = await setup(diff({ unsynced: "commit headcommit1 isn't in the runner's shared repo: Couldn't bring ticket x's branch over from its copy: fatal: bad object" }));
+    await expect(s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket })).rejects.toThrow(/couldn't copy your branch .*nothing was queued.*fatal: bad object/);
+    expect(await s.db.select().from(checkJobs)).toHaveLength(0);
+  });
 });

@@ -35,7 +35,7 @@ type AgentRow = {
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
   openTickets: number;
-  /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 / 2" (BOS-1029). */
+  /** Tickets in progress, and the owner's limit per agent (null: no limit), for "3 of 2 tickets in progress" (BOS-1029). */
   wipCount?: number;
   wipLimit?: number | null;
   pa: { posted: number; escalated: number; wrong: number } | null;
@@ -809,7 +809,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                 <>
                   {" · "}
                   <span title="Tickets in progress, against the limit per agent set in Settings" className={a.wipCount > a.wipLimit ? "over-limit" : undefined}>
-                    {a.wipCount} / {a.wipLimit} in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
+                    {a.wipCount} of {a.wipLimit} tickets in progress{a.wipCount > a.wipLimit ? ", over the limit" : ""}
                   </span>
                 </>
               )}
@@ -823,7 +823,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               )}
             </div>
             <div className="muted agent-stats">
-              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "No account to run on yet"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
             {a.pa && (
               <div className="muted agent-stats">

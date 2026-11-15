@@ -2,9 +2,9 @@
 // mcp.ts import them without importing mcp.ts back.
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { afterMergeLint, criterionText, isAfterMerge, readVerdicts, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
+import { afterMergeLint, criterionText, isAfterMerge, namesStaging, readVerdicts, stagingLint, stateNoteLine, ticketRef, type Criterion } from "@boss-man/shared";
 import type { Db } from "./db/client.js";
-import { agents, companies, projects, tickets, wakes } from "./db/schema.js";
+import { agents, companies, deployTargets, projects, tickets, wakes } from "./db/schema.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -28,6 +28,26 @@ export const criteriaWarning = (criteria: readonly Criterion[] | undefined) => {
   const w = criteria?.length ? afterMergeLint(criteria) : "";
   return w ? `\n\nHeads-up: ${w}` : "";
 };
+
+/**
+ * Whether anything in the company can reach staging: a non-production deploy target (BOS-1473). Boss Man's own
+ * self-deploy has none today; BOS-1472 will record a staging deploy there. Computed, so no flag can go stale.
+ */
+export async function stagingReachable(db: Db, companyId: string): Promise<boolean> {
+  const [t] = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.companyId, companyId), eq(deployTargets.isProduction, false))).limit(1);
+  return !!t;
+}
+
+/** The heads-up when a criterion or the ticket text names staging and nothing can reach it; empty otherwise. */
+export async function stagingWarning(db: Db, companyId: string, texts: ReadonlyArray<string | null | undefined>): Promise<string> {
+  const named = texts.filter((t): t is string => !!t && namesStaging(t));
+  if (!named.length || (await stagingReachable(db, companyId))) return "";
+  const w = stagingLint(named);
+  return w ? `\n\nHeads-up: ${w}` : "";
+}
+
+/** The texts of a criteria list plus the ticket's own text, for the staging check. */
+export const stagingTexts = (criteria: readonly Criterion[] | undefined, ...more: Array<string | null | undefined>) => [...(criteria ?? []).map(criterionText), ...more];
 
 /**
  * The heads-up a code ticket gets when it will be hard to pick up (BOS-595): no description, so the
@@ -116,6 +136,60 @@ export function waitsOnAdvice(summary: string | undefined | null): string {
     if (cue.test(near)) return "\nTip: use update_ticket waitsOn to make this a real link, so you are woken when it is merged or done.";
   }
   return "";
+}
+
+/** An ordering written as prose: "after BOS-12", "waits on BOS-12", "once BOS-12 lands/merges/is done" (BOS-1375). */
+const ORDER_PROSE = /\b(?:after|waits?\s+on|waiting\s+on|once)\s+([A-Za-z][A-Za-z0-9]{0,9}-\d{1,9})\b/gi;
+
+/**
+ * Write-time warning (BOS-1375): the title or body says a ticket comes after BOS-n, but the ticket has no waits-on
+ * link to it. `linkedNumbers` are the numbers it already waits on. Returns "" when nothing is missing; never a refusal.
+ */
+export function unlinkedOrderWarning(texts: ReadonlyArray<string | null | undefined>, linkedNumbers: ReadonlySet<number>): string {
+  const missing = new Set<string>(); // lost on restart, harmless because it is a per-call local, gone when the function returns
+  for (const t of texts) {
+    if (!t) continue;
+    for (const m of t.matchAll(ORDER_PROSE)) {
+      const ref = m[1]!;
+      if (!linkedNumbers.has(Number(ref.slice(ref.lastIndexOf("-") + 1)))) missing.add(ref.toUpperCase());
+    }
+  }
+  if (!missing.size) return "";
+  const list = [...missing].join(", ");
+  return `\n\nHeads-up: the text says this comes after ${list}, but there is no waits-on link to ${missing.size === 1 ? "it" : "them"}, so nothing waits and you will not be woken when ${missing.size === 1 ? "it" : "they"} merge${missing.size === 1 ? "s" : ""}. Link ${missing.size === 1 ? "it" : "them"} with update_ticket waitsOn add: [${[...missing].map((r) => `"${r}"`).join(", ")}], or reword the text if no wait is meant.`;
+}
+
+/** "urgent" as a claim: not "not urgent", "non-urgent" or "isn't urgent". */
+const URGENT_WORD = /(?<!\bnot\s)(?<!\bnon-)(?<!n't\s)(?<!\bnon\s)\burgent\b/gi;
+const REF_IN_TEXT = /\b[A-Za-z][A-Za-z0-9]{0,9}-(\d{1,9})\b/g;
+
+/**
+ * Which tickets a CEO message calls urgent (BOS-1375): a BOS-n within 40 characters of the word, or, when the word
+ * stands with no reference near it, `ownTicketId` (the ticket the reply is on). "not urgent" is not a claim.
+ */
+export function urgentClaims(body: string): { numbers: number[]; unnamed: boolean } {
+  const numbers = new Set<number>(); // lost on restart, harmless because it is a per-call local, gone when the function returns
+  let unnamed = false;
+  const refs = [...body.matchAll(REF_IN_TEXT)];
+  for (const m of body.matchAll(URGENT_WORD)) {
+    const near = refs.filter((r) => Math.abs(r.index! - m.index!) <= 40);
+    if (near.length) for (const r of near) numbers.add(Number(r[1]));
+    else unnamed = true;
+  }
+  return { numbers: [...numbers], unnamed };
+}
+
+/** What the CEO is told when a message calls a ticket urgent while its urgent flag is off (BOS-1375). */
+export async function urgentHeldMessage(db: Db, companyId: string, body: string, ownTicketId: string | undefined): Promise<string | null> {
+  const claims = urgentClaims(body);
+  if (!claims.numbers.length && !(claims.unnamed && ownTicketId)) return null;
+  const rows = [
+    ...(claims.numbers.length ? await db.select({ number: tickets.number, urgent: tickets.urgent }).from(tickets).where(and(eq(tickets.companyId, companyId), inArray(tickets.number, claims.numbers))) : []),
+    ...(claims.unnamed && ownTicketId ? await db.select({ number: tickets.number, urgent: tickets.urgent }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.id, ownTicketId))) : []),
+  ];
+  const off = [...new Set(rows.filter((r) => !r.urgent).map((r) => `BOS-${r.number}`))];
+  if (!off.length) return null;
+  return `Not sent. This calls ${off.join(", ")} "urgent", but ${off.length === 1 ? "its" : "their"} urgent flag is off, so Boss Man treats ${off.length === 1 ? "it" : "them"} as normal priority and the reader acts on the flag, not the word. Set the flag with update_ticket urgent: true, then send it again. If you only quote the word or mean something else, reword it, or send it again with quotesUrgent set to true and it will go.`;
 }
 
 /** One line per criterion with the author's verdict, the after-merge ones marked so they read as skippable (DR-024 #5). */

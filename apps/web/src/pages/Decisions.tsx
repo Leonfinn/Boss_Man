@@ -504,7 +504,7 @@ function useLinkedCard(): string | null {
   return id;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [], closedNotices = [], tally }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode | ((folded: boolean) => ReactNode); elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[]; closedNotices?: ClosedNoticeCard[]; tally?: DecisionTally | null }) {
   const [filter, setFilter] = useState<string | null>(null);
   // A link straight to one card (#/decisions/<id>, BOS-1078: the Merge queue names the card holding a merge):
   // that card is scrolled to and marked once it is on the page.
@@ -725,8 +725,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         <div>
           <h1>Decisions</h1>
           <p className="sub">
-            {counts.open === 1 ? "1 decision to do" : `${counts.open} decisions to do`}
-            {counts.waiting > 0 ? ` · ${counts.waiting === 1 ? "1 waiting" : `${counts.waiting} waiting`}` : ""}
+            {counts.open === 1 ? "1 needs you" : `${counts.open} need you`}
+            {counts.waiting > 0 ? ` · ${counts.waiting} with the team` : ""}
             {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, newest first.
           </p>
           {elsewhere.length > 0 && (
@@ -756,7 +756,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           </div>
         )}
       </header>
-      {banner}
+      {typeof banner === "function" ? (queueCards.length > 0 ? null : banner(false)) : banner}
       {withTeam.length > 0 && (
         // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
         <details className="sub">
@@ -1396,6 +1396,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               );
             })}
           </ol>
+          {/* (BOS-1497) With cards to answer, the setup checklist comes after them, folded to one line. */}
+          {typeof banner === "function" ? banner(true) : null}
           </>
           )}
           {waitingCards.length > 0 && (

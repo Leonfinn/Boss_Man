@@ -204,3 +204,40 @@ describe("merge train: restart (BOS-1289)", () => {
     expect(tr2.seated("y")).toBe(true);
   });
 });
+
+describe("merge train: what the check queue holds back (BOS-1504)", () => {
+  it("withholds a ticket waiting for a seat, and a seeded one not seated yet; never a member, a leaver or a stranger", () => {
+    const clock = { t: 0 };
+    const tr = train(1, clock);
+    tr.seedOrder(["x", "y"], 1000);
+    expect(tr.withheld("x")).toBe(true); // seeded, its landing hasn't re-joined yet
+    expect(tr.withheld("stranger")).toBe(false); // never joined: the queue serves it as before
+    tr.join("x", { priority: 1, place: 1 });
+    tr.join("y", { priority: 1, place: 2 });
+    expect(tr.seated("x")).toBe(true);
+    expect(tr.seated("y")).toBe(false); // one seat
+    expect(tr.withheld("x")).toBe(false);
+    expect(tr.withheld("y")).toBe(true);
+    expect(tr.seatedIds()).toEqual(["x"]);
+    tr.leave("y");
+    expect(tr.withheld("y")).toBe(false);
+
+    // The seed stops holding back once its deadline has passed.
+    const tr2 = train(3, clock);
+    tr2.seedOrder(["a"], 1000);
+    expect(tr2.withheld("a")).toBe(true);
+    clock.t = 1000;
+    expect(tr2.withheld("a")).toBe(false);
+  });
+
+  it("lists seated tickets head first", () => {
+    const tr = train(3);
+    tr.join("b", { priority: 1, place: 20 });
+    tr.join("a", { priority: 1, place: 10 });
+    tr.join("c", { priority: 2, place: 0 });
+    tr.seated("a");
+    expect(tr.seatedIds()).toEqual(["a", "b", "c"]);
+    tr.landed("a");
+    expect(tr.seatedIds()).toEqual(["b", "c"]);
+  });
+});

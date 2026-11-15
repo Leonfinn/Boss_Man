@@ -24,7 +24,7 @@ New records:
   - shortcut: history starts at deploy. Older tickets have only the activity log.
 - **`check_results`**: one row per CI or verify result (ticket, commit, kind, passed, at). Today only the latest `pullRequestCi` is kept.
 
-`GET /api/companies/:id/workflow?days=14` and a **Workflow** page show the scorecard:
+`GET /api/companies/:id/workflow?days=14` and the **Workflow report** page show the scorecard:
 
 - **Per role and per agent:**
   - tickets done

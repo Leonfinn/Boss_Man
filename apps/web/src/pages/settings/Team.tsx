@@ -364,6 +364,35 @@ export function PermissionJudgeSetting({ company, onChanged }: { company: Compan
   );
 }
 
+/** Plain /tmp cleanups are allowed by the rules with no card (BOS-1453). On by default; each one is logged in the permission history. */
+export function AutoTempCleanupSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const on = company.autoTempCleanup !== false;
+  return (
+    <Section id="auto-temp-cleanup-h" title="Cleaning up temp files">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When an agent only deletes its own scratch entries directly in /tmp (for example rm -rf /tmp/work-1), Boss Man allows it at once, with no card for you or the CEO, and records the command and the agent in the permission history. Anything else, such as a path with .., a variable or a wildcard, a deeper path, or files in an agent's working copy, still goes to the CEO first. Turn this off to have every cleanup go to the CEO first.
+      </p>
+      <label>
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { autoTempCleanup: e.target.checked } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        />{" "}
+        Allow plain /tmp cleanups without asking
+      </label>
+      {act.view}
+    </Section>
+  );
+}
+
 export function Chapters({ company }: { company: Company }) {
   const list = usePoll((signal) => api<Chapter[]>(`/api/companies/${company.id}/chapters`, { signal }), 30_000, `ch-${company.id}`);
   const act = useAction();
