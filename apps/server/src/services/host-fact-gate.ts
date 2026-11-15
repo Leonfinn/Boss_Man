@@ -31,7 +31,7 @@ export function hostFactRefusal(
       continue;
     }
     if (liveSince && Date.parse(rec.reportedAt) < liveSince.getTime()) {
-      lines.push(`"${criterionText(c)}": the newest host report (${at(rec.reportedAt)}) is from before this ticket went live (${at(liveSince.toISOString())}), so it says nothing about the new code. Wait for the host's next report.`);
+      lines.push(`"${criterionText(c)}": the newest host report (${at(rec.reportedAt)}) is from before this ticket went live (${at(liveSince.toISOString())}), so it says nothing about the new code. Waiting for a host report since go-live: try again after the host's next report (this isn't a failure).`);
       continue;
     }
     for (const clause of clauses) {
