@@ -9,6 +9,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { SessionManager } from "../src/session-manager.js";
+import { claudeAdapterBin } from "./claude-adapter.js";
+
+/** The real Claude ACP adapter now lives in the Claude pack (DR-050, BOS-972), not the runner's node_modules:
+ * this suite drives it, so it runs only where a pack is pointed at, and skips otherwise. */
+const claude = claudeAdapterBin();
 
 const PLAN = "1. Read the limiter config.\n2. Add a test for the window boundary.";
 let server: http.Server | undefined;
@@ -55,7 +60,7 @@ async function planningModel(seen: { tools: string[][]; systemPlanMode: boolean 
   return `http://127.0.0.1:${(server!.address() as { port: number }).port}`;
 }
 
-describe("plan-first runs (R40)", () => {
+describe.skipIf(!claude)("plan-first runs (R40)", () => {
   it("start in plan mode, send the plan for approval, and carry on once it's approved", async () => {
     const seen = { tools: [] as string[][], systemPlanMode: false };
     const url = await planningModel(seen);

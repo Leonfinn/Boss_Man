@@ -48,6 +48,8 @@ export type CheckDispatcherDeps = {
   workerGraceMs?: number;
   /** Only the leader re-queues a dropped worker's jobs (a standby closed the socket itself). Absent: always the leader. */
   isLeader?: () => boolean;
+  /** A runner drain (image update or setting change) is under way (BOS-1471): no new job goes to any runner until it ends. Running ones finish; queued ones wait. */
+  drainPending?: () => Promise<boolean>;
 };
 
 const DEFAULT_TIMEOUT = 30 * 60_000;
@@ -58,6 +60,8 @@ const verdict = (j: CheckJob) =>
 
 export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   const queue = checkQueue(db);
+  /** Checks at once each connected runner said it runs (hello, BOS-1471). A runner that said nothing has no entry: no cap. */
+  const runnerSlots = new Map<string, number>(); // lost on restart, harmless because each runner says its count again when it reconnects.
   const scanList = deps.scanList ? scanListReader({ read: deps.scanList, ...deps.scanListWarning }) : null;
   const graceMs = deps.workerGraceMs ?? HEARTBEAT_MS * 3;
   // shortcut: a dropped worker's pending re-queue, cancelled if it says hello again in time; lost on restart, harmless because
@@ -181,6 +185,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   /** Start whatever the free slots allow. Safe to call any time: a job is never claimed twice. */
   async function pump(): Promise<void> {
     if ((await queue.mode()) !== "server") return;
+    // The runner is about to be swapped: a job started now would be killed by it. Workers wait too: a worker only takes
+    // jobs while its image commit equals the runner's (DR-042), and the swap is what changes the runner's commit.
+    if (await deps.drainPending?.()) return;
     const queuedCompanies = await db.selectDistinct({ companyId: checkJobs.companyId }).from(checkJobs).where(eq(checkJobs.state, "queued"));
     for (const { companyId } of queuedCompanies) {
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
@@ -191,9 +198,10 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
       if (!runnerUp && !workers.length) continue;
       // A list that can't be read must not stop the line: the scan then runs its secret rules only, and says so once (BOS-1093).
       const list = await scanList?.forScan();
-      // The company runner first, so a worker only gets what the runner has no free slot for.
+      // The company runner first, so a worker only gets what the runner has no free slot for. BOS-1471: the runner's
+      // limit is also capped by the slots it reported in hello.
       if (runnerUp)
-        for (const job of await queue.claimNext(runner!.id, new Date(), companyId)) {
+        for (const job of await queue.claimNext(runner!.id, new Date(), companyId, runnerSlots.get(runner!.id))) {
           const sent = deps.send(runner!.id, runCommand(job, list));
           if (!sent) await queue.requeue(job.id, "The runner could not be reached when the check was due to start, so it went back in line.");
         }
@@ -242,7 +250,12 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     },
 
     /** A runner said hello with the jobs it is running: any this runner was given but does not list are gone (it restarted). */
-    async onHello(runnerId: string, running: string[] | undefined) {
+    /** The checks at once this runner reported in hello, or undefined (older runner, or none said yet). Settings → Checks shows the smaller of this and check_slots. */
+    runnerSlots: (runnerId: string): number | undefined => runnerSlots.get(runnerId),
+
+    async onHello(runnerId: string, running: string[] | undefined, slots?: number) {
+      if (slots) runnerSlots.set(runnerId, slots);
+      else runnerSlots.delete(runnerId);
       const mine = await db.select({ id: checkJobs.id }).from(checkJobs).where(and(eq(checkJobs.state, "running"), eq(checkJobs.runnerId, runnerId)));
       const alive = new Set(running ?? []);
       for (const { id } of mine) if (!alive.has(id)) await queue.requeue(id, "The runner restarted or lost this check, so it was put back in line.");

@@ -28,11 +28,13 @@ import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
-import { getHold, maintenanceService } from "./services/maintenance.js";
+import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
+import { runnerBusy } from "./services/runner-busy.js";
 import { runnerWatchService } from "./services/runner-watch.js";
 import { runnerReportService } from "./services/runner-report.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { failuresForStatus } from "./services/merge-failures.js";
 import { addonsService, mergeHostAddons, unknownAddons } from "./services/addons.js";
 import { probeColours } from "./services/bluegreen.js";
 import { createStallMonitor } from "./services/stall-monitor.js";
@@ -342,6 +344,11 @@ export async function buildApp(opts: AppOptions) {
   const bundleStore = checkBundleStore(opts.checkBundleDir ? { dir: opts.checkBundleDir } : {});
   bundleStore.clear();
   const checks = checkDispatcher(db, {
+    // BOS-1471: while a runner drain is under way (image update or setting change) no new check goes to a runner about to be swapped.
+    drainPending: async () => {
+      const h = runnerCardHold(await getHold(db));
+      return !!h && holdBlocksStarts(h, opts.now?.() ?? new Date());
+    },
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
     send: (id, c) => runners.send(id, c),
@@ -565,6 +572,7 @@ export async function buildApp(opts: AppOptions) {
     memory,
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
+    mergeFailures: (id) => failuresForStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -952,6 +960,7 @@ export async function buildApp(opts: AppOptions) {
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
     checkCapacity: (companyId) => checks.capacity(companyId),
+    alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
@@ -992,8 +1001,7 @@ export async function buildApp(opts: AppOptions) {
   const deployWait = deployWaitService(db, {
     headroom: () => selfDeploy.headroom(),
     checksRunning: async () => {
-      const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(eq(checkJobs.state, "running"))) as [{ n: number }];
-      return review.gateState().running + n;
+      return review.gateState().running + (await runnerBusy(db)).checksTotal; // the same busy count the runner drain waits on (BOS-1471)
     },
     openRuns: async () => {
       const [{ n }] = (await db.select({ n: sql<number>`count(*)::int` }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`))) as [{ n: number }];

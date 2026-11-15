@@ -3,15 +3,14 @@
 # Needs Docker and the images boss-man-runner:ci and boss-man-netguard:current (build them first).
 #   scripts/image-tests.sh                 all tests
 #   scripts/image-tests.sh canary fence    only the named ones: canary, fence, netguard, no-anthropic
-# XFAIL_NO_ANTHROPIC=1 (the default for now) marks the no-Anthropic check as expected to fail until the
-# runner image no longer holds Claude Code (BOS-935 "Claude pack"); once it passes, this fails so the
-# marker gets removed. Set it to 0 to make the check a normal one.
+# The no-Anthropic check is a normal one now that the Claude pack has landed (BOS-972). XFAIL_NO_ANTHROPIC=1
+# still marks it as expected to fail, for trying an old image.
 # Safe to run twice: it removes the containers and the network it makes, even when a test fails.
 set -euo pipefail
 
 RUNNER_IMAGE="${RUNNER_IMAGE:-boss-man-runner:ci}"
 GUARD_IMAGE="${GUARD_IMAGE:-boss-man-netguard:current}"
-XFAIL_NO_ANTHROPIC="${XFAIL_NO_ANTHROPIC:-1}"
+XFAIL_NO_ANTHROPIC="${XFAIL_NO_ANTHROPIC:-0}"
 ARCH="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || uname -m)"
 tag="bm-imgtest-$$"
 net="$tag-net"
