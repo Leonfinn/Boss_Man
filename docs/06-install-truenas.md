@@ -198,7 +198,7 @@ The example service is called `runner-app-co`. For a second company:
 With the launcher (R55), each company's runner starts by itself when you create the company, and **Settings > Server and runner > Runner** gets **Start**, **Reconnect**, **Restart** and **Stop** buttons. There are no token files to copy and no compose blocks to duplicate per company.
 - **How it stays safe.** The launcher is the only container that can reach Docker. It joins the socket's group (`docker`, group 999 on your NAS, from `stat -c '%U:%G %g %a %n' /var/run/docker.sock`) instead of running as root.
 - **What it accepts.** It publishes no ports, and only the server can reach it, over an internal network with a key. It accepts only "start, stop or restart company X's runner".
-- **What it builds.** It builds the container itself: uid 1000, all capabilities dropped, `no-new-privileges`, not privileged, the 4 GB memory limit, and only that company's folders under `data/companies/<slug>`.
+- **What it builds.** It builds the container itself: uid 1000, all capabilities dropped, `no-new-privileges`, not privileged, a memory limit sized from **Agents at once** and **Checks at once** (see [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits)), and only that company's folders under `data/companies/<slug>`.
 
 These steps move an existing install, including the compose runner from step 7, over to the launcher. Run them from the repo folder.
 
