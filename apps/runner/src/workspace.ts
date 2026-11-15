@@ -884,6 +884,14 @@ export class Workspaces {
           }),
         );
       }
+      // BOS-1476: a review copy made as a worktree (an older runner, or BOSSMAN_TICKET_COPIES=worktree once) keeps its git admin
+      // folder inside the read-only shared repo, so the fenced checkout can't create index.lock there ("Permission denied", exit
+      // 128). A review copy is disposable: replace it with a clone, which the fence can write. Installed packages are reinstalled.
+      if (this.fenceCloneGit && this.newCopiesAreClones() && lstatSync(path.join(dir, ".git"), { throwIfNoEntry: false })?.isFile()) {
+        await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+        rmSync(dir, { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo });
+      }
       if (existsSync(path.join(dir, ".git"))) {
         await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
         await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);

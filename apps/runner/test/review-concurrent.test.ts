@@ -94,6 +94,19 @@ describe.skipIf(!live)("four reviewers prepare one review copy at once (BOS-1476
     expect(existsSync(lock)).toBe(false);
   }, 120_000);
 
+  // 15 Nov: a review copy that is a worktree keeps its admin folder in the read-only shared repo, so the fenced checkout died
+  // with "Unable to create '<repo>/worktrees/<id>/index.lock': Permission denied". It is replaced by a clone.
+  it("replaces a review copy that is a worktree of the shared repo with a clone", async () => {
+    const { ws, spec } = await setup();
+    const repo = ws.repoDir(spec.projectId);
+    const rev = ws.reviewDir(spec.ticketId);
+    git(repo, "worktree", "add", "--quiet", "--detach", rev, "main");
+    expect(existsSync(path.join(rev, ".git", "HEAD"))).toBe(false); // a .git file, not a folder
+    await expect(ws.ensureReview(spec)).resolves.toMatchObject({ path: rev });
+    expect(existsSync(path.join(rev, ".git", "HEAD"))).toBe(true);
+    await expect(ws.ensureReview(spec)).resolves.toMatchObject({ path: rev });
+  }, 120_000);
+
   it("the first run on a ticket whose review copy doesn't exist yet, and again with it present", async () => {
     const { ws, spec } = await setup();
     for (let round = 0; round < 3; round++) {
