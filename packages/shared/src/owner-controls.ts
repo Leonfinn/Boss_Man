@@ -40,8 +40,6 @@ export const OWNER_CONTROLS = {
     // The Claude and runner steps (BOS-1495), then the credentials, funding and project panels Setup shares with Settings and Projects.
     "Save the token", "Start the runner",
     "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add funding source", "Cancel", "Re-detect",
-    // The safety cards under the runner (BOS-938).
-    "Keep agents stopped", "Run agents without the network guard", "Run agents without the fence",
   ],
   Decisions: [
     "Show less", "Show all …", "Show the whole", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
