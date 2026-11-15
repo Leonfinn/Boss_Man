@@ -1,0 +1,170 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { DEFAULT_REASON, PLAIN_REASONS, plainReason, updateStatus, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+
+// The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
+
+const NOW = Date.parse("2026-11-14T12:00:00.000Z");
+const iso = (minFromNow: number) => new Date(NOW + minFromNow * 60_000).toISOString();
+
+const base = (over: Partial<SelfDeployView> = {}): SelfDeployView => ({
+  enabled: true,
+  pending: false,
+  status: null,
+  available: { tip: "aaaaaaa1", deployed: "aaaaaaa1", checkedAt: iso(-3) },
+  deployer: { reportedAt: iso(-1), late: false },
+  ...over,
+});
+const offered = (over: Partial<SelfDeployView> = {}) => base({ available: { tip: "bbbbbbb2", deployed: "aaaaaaa1", checkedAt: iso(-3), commits: [{ sha: "x", subject: 'Merge "A change" (00000000-0000-4000-8000-000000000001)' }] }, ...over });
+const st = (over: Partial<NonNullable<SelfDeployView["status"]>>) => ({ result: "deployed", message: "", target: "server", to_commit: "aaaaaaa1", ended: iso(-60), started: iso(-65), ...over });
+const run = (over: Record<string, unknown> = {}) => ({ runId: "r1", agent: "Parsley - Web Developer", ticket: "BOS-1238", ticketTitle: "t", runningForMinutes: 20, sinceWrapUpMinutes: 5, waitingOn: null, ...over });
+const maintUpdate = (over: Record<string, unknown> = {}) => ({ on: true, kind: "update", deadline: iso(5), runs: 2, companies: 1, ...over }) as unknown as MaintenanceView;
+const asked = (runs: ReturnType<typeof run>[], over: Record<string, unknown> = {}) => maintUpdate({ wrapAsked: true, notRespondingAfter: 10, runsList: runs, runs: runs.length, ...over });
+
+describe("updateStatus: one row per state, first match wins", () => {
+  it("loading: Checking…, no button", () => {
+    const s = updateStatus(null, null, null, NOW);
+    expect(s.tag).toBe("Checking…");
+    expect(s.primary).toBeNull();
+  });
+
+  it("1. Update failed: red, plain reason, raw kept, Try again only when an update is offered", () => {
+    const failed = st({ result: "rolled_back", message: "Rolled back to abc12345: the smoke test (setup page) failed" });
+    const withOffer = updateStatus(offered({ status: failed }), null, null, NOW);
+    expect(withOffer.tag).toBe("Update failed");
+    expect(withOffer.tone).toBe("red");
+    expect(withOffer.alert).toBe(true);
+    expect(withOffer.more).toContain("Why:");
+    expect(withOffer.raw).toBe(failed.message);
+    expect(withOffer.primary).toMatchObject({ id: "try-again", label: "Try again", blue: true });
+    const noOffer = updateStatus(base({ status: failed }), null, null, NOW);
+    expect(noOffer.primary).toBeNull();
+    expect(noOffer.next).toBe("Nothing to retry: the next change will be offered when it merges.");
+  });
+
+  it("1. a rejection only because a newer update replaced it is history, not a failure", () => {
+    const s = updateStatus(base({ status: st({ result: "rejected", message: "Rejected: abc is not on main any more (main is at def)" }) }), null, null, NOW);
+    expect(s.tag).toBe("Up to date");
+  });
+
+  it("2. Waiting for agents, wrap-up not asked: one blue Ask agents to wrap up, plus a Cancel", () => {
+    const s = updateStatus(base(), maintUpdate(), null, NOW);
+    expect(s.tag).toBe("Waiting for agents");
+    expect(s.say).toBe("The runner update is waiting for 2 agents to finish.");
+    expect(s.primary).toMatchObject({ id: "ask-wrapup", blue: true });
+    expect(s.normal.map((b) => b.id)).toEqual(["cancel-update"]);
+  });
+
+  it("2. Waiting for agents, wrap-up asked, before the deadline: no main button", () => {
+    const s = updateStatus(base(), asked([run()], { deadline: iso(5) }), null, NOW);
+    expect(s.tag).toBe("Waiting for agents");
+    expect(s.primary).toBeNull();
+  });
+
+  it("2. after the deadline with runs left: Stop N and carry on, naming each run and sending the ids shown", () => {
+    const s = updateStatus(base(), asked([run(), run({ runId: "r2", agent: "Dougal - Dev", ticket: "BOS-5" })], { deadline: iso(-1) }), null, NOW);
+    expect(s.primary).toMatchObject({ id: "stop-stragglers", label: "Stop 2 and carry on with the update", blue: true, runIds: ["r1", "r2"] });
+    expect(s.next).toContain("Parsley (BOS-1238) and Dougal (BOS-5)");
+    expect(s.next).toContain("anything they haven't saved is lost");
+  });
+
+  it("2. past the deadline but no run left: no stop button", () => {
+    const s = updateStatus(base(), asked([], { deadline: iso(-1) }), null, NOW);
+    expect(s.primary).toBeNull();
+  });
+
+  it("2. an update with no agents left is Updating", () => {
+    expect(updateStatus(base(), maintUpdate({ runs: 0 }), null, NOW).tag).toBe("Updating");
+  });
+
+  it("2b. a plain wrap-up with no update is Wrapping up, never Up to date", () => {
+    const m = { on: true, kind: "wrapup", deadline: iso(5), runs: 1, companies: 1, wrapAsked: true, notRespondingAfter: 10, runsList: [run()] } as unknown as MaintenanceView;
+    const s = updateStatus(base(), m, null, NOW);
+    expect(s.tag).toBe("Wrapping up");
+    expect(s.primary).toBeNull();
+  });
+
+  it("3. Approved, waiting for a quiet machine: no main button, a Cancel, BOS-420's line", () => {
+    const w: DeployWaitView = { on: true, phase: "waiting", origin: "approve", commit: "bbbbbbbb22", deadline: iso(20), quiet: { ready: false, runs: 1, checks: 0, freeMb: null, needMb: null, why: ["1 agent is running"] } };
+    const s = updateStatus(offered(), null, w, NOW);
+    expect(s.tag).toBe("Approved, waiting");
+    expect(s.more).toContain("1 agent is running");
+    expect(s.primary).toBeNull();
+    expect(s.normal.map((b) => b.id)).toEqual(["cancel-wait"]);
+  });
+
+  it("4. Updating: while the host has a request or is running", () => {
+    expect(updateStatus(base({ pending: true }), null, null, NOW).tag).toBe("Updating");
+    expect(updateStatus(base({ status: st({ result: "running" }) }), null, null, NOW).tag).toBe("Updating");
+  });
+
+  it("5. In trial: with progress and no button", () => {
+    const s = updateStatus(base({ trial: { endsAt: iso(10), seconds: 900 } }), null, null, NOW);
+    expect(s.tag).toBe("In trial");
+    expect(s.progress).toEqual({ doneMin: 5, totalMin: 15 });
+    expect(s.primary).toBeNull();
+  });
+
+  it("6. Update ready: one blue Review and deploy, change count in the sentence", () => {
+    const s = updateStatus(offered(), null, null, NOW);
+    expect(s.tag).toBe("Update ready");
+    expect(s.say).toBe("A server update with 1 change is ready.");
+    expect(s.primary).toMatchObject({ id: "review-deploy", label: "Review and deploy", blue: true });
+  });
+
+  it("6. Update ready while rate-limited: the button is disabled and says when", () => {
+    const s = updateStatus(offered({ deployWait: { until: iso(7) } }), null, null, NOW);
+    expect(s.primary?.disabled).toBe(true);
+    expect(s.next).toContain("You can deploy again from");
+  });
+
+  it("7. Host not reporting: amber, no button", () => {
+    const s = updateStatus(base({ available: null, deployer: { reportedAt: iso(-60), late: true } }), null, null, NOW);
+    expect(s.tag).toBe("Host not reporting");
+    expect(s.tone).toBe("amber");
+    expect(s.primary).toBeNull();
+  });
+
+  it("8. Up to date: green, a plain Check for updates now button", () => {
+    const s = updateStatus(base({ status: st({ result: "deployed" }) }), null, null, NOW);
+    expect(s.tag).toBe("Up to date");
+    expect(s.tone).toBe("green");
+    expect(s.primary).toMatchObject({ id: "check-now", blue: false });
+    expect(s.more).toContain("Server updated");
+  });
+
+  it("never more than one blue main button, in any row", () => {
+    const rows = [
+      updateStatus(offered(), null, null, NOW),
+      updateStatus(base(), maintUpdate(), null, NOW),
+      updateStatus(base(), asked([run()], { deadline: iso(-1) }), null, NOW),
+      updateStatus(base(), null, null, NOW),
+    ];
+    for (const r of rows) expect([r.primary].filter((b) => b?.blue)).toHaveLength(r.primary?.blue ? 1 : 0);
+  });
+});
+
+describe("plain failure reasons", () => {
+  it("maps each listed host message, and falls back to the default for an unknown one", () => {
+    for (const r of PLAIN_REASONS) expect(r.reason.length).toBeGreaterThan(0);
+    expect(plainReason("Rejected: the request file is not a plain file under 4 KB.")).toContain("damaged");
+    expect(plainReason("Rolled back to abc12345: it went wrong")).toContain("switched back");
+    expect(plainReason("something nobody has seen before")).toBe(DEFAULT_REASON);
+    expect(plainReason(null)).toBe(DEFAULT_REASON);
+    expect(DEFAULT_REASON).toBe("the update stopped with an error");
+  });
+
+  // BOS-1238 open question 3: every failure message the host can write gets a reason, so a new one falls back to the
+  // default and never shows nothing. The messages are read from the script itself, so a new one is covered here.
+  it("every failure message in host-deployer.sh yields a non-empty plain reason", () => {
+    const script = readFileSync(path.resolve(__dirname, "../../../scripts/host-deployer.sh"), "utf8");
+    const msgs = [...script.matchAll(/(?:finish (?:failed|rolled_back|partial|rejected)|bg_fail (?:failed|rolled_back)) "((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!);
+    expect(msgs.length).toBeGreaterThan(15);
+    for (const m of msgs) {
+      const reason = plainReason(m);
+      expect(reason, m).toBeTruthy();
+      expect(reason.endsWith("."), m).toBe(false);
+    }
+  });
+});

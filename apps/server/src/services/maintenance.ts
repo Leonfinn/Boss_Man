@@ -5,7 +5,7 @@
 // The hold is one `settings` row, so there is no migration and a restart keeps it.
 import { rm, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
 import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
@@ -462,6 +462,25 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const { wrapSince: _s, wrapNotRespondingAfter: _n, wrapTold: _t, ...rest } = h;
       await save(rest);
       return true;
+    },
+
+    /**
+     * "Stop N and carry on with the update" (BOS-1238): which of the runs the owner was shown may be stopped. The
+     * scope is fixed here, not by the page: only runs that were told to wrap up (`wrapTold`), only once the hold's
+     * deadline has passed, and only those still going now. A run that has since ended is skipped; an id that was
+     * never told is never returned, whatever the request says. It stops nothing itself: the caller ends each id
+     * through the same per-run stop as BOS-929's Stop this run.
+     */
+    async stragglers(shown: string[]): Promise<{ ok: true; ids: string[]; skipped: number } | { ok: false; reason: "no_wrapup" | "too_early" }> {
+      const h = await getHold(db);
+      if (!h || !(h.kind === "wrapup" || h.wrapSince)) return { ok: false, reason: "no_wrapup" };
+      if (now() < new Date(h.deadline)) return { ok: false, reason: "too_early" };
+      const told = new Set(Object.keys(h.wrapTold ?? {}));
+      const asked = [...new Set(shown)].filter((id) => told.has(id));
+      if (!asked.length) return { ok: true, ids: [], skipped: shown.length };
+      const live = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.id, asked), isNull(runs.endedAt)));
+      const ids = live.map((r) => r.id);
+      return { ok: true, ids, skipped: shown.length - ids.length };
     },
 
     /**

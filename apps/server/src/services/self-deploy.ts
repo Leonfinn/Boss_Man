@@ -1465,6 +1465,31 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await writeRequest(decisionId, ctx.target, ctx.commit, opts);
     },
 
+    /**
+     * The newest answered update cards for the panel's Recent updates (BOS-1238): target, how it ended, how many
+     * changes and when. Read-only, from the cards that already hold it; `result` is null while the host is still on it.
+     */
+    async history(limit = 5) {
+      const rows = await db
+        .select({ id: decisions.id, context: decisions.context, answeredAt: decisions.answeredAt, createdAt: decisions.createdAt })
+        .from(decisions)
+        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->>'type' = 'self_deploy'`))
+        .orderBy(desc(sql`coalesce(${decisions.answeredAt}, ${decisions.createdAt})`))
+        .limit(Math.max(1, Math.min(limit, 20)));
+      return rows.map((r) => {
+        const c = r.context as SelfDeployContext;
+        return {
+          id: r.id,
+          target: c.target,
+          commit: c.commit,
+          changes: c.changes?.length ?? 0,
+          result: c.result?.result ?? null,
+          message: c.result?.message ?? null,
+          at: c.result?.at ?? (r.answeredAt ?? r.createdAt).toISOString(),
+        };
+      });
+    },
+
     /** "Cancel" on the queued runner update (BOS-1086): the owner's press is taken back and the hold goes back to what it was. */
     async cancelRunnerQueue() {
       // The combined button's wish (deploy not landed yet) is a queued press too: cancelling takes it back.

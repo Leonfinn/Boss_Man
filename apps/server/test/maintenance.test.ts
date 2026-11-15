@@ -98,6 +98,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const commands: Array<Extract<RunnerCommand, { type: "run.start" }> & { company: string }> = [];
   const messages: Array<Extract<RunnerCommand, { type: "run.message" }>> = [];
   const decides: Array<Extract<RunnerCommand, { type: "permission.decide" }>> = [];
+  const cancels: string[] = [];
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
@@ -108,6 +109,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
       built.runners.connect(reg.runnerId, (cmd) => {
         if (cmd.type === "run.start") commands.push({ ...cmd, company: name });
         if (cmd.type === "run.message") messages.push(cmd);
+        if (cmd.type === "run.cancel") cancels.push(cmd.runId);
         if (cmd.type === "permission.decide") decides.push(cmd);
         return true;
       });
@@ -132,7 +134,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, decides, cancels, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -953,5 +955,64 @@ describe("QA: wrap-up during an update, the cases a regression would slip past (
     expect(after).toMatchObject({ on: true, kind: "update" });
     expect(after.wrapAsked).toBeUndefined();
     expect(after.runsList).toBeUndefined();
+  });
+});
+
+describe("Stop N and carry on with the update (BOS-1238)", () => {
+  it("refuses an unauthenticated request", async () => {
+    const c = (ctx = await setup());
+    const r = await c.app.inject({ method: "POST", url: "/api/maintenance/stop-stragglers", payload: { runIds: [randomUUID()] } });
+    expect(r.statusCode).toBe(401);
+    expect((await c.app.inject({ method: "GET", url: "/api/self-deploy/history" })).statusCode).toBe(401);
+  });
+
+  it("is refused with no wrap-up on, and before the deadline", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    const id = c.commands[0]!.runId;
+    expect((await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [id] })).statusCode).toBe(409);
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    const early = await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [id] });
+    expect(early.statusCode).toBe(409);
+    expect(early.json()).toMatchObject({ error: "too_early" });
+    expect(c.cancels).toEqual([]);
+  });
+
+  it("stops only the shown runs that were told and still go; an ended run is skipped and an unshown one is never stopped", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const b = await c.company("Home Lab", "home-lab");
+    const d = await c.company("Third Co", "third-co");
+    for (const co of [a, b, d]) await c.wake(co);
+    await c.scheduler.tick();
+    const [runA, runB, runC] = c.commands.map((x) => x.runId) as [string, string, string];
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/wrapup", {});
+    // Run B ends on its own after the owner was shown the list.
+    await c.finish(b);
+    c.advance(31 * MIN);
+    // The page shows A and B only; C is going but was never in the shown set, and a made-up id was never told.
+    const r = await c.req("POST", "/api/maintenance/stop-stragglers", { runIds: [runA, runB, randomUUID()] });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ stopped: 1, skipped: 2 });
+    expect(c.cancels).toEqual([runA]);
+    expect(c.cancels).not.toContain(runC);
+    // It pauses no lane and moves no ticket: the hold is as it was.
+    expect(await getHold(c.db)).toMatchObject({ kind: "update" });
+  });
+
+  it("lists the newest answered update cards for Recent updates", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.db.insert(decisions).values([
+      { companyId: a.id, kind: "question", question: "Update?", options: ["Deploy"], recommendedOption: "Deploy", status: "answered", answer: "Deploy", answeredAt: new Date("2026-11-10T10:00:00Z"), context: { type: "self_deploy", target: "server", commit: "a".repeat(40), fromCommit: "b".repeat(40), changes: ["x", "y"], result: { result: "deployed", message: "ok", at: "2026-11-10T10:05:00Z" } } },
+      { companyId: a.id, kind: "question", question: "Update?", options: ["Deploy"], recommendedOption: "Deploy", status: "open", context: { type: "self_deploy", target: "server", commit: "c".repeat(40), fromCommit: "a".repeat(40) } },
+    ]);
+    const h = (await c.req("GET", "/api/self-deploy/history?limit=5")).json() as Array<{ target: string; result: string | null; changes: number }>;
+    expect(h).toHaveLength(1);
+    expect(h[0]).toMatchObject({ target: "server", result: "deployed", changes: 2 });
   });
 });
