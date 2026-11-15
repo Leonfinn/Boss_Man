@@ -333,11 +333,7 @@ scripts/update-runner.sh
 
 The script returns as soon as it has asked; follow the swap in the banner or in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners (finish runs first)** in Settings > Server and runner > Updates.
 
-**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
-
-```sh
-RUNNER_ADDONS=agent-browser
-```
+**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), tick it under Settings → Server and runner → Runner → Add-ons, press **Save add-ons**, then press **Build and update runners**. The canary opens and closes a blank page in the new image before it is used. Untick it, save and update again to take the add-on out. (A `RUNNER_ADDONS=` line in `.env` still works until the first save, and when running `scripts/update-runner.sh` by hand without self-deploy.)
 
 **Emergency: restart every runner now,** cutting off runs in progress (crash recovery restarts them):
 

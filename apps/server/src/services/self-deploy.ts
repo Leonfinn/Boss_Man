@@ -205,6 +205,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   /** Asks the host to look at main on its next tick (only the file's existence is read). True when the ask was written. */
   const askHostToLook = () => (dir ? writeFile(path.join(dir, "inbox", "check"), "", { mode: 0o640 }).then(() => true, () => false) : Promise.resolve(false));
 
+  async function readRunnerAddons() {
+    if (!dir) return { enabled: false as const, saved: null as string[] | null, built: null as string[] | null };
+    const read = async (f: string) => {
+      const t = await readFile(path.join(dir, f), "utf8").then((s) => s.trim(), () => null);
+      return t === null ? null : t === "" ? [] : /^[a-z0-9-]+(,[a-z0-9-]+)*$/.test(t) ? t.split(",") : null;
+    };
+    return { enabled: true as const, saved: await read("inbox/runner-addons"), built: await read("outbox/runner-addons.built") };
+  }
+
   /** Why there is no offer to act on, in words that don't send the owner to a cron job that is running fine (BOS-753). */
   async function noOfferReason(a: Available | null, s: DeployStatus | null): Promise<string> {
     const seen = await deployerSeen(a, s);
@@ -1388,6 +1397,32 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const r = (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true })) ?? (await raiseRunner(a.deployed, a.deployed, a, { requested: true, askAnyway: true, again: true }));
       if (!r || "blocked" in r) return { error: "Create a company first: decisions belong to one." } as const;
       return { decisionId: r.row.id } as const;
+    },
+
+    /**
+     * BOS-1583: the runner add-on tick boxes. `saved` is the owner's choice (inbox/runner-addons, written here), `built` what the
+     * last runner build held (outbox/runner-addons.built, written by update-runner.sh); either is null when the file is absent.
+     * Ids are plain strings, not checked against the catalogue on read, so an add-on this version doesn't list is carried along.
+     */
+    runnerAddons: () => readRunnerAddons(),
+
+    /** Saves the owner's ticked add-ons for the next "Build and update runners". Returns the list written, or an error. */
+    async setRunnerAddons(ids: string[], known: string[]) {
+      if (!dir) return { error: "Self-deploy is not set up on this install, so the host can't read a choice." } as const;
+      const current = await readRunnerAddons();
+      // An id the host holds or was told about that this catalogue doesn't list is kept as it is, never dropped on the first save.
+      const carried = [...(current.saved ?? current.built ?? [])].filter((id) => !known.includes(id));
+      const list = [...new Set([...ids.filter((id) => known.includes(id)), ...carried])].sort();
+      const file = path.join(dir, "inbox", "runner-addons");
+      const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+      try {
+        await writeFile(tmp, `${list.join(",")}\n`, { mode: 0o640 });
+        await rename(tmp, file);
+      } catch {
+        await rm(tmp, { force: true });
+        return { error: "Could not save the choice: the deployer folder is not writable from the server." } as const;
+      }
+      return { saved: list } as const;
     },
 
     /** What Settings shows. */

@@ -70,7 +70,7 @@ From: [Guide 3](/guides/first-company-and-ticket).
 
 ### A runner add-on says Not installed or Not working.
 
-Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, add the add-on to `RUNNER_ADDONS` in `.env`, for example `RUNNER_ADDONS=agent-browser`, then run `scripts/update-runner.sh` as root. Skills that need an add-on are left out of agents' runs until it says Working.
+Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, tick the add-on there, press **Save add-ons**, then press **Build and update runners** in Settings > Server and runner > Updates. Skills that need an add-on are left out of agents' runs until it says Working.
 
 From: [Guide 9](/guides/add-ons).
 
