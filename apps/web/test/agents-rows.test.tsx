@@ -94,7 +94,9 @@ describe("agent rows (BOS-1256)", () => {
       { ...base, id: "a3", name: "Old", retiredAt: "2026-11-01T00:00:00Z", status: "retired" },
     ]);
     render(<Agents company={company} onChanged={() => {}} />);
-    expect(await screen.findByText("4 / 3 in progress, over the limit")).toBeTruthy();
+    expect(await screen.findByText("4 of 3 tickets in progress, over the limit")).toBeTruthy();
+    // No funding source: plain words, not "no funding set" (BOS-1494).
+    expect(screen.getAllByText(/No account to run on yet/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
     expect(screen.getByText("Paused")).toBeTruthy();
     expect(screen.getByRole("button", { name: "History" })).toBeTruthy();

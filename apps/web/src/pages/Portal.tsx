@@ -17,7 +17,11 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "released", label: "Released", help: "Done recently." },
 ];
 type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
-type Portal = { title: string; intro: string | null; hasLogo: boolean; back: { url: string; text: string } | null; features: PortalFeature[] };
+type Portal = { title: string; intro: string | null; hasLogo: boolean; confirmByEmail?: boolean; rememberedEmail?: string | null; back: { url: string; text: string } | null; features: PortalFeature[] };
+/** BOS-1388: with "Confirm posts by email" on, the address is needed and the reason is said once, next to the box. */
+type Ask = { required: boolean; remembered: string | null };
+const WHY_EMAIL = "We ask for your email only to send you a link that confirms it's you. It counts once you click it. Nobody else ever sees it.";
+const CHECK_EMAIL = "Check your email: we sent you a link. It counts once you click it.";
 
 const token = () => decodeURIComponent(window.location.hash.replace(/^#/, ""));
 
@@ -34,33 +38,47 @@ async function call<T>(path: string, init: { method?: string; body?: unknown } =
   return data as T;
 }
 
-function Who({ name, email, onChange, idPrefix }: { name: string; email: string; onChange: (v: { name: string; email: string }) => void; idPrefix: string }) {
+function EmailField({ email, onChange, id, ask }: { email: string; onChange: (email: string) => void; id: string; ask: Ask }) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>{ask.required ? "Your email" : "Email, if you'd like to hear back (optional)"}</label>
+      <input id={id} type="email" required={ask.required} maxLength={320} autoComplete="email" aria-describedby={ask.required ? `${id}-why` : undefined} value={email} onChange={(e) => onChange(e.target.value)} />
+      {ask.required && (
+        <p id={`${id}-why`} className="muted" style={{ fontSize: 13 }}>
+          {WHY_EMAIL}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Who({ name, email, onChange, idPrefix, ask }: { name: string; email: string; onChange: (v: { name: string; email: string }) => void; idPrefix: string; ask: Ask }) {
   return (
     <div className="form-grid">
       <div className="field">
         <label htmlFor={`${idPrefix}-name`}>Your name (optional)</label>
         <input id={`${idPrefix}-name`} maxLength={100} autoComplete="name" value={name} onChange={(e) => onChange({ name: e.target.value, email })} />
       </div>
-      <div className="field">
-        <label htmlFor={`${idPrefix}-email`}>Email, if you'd like to hear back (optional)</label>
-        <input id={`${idPrefix}-email`} type="email" maxLength={320} autoComplete="email" value={email} onChange={(e) => onChange({ name, email: e.target.value })} />
-      </div>
+      <EmailField id={`${idPrefix}-email`} email={email} ask={ask} onChange={(v) => onChange({ name, email: v })} />
     </div>
   );
 }
 
-function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void }) {
+function FeatureCard({ f, onChanged, ask }: { f: PortalFeature; onChanged: () => void; ask: Ask }) {
   const [comment, setComment] = useState(f.myVote?.comment ?? "");
   // A visitor's comment is kept in their browser as they type (DR-045); it goes once it is sent.
   const commentKey = `portal-comment/${f.id}`;
-  const [who, setWho] = useState({ name: "", email: "" });
+  const [who, setWho] = useState({ name: "", email: ask.remembered ?? "" });
   const [open, setOpen] = useState(false);
+  // A vote needs an address when the owner asks for one and this browser hasn't confirmed one: ask before sending it.
+  const [asking, setAsking] = useState<Importance | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const vote = (importance: Importance, withComment = false) =>
-    void call(`/api/portal/votes`, { method: "POST", body: { featureId: f.id, importance, ...(withComment ? { comment: comment.trim() || null, name: who.name.trim() || null, email: who.email.trim() || null } : {}) } }).then(
-      () => (setNote({ ok: true, text: withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), withComment && clearDraft(commentKey), onChanged()),
+    void call<{ needsConfirm?: boolean }>(`/api/portal/votes`, { method: "POST", body: { featureId: f.id, importance, ...(withComment ? { comment: comment.trim() || null, name: who.name.trim() || null } : {}), email: who.email.trim() || null } }).then(
+      (r) => (setNote({ ok: true, text: r.needsConfirm ? CHECK_EMAIL : withComment ? "Thanks, we've got your comment." : "Thanks for your vote." }), setOpen(withComment ? false : open), setAsking(null), withComment && clearDraft(commentKey), onChanged()),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
+  const pick = (importance: Importance) => (ask.required && !who.email.trim() ? (setAsking(importance), setNote(null)) : vote(importance));
   const remove = () => void call(`/api/portal/votes/${f.id}`, { method: "DELETE" }).then(() => (setNote(null), setComment(""), clearDraft(commentKey), onChanged()), (err: Error) => setNote({ ok: false, text: err.message }));
   const canVote = f.stage !== "released";
   return (
@@ -72,11 +90,30 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
           <p className="label">How much would this matter to you?</p>
           <div className="chips" role="group" aria-label={`How much ${f.title} would matter to you`}>
             {LEVELS.map((l) => (
-              <button key={l.id} type="button" className={`chip ${f.myVote?.importance === l.id ? "on" : ""}`} aria-pressed={f.myVote?.importance === l.id} onClick={() => vote(l.id)}>
+              <button key={l.id} type="button" className={`chip ${f.myVote?.importance === l.id ? "on" : ""}`} aria-pressed={f.myVote?.importance === l.id} onClick={() => pick(l.id)}>
                 {l.label}
               </button>
             ))}
           </div>
+          {asking && (
+            <form
+              onSubmit={(e: FormEvent) => {
+                e.preventDefault();
+                vote(asking);
+              }}
+              style={{ display: "flex", flexDirection: "column", gap: 10 }}
+            >
+              <EmailField id={`v-${f.id}-email`} email={who.email} ask={ask} onChange={(email) => setWho({ ...who, email })} />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn primary" type="submit">
+                  Send my vote
+                </button>
+                <button className="btn" type="button" onClick={() => setAsking(null)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
           {f.myVote && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 14 }}>
               {!open && (
@@ -101,7 +138,7 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
                 <label htmlFor={`c-${f.id}`}>What would it let you do?</label>
                 <DraftTextarea draftKey={commentKey} id={`c-${f.id}`} rows={3} maxLength={2000} value={comment} onChange={setComment} />
               </div>
-              <Who name={who.name} email={who.email} onChange={setWho} idPrefix={`w-${f.id}`} />
+              <Who name={who.name} email={who.email} onChange={setWho} idPrefix={`w-${f.id}`} ask={ask} />
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn primary" type="submit">
                   Send
@@ -123,15 +160,15 @@ function FeatureCard({ f, onChanged }: { f: PortalFeature; onChanged: () => void
   );
 }
 
-function Idea() {
-  const [form, setForm] = useState({ title: "", text: "", name: "", email: "", website: "" });
+function Idea({ ask }: { ask: Ask }) {
+  const [form, setForm] = useState({ title: "", text: "", name: "", email: ask.remembered ?? "", website: "" });
   // A visitor's idea is kept in their browser as they type (DR-045); it goes once it is sent.
   const textKey = "portal-idea";
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    void call(`/api/portal/ideas`, { method: "POST", body: { title: form.title.trim(), text: form.text.trim(), name: form.name.trim() || null, email: form.email.trim() || null, website: form.website } }).then(
-      () => (setForm({ title: "", text: "", name: "", email: "", website: "" }), clearDraft(textKey), setNote({ ok: true, text: "Thank you! We read every idea." })),
+    void call<{ needsConfirm?: boolean }>(`/api/portal/ideas`, { method: "POST", body: { title: form.title.trim(), text: form.text.trim(), name: form.name.trim() || null, email: form.email.trim() || null, website: form.website } }).then(
+      (r) => (setForm({ title: "", text: "", name: "", email: ask.remembered ?? "", website: "" }), clearDraft(textKey), setNote({ ok: true, text: r.needsConfirm ? CHECK_EMAIL : "Thank you! We read every idea." })),
       (err: Error) => setNote({ ok: false, text: err.message }),
     );
   };
@@ -148,7 +185,7 @@ function Idea() {
         <label htmlFor="idea-text">What problem would it solve for you?</label>
         <DraftTextarea draftKey={textKey} id="idea-text" required rows={4} maxLength={5000} value={form.text} onChange={(text) => setForm({ ...form, text })} />
       </div>
-      <Who name={form.name} email={form.email} onChange={(w) => setForm({ ...form, ...w })} idPrefix="idea" />
+      <Who name={form.name} email={form.email} onChange={(w) => setForm({ ...form, ...w })} idPrefix="idea" ask={ask} />
       {/* People never see this; bots tend to fill it in. */}
       <div className="visually-hidden" aria-hidden="true">
         <label htmlFor="idea-website">Website</label>
@@ -215,6 +252,7 @@ export function PortalApp() {
     );
   if (!data) return null;
   const shown = data.features.filter((f) => f.stage === stage);
+  const ask: Ask = { required: !!data.confirmByEmail, remembered: data.rememberedEmail ?? null };
   // BOS-967: when the owner sets a website address, the page gains a bar at the top and a link at the
   // bottom so a visitor can get back to the site. Both are plain links in the same tab.
   const back = data.back ? (
@@ -253,13 +291,13 @@ export function PortalApp() {
         {shown.length ? (
           <ul className="portal-list">
             {shown.map((f) => (
-              <FeatureCard key={f.id} f={f} onChanged={load} />
+              <FeatureCard key={`${f.id}:${ask.remembered ?? ""}`} f={f} onChanged={load} ask={ask} />
             ))}
           </ul>
         ) : (
           <p className="muted">Nothing here yet.</p>
         )}
-        <Idea />
+        <Idea key={ask.remembered ?? ""} ask={ask} />
         <p className="muted" style={{ fontSize: 12 }}>
           Votes are remembered in this browser, so you can change them later. What you send goes to the team as feedback.
         </p>

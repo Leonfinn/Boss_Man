@@ -18,10 +18,12 @@ export function WorkspaceDisk({ company, onChanged }: { company: Company; onChan
   return (
     <Section id="workspace-disk-h" title="Workspace disk">
       <p className="muted" style={{ fontSize: 14 }}>
-        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this cap, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. Worktrees of tickets done more than 7 days ago are released automatically.
+        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this amount, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. The working files of tickets done more than 7 days ago are cleared automatically.
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <label htmlFor="disk-cap">Disk cap (GB)</label>
+        <label htmlFor="disk-cap">
+          Most disk to use (GB) <code className="mono">workspace disk cap</code>
+        </label>
         <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
         <button
           type="button"
@@ -483,7 +485,9 @@ export function RunLimits() {
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <label htmlFor="limit-background">Background (infinite mode) runs at once (0 to 16)</label>
+        <label htmlFor="limit-background">
+          Background agents at once (0 to 16) <code className="mono">infinite mode</code>
+        </label>
         <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
@@ -666,17 +670,17 @@ export function CheckQueueSetting() {
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-        <legend>Who runs agents' checks</legend>
+        <legend>Who runs the checks</legend>
         <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
           <input type="radio" name="check-queue-mode" value="legacy" checked={v.mode === "legacy"} onChange={() => setEdit({ ...v, mode: "legacy" })} />
           <span>
-            <strong>Agents run their own (legacy).</strong> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
+            <strong>Each agent runs its own.</strong> <code className="mono">legacy</code> <span className="muted">Each agent runs the quick check inside its own session. A check dies if the session ends or the runner restarts, and agents wait in line for a free slot.</span>
           </span>
         </label>
         <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
           <input type="radio" name="check-queue-mode" value="server" checked={v.mode === "server"} onChange={() => setEdit({ ...v, mode: "server" })} />
           <span>
-            <strong>Boss Man runs them (server queue).</strong> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
+            <strong>Boss Man runs them.</strong> <code className="mono">server queue</code> <span className="muted">Agents ask for a check and Boss Man runs it on the runner. The check keeps going after the agent's session ends or the runner restarts, a pass on the same code is reused, and the agent is woken with the result. The merge check before each merge uses this queue too.</span>
           </span>
         </label>
       </fieldset>
@@ -714,7 +718,7 @@ export function CheckQueueSetting() {
       <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
         <input type="checkbox" data-testid="merge-train" checked={v.train} onChange={(e) => setEdit({ ...v, train: e.target.checked })} />
         <span>
-          <strong>Land approved merges in order (merge train).</strong>{" "}
+          <strong>Merge approved work in the order it was approved.</strong> <code className="mono">merge train</code>{" "}
           <span className="muted">Up to one approved ticket per check slot is checked on top of the tickets ahead of it, and they land in that order, so a merge landing ahead no longer spoils the long checks behind it. Main still only ever gets exactly what passed its check. Needs the server queue. Turning it off takes effect for the next merge.</span>
         </span>
       </label>

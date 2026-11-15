@@ -42,6 +42,27 @@ export function serverContains(live: string | null, merge: string, order: string
   return at >= 0 && run >= 0 && at <= run;
 }
 
+/**
+ * DR-061 Q5: the one answer to "is this merge commit running?", over the one merge order (allMergeOrder).
+ * "server": the commit release-log recorded as live contains it. "runner": the runners' image was built from it
+ * or a later merge. False when nothing is recorded or either commit can't be placed: never assumed live.
+ * `serverFallback` is only used when the server has no recorded live commit yet (a fresh install): the commit
+ * this process was built from.
+ */
+export async function commitIsLive(
+  db: Db,
+  companyId: string,
+  commit: string | null | undefined,
+  side: "server" | "runner",
+  opts: { serverFallback?: string | null } = {},
+): Promise<boolean> {
+  if (!commit) return false;
+  const order = await allMergeOrder(db, companyId);
+  if (side === "runner") return imageContains(await runnerImageCommit(db, companyId), commit, order);
+  const fallback = opts.serverFallback?.toLowerCase();
+  return serverContains((await liveServerCommit(db, companyId)) ?? (fallback && isSha(fallback) ? fallback : null), commit, order);
+}
+
 /** The go-live facts of a merged ticket that every reader needs (liveMarkedAt is required so no caller can forget it). */
 export type GoLiveTicket = { companyId: string; mergeCommit: string | null; touchesRunner: boolean | null; liveMarkedAt: Date | null; liveEvidence?: string | null };
 
