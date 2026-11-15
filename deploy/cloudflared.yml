@@ -1,0 +1,24 @@
+# The feedback portal on a public address through a Cloudflare Tunnel (BOS-1574). Add it to COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:deploy/cloudflared.yml   (plus your host files, e.g. deploy/truenas.yml, and any blue/green files)
+# Steps: docs/33-public-portal-cloudflare.md (any Docker host).
+#
+# The tunnel is dialled OUT from this container to Cloudflare: no router port is opened and no reverse proxy is needed.
+# In the Cloudflare dashboard the tunnel's public hostname points at http://server:3101 and nowhere else. 3101 is the
+# portal listener, which serves only the portal page, its assets and /api/portal (apps/server/src/portal.ts); the owner's
+# app on 3100 is never named. The name "server" resolves on the default network on every install: the server service
+# in a single-server install, Caddy's alias in blue/green (deploy/truenas-bluegreen.yml).
+#
+# The token comes from CLOUDFLARE_TUNNEL_TOKEN in .env (a secret: never in this file). Without it the stack refuses to start.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.11.0@sha256:b94b96edf2c9c4360f8879c8580cfaa99077f19c849ec595ca2f711b27d4f344
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env (docs/33-public-portal-cloudflare.md)}
+    networks: [default]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128

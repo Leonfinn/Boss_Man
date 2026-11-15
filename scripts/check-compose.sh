@@ -15,7 +15,7 @@ command -v actionlint >/dev/null 2>&1 || { echo "check-compose: actionlint not i
 
 # Placeholders for the values the files require (${VAR:?...}), only where the caller has not set one. They are not secrets
 # and are never used: config -q renders the files and starts nothing.
-for v in POSTGRES_PASSWORD NTFY_BASE_URL BOSSMAN_TOOLSERVER_IMAGE PENPOT_PUBLIC_URI PENPOT_SECRET_KEY PENPOT_DB_PASSWORD; do
+for v in POSTGRES_PASSWORD NTFY_BASE_URL BOSSMAN_TOOLSERVER_IMAGE PENPOT_PUBLIC_URI PENPOT_SECRET_KEY PENPOT_DB_PASSWORD CLOUDFLARE_TUNNEL_TOKEN; do
   [ -n "${!v:-}" ] || export "$v=check-compose-placeholder"
 done
 # Folders must look like absolute paths (a bind mount) and the Penpot bind must be an address, or compose reads them as volume names.
@@ -32,6 +32,8 @@ sets=(
   "$d deploy/truenas.yml deploy/truenas-bluegreen.yml"
   "$d deploy/tailscale.yml"
   "$d deploy/truenas.yml deploy/tailscale.yml deploy/truenas-bluegreen.yml deploy/tailscale-bluegreen.yml"
+  "$d deploy/cloudflared.yml"
+  "$d deploy/truenas.yml deploy/truenas-bluegreen.yml deploy/cloudflared.yml"
   "$d deploy/staging.yml"
   "$d deploy/tool-servers.yml"
   "deploy/ntfy.yml"
