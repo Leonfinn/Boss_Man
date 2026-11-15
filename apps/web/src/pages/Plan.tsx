@@ -241,7 +241,7 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
     ? `Last updated ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (${ageLabel(now - updatedAt)})`
     : "";
   return (
-    <>
+    <div className="plan-page">
       <header className="page-head">
         <div>
           <h1>Plan</h1>
@@ -255,10 +255,10 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
         <p className="muted">No open task waits on anything. Add what a task waits on from its page.</p>
       ) : p ? (
         <>
-          <p className="muted" style={{ fontSize: 14 }}>
-            {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
-          </p>
           <div className="pl-meta">
+            <span className="muted pl-count" style={{ fontSize: 14 }}>
+              {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
+            </span>
             <span className="muted pl-updated" style={{ fontSize: 13 }}>{updated}</span>
             <button type="button" className="btn pl-refresh" onClick={() => plan.reload()}>
               Refresh
@@ -268,6 +268,6 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <Graph plan={p} />
         </>
       ) : null}
-    </>
+    </div>
   );
 }
