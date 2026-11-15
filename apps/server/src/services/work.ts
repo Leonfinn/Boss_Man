@@ -354,7 +354,30 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const doing = (r: (typeof everyLive)[number], ticketId?: string) =>
         r.origin === REVIEW_REASON ? (!r.ticketId || r.ticketId === ticketId ? "reviewing" : "working") : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
-      const withoutCard = everyLive.filter((r) => about(r).size === 0);
+      const notHere = everyLive.filter((r) => about(r).size === 0);
+      // A run on a ticket in another project is real, tracked work: name the ticket and its project instead of calling it ticketless.
+      const candidates = (r: (typeof everyLive)[number]) => [r.ticketId, r.runTicketId, ...named(r)].filter((x): x is string => !!x);
+      const elsewhereIds = [...new Set(notHere.flatMap((r) => (r.purpose === "chat" ? [] : candidates(r))))];
+      const elsewhereRows = elsewhereIds.length
+        ? await db
+            .select({ id: tickets.id, number: tickets.number, title: tickets.title, projectId: tickets.projectId, projectName: projects.name })
+            .from(tickets)
+            .innerJoin(projects, eq(projects.id, tickets.projectId))
+            .where(and(inArray(tickets.id, elsewhereIds), eq(projects.companyId, p.companyId), ne(tickets.projectId, p.id)))
+        : [];
+      const elsewhereOf = (r: (typeof everyLive)[number]) => {
+        if (r.purpose === "chat") return null;
+        for (const id of candidates(r)) {
+          const hit = elsewhereRows.find((e) => e.id === id);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const withoutCard = notHere.filter((r) => !elsewhereOf(r));
+      const otherProjects = notHere.flatMap((r) => {
+        const e = elsewhereOf(r);
+        return e ? [{ id: r.id, agent: r.agent, purpose: r.purpose, startedAt: r.startedAt.toISOString(), ticketId: e.id, ticketNumber: e.number, ticketTitle: e.title, projectId: e.projectId, projectName: e.projectName }] : [];
+      });
       const waits = await reviewWaits(db, inReview);
       // Approved by every reviewer, so only the merge is left (BOS-667): the board shows these apart from
       // tickets still waiting on a reviewer, so a long merge line doesn't read as a reviewer shortage.
@@ -433,6 +456,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // Same rule as the Dashboard's "agents working" and the Agents page (DR-061 Q3): every agent with a run going that isn't a chat.
         workingAgents: new Set(everyLive.filter(isWorkingRun).map((r) => r.agentId)).size,
         withoutTicket: withoutCard.map((r) => ({ id: r.id, agent: r.agent, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt.toISOString() })),
+        otherProjects,
         columns: cols.map((c) => ({
           ...c,
           // A ticket shows in its column while that column matches its state; otherwise (no

@@ -127,15 +127,16 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect(board.workingAgents).toBe(1);
   });
 
-  it("keeps a run reviewing another project's ticket in the strip, so the board never under-reports", async () => {
+  it("lists a run reviewing another project's ticket under 'other projects', not as ticketless, and still counts it", async () => {
     const c = (ctx = await setup());
     const other = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Other site" })).json() as { id: string };
     const t = (await c.req("POST", `/api/projects/${other.id}/tickets`, { title: "Elsewhere" })).json() as { id: string };
     await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${t.id} "Elsewhere": ready` });
     await c.scheduler.tick();
-    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }> };
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }>; otherProjects: Array<{ agent: string; ticketId: string; projectName: string }> };
     const dash = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json() as { stats: { running: number } };
-    expect(board.withoutTicket.map((r) => r.agent)).toEqual(["Engineer"]);
+    expect(board.withoutTicket).toEqual([]);
+    expect(board.otherProjects).toMatchObject([{ agent: "Engineer", ticketId: t.id, projectName: "Other site" }]);
     expect(board.workingAgents).toBe(1);
     expect(board.workingAgents).toBe(dash.stats.running);
   });

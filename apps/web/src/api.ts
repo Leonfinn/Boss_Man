@@ -295,7 +295,9 @@ export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{
 /** A run going now that no card on the board shows (BOS-155). */
 export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
 /** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
-export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+/** A run going now on a ticket in another project of the company. */
+export type OtherProjectRun = { id: string; agent: string | null; purpose: string | null; startedAt: string; ticketId: string; ticketNumber: number | null; ticketTitle: string; projectId: string; projectName: string };
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; otherProjects?: OtherProjectRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[]; secretId?: string | null; fallbackRank?: number | null };
 export type FundingStatus = {
