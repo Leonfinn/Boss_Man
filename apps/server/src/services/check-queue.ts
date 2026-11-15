@@ -548,6 +548,8 @@ export function checkQueue(db: Db) {
         // BOS-1384: why this one is ahead of the others, in the owner's words (null for an ordinary place).
         why: j.state !== "queued" ? null : j.fixesMain ? "fixes main" : j.frontAt ? `moved to front by ${j.frontBy ?? "the owner"}` : r.urgent ? "urgent" : null,
         heldBy,
+        // BOS-1517: held because the ticket has no merge-train seat yet (its check isn't waiting for a slot at all).
+        heldBySeat: j.state === "queued" && served.trainHeld.has(j.id),
         // True only for checks a red main holds back; "all slots are busy" fills heldBy too but is plain queueing (BOS-1262).
         heldByMain: heldBy !== null && heldBy.startsWith("main is red"),
         // BOS-1435: where a running check runs: the company's runner, or a check worker by name.

@@ -984,7 +984,7 @@ export async function buildApp(opts: AppOptions) {
     limit: () => checkGate(db).limit(),
     runningChecks: (companyId) =>
       db
-        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind })
+        .select({ ticketId: checkJobs.ticketId, kind: checkJobs.kind, startedAt: checkJobs.startedAt })
         .from(checkJobs)
         .where(and(eq(checkJobs.companyId, companyId), eq(checkJobs.state, "running")))
         .orderBy(asc(checkJobs.startedAt)),
@@ -1020,6 +1020,7 @@ export async function buildApp(opts: AppOptions) {
         busy: q.rows.filter((r) => r.state === "running").map((r) => ({ ref: r.ref, title: r.title, kind: r.kind === "merge" ? "merge check" : r.kind === "full" ? "full check" : "quick check" })),
         mainRed: q.rows.some((r) => r.heldByMain),
         fixRef: fix ? (fix.ref ?? fix.title) : null,
+        seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
       };
     },
     now: opts.now,
@@ -1861,6 +1862,11 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
       return checkQueueSvc.list(id, new Date(), await checks.capacity(id));
+    });
+    // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
+    owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
+      const { id, ticketId } = z.object({ id: z.string().uuid(), ticketId: z.string().uuid() }).parse(req.params);
+      return { statusLine: await mergeQueue.statusLineFor(id, ticketId) };
     });
     // BOS-1384: the owner puts a waiting merge next in line. Only the order changes: the merge still runs its whole check.
     owner.post("/api/companies/:id/merge-queue/:ticketId/front", async (req, reply) => {
