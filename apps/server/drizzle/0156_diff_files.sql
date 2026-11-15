@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "diff_files" jsonb DEFAULT '[]'::jsonb NOT NULL;
