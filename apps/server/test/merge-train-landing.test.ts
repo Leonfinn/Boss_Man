@@ -9,6 +9,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 vi.hoisted(() => {
   process.env.BOSSMAN_CHECK_JOB_POLL_MS = "15";
   process.env.BOSSMAN_MERGE_RETARGET_MS = "15";
+  process.env.BOSSMAN_TRAIN_TRIAL_MIN_MS = "15";
 });
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
@@ -22,7 +23,10 @@ let app: ReturnType<typeof buildApp> | undefined;
 beforeAll(async () => {
   shared = await sharedDatabase();
 });
+/** Every check-runner loop a test started: stopped after each test, so a failed test's loop can't run the next test's jobs. */
+const loops: Array<() => void> = [];
 afterEach(async () => {
+  for (const stop of loops.splice(0)) stop();
   await new Promise((resolve) => setTimeout(resolve, 50));
 });
 afterAll(async () => {
@@ -45,6 +49,10 @@ function fakeGit() {
     seen: [] as Array<{ phase: string; ticket: string; base?: string; expectBase?: string }>,
     /** Pairs of tickets whose changes conflict. */
     clashes: [] as Array<[string, string]>,
+    /** BOS-1515: who had a trial merge on main, and whether the runner answers it. */
+    trials: [] as string[],
+    clashUnknown: false,
+    clashesOnMain: (ticket: string) => g.clashes.some(([x, y]) => (x === ticket && g.has(g.main).includes(y)) || (y === ticket && g.has(g.main).includes(x))),
     treeOf: (has: string[]) => `tree:${[...has].sort().join(",")}`,
     has: (c: string) => commits.get(c)?.has ?? [],
     onMain(c: string): boolean {
@@ -100,6 +108,13 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
     if (c.type === "workspace.diff") reply(DIFF);
     if (c.type === "workspace.carried") reply({ carried: [] });
     if (c.type === "workspace.migrations") reply({ needed: false, reason: "Nothing taken." });
+    // BOS-1515: the read-only trial merge on main (clash-check). `clashUnknown` plays a runner that can't tell (an error).
+    if (c.type === "workspace.clash") {
+      const who = names.get((c as unknown as { ticketId: string }).ticketId)!;
+      git.trials.push(who);
+      if (git.clashUnknown) queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: false, error: "no copy of that repo" }));
+      else reply({ clashes: git.clashesOnMain(who), files: git.clashesOnMain(who) ? ["src/a.ts"] : [] });
+    }
     if (c.type === "workspace.merge") {
       const x = c as unknown as { ticketId: string; phase?: string; tree?: string; commit?: string; base?: string; expectBase?: string };
       const who = names.get(x.ticketId)!;
@@ -141,7 +156,8 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
   /** Plays the check runner: queued jobs pass, except while `fails(tickets in tree, ticket name, run number)` says so. */
   let stop = false;
   const runs = new Map<string, number>();
-  const runJobs = (fails: (has: string[], who: string, run: number) => boolean) => {
+  /** `fails` may also return null: leave that job running for now (a slow check). */
+  const runJobs = (fails: (has: string[], who: string, run: number) => boolean | null) => {
     void (async () => {
       while (!stop) {
         // Running too: a dispatcher pump (after a cancel, BOS-1504) may have sent a job to the fake runner, which ignores it.
@@ -149,20 +165,27 @@ async function setup(opts: { train?: boolean; features?: string[]; slots?: numbe
         for (const j of queued) {
           const who = names.get(j.ticketId!)!;
           const run = (runs.get(who) ?? 0) + 1;
-          runs.set(who, run);
           const has = j.tree.replace(/^tree:/, "").split(",");
           const bad = fails(has, who, run);
+          if (bad === null) continue;
+          runs.set(who, run);
           await db.update(checkJobs).set({ state: bad ? "failed" : "passed", exitCode: bad ? 1 : 0, logTail: bad ? "1 test failed" : "ok", startedAt: new Date(), endedAt: new Date() }).where(and(eq(checkJobs.id, j.id), inArray(checkJobs.state, ["queued", "running"])));
         }
         await new Promise((r) => setTimeout(r, 30));
       }
     })();
-    return () => {
+    const end = () => {
       stop = true;
     };
+    loops.push(end);
+    return end;
   };
   const events = async (id: string, event: string) => (await db.select({ detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "merge_line")))).map((r) => r.detail as Record<string, unknown>).filter((d) => d.event === event);
-  return { db, git, ticket, approve, outcome, waitFor, runJobs, runs, names, events };
+  /** When the ticket's first merge_line row of this event was written. */
+  const eventAt = async (id: string, event: string) => (await db.select({ at: activity.at, detail: activity.detail }).from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "merge_line"))).orderBy(asc(activity.at))).find((r) => (r.detail as { event: string }).event === event)?.at;
+  /** The real server_status service (the wiring in app.ts). */
+  const status = async () => (await built.serverStatus.status(company.id)) as { mergeTrain: Array<Record<string, unknown>> | null };
+  return { db, git, ticket, approve, outcome, waitFor, runJobs, runs, names, events, eventAt, status };
 }
 
 /** Approve in this order, each one once the one before has prepared, so the train's order is the approval order. */
@@ -249,7 +272,101 @@ describe("merge train landings (BOS-1366)", () => {
     // BOS-1518: right after the stacked clash it is asked on main alone; clean there, so it waits rather than goes back.
     expect(bPrepares[1]!.base).toBeUndefined();
     expect(bPrepares.at(-1)!.base).toBeUndefined();
+    // BOS-1515 (B1): the hold to land alone is on the merge line, naming A and the files, and is a hold of its own.
+    expect(await c.events(b, "train_clash")).toEqual([expect.objectContaining({ on: "ahead", action: "land_alone", with: [expect.objectContaining({ ticketId: a, title: "Ticket A" })], files: ["src/a.ts"] })]);
+    expect((await c.events(b, "hold_started")).map((d) => d.note)).toContain("waiting to land on main alone, after the merge train ahead");
   });
+
+  it("B1: a ticket held to land alone shows in server_status mergeTrain with the ticket it clashed with and the files (BOS-1515)", async () => {
+    const c = await setup({ slots: 2 });
+    c.git.clashes.push(["A", "B"]);
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    let stop = () => {};
+    try {
+      expect(await c.waitFor(async () => (await c.events(b, "train_clash")).length === 1)).toBe(true);
+      const [p] = (await c.status()).mergeTrain ?? [];
+      expect(p).toMatchObject({ project: "Customer app", seats: 2, heldAlone: [{ ticketId: b, clashWith: [expect.any(String)], files: ["src/a.ts"], passed: 0, holdsLine: false, since: expect.any(String) }] });
+      // A fails for real and leaves; B, clean on main alone, lands.
+      stop = c.runJobs((_has, who) => who === "A");
+      expect([await c.outcome(a), await c.outcome(b)]).toEqual(["verify_failed", "merged"]);
+    } finally {
+      stop();
+    }
+  });
+
+  it("B2: when the ticket ahead lands, a ticket held alone whose clash is now on main goes back at once, while a later one is still seated (BOS-1515)", async () => {
+    const c = await setup({ slots: 2, features: ["carried-check", "check-jobs", "merge-base", "merge-pin", "clash-check"] });
+    c.git.clashes.push(["A", "B"]);
+    const [a, b, d] = [await c.ticket("A"), await c.ticket("B"), await c.ticket("C")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    expect(await c.waitFor(async () => (await c.events(b, "train_clash")).length === 1)).toBe(true);
+    // C takes the free seat past B, stacked on A.
+    await c.approve(d);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "C"))).toBe(true);
+    // While A is unlanded, main hasn't moved: B has just been tried on main alone (clean), so no trial runs and it waits.
+    expect(c.git.trials).not.toContain("B");
+    // C's check is slow: it stays running until released, so C is still seated when A lands.
+    const stuckOnC = { hold: true };
+    const stop = c.runJobs((_has, who) => (who === "C" && stuckOnC.hold ? null : false));
+    // A lands; B's next trial clashes on main and it goes back with the file, without ever being seated as head.
+    expect(await c.outcome(a)).toBe("merged");
+    expect(await c.outcome(b)).toBe("conflicts");
+    const [sent] = (await c.events(b, "train_clash")).filter((e) => e.on === "main");
+    expect(sent).toMatchObject({ action: "sent_back", files: ["src/a.ts"], with: [expect.objectContaining({ ticketId: a })] });
+    expect(await c.events(b, "attempt_failed")).toEqual([expect.objectContaining({ reason: "conflict" })]);
+    expect(c.git.seen.filter((s) => s.phase === "prepare" && s.ticket === "B").length).toBe(2);
+    const [bRow] = await c.db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, b));
+    expect(bRow!.state).toBe("in_progress");
+    // C had not landed when B went back.
+    expect(await c.eventAt(d, "merged")).toBeUndefined();
+    stuckOnC.hold = false;
+    expect(await c.outcome(d)).toBe("merged");
+    stop();
+    expect(c.git.pushes.map((p) => p.ticket)).toEqual(["A", "C"]);
+  }, 30_000);
+
+  it("B2: a ticket waiting for a seat that already clashes with main goes back without taking a seat (BOS-1515)", async () => {
+    const c = await setup({ slots: 1, features: ["carried-check", "check-jobs", "merge-base", "merge-pin", "clash-check"] });
+    c.git.outside("X");
+    c.git.clashes.push(["X", "B"]);
+    const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+    await c.approve(a);
+    expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+    await c.approve(b);
+    expect(await c.outcome(b)).toBe("conflicts");
+    expect(c.git.seen.filter((s) => s.ticket === "B")).toEqual([]);
+    expect(await c.events(b, "train_clash")).toEqual([expect.objectContaining({ on: "main", action: "sent_back", with: [], files: ["src/a.ts"] })]);
+    const stop = c.runJobs(() => false);
+    expect(await c.outcome(a)).toBe("merged");
+    stop();
+  });
+
+  it("B2: a runner that can't tell (an error, or no clash-check) never sends a waiting ticket back (BOS-1515)", async () => {
+    for (const opts of [{ unknown: true, features: ["carried-check", "check-jobs", "merge-base", "merge-pin", "clash-check"] }, { unknown: false, features: ["carried-check", "check-jobs", "merge-base", "merge-pin"] }]) {
+      const c = await setup({ slots: 1, features: opts.features });
+      c.git.clashUnknown = opts.unknown;
+      c.git.outside("X");
+      c.git.clashes.push(["X", "B"]);
+      const [a, b] = [await c.ticket("A"), await c.ticket("B")];
+      await c.approve(a);
+      expect(await c.waitFor(() => c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "A"))).toBe(true);
+      await c.approve(b);
+      // It waits for its seat as before, and gets the real answer when seated (prepare on main).
+      if (opts.unknown) expect(await c.waitFor(() => c.git.trials.includes("B"))).toBe(true);
+      else expect(await c.waitFor(async () => (await c.events(b, "hold_started")).length > 0)).toBe(true);
+      expect(await c.events(b, "train_clash")).toEqual([]);
+      const stop = c.runJobs(() => false);
+      expect([await c.outcome(a), await c.outcome(b)]).toEqual(["merged", "conflicts"]);
+      stop();
+      expect(c.git.seen.some((s) => s.phase === "prepare" && s.ticket === "B")).toBe(true);
+      expect(await c.events(b, "train_clash")).toEqual([]);
+    }
+  }, 30_000);
 
   it("a clash with main itself is sent back at once, not after the train drains (BOS-1518)", async () => {
     const c = await setup();
