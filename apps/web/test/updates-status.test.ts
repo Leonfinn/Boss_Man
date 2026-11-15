@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, waitingFor, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
@@ -57,6 +57,24 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(s.say).toBe("The runner update is waiting for 2 agents to finish.");
     expect(s.primary).toMatchObject({ id: "ask-wrapup", blue: true });
     expect(s.normal.map((b) => b.id)).toEqual(["cancel-update"]);
+  });
+
+  it("2. Only a merge check left (BOS-1600): says what it waits for, offers stop-the-checks, not wrap up", () => {
+    const check = { ticket: "BOS-1525", kind: "merge", scope: "full", startedAt: iso(-19), runningForMinutes: 19, usuallyMinutes: 15 };
+    const m = maintUpdate({ runs: 0, companies: 0, checks: 1, checksList: [check] });
+    const s = updateStatus(base(), m, null, NOW);
+    expect(s.tag).toBe("Waiting for checks");
+    expect(s.say).toContain("waiting for 1 check to finish before swapping the runners: BOS-1525 merge check, started ");
+    expect(s.say).toContain("usually about 15 min");
+    expect(s.say).not.toContain("swapping the runners now");
+    expect(s.primary).toMatchObject({ id: "update-now", label: "Stop the check and update now" });
+    expect(waitingFor(m as never)).toContain("BOS-1525 merge check");
+  });
+
+  it("2. Agents and checks are listed separately; with nothing left it says swapping now (BOS-1600)", () => {
+    expect(waitingFor({ runs: 2, companies: 1, checks: 1, checksList: [] })).toBe("waiting for 2 runs in 1 company to finish, and for 1 check to finish before swapping the runners");
+    expect(waitingFor({ runs: 0, companies: 0, checks: 0 })).toBe("swapping the runners now");
+    expect(waitingFor({ runs: 0, companies: 0 })).toBe("swapping the runners now");
   });
 
   it("2. Waiting for agents, wrap-up asked, before the deadline: no main button", () => {

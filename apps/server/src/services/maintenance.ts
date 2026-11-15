@@ -8,10 +8,10 @@ import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, checkWorkers, companies, decisions, runnerEvents, runs, settings, tickets } from "../db/schema.js";
-import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
+import { CANCEL_RUNNER_UPDATE, CANCEL_UPDATE, DEADLINE_WAIT_MINUTES, KEEP_WAITING_MORE, STOP_AND_UPDATE, STOP_CHECKS_UPDATE_NOW, STOP_THESE_CARRY_ON, WAIT_TEN_MORE } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { expectRestart } from "./runner-restarts.js";
-import { runnerBusy, runsByCompany } from "./runner-busy.js";
+import { runnerBusy, runnerChecks, runsByCompany } from "./runner-busy.js";
 
 export const MAINTENANCE_KEY = "maintenance";
 
@@ -177,7 +177,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
    * What holds a swap (BOS-1471): work runs plus running check jobs, so a recreate never kills a merge check
    * in flight. The shared function is also what a server update's quiet-host wait reads (runner-busy.ts).
    */
-  const busyByCompany = async () => (await runnerBusy(db)).byCompany;
+  const busyByCompany = async () => (await runnerBusy(db, true)).byCompany;
 
   /**
    * The wrap-up panel's list (BOS-929): every work run still going, with its agent, ticket reference and when it
@@ -319,7 +319,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     // BOS-1377: the runs this card shows are the ones told at wrap-up that are still going; "Stop these" touches only them.
     const told = { ...h.startTold, ...h.wrapTold };
     const shown = (await liveWorkRuns(db, h.wrapSince ?? h.since, told)).filter((r) => told[r.runId]);
-    const options = shown.length ? [STOP_THESE_CARRY_ON, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : [WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
+    // BOS-1600: with only checks left there are no runs to stop; the plain choice is wait, or end the checks now.
+    const onlyChecks = n === 0 && checksN > 0;
+    const options = shown.length ? [STOP_THESE_CARRY_ON, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : onlyChecks ? [STOP_CHECKS_UPDATE_NOW, WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE] : [WAIT_TEN_MORE, CANCEL_RUNNER_UPDATE];
+    const checksText = onlyChecks ? ` "Stop the checks and update now" ends ${checksN === 1 ? "the check" : "the checks"} running on the runner; ${checksN === 1 ? "it starts" : "they start"} again from the beginning after the update, so the time already spent is lost.` : "";
     const names = shown.map((r) => `${r.agent ?? "an agent"} (${r.ticket ?? "no ticket"})`).join(", ");
     const stopText = shown.length ? ` "Stop these and carry on" stops ${names}: anything they haven't saved is lost, and their tickets wake again after the update. No other run is touched.` : "";
     await db
@@ -327,7 +330,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       .values({
         companyId: home.id,
         kind: "approval",
-        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}.${stopText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks are not held for this update; it goes ahead by itself once a company has no run or check left.`,
+        question: `The runner update has waited ${h.minutes} minutes and ${n ? `${n} run${n === 1 ? " is" : "s are"}` : ""}${n && checksN ? " and " : ""}${checksN ? `${checksN} check${checksN === 1 ? " is" : "s are"}` : ""} still going in ${inCompanies} compan${inCompanies === 1 ? "y" : "ies"}.${stopText}${checksText} Or wait ${DEADLINE_WAIT_MINUTES} more minutes, or cancel the runner update (the work going carries on). Until you answer, new runs and checks are not held for this update; it goes ahead by itself once a company has no run or check left.`,
         options,
         recommendedOption: WAIT_TEN_MORE,
         dedupeKey: `maintenance:${h.since}:${h.deadline}`,
@@ -434,7 +437,10 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const active = await activeByCompany(true);
       const runsTotal = [...active.values()].reduce((a, b) => a + b, 0);
       // BOS-349: while work runs are still going, the chat page stays open and says so; otherwise the swap can land any moment.
-      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), last };
+      // BOS-1600: the checks on a runner that a swap waits on (not those on a check worker), so the banner can name them.
+      // A "stop the checks and update now" answer (force) means nothing is waited for any more.
+      const checksList = h.kind === "wrapup" || h.force ? [] : await runnerChecks(db, now());
+      const base = { on: true as const, kind: h.kind ?? "update", reason: h.reason, since: h.since, deadline: h.deadline, runs: runsTotal, companies: active.size, chatOpen: runsTotal > 0, blocking: holdBlocksStarts(h, now()), checks: checksList.length, checksList, last };
       // The wrap-up panel's list (BOS-929): each work run still going, with its ticket and a run waiting on an open
       // permission card named as waiting for an answer (Brains's part B), so it is never called "not responding".
       // A wrap-up asked for while an update waits (BOS-988) keeps the update's kind but carries the ask, so it shows
@@ -449,6 +455,21 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         notRespondingAfter: h.wrapNotRespondingAfter ?? WRAPUP_NOT_RESPONDING_MINUTES,
         runsList: list,
       };
+    },
+
+    /**
+     * "Stop the checks and update now" (BOS-1600): the owner's choice when only checks on a runner are left. The swap
+     * then ignores them; each one goes back in line and starts again from the beginning once its runner is back.
+     * Refused while agent runs are still going (those have their own wrap-up) and when no check is waited on. // leader-only
+     */
+    async updateNow(): Promise<{ ok: true } | { ok: false; reason: "no_update" | "agents_running" | "no_checks" }> {
+      const h = await getHold(db);
+      if (!h || h.kind === "wrapup") return { ok: false, reason: "no_update" };
+      const busy = await runnerBusy(db, true);
+      if (busy.runsTotal > 0) return { ok: false, reason: "agents_running" };
+      if (busy.checksTotal === 0) return { ok: false, reason: "no_checks" };
+      await save({ ...h, force: true });
+      return { ok: true };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */
@@ -536,7 +557,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       } else if (answer === WAIT_TEN_MORE) await save({ ...h, deadline: later(DEADLINE_WAIT_MINUTES) });
       else if (answer === CANCEL_RUNNER_UPDATE || answer === CANCEL_UPDATE) await self.cancel();
       // Cards raised before BOS-1377 keep their old meanings.
-      else if (answer === STOP_AND_UPDATE) await save({ ...h, force: true });
+      else if (answer === STOP_AND_UPDATE || answer === STOP_CHECKS_UPDATE_NOW) await save({ ...h, force: true });
       else await save({ ...h, deadline: later(h.minutes) });
     },
 
@@ -591,7 +612,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       }
       const t = now();
       // BOS-1471: running check jobs hold a swap like agent runs do, with the same deadline and the same ask.
-      const first = await runnerBusy(db);
+      const first = await runnerBusy(db, true); // BOS-1600: checks on a separate check worker do not hold a swap
       let active = first.byCompany;
       const total = first.runsTotal + first.checksTotal;
       if (!h.force && total > 0 && t >= new Date(h.deadline)) await askAtDeadline(h, first.runsTotal, active.size, first.checksTotal);

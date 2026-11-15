@@ -71,6 +71,13 @@ export function serverAdminRoutes(
     await maintenance.start({ kind: "wrapup" }); // leader-only
     return maintenance.status();
   });
+  // "Stop the checks and update now" (BOS-1600): only when checks on a runner are all that is left; they restart afterwards.
+  owner.post("/api/maintenance/update-now", async (_req, reply) => {
+    const r = await maintenance.updateNow(); // leader-only
+    if (r.ok) return maintenance.status();
+    const message = r.reason === "agents_running" ? "Agents are still running; ask them to wrap up first." : r.reason === "no_checks" ? "No check is holding the update, so there is nothing to stop." : "No runner update is waiting.";
+    return reply.code(409).send({ error: r.reason, message });
+  });
   // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
   owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
 

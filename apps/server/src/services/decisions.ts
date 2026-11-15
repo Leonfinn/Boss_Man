@@ -748,6 +748,8 @@ export const CANCEL_UPDATE = "Cancel the update";
 export const STOP_THESE_CARRY_ON = "Stop these and carry on";
 export const WAIT_TEN_MORE = "Wait 10 more minutes";
 export const CANCEL_RUNNER_UPDATE = "Cancel the runner update";
+/** BOS-1600: the deadline card when only checks remain. The checks on the runner end and start again from the beginning afterwards. */
+export const STOP_CHECKS_UPDATE_NOW = "Stop the checks and update now";
 export const DEADLINE_WAIT_MINUTES = 10;
 /** The quiet-host wait's deadline question (BOS-420): send the update now, past the host's memory floor too. */
 export const UPDATE_NOW_ANYWAY = "Update now anyway";
