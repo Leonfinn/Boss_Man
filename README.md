@@ -10,9 +10,7 @@ It is for people who want AI agents doing real project work (code, docs, design)
 
 ![A 10 second silent loop of the Boss Man app with made-up data: the project board, the team of AI agents, the merge queue and the roadmap](docs/promo/boss-man-promo-loop.gif)
 
-**Watch the full video with sound:**
-
-https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972
+**[▶ Watch the full video (63 seconds)](https://github.com/user-attachments/assets/a239301f-dd1c-4fb4-a3f2-2a86c6a52972)**
 
 <!-- The loop above (BOS-1554) is cut from docs/promo/boss-man-promo.mp4 and autoplays because GitHub plays animated
      images on its own, never an MP4. How both are made: docs/promo/README.md -->
