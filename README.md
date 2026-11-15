@@ -22,11 +22,14 @@ A one-minute tour (63 seconds), recorded from the real app with made-up data: th
 
 ## Install
 
-You need a Linux host with Docker (a plain Linux box, a Proxmox VM or LXC, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). During the alpha, the install builds the containers on your server. Ready-made Docker images are planned for the beta release.
+You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS SCALE), and a Claude subscription or an Anthropic API key, or any OpenAI compatible API key (tested so far with OpenRouter, Ollama and Synthetic). During the alpha, the install builds the containers on your server. Ready-made Docker images are planned for the beta release.
+
+> **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
 1. Follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
-2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups and self-updates.
+2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups.
 3. Before you update, read [docs/23-updating.md](docs/23-updating.md).
+4. If something goes wrong, or you want to tune memory limits, see [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md).
 
 ## Get help
 
@@ -89,9 +92,13 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 |---|---|
 | [docs/00-first-time-install.md](docs/00-first-time-install.md) | Start here to install: from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
 | [docs/06-install-truenas.md](docs/06-install-truenas.md) | Installing on TrueNAS SCALE: datasets, building the images on the NAS, credentials, updates and backups |
+| [docs/32-proxmox.md](docs/32-proxmox.md) | Running Boss Man on Proxmox: use a VM, not an LXC container, and why |
 | [docs/23-updating.md](docs/23-updating.md) | Read before you update: the update steps, backups and how to check one restores, breaking changes that need a hand step, and where release notes are |
+| [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md) | Fixes for common problems, where backups are saved, memory limits, reserved threads and Synthetic |
+| [docs/30-in-app-updates.md](docs/30-in-app-updates.md) | Updating from the web page: setting up the host deployer on any Linux host, with TrueNAS notes |
 | [docs/24-privacy.md](docs/24-privacy.md) | What Boss Man sends, and where |
 | [docs/20-https-tailscale.md](docs/20-https-tailscale.md) | An HTTPS address through Tailscale Serve, which the installable web app and phone notifications need |
+| [docs/31-phone-notifications.md](docs/31-phone-notifications.md) | Pages and asks on your phone through your own ntfy server, with Approve buttons |
 | [docs/12-runner-add-ons.md](docs/12-runner-add-ons.md) | Optional tools in the runner image, such as a browser |
 | [docs/15-penpot.md](docs/15-penpot.md) | The optional Penpot design tool |
 | [docs/16-penpot-agent-setup.md](docs/16-penpot-agent-setup.md) | Letting agents read and draw designs in Penpot |

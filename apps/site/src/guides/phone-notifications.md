@@ -30,7 +30,7 @@ Open **Notifications** in the sidebar and find **How you're told**.
 
 ## Send notifications to your phone
 
-You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your phone reaches ntfy over your tailnet. The full steps are in [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), section "Phone notifications", and work on any Linux host.
+You need Tailscale set up first (see [Add-ons](/guides/add-ons)), because your phone reaches ntfy over your tailnet. The full steps are in [`docs/31-phone-notifications.md`](@repo/blob/main/docs/31-phone-notifications.md), and work on any Linux host.
 
 1. Add `NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443` to `.env`.
 2. Start ntfy as its own Compose project with `docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`.
