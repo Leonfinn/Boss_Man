@@ -11,11 +11,13 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import type { CheckLimits, WorkerCommand } from "@boss-man/shared";
+import { toolchainDifferences, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
 import { MAX_CHECK_SLOTS } from "./check-queue.js";
+
+type Tc = { fingerprint: string; tools: Record<string, string> };
 
 export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
@@ -67,22 +69,36 @@ export function checkWorkersService(db: Db) {
     const feats = features.get(w.id) ?? [];
     if (!feats.includes("check-jobs")) return "Its image can't run queued checks: update this machine.";
     if (!feats.includes(BUNDLE_FEATURE)) return "Its image can't fetch the code to check yet (needs a newer image), so it gets no checks.";
-    if (!w.imageCommit) return "It hasn't said which commit its image was built from: update this machine.";
+    if (!w.imageCommit && !w.toolchain) return "It hasn't said which tools or commit its image was built with: update this machine.";
     return null;
   }
 
-  function readiness(w: CheckWorker, companyId: string, runnerCommit: string | null): Readiness {
+  /**
+   * BOS-1570: a worker matches on the tools checks run with (Node, pnpm, git, ...), not on the commit its image was built
+   * from, so a runner update that leaves the tools alone leaves the worker working. The commit stays the test only
+   * when one side's image is too old to report its tools.
+   */
+  function readiness(w: CheckWorker, companyId: string, runnerCommit: string | null, runnerToolchain: Tc | null = null): Readiness {
     const why = machineReason(w);
     if (why) return { ok: false, reason: why };
     if (!w.companyIds.includes(companyId)) return { ok: false, reason: "Not set up for this company." };
-    if (!runnerCommit) return { ok: false, reason: "The company's runner hasn't said which commit its image was built from, so results can't be compared." };
-    if (w.imageCommit!.toLowerCase() !== runnerCommit.toLowerCase()) return { ok: false, reason: "Built from a different commit than the company's runner, so its results could differ: update this machine." };
+    if (w.toolchain && runnerToolchain) {
+      if (w.toolchain.fingerprint === runnerToolchain.fingerprint) return { ok: true, limit: workerLimit(w) };
+      const diff = toolchainDifferences(w.toolchain.tools, runnerToolchain.tools);
+      return { ok: false, reason: `Out of date: its tools differ from your runner's (${diff.length ? diff.join("; ") : "see the tool list"}). Redeploy this worker so it rebuilds; no file edit is needed.` };
+    }
+    // One side can't report its tools: fall back to the commit.
+    if (!runnerCommit) return { ok: false, reason: "The company's runner hasn't said which tools or commit its image was built with, so results can't be compared." };
+    if (!w.imageCommit) return { ok: false, reason: "Its image is too old to report its tools and has no commit: update this machine." };
+    if (w.imageCommit.toLowerCase() !== runnerCommit.toLowerCase()) {
+      return { ok: false, reason: w.toolchain ? "Your runner's image is older and can't report its tools, and the commits differ: rebuild the runner (Build and update runners)." : "Its image is older than this check and can't report its tools, and its commit differs from your runner's: redeploy this worker from the current compose.yaml (one time only)." };
+    }
     return { ok: true, limit: workerLimit(w) };
   }
 
-  async function runnerCommit(companyId: string): Promise<string | null> {
-    const [r] = await db.select({ c: runners.imageCommit }).from(runners).where(eq(runners.companyId, companyId));
-    return r?.c ?? null;
+  async function runnerImage(companyId: string): Promise<{ commit: string | null; toolchain: Tc | null }> {
+    const [r] = await db.select({ c: runners.imageCommit, t: runners.toolchain }).from(runners).where(eq(runners.companyId, companyId));
+    return { commit: r?.c ?? null, toolchain: r?.t ?? null };
   }
 
   return {
@@ -120,10 +136,10 @@ export function checkWorkersService(db: Db) {
     },
 
     /** Records a hello: last seen, image commit and version, the slots and features it reports. */
-    async touch(id: string, hello: { imageCommit?: string; imageVersion: string | null; checkSlots?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
+    async touch(id: string, hello: { imageCommit?: string; toolchain?: { fingerprint: string; tools: Record<string, string> }; imageVersion: string | null; checkSlots?: number; features?: string[] }, now = new Date()): Promise<CheckWorker | null> {
       const [row] = await db
         .update(checkWorkers)
-        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, features: hello.features ?? [] })
+        .set({ lastSeenAt: now, imageCommit: hello.imageCommit ?? null, toolchain: hello.toolchain ?? null, imageVersion: hello.imageVersion, reportedSlots: hello.checkSlots ?? null, features: hello.features ?? [] })
         .where(eq(checkWorkers.id, id))
         .returning();
       return row ?? null;
@@ -164,10 +180,10 @@ export function checkWorkersService(db: Db) {
       // Cheap when there are no workers (the common case): one indexed read, nothing else.
       const all = await db.select().from(checkWorkers).where(eq(checkWorkers.enabled, true)).orderBy(asc(checkWorkers.createdAt));
       if (!all.length) return [];
-      const commit = await runnerCommit(companyId);
+      const image = await runnerImage(companyId);
       const out: Eligible[] = [];
       for (const w of all) {
-        const r = readiness(w, companyId, commit);
+        const r = readiness(w, companyId, image.commit, image.toolchain);
         if (r.ok) out.push({ id: w.id, name: w.name, limit: r.limit, limits: limitsOf(w) });
       }
       return out;
@@ -177,7 +193,7 @@ export function checkWorkersService(db: Db) {
     async list() {
       const all = await db.select().from(checkWorkers).orderBy(asc(checkWorkers.createdAt));
       const names = new Map((await db.select({ id: companies.id, name: companies.name }).from(companies)).map((c) => [c.id, c.name]));
-      const commits = new Map((await db.select({ c: runners.companyId, commit: runners.imageCommit }).from(runners)).map((r) => [r.c, r.commit]));
+      const images = new Map((await db.select({ c: runners.companyId, commit: runners.imageCommit, tc: runners.toolchain }).from(runners)).map((r) => [r.c, r]));
       return all.map((w) => ({
         id: w.id,
         name: w.name,
@@ -189,11 +205,12 @@ export function checkWorkersService(db: Db) {
         checkThreads: w.checkThreads,
         checkMemoryMb: w.checkMemoryMb,
         imageCommit: w.imageCommit,
+        toolchain: w.toolchain?.tools ?? null,
         imageVersion: w.imageVersion,
         lastSeenAt: w.lastSeenAt,
         createdAt: w.createdAt,
         companies: w.companyIds.map((id) => {
-          const r = readiness(w, id, commits.get(id) ?? null);
+          const r = readiness(w, id, images.get(id)?.commit ?? null, images.get(id)?.tc ?? null);
           return { id, name: names.get(id) ?? "(deleted company)", ready: r.ok, reason: r.ok ? null : r.reason };
         }),
         // One line when nothing works for any company (turned off, offline, old image); null otherwise.

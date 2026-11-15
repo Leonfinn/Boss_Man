@@ -4,18 +4,18 @@ import { describe, expect, it } from "vitest";
 import template from "../src/pages/settings/check-worker-compose.yaml?raw";
 import { workerComposeFile, workerSocketUrl } from "../src/pages/settings/check-worker-compose";
 
-const COMMIT = "ab12".repeat(10);
-
 describe("check worker compose file (BOS-1550)", () => {
   it("the web copy is identical to deploy/check-worker/compose.yaml", () => {
     expect(template).toBe(readFileSync(new URL("../../../deploy/check-worker/compose.yaml", import.meta.url), "utf8"));
   });
 
-  it("fills in the address, the commit twice, the slots and the token", () => {
-    const out = workerComposeFile({ url: workerSocketUrl("https://boss.example.org/"), commit: COMMIT, slots: 3, token: "bmw_example" });
+  it("fills in the address, the slots and the token, and has no commit for the owner to keep up to date (BOS-1570)", () => {
+    const out = workerComposeFile({ url: workerSocketUrl("https://boss.example.org/"), slots: 3, token: "bmw_example" });
     expect(out).toContain("wss://boss.example.org/api/check-worker/connect");
-    expect(out).toContain(`Boss_Man.git#${COMMIT}`);
-    expect(out).toContain(`BOSSMAN_IMAGE_COMMIT: "${COMMIT}"`);
+    expect(out).toContain("Boss_Man.git#main");
+    expect(out).not.toContain("BOSSMAN_IMAGE_COMMIT");
+    expect(out).not.toContain("CHANGE THIS (commit");
+    expect(out).not.toMatch(/[0-9a-f]{40}/);
     expect(out).toContain('BOSSMAN_CHECK_SLOTS: "3"');
     expect(out).toContain('content: "bmw_example"');
     expect(out).not.toContain("PASTE-THE-WORKER-TOKEN-HERE");
@@ -29,17 +29,12 @@ describe("check worker compose file (BOS-1550)", () => {
   });
 
   it("builds the image with a browser and without the agent harness (BOS-1553)", () => {
-    const out = workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: COMMIT, slots: 1, token: "t" });
+    const out = workerComposeFile({ url: "wss://x/api/check-worker/connect", slots: 1, token: "t" });
     expect(out).toContain("RUNNER_ADDONS: agent-browser");
     expect(out).toContain('WITH_HARNESS: "0"');
   });
 
-  it("keeps the zeros when no runner has reported a commit, and never trusts a malformed one", () => {
-    expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: null, slots: 1, token: "t" })).toContain("0".repeat(40));
-    expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: "main; rm -rf /", slots: 1, token: "t" })).not.toContain("rm -rf");
-  });
-
   it("quotes a token so it cannot break out of the YAML string", () => {
-    expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", commit: COMMIT, slots: 1, token: 'a"b\nc' })).toContain('content: "a\\"b\\nc"');
+    expect(workerComposeFile({ url: "wss://x/api/check-worker/connect", slots: 1, token: 'a"b\nc' })).toContain('content: "a\\"b\\nc"');
   });
 });
