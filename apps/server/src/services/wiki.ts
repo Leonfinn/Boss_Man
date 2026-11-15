@@ -777,6 +777,33 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
    * save can slip between the read and the write (BOS-496). An append or a restore passes its own
    * transaction, which already holds the page.
    */
+  /**
+   * A new page whose title or slug starts with "DR-NNN" may not reuse a number another page already
+   * has (BOS-1552: DR-059 clashed because the index lagged). Refuses, naming the page and the next
+   * free number. Checked on creation only, so an update to the same slug is never refused.
+   */
+  async function refuseTakenDrNumber(conn: Db, companyId: string, slug: string, title: string) {
+    const num = (s: string) => /^dr-(\d{1,6})(?!\d)/i.exec(s)?.[1];
+    const wanted = num(title.trim()) ?? num(slug.split("/").at(-1) ?? "");
+    if (wanted === undefined) return;
+    const n = Number(wanted);
+    const rows = await conn
+      .select({ slug: wikiPages.slug, title: wikiPages.title })
+      .from(wikiPages)
+      .where(and(eq(wikiPages.companyId, companyId), or(ilike(wikiPages.title, "dr-%"), ilike(wikiPages.slug, "dr-%"), ilike(wikiPages.slug, "%/dr-%"))));
+    let max = n;
+    let clash: { slug: string; title: string } | undefined;
+    for (const r of rows) {
+      const found = num(r.title) ?? num(r.slug.split("/").at(-1) ?? "");
+      if (found === undefined) continue;
+      max = Math.max(max, Number(found));
+      if (!clash && Number(found) === n) clash = r;
+    }
+    if (!clash) return;
+    const pad = (x: number) => String(x).padStart(3, "0");
+    throw new WikiError(409, `DR-${pad(n)} is already taken by "${clash.title}" (${clash.slug}). The next free number is DR-${pad(max + 1)}.`);
+  }
+
   async function writeWithinTx(conn: Db, companyId: string, input: WriteInput, title: string) {
     if (input.ticketId) {
       await ownTicket(conn, companyId, input.ticketId);
@@ -801,6 +828,7 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
       slug = given ?? pageSlug(folder, title);
       // Writing a new page where one already is updates that page.
       existing = await bySlug(slug);
+      if (!existing) await refuseTakenDrNumber(conn, companyId, slug, title);
     }
     const changed = !existing || existing.title !== title || existing.body !== input.body;
     // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
