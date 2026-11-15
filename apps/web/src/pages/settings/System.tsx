@@ -7,7 +7,7 @@ import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
-import { LiveState, atTime, historyTag, historyWhat, inAbout, updateStatus, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
+import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
 export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
@@ -173,6 +173,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     );
   }
   const s =v?.status ?? null;
+  const progress = runnerProgress(report.data?.live, maint.data);
   const st = updateStatus(v, maint.data, wait.data, now, { runnersAt: report.data?.update?.at ?? null });
   const wrap = maint.data && maint.data.on && ((maint.data as WrapUpStatus).wrapAsked || maint.data.kind === "wrapup") ? (maint.data as WrapUpStatus) : null;
   const busy = act.busy || !v;
@@ -282,9 +283,9 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
           ) : (
             v?.available && st.tag === "Update ready" && <WaitingChanges commits={v.available.commits} />
           )}
-          <NowRunning v={v} report={report.data} />
+          <NowRunning v={v} report={report.data} progress={progress} />
         </div>
-        <RecentUpdates rows={history.data} />
+        <RecentUpdates rows={history.data} progress={progress} />
       </div>
       {v && (
         <div className="upd-other" data-testid="other-actions">
@@ -408,7 +409,7 @@ export function WrapUpRuns({ s, busy, onStop }: { s: WrapUpStatus; busy: boolean
 }
 
 /** Now running: the server's version as a date and each company's runner (BOS-1238). Replaces the Runner update box's "Now" list. */
-function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | null }) {
+function NowRunning({ v, report, progress }: { v: SelfDeployView | null; report: Report | null; progress: RunnerProgress }) {
   const s = v?.status;
   const server = s && s.target === "server" && s.result === "deployed" ? when(s.ended || s.started) : null;
   return (
@@ -420,7 +421,7 @@ function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | 
             <strong>Server</strong> <span className="muted">updated {server}</span>
           </li>
         )}
-        {report?.live?.map((l) => <LiveState key={l.slug} r={l} />)}
+        {report?.live?.map((l) => <LiveState key={l.slug} r={l} progress={progress} />)}
       </ul>
       {report?.live && !report.live.length &&<p className="muted" style={{ fontSize: 14 }}>No company has a runner yet.</p>}
     </div>
@@ -428,7 +429,9 @@ function NowRunning({ v, report }: { v: SelfDeployView | null; report: Report | 
 }
 
 /** Recent updates: the last 5 server updates and runner rebuilds, newest first (BOS-1238). */
-function RecentUpdates({ rows }: { rows: HistoryRow[] | null }) {
+function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress: RunnerProgress }) {
+  // Only the newest runner row can be mid-swap; older ones are history.
+  const newestRunner = rows?.find((r) => r.target === "runner")?.id;
   return (
     <div className="upd-col" data-testid="recent-updates">
       <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Recent updates</h3>
@@ -439,7 +442,7 @@ function RecentUpdates({ rows }: { rows: HistoryRow[] | null }) {
       ) : (
         <ul style={{ margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           {rows.map((r) => {
-            const t = historyTag(r);
+            const t = historyTag(r, r.id === newestRunner ? progress : null);
             return (
               <li key={r.id} className="upd-row" style={{ listStyle: "none" }}>
                 <span>{when(r.at)}</span>
@@ -494,7 +497,7 @@ export function RunLimits() {
         </p>
       </div>
       <p className="muted" style={{ fontSize: 14 }}>
-        Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
+        Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits. A company's runner is given memory to match: 2 GB, plus 1 GB for each agent it can run at once (one company's number plus the background number), plus 3 GB for each check; a change reaches each runner the next time it restarts.
       </p>
       <div>
         <button
@@ -519,10 +522,58 @@ export function RunLimits() {
 }
 
 /**
+ * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Saved on its
+ * own, since the two limits above are for every company and these are this company's.
+ */
+function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+  const act = useAction();
+  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const [edit, setEdit] = useState<{ merges: string; checks: string } | null>(null);
+  const v = edit ?? { merges: text(company.holdStartsMergesWaiting), checks: text(company.holdStartsQuickChecksQueued) };
+  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
+  const [m, q] = [parse(v.merges), parse(v.checks)];
+  const ok = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-merges">Hold new starts while this many merges are waiting (leave empty for off)</label>
+        <input id="hold-merges" type="number" min={1} max={1000} placeholder="Off" value={v.merges} onChange={(e) => setEdit({ ...v, merges: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks and urgent tickets carry on.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-checks">Hold new starts while this many quick checks are queued (leave empty for off)</label>
+        <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
+      </div>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !ok(m) || !ok(q)}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
+              setEdit(null);
+              onChanged?.();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </>
+  );
+}
+
+/**
  * Tickets in progress per agent (BOS-1029): an agent finishes before it starts more. Only in-progress tickets
  * count (review, blocked and done don't). Empty box = No limit.
  */
-export function WipLimits() {
+export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
   const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
@@ -546,6 +597,7 @@ export function WipLimits() {
         <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
       </div>
+      {company ? <HoldStarts company={company} onChanged={onChanged} /> : null}
       <div>
         <button
           type="button"
@@ -568,7 +620,7 @@ export function WipLimits() {
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number } | null; workers?: CheckWorkerView[] };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[] };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -698,7 +750,9 @@ export function CheckQueueSetting() {
         )}
         {d.runner && (
           <p style={{ fontSize: 14 }} data-testid="check-runner-limit">
-            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check). That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
+            Limit in force on the runners: <strong>{d.runner.slots} at once</strong> ({Math.round((d.runner.memoryBytes / 1024 ** 3) * 10) / 10} GB memory limit for the whole runner, shared by its agents and every check).
+            {/* BOS-1498: what the runner is given and why, from Agents at once and Checks at once. */}
+            {d.runner.memoryLine ? <> Runner memory: <span data-testid="runner-memory-line">{d.runner.memoryLine}</span></> : null} That runner limit is a cap, not memory set aside: a runner only uses what its agents and checks need, and the machine's own free memory is never reserved.
             {d.runner.perCheckBytes ? <> Separately, each single check is stopped with a clear message if it uses more than {Math.round((d.runner.perCheckBytes / 1024 ** 3) * 10) / 10} GB, so one runaway check cannot starve the others.</> : null}
             {d.runner.reason && <> <span className="tag red">Lower than the setting</span> {d.runner.reason}</>}
             {d.runner.applying || d.runner.pending > 0 ? <> <span className="tag">Applying</span> {d.runner.pending} runner{d.runner.pending === 1 ? "" : "s"} still on the old limit. Each is restarted when its company has no run going, and agents are woken afterwards.</> : null}

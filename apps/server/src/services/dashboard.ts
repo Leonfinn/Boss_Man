@@ -2,7 +2,7 @@
 // 14 days of runs and tickets, and what happened recently. One read, for the home screen.
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, costEvents, decisions, fundingSources, notifications, runs, tickets } from "../db/schema.js";
+import { agents, costEvents, decisions, fundingSources, notifications, runners as runnersTable, runs, tickets, wakes } from "../db/schema.js";
 import { liveRuns, runOriginQuery } from "./runs.js";
 import { isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
@@ -18,8 +18,63 @@ export function runResult(outcome: string | null): "succeeded" | "failed" | "oth
 
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
-export function dashboardService(db: Db, deps: { now?: () => Date; decisions?: { queueTally: (opts: { companyId: string }) => Promise<{ open: number; waiting: number }> } } = {}) {
+/** The "Right now" strip's server-side lines (BOS-1507). A line that couldn't be read is null, and the screen says "not known". */
+export type DashboardHealth = {
+  runner: { registered: boolean; connected: boolean; lastSeenAt: string | null } | null;
+  /** Agents whose wakes a subscription usage limit holds: how many, which accounts, the earliest reset. */
+  usage: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
+  /** A server update waiting for a quiet machine, or null when none is. `undefined` from an older server never happens here. */
+  update: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+};
+
+export function dashboardService(
+  db: Db,
+  deps: {
+    now?: () => Date;
+    decisions?: { queueTally: (opts: { companyId: string }) => Promise<{ open: number; waiting: number }> };
+    /** Whether a runner is connected right now (the runner hub). */
+    runnerConnected?: (runnerId: string) => boolean;
+    /** The server update waiting for a quiet machine (BOS-420), if any. */
+    updateWait?: () => Promise<{ on: boolean; phase?: string; deadline?: string }>;
+  } = {},
+) {
   const now = deps.now ?? (() => new Date());
+  /** Each line is read on its own, so one failure greys one line and nothing else. */
+  const attempt = async <T>(read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch {
+      return null;
+    }
+  };
+  const readHealth = async (companyId: string): Promise<DashboardHealth> => {
+    const runner = await attempt(async () => {
+      const [r] = await db.select({ id: runnersTable.id, lastSeenAt: runnersTable.lastSeenAt }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      if (!r) return { registered: false, connected: false, lastSeenAt: null };
+      return { registered: true, connected: deps.runnerConnected?.(r.id) ?? false, lastSeenAt: r.lastSeenAt ? r.lastSeenAt.toISOString() : null };
+    });
+    const usage = await attempt(async () => {
+      const held = await db
+        .select({ agentId: wakes.agentId, until: wakes.notBefore, account: fundingSources.name })
+        .from(wakes)
+        .innerJoin(agents, eq(agents.id, wakes.agentId))
+        .leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
+        .where(and(eq(wakes.companyId, companyId), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`));
+      const times = held.map((h) => h.until?.getTime()).filter((n): n is number => typeof n === "number" && n > now().getTime());
+      return {
+        agents: new Set(held.map((h) => h.agentId)).size,
+        accounts: [...new Set(held.map((h) => h.account).filter((n): n is string => !!n))],
+        firstResetAt: times.length ? new Date(Math.min(...times)).toISOString() : null,
+      };
+    });
+    const update = deps.updateWait
+      ? await attempt(async () => {
+          const w = await deps.updateWait!();
+          return { waiting: w.on, phase: w.phase ?? null, deadline: w.deadline ?? null };
+        })
+      : null;
+    return { runner, usage, update };
+  };
   /**
    * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the
    * runs table alone, and the origin subqueries run only on those rows: doing it the other way
@@ -170,6 +225,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date; decisions?: {
         ticketsByDay,
         recentTickets,
         recentActivity,
+        health: await readHealth(companyId),
       };
     },
   };

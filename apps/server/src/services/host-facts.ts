@@ -57,6 +57,8 @@ const HostRecord = z.object({
      * for pushes (under blue/green: start ntfy with deploy/ntfy-bluegreen.yml). Absent: not checked. */
     serverReach: z.boolean().optional().catch(undefined),
   }).optional().catch(undefined),
+  /** BOS-1004: whether the host can seal a phone-login password (it needs openssl). Absent: an older deployer, treated as unknown. */
+  phoneLogin: z.object({ openssl: z.boolean() }).optional().catch(undefined),
   memory: z.object({ totalKb: z.number().int().nonnegative(), availableKb: z.number().int().nonnegative() }).optional().catch(undefined),
   addons: z.record(z.string(), z.string()).optional().catch(undefined),
   // BOS-986: a record of numbers and short strings, or (container_status.stopped) a short list of {name,status,exit,since}.
@@ -143,6 +145,7 @@ export function flattenHostRecord(r: HostRecord): Record<string, string> {
   }
   if (r.ntfy?.baseUrl) o["ntfy.baseUrl"] = r.ntfy.baseUrl;
   if (r.ntfy?.container) o["ntfy.container"] = r.ntfy.container;
+  if (r.phoneLogin) o["phoneLogin.openssl"] = String(r.phoneLogin.openssl);
   if (r.ntfy?.serverReach !== undefined) o["ntfy.serverReach"] = String(r.ntfy.serverReach);
   if (r.memory) { o["memory.totalKb"] = String(r.memory.totalKb); o["memory.availableKb"] = String(r.memory.availableKb); }
   for (const [k, v] of Object.entries(r.addons ?? {})) o[`addon.${k}`] = v;

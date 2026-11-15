@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 import { when } from "../src/pages/Runs";
-import { DEFAULT_REASON, PLAIN_REASONS, plainReason, updateStatus, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
 
@@ -197,5 +199,32 @@ describe("plain failure reasons", () => {
       expect(reason, m).toBeTruthy();
       expect(reason.endsWith("."), m).toBe(false);
     }
+  });
+});
+
+describe("runner swap in progress: every part of the page agrees (BOS-1558)", () => {
+  const row = (slug: string, imageVersion: string, over: Record<string, unknown> = {}) => ({ slug, name: slug, registered: true, connected: true, at: iso(-1), imageVersion, fault: null, ...over }) as unknown as LiveRow;
+  const hist = { id: "h1", target: "runner", commit: "abc", changes: 0, result: "deployed", message: null, at: iso(-5) } as HistoryRow;
+  const view = base({ status: st({ target: "runner", result: "deployed" }) });
+
+  it("image built, one company swapped, one still waiting: all say still in progress", () => {
+    const live = [row("a", "202611151140"), row("b", "202611151017")];
+    const m = maintUpdate({ runs: 0 });
+    const p = runnerProgress(live, m);
+    expect(p).toMatchObject({ inProgress: true, done: 1, total: 2 });
+    expect(historyTag(hist, p).tag).toBe("Swapping (1 of 2 companies done)");
+    expect(updateStatus(view, m, null, NOW).tag).toBe("Updating");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).toContain("waiting for runs to finish, old image 202611151017");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[0]!, progress: p }))).not.toContain("old image");
+  });
+
+  it("all swapped and the hold is off: all say done", () => {
+    const live = [row("a", "202611151140"), row("b", "202611151140")];
+    const m = { on: false } as MaintenanceView;
+    const p = runnerProgress(live, m);
+    expect(p.inProgress).toBe(false);
+    expect(historyTag(hist, p).tag).toBe("Done");
+    expect(updateStatus(view, m, null, NOW).tag).not.toBe("Updating");
+    expect(renderToStaticMarkup(createElement(LiveState, { r: live[1]!, progress: p }))).not.toContain("old image");
   });
 });

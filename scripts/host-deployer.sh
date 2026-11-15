@@ -753,6 +753,8 @@ host_extra_facts() {
     fi
   fi
   [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
+  # --- BOS-1004: can this host seal a phone-login password? (openssl is what "Create phone login" needs)
+  if command -v openssl >/dev/null 2>&1; then out+="$sep\"phoneLogin\": {\"openssl\": true}"; else out+="$sep\"phoneLogin\": {\"openssl\": false}"; fi
   # --- BOS-770: each BOSSMAN_NETGUARD_ALLOW line in .env, in file order, as its host:port entries only. Compose uses
   # only the last line, so two or more means an earlier list is silently ignored. Nothing else on the line is kept
   # (any token that isn't host:port is dropped), and no other key is read.
@@ -1453,6 +1455,103 @@ recover_interrupted() {
   finish failed "The ${TARGET:-deploy} run for ${COMMIT:0:8} was cut off before it finished (the deployer was stopped part-way).$reset Check what runs before deploying again."
 }
 
+# BOS-1004: "Create phone login". The server asks (inbox/phone-login.json) for the phone's read-only ntfy user; this
+# makes it inside the ntfy container and hands the password back sealed (RSA-OAEP) to a public key that only the
+# server's memory holds the private half of. The password is never written anywhere in the clear: not the inbox, the
+# outbox, the history, the log or the webhook, and never on a command line (it reaches ntfy through the environment).
+# The request is data only. Every field is checked against its own pattern, and the only commands that run inside the
+# container are these fixed ones: ntfy user list | user add | user change-pass | access <user> <topic> read-only.
+PHONE_USER='phone-read' # the only account this request may make or reset: the server is not trusted to pick another (an owner's admin login would be one reset away)
+PHONE_SEAL_OPTS=(-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256)
+PL_USER=""
+phone_result() { # id result message [sealed]: the answer the server polls for. Only the sealed (encrypted) password is ever in it.
+  json id="$1" result="$2" message="$3" sealed="${4:-}" at="$(now)" >"$OUTBOX/phone-login.json.tmp"
+  chmod 644 "$OUTBOX/phone-login.json.tmp"; mv "$OUTBOX/phone-login.json.tmp" "$OUTBOX/phone-login.json"
+  printf '%s %s %s %s\n' "$(now)" "$1" "$2" "${PL_USER:--}" >>"$STATE/phone-login.log" # history: no secret
+  log "Phone login $2 (request $1, user ${PL_USER:--})."
+}
+ntfy_exec() { # container-id args...: a fixed ntfy command in the container; a NTFY_PASSWORD set by the caller is passed on through the environment
+  local cid=$1; shift
+  timeout 30 docker exec -e NTFY_PASSWORD "$cid" ntfy "$@" </dev/null 2>&1
+}
+phone_login_run() { # file: handle one request; never exits the deployer
+  local f=$1 flat k id action user topic pubkey now_s last
+  PL_USER=""
+  [[ -f $f && ! -L $f && $(stat -c %s "$f") -le 2048 ]] || { log "Phone login request ignored: not a plain file under 2 KB."; return 0; }
+  [[ $(LC_ALL=C tr -d '\0' <"$f" | wc -c) -eq $(stat -c %s "$f") ]] || { log "Phone login request ignored: unexpected format."; return 0; }
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$f")"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9+/=_.:-]{0,1024}"'
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || { log "Phone login request ignored: unexpected format."; return 0; }
+  [[ $(tr ',' '\n' <<<"$flat" | wc -l) -eq 5 ]] || { log "Phone login request ignored: unexpected fields."; return 0; }
+  for k in id action user topic pubkey; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || { log "Phone login request ignored: unexpected fields."; return 0; }
+  done
+  id="$(jfield id <<<"$flat")" action="$(jfield action <<<"$flat")" user="$(jfield user <<<"$flat")"
+  topic="$(jfield topic <<<"$flat")" pubkey="$(jfield pubkey <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ ]] || { log "Phone login request ignored: bad id."; return 0; }
+  if grep -qs " $id " "$STATE/phone-login.log"; then log "Phone login request $id ignored: already handled."; return 0; fi
+  PL_USER=$user
+  [[ $action =~ ^(create|reset)$ ]] || { PL_USER=-; phone_result "$id" rejected "Rejected: the action must be create or reset."; return 0; }
+  if [[ $user != "$PHONE_USER" ]]; then PL_USER=-; phone_result "$id" rejected "Rejected: a phone login can only be made for the user $PHONE_USER."; return 0; fi
+  [[ $topic =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { phone_result "$id" rejected "Rejected: the topic may only have letters, digits, - and _ (1 to 64)."; return 0; }
+  [[ $pubkey =~ ^[A-Za-z0-9+/]{100,900}={0,2}$ ]] || { phone_result "$id" rejected "Rejected: the sealing key is not valid."; return 0; }
+  now_s="$(date +%s)"; last="$(cat "$STATE/last-phone-login" 2>/dev/null || echo 0)"
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  if ((last + 30 > now_s)); then phone_result "$id" rejected "Rejected: one phone login every 30 seconds. Try again in a moment."; return 0; fi
+  printf '%s\n' "$now_s" >"$STATE/last-phone-login"
+  command -v openssl >/dev/null 2>&1 || { phone_result "$id" failed "Failed: openssl is not installed on the host, which is needed to seal the password."; return 0; }
+  have_docker || { phone_result "$id" unavailable "The ntfy add-on is not installed here (this host has no Docker)."; return 0; }
+  local td; td="$(umask 077; mktemp -d "$STATE/pl.XXXXXX")" || { phone_result "$id" failed "Failed: could not make a private work folder."; return 0; }
+  # The public key must parse as a 2048-bit or larger RSA key before anything in ntfy is touched.
+  local keytext bits
+  printf '%s' "$pubkey" | base64 -d >"$td/pub.der" 2>/dev/null || true
+  keytext="$(openssl pkey -pubin -inform DER -in "$td/pub.der" -noout -text 2>/dev/null)" || keytext=""
+  bits="$(sed -n 's/^.*Public-Key: (\([0-9]*\) bit).*$/\1/p' <<<"$keytext" | head -n 1)"
+  if ! grep -q '^Modulus' <<<"$keytext" || [[ ! $bits =~ ^[0-9]+$ ]] || ((bits < 2048)); then
+    rm -rf "$td"; phone_result "$id" rejected "Rejected: the sealing key is not an RSA key of 2048 bits or more."; return 0
+  fi
+  local cids ncids cid
+  cids="$(timeout 10 docker ps --filter "label=com.docker.compose.service=ntfy" --format '{{.ID}}' 2>/dev/null)" || cids=""
+  ncids="$(grep -c . <<<"$cids" || true)"
+  if [[ $ncids != 1 ]]; then
+    rm -rf "$td"
+    if [[ $ncids == 0 ]]; then phone_result "$id" unavailable "The ntfy add-on is not set up or not running on this host."
+    else phone_result "$id" failed "Failed: more than one running container is labelled as ntfy, so it is not clear which to change."; fi
+    return 0
+  fi
+  cid="$cids"
+  [[ $cid =~ ^[0-9a-f]{12,64}$ ]] || { rm -rf "$td"; phone_result "$id" failed "Failed: docker named the ntfy container in a form that was not expected."; return 0; }
+  # The password is made and sealed before anything changes, so a failure here leaves ntfy as it was.
+  local pw sealed out exists=0
+  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24)" || true
+  if [[ ${#pw} -ne 24 ]]; then rm -rf "$td"; phone_result "$id" failed "Failed: could not make a password."; return 0; fi
+  sealed="$(printf '%s' "$pw" | openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$td/pub.der" "${PHONE_SEAL_OPTS[@]}" 2>/dev/null | base64 -w0)" || sealed=""
+  rm -rf "$td"
+  [[ $sealed =~ ^[A-Za-z0-9+/]{100,}={0,2}$ ]] || { phone_result "$id" failed "Failed: could not seal the password."; return 0; }
+  if ! out="$(ntfy_exec "$cid" user list)"; then phone_result "$id" failed "Failed: ntfy could not list its users: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; fi
+  grep -qE "^user $user( |$)" <<<"$out" && exists=1
+  if [[ $action == create && $exists == 1 ]]; then phone_result "$id" exists "The user $user already exists. Reset its password to get a new one."; return 0; fi
+  if [[ $action == reset && $exists == 0 ]]; then phone_result "$id" missing "The user $user does not exist yet. Create it first."; return 0; fi
+  if [[ $action == create ]]; then
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user add --role=user "$user")" || { phone_result "$id" failed "Failed: ntfy could not add the user: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+  else
+    out="$(NTFY_PASSWORD="$pw" ntfy_exec "$cid" user change-pass "$user")" || { phone_result "$id" failed "Failed: ntfy could not change the password: $(head -n 1 <<<"${out//$pw/***}" | cut -c1-160)"; return 0; }
+  fi
+  # Always (re)applied: a repeat fixes drift. Read-only on this one topic, never more.
+  out="$(ntfy_exec "$cid" access "$user" "$topic" read-only)" || { phone_result "$id" failed "Failed: the user $user was set up but ntfy refused its read-only access: $(head -n 1 <<<"$out" | cut -c1-160). Use Reset password to try again."; return 0; }
+  if [[ $action == create ]]; then phone_result "$id" created "Created the read-only user $user for topic $topic." "$sealed"
+  else phone_result "$id" reset "Changed the password of $user and re-applied read-only access to topic $topic." "$sealed"; fi
+}
+handle_phone_login() {
+  local req="$INBOX/phone-login.json"
+  [[ -e $req || -L $req ]] || return 0
+  if ((DRY)); then log "[dry-run] a phone-login request is waiting; a real tick would handle it"; return 0; fi
+  local mine="$STATE/phone-login.$$.json"
+  mv -T "$req" "$mine" 2>/dev/null || return 0
+  phone_login_run "$mine" || true
+  rm -f "$mine"
+}
+
 main() {
   local req="$INBOX/request.json"
   # What this host says about itself (BOS-427), refreshed every tick, so an owner card's steps can be
@@ -1498,6 +1597,7 @@ main() {
     fi
     log "Baseline renewed, but the checklist still fails: $VERIFY_WHY"; exit 1
   fi
+  handle_phone_login
   recover_interrupted
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
