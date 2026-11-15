@@ -868,7 +868,7 @@ The Android app does not use Google's push service with a self-hosted server. It
 
 After every ntfy restart:
 1. On the phone, open the ntfy app, then swipe it away from recent apps and open it again.
-2. Send a test notification from Boss Man (Settings → Notifications) with the app closed and the screen off. It should pop up without you opening the app.
+2. In Boss Man, open Notifications and choose **Send a test to my phone**, with the app closed and the screen off. It should pop up without you opening the app.
 3. If it only appears when you open the app: in the app's Settings turn on "Instant delivery in doze mode", turn on "Instant delivery" on that subscription, and in Android Settings → Apps → ntfy → Battery choose "Unrestricted".
 
 ### Approve buttons
