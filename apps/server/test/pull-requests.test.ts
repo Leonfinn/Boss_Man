@@ -102,6 +102,8 @@ async function setup(opts: { token?: boolean; pin?: PinRunner } = {}) {
     return true;
   }, opts.pin ? ["signoff-covers", "merge-pin"] : undefined);
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", body: "Limit the API to 100 requests a minute.", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
+  // The covers check needs the ticket's branch, as a real ticket has one.
+  if (opts.pin) await db.update(tickets).set({ branch: `bossman/${ticket.id}` }).where(eq(tickets.id, ticket.id));
   await db.delete(wakes);
   const approve = () => approveAndWait(req, ticket.id);
   const state = async () => (await db.select().from(tickets).where(eq(tickets.id, ticket.id)))[0]!;

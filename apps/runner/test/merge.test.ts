@@ -184,7 +184,9 @@ describe("pushing a ticket's branch for a pull request (R59)", () => {
     const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
     const pin = git(w.path, "rev-parse", "HEAD");
     expect(await ws.pushForReview(spec, "main", {}, pin)).toMatchObject({ status: "pushed", commit: pin });
-    commitLate(w.path);
+    writeFileSync(path.join(w.path, "late.txt"), "late\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "late work");
     const r = await ws.pushForReview(spec, "main", {}, pin);
     expect(r).toEqual({ status: "branch_moved", head: git(w.path, "rev-parse", "HEAD"), pinned: pin });
     expect(git(o.url, "rev-parse", `bossman/${ids.t}`)).toBe(pin);
