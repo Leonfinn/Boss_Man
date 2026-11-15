@@ -66,7 +66,11 @@ function fakeGitea() {
   return { fetch, calls, pr, mergeAnswers, checks, pulls, commits, heads, branchErrors };
 }
 
-async function setup(opts: { token?: boolean } = {}) {
+// pin: the runner announces "merge-pin" like the real one: workspace.push answers branch_moved unless its pin is the branch tip
+// held in pin.branch; workspace.covers answers pin.covers. The pins the pushes carried are kept in pin.pins.
+type PinRunner = { branch: string; covers: boolean; pins: Array<string | undefined> };
+
+async function setup(opts: { token?: boolean; pin?: PinRunner } = {}) {
   const gitea = fakeGitea();
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gitea.fetch });
@@ -86,11 +90,17 @@ async function setup(opts: { token?: boolean } = {}) {
     sent.push(c);
     // Landing first asks what changed; these tickets changed code.
     if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false } }));
-    if (c.type === "workspace.push") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "pushed", branch: `bossman/${c.ticketId}`, commit: HEAD } }));
+    if (c.type === "workspace.push") {
+      const pin = opts.pin;
+      pin?.pins.push(c.pin);
+      const data = pin && c.pin && c.pin !== pin.branch ? { status: "branch_moved", head: pin.branch, pinned: c.pin } : { status: "pushed", branch: `bossman/${c.ticketId}`, commit: HEAD };
+      queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data }));
+    }
+    if (c.type === "workspace.covers") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { covers: opts.pin?.covers ?? false, reason: "", newCommits: opts.pin?.covers ? 0 : 1, handMerges: 0 } }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
     if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
-  });
+  }, opts.pin ? ["signoff-covers", "merge-pin"] : undefined);
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", body: "Limit the API to 100 requests a minute.", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.delete(wakes);
   const approve = () => approveAndWait(req, ticket.id);
@@ -149,6 +159,37 @@ describe("pull requests on Gitea (R59)", () => {
     expect((await c.approve()).json().message).toContain("git host");
     expect(c.sent.some((x) => x.type === "workspace.push" || x.type === "workspace.merge")).toBe(false);
     expect(await c.state()).toMatchObject({ systemState: "review" });
+  });
+});
+
+describe("the pull-request push is pinned to the reviewed head (BOS-1413 follow-up)", () => {
+  const REVIEWED = "b".repeat(40);
+  const LATE = "c".repeat(40);
+
+  it("pushes with the reviewed head as its pin", async () => {
+    const pin: PinRunner = { branch: REVIEWED, covers: false, pins: [] };
+    const c = (ctx = await setup({ pin }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    expect((await c.approve()).json()).toMatchObject({ outcome: "merged" });
+    expect(pin.pins).toEqual([REVIEWED]);
+  });
+
+  it("a commit made after the approval is not pushed: no pull request, ticket sent back", async () => {
+    const pin: PinRunner = { branch: LATE, covers: false, pins: [] };
+    const c = (ctx = await setup({ pin }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    expect((await c.approve()).json()).toMatchObject({ outcome: "branch_changed" });
+    expect(c.gitea.calls.some((x) => x.method === "POST")).toBe(false);
+    expect(await c.state()).toMatchObject({ systemState: "in_progress", pullRequestNumber: null });
+  });
+
+  it("a head that only has main merged in is pushed: the pin moves to it", async () => {
+    const pin: PinRunner = { branch: LATE, covers: true, pins: [] };
+    const c = (ctx = await setup({ pin }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    expect((await c.approve()).json()).toMatchObject({ outcome: "merged" });
+    expect(pin.pins).toEqual([REVIEWED, LATE]);
+    expect(await c.state()).toMatchObject({ systemState: "done", pullRequestNumber: 7 });
   });
 });
 

@@ -179,6 +179,17 @@ describe("pushing a ticket's branch for a pull request (R59)", () => {
     expect(await ws.pushForReview(spec, "main")).toEqual({ status: "uncommitted", files: ["draft.txt"] });
   });
 
+  it("pushes the pinned head, and refuses a commit made after the pin: nothing is pushed (BOS-1413 follow-up)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const pin = git(w.path, "rev-parse", "HEAD");
+    expect(await ws.pushForReview(spec, "main", {}, pin)).toMatchObject({ status: "pushed", commit: pin });
+    commitLate(w.path);
+    const r = await ws.pushForReview(spec, "main", {}, pin);
+    expect(r).toEqual({ status: "branch_moved", head: git(w.path, "rev-parse", "HEAD"), pinned: pin });
+    expect(git(o.url, "rev-parse", `bossman/${ids.t}`)).toBe(pin);
+  });
+
   it("reports conflicts with the target instead of pushing", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "app.txt", "line 1\nticket's line 2\nline 3\n");
