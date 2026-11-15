@@ -761,6 +761,18 @@ host_extra_facts() {
       nparts+="${nparts:+, }\"serverReach\": $reach"
     fi
   fi
+  # BOS-1589: after an ntfy restart a phone that does not reconnect gets no push. Two host facts make that visible:
+  # when this ntfy container last started, and how many subscribers (open phone connections) it has right now.
+  # Subscribers come from ntfy's own metrics, served on an in-container-only port (deploy/ntfy.yml), read with
+  # `docker exec`; nothing is published. A count of 0 shortly after startedAt is a silent phone. Left out when unreadable.
+  if [[ -n $ncont ]]; then
+    local nstart nsubs
+    # shellcheck disable=SC2016 # Go template for docker
+    nstart="$(dk inspect -f '{{.State.StartedAt}}' "$ncont")" || nstart=""
+    [[ $nstart =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]] && nparts+="${nparts:+, }\"startedAt\": $(jstr "$nstart")"
+    nsubs="$(dk exec "$ncont" wget -qO- http://localhost:9090/metrics </dev/null | sed -n 's/^ntfy_subscribers_total \([0-9][0-9]*\).*/\1/p' | head -n1)" || nsubs=""
+    [[ $nsubs =~ ^[0-9]{1,9}$ ]] && nparts+="${nparts:+, }\"subscribers\": $nsubs"
+  fi
   [[ -n $nparts ]] && out+="$sep\"ntfy\": {$nparts}"
   # --- BOS-1004: can this host seal a phone-login password? (openssl is what "Create phone login" needs)
   if command -v openssl >/dev/null 2>&1; then out+="$sep\"phoneLogin\": {\"openssl\": true}"; else out+="$sep\"phoneLogin\": {\"openssl\": false}"; fi
