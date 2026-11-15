@@ -565,7 +565,9 @@ export class Workspaces {
         // BOS-1470: node's own message is "Command failed: <the whole fence command line>", which hides why. Lead with the command's
         // stderr (the fence helper's or git's last lines) and the exit code, and keep the command line out of the way.
         const e = err as { stderr?: string; stdout?: string; code?: number | string; killed?: boolean; signal?: string };
-        const why = String(e.stderr ?? "").trim().split("\n").filter(Boolean).slice(-4).join(" | ").slice(0, 300);
+        // The first line is usually the reason (git's "Unable to create '...index.lock'"), the rest advice: keep it and the tail (BOS-1476).
+        const lines = String(e.stderr ?? "").trim().split("\n").filter(Boolean);
+        const why = (lines.length > 4 ? [lines[0], ...lines.slice(-3)] : lines).join(" | ").slice(0, 300);
         const how = e.killed ? `was stopped (${e.signal ?? "signal"})` : `exit ${e.code ?? "?"}`;
         // Keep code/stdout/stderr on the new error: gitCode() reads the exit code (e.g. rev-parse --verify exits 1 for "no such ref").
         throw Object.assign(new Error(`fenced git ${args[0] ?? ""} failed (${how})${why ? `: ${why}` : " with no output"}`, { cause: err }), {
@@ -883,8 +885,8 @@ export class Workspaces {
         );
       }
       if (existsSync(path.join(dir, ".git"))) {
-        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir, repo });
-        await this.git(["clean", "-fdq"], { cwd: dir, repo });
+        await this.gitWaitingForLocks(["checkout", "--quiet", "--force", "--detach", commit], dir, repo);
+        await this.gitWaitingForLocks(["clean", "-fdq"], dir, repo);
       } else {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
@@ -894,6 +896,39 @@ export class Workspaces {
       await this.refreshCopy(spec.projectId, repo, dir, auth);
       return { path: dir, commit };
     });
+  }
+
+  /** How long a review copy's prep waits for a git lock that someone else holds before it gives up (BOS-1476). */
+  reviewLockWaitMs = 30_000;
+  /** A lock file this old belongs to a git that died: no git operation holds its lock for a minute. */
+  reviewStaleLockMs = 60_000;
+
+  /**
+   * git in a review copy, waiting out a lock file (BOS-1476). The repo lock only keeps the runner's own jobs apart; a
+   * reviewer's agent already running in the same copy (or the author's, before the copy exists) runs its own git, which
+   * holds index.lock for a moment. The runner's checkout then exits 128 ("Unable to create index.lock: File exists") and
+   * the review never started. So it waits and tries again until the deadline; a lock file older than a minute is a crashed
+   * git's and is removed. Any other failure is thrown at once, and the fence is the same on every try.
+   */
+  private async gitWaitingForLocks(args: string[], dir: string, repo: string) {
+    const deadline = Date.now() + this.reviewLockWaitMs;
+    let removedStale = false;
+    for (;;) {
+      try {
+        return await this.git(args, { cwd: dir, repo });
+      } catch (err) {
+        const text = `${(err as { stderr?: string }).stderr ?? ""}\n${(err as Error)?.message ?? ""}`;
+        const lock = /Unable to create '([^']+\.lock)'/.exec(text)?.[1];
+        if (!lock) throw err;
+        const gitDir = path.join(path.resolve(dir), ".git") + path.sep;
+        const mtime = path.resolve(lock).startsWith(gitDir) ? statSync(lock, { throwIfNoEntry: false })?.mtimeMs : undefined;
+        if (!removedStale && mtime !== undefined && Date.now() - mtime > this.reviewStaleLockMs) {
+          removedStale = true;
+          rmSync(lock, { force: true });
+        } else if (Date.now() >= deadline) throw err;
+        else await new Promise((r) => setTimeout(r, 250));
+      }
+    }
   }
 
   /** One install at a time per review copy: a ticket's code and security reviewers share the folder. */
