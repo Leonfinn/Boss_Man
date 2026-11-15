@@ -1188,19 +1188,29 @@ export class Workspaces {
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
     // Fetches under the repo lock, like every other git call that touches the shared refs.
     const { base: baseCommit, tip, unsynced } = await this.withRepoLock(spec.projectId, async () => {
-      // BOS-1544: a clone's commits reach the shared repo only by syncBranch, which otherwise runs at turn checkpoints. A
-      // check job opens its work area from the shared repo, so head must be there now, not after the turn; when it can't
-      // be brought over, the reason goes back with the diff instead of a check that dies with "invalid reference".
+      // BOS-1544: a clone's commits reach the shared repo only by syncBranch, which otherwise runs at turn checkpoints, and
+      // only on the ticket's own branch name. A check job opens its work area from the shared repo, so head must be there
+      // now, not after the turn. When it isn't (the sync failed, or the copy's HEAD is on another branch or detached, as an
+      // agent's `git switch` can leave it), the reason goes back with the diff instead of a check that dies with
+      // "invalid reference".
       let unsynced: string | undefined;
       if (isClone(dir)) {
+        const own = branchFor(spec.ticketId);
+        let failed: string | undefined;
         await this.syncBranch(repo, dir, spec.ticketId).catch((err: unknown) => {
           // git's reason can be on any line of its stderr, so all of it, on one line.
-          unsynced = String((err as Error)?.message ?? err).replace(/\s+/g, " ").trim().slice(0, 600);
+          failed = String((err as Error)?.message ?? err).replace(/\s+/g, " ").trim().slice(0, 600);
         });
         if ((await this.gitCode(["cat-file", "-e", `${head}^{commit}`], { cwd: repo })).code !== 0) {
-          unsynced ??= "the ticket's branch moved while it was being copied over";
-          unsynced = `commit ${head.slice(0, 12)} isn't in the runner's shared repo: ${unsynced}`;
-        } else unsynced = undefined;
+          const on = (await this.gitCode(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir, repo })).stdout;
+          const why =
+            on && on !== own
+              ? `the copy is on branch ${on}, not the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+              : !on
+                ? `the copy's HEAD is detached, not on the ticket's branch ${own}, and only ${own} is brought over (to fix: git branch -f ${own} HEAD && git switch ${own})`
+                : (failed ?? "the ticket's branch moved while it was being copied over; ask again");
+          unsynced = `commit ${head.slice(0, 12)} isn't in the runner's shared repo: ${why}`;
+        }
       }
       return { ...(await this.reviewBase(repo, dir, head, recorded, baseRef, secrets)), unsynced };
     });
