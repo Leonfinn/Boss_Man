@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DEFAULT_REASON, PLAIN_REASONS, LiveState, historyTag, plainReason, runnerProgress, updateStatus, type HistoryRow, type LiveRow, type DeployWaitView, type MaintenanceView, type SelfDeployView } from "../src/pages/settings/updates";
+import { when } from "../src/pages/Runs";
 
 // The Updates panel's status box (BOS-1238, design BOS-1214): rows checked in the page's table order, first match wins.
 
@@ -155,6 +156,36 @@ describe("plain failure reasons", () => {
     expect(plainReason("something nobody has seen before")).toBe(DEFAULT_REASON);
     expect(plainReason(null)).toBe(DEFAULT_REASON);
     expect(DEFAULT_REASON).toBe("the update stopped with an error");
+  });
+
+  // BOS-1469: a press that waits comes first; the earlier refusal is only "Previous attempt", never "Try again in N minutes".
+  describe("a waiting request and an older rejected result (BOS-1469)", () => {
+    const refusal = st({ result: "rejected", target: "runner", message: "Rejected: only one runner deploy every 10 minutes.", ended: iso(-3), started: iso(-3) });
+    const real = st({ result: "deployed", target: "runner", message: "Image built.", ended: iso(-12), started: iso(-15) });
+
+    it("says what was pressed and that it waits for the host, with the previous result below", () => {
+      const s = updateStatus(base({ status: refusal, previousRun: real, active: { phase: "waiting", what: "Build and update runners", since: iso(-1) } }), null, null, NOW);
+      expect(s.tag).toBe("Updating");
+      expect(s.say).toBe(`Build and update runners, pressed ${when(iso(-1))}: waiting for the host, it checks every minute.`);
+      expect(s.more).toBe(`Previous attempt: deployed, runner aaaaaaa1, ${when(real.ended)}. Image built.`);
+      expect(s.more).not.toMatch(/Try again/);
+      expect(s.primary).toBeNull();
+    });
+
+    it("says running since when the host has started it", () => {
+      const s = updateStatus(base({ status: refusal, previousRun: real, active: { phase: "running", what: "Build and update runners", since: iso(-1) } }), null, null, NOW);
+      expect(s.say).toBe(`Build and update runners, pressed ${when(iso(-1))}: running since ${when(iso(-1))}.`);
+    });
+
+    it("a refused runner press shows when to press again, and does not grey the server button", () => {
+      const view = offered({ status: refusal, deployWait: { until: iso(2), target: "runner" } });
+      const s = updateStatus(view, null, null, NOW);
+      expect(s.tag).toBe("Update ready");
+      expect(s.primary?.disabled).toBeFalsy();
+      const upToDate = updateStatus(base({ status: refusal, deployWait: { until: iso(2), target: "runner" }, runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" } }), null, null, NOW);
+      expect(upToDate.more).toContain("Runner update: press Build and update runners again from ");
+      expect(upToDate.more).toContain("Runner image: aaaaaaa1; the live server needs bbbbbbb2 (a runner update may still be needed).");
+    });
   });
 
   // BOS-1238 open question 3: every failure message the host can write gets a reason, so a new one falls back to the

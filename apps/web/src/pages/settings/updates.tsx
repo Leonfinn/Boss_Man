@@ -22,8 +22,14 @@ export type SelfDeployView = {
   lateAfterMinutes?: number;
   /** The runner trial, with the real time it ends (BOS-953). Null/absent when no trial is running. */
   trial?: { endsAt: string; seconds: number } | null;
+  /** BOS-1469: a request waiting for the host or running; it comes first, and the last result moves below it as the previous attempt. */
+  active?: { phase: "waiting" | "running"; what: string; since: string } | null;
+  /** BOS-1469: the last real run when a refusal came after it (a refusal never replaces it). */
+  previousRun?: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
+  /** BOS-1469: the runner image's version next to the one the live server needs. */
+  runnerImage?: { running: string | null; needed: string | null };
   /** A rate-limit refusal counted from its own time (BOS-953): the panel counts down to `until`, then says you can deploy now. */
-  deployWait?: { until: string } | null;
+  deployWait?: { until: string; target?: string } | null;
   /** BOS-1086: the owner's queued runner update and what it waits for (null when none is queued). */
   runnerQueue?: { pressedAt: string; startsAt: string | null; why: string } | null;
   /** A server deploy approved while a runner update was queued or under way: it goes by itself once the runner update is with the host. */
@@ -150,7 +156,10 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   if (!view) return { tone: "grey", tag: "Checking…", say: "Checking…", more: "", next: null, primary: null, normal: [] };
   const s = view.status;
   const offered = !!(view.available && view.available.tip && view.available.tip !== view.available.deployed && !(s?.result === "deployed" && s.to_commit === view.available.tip));
-  const rateLimited = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  // Each kind of deploy has its own 10-minute limit: a refused runner press must not grey the server buttons (BOS-1469).
+  const waitOn = !!view.deployWait && Date.parse(view.deployWait.until) > now;
+  const rateLimited = waitOn && view.deployWait?.target !== "runner";
+  const runnerAgain = waitOn && view.deployWait?.target === "runner" ? `Runner update: press Build and update runners again from ${atTime(view.deployWait!.until)}. ` : "";
   const w = wait && wait.on ? wait : null;
   const wrap = maint && maint.on && ((maint as WrapUpStatus).wrapAsked || maint.kind === "wrapup") ? (maint as WrapUpStatus) : null;
   const queueNormal = view.runnerQueue ? [{ id: "cancel-queue" as const, label: "Cancel queued runner update" }] : [];
@@ -158,7 +167,7 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 1. Update failed: the last report was a failure and nothing newer has deployed.
   const failed = !!s && (s.result === "failed" || s.result === "rolled_back" || s.result === "rejected");
   const ignorable = !!s && s.result === "rejected" && (isReplaced(s.message) || s.target === "runner" || rateLimited);
-  if (s && failed && !ignorable) {
+  if (s && failed && !ignorable && !view.active) {
     const what = s.target === "runner" ? "runner update" : s.target === "restart" ? "restart" : "update";
     const earlier = s.target === "runner" ? "the earlier runner image" : "the earlier version";
     const more = [`Why: ${plainReason(s.message)}.`, view.queueCancelled?.why].filter(Boolean).join(" ");
@@ -224,8 +233,16 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
     return { tone: "amber", tag: "Approved, waiting", say: w.origin === "hand" ? "The machine is being made ready for your hand-applied update." : "Your update is approved and waiting for a quiet machine.", more: waitLine(w), next: null, primary: null, normal: [{ id: "cancel-wait", label: waitCancelLabel(w) }] };
 
   // 4. Updating.
-  if (view.pending || s?.result === "running" || (w && w.phase === "sent"))
-    return { tone: "blue", tag: "Updating", say: "The update is going in now. Pages keep working.", more: "This takes about 5 minutes.", next: view.pending ? "A request is waiting for the host (it checks every minute)." : null, primary: null, normal: w && w.phase === "sent" ? [{ id: "cancel-wait", label: waitCancelLabel(w) }] : [] };
+  if (view.active || view.pending || s?.result === "running" || (w && w.phase === "sent")) {
+    // BOS-1469: the waiting/running request comes first; the last real result sits below it as the previous attempt.
+    const a = view.active;
+    const prev = view.previousRun ?? s;
+    const prevLine = a && prev && prev.result !== "running" ? `Previous attempt: ${prev.result.replace(/_/g, " ")}, ${prev.target} ${prev.to_commit.slice(0, 8)}, ${when(prev.ended || prev.started)}. ${prev.message}` : "";
+    const say = a
+      ? `${a.what}, pressed ${when(a.since)}: ${a.phase === "waiting" ? "waiting for the host, it checks every minute." : `running since ${when(a.since)}.`}`
+      : "The update is going in now. Pages keep working.";
+    return { tone: "blue", tag: "Updating", say, more: [a ? "" : "This takes about 5 minutes.", prevLine].filter(Boolean).join(" "), next: !a && view.pending ? "A request is waiting for the host (it checks every minute)." : null, primary: null, normal: w && w.phase === "sent" ? [{ id: "cancel-wait", label: waitCancelLabel(w) }] : [] };
+  }
 
   // 5. In trial.
   const trialOn = !!view.trial && Date.parse(view.trial.endsAt) > now;
@@ -271,11 +288,13 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
   // 8. Up to date.
   const server = s && s.target === "server" && s.result === "deployed" ? `Server updated ${when(s.ended || s.started)}. ` : "";
   const runners = extras.runnersAt ? `Runners updated ${when(extras.runnersAt)}. ` : "";
+  const ri = view.runnerImage;
+  const image = ri?.needed ? `Runner image: ${ri.running ? ri.running.slice(0, 8) : "version not recorded"}; the live server needs ${ri.needed.slice(0, 8)}${ri.running ? (ri.running === ri.needed ? " (match). " : " (a runner update may still be needed). ") : ". "}` : "";
   return {
     tone: "green",
     tag: "Up to date",
     say: "Boss Man is up to date.",
-    more: `${server}${runners}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
+    more: `${server}${runners}${image}${runnerAgain}Last checked for changes ${ago(view.available.checkedAt, now)}.`,
     next: null,
     primary: { id: "check-now", label: "Check for updates now", blue: false },
     normal: queueNormal,
