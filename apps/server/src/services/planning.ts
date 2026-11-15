@@ -8,6 +8,7 @@ import { agents, companies, decisions, engagements, features, keyResults, milest
 import { WorkError } from "./work.js";
 import { ticketBlockerFinished } from "./ticket-links.js";
 import { hiddenWhileRechecked } from "./card-validity.js";
+import { heldReadyTickets } from "./agent-wip.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
 
@@ -157,7 +158,12 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       const links = edges.map((e) => ({ id: e.id, from: (e.ticket ?? e.engagement ?? e.decision)!, to: e.to }));
       const layout = layoutPlan(base, links);
       const nodes: PlanNodeView[] = base.map((n) => ({ ...n, layer: layout.layer[n.id] ?? 0, blocked: layout.blocked.has(n.id), causes: layout.causes[n.id] ?? [], holdingUp: layout.holdingUp[n.id] ?? 0 }));
-      return { nodes, edges: links, columns: layout.columns };
+      // BOS-1489: Ready tickets the merge line or check queue is holding back, for "What's holding work up".
+      const queueHeld = (await heldReadyTickets(db, companyId)).filter((h) => h.scope === "queue");
+      const startHold = queueHeld.length
+        ? { reason: (queueHeld[0]!.ticket.stateNote ?? "Held while the merge line or check queue is long").replace(/\. It starts by itself.*$/, ""), tickets: queueHeld.map((h) => ({ id: h.ticket.id, title: h.ticket.title, link: `#/tickets/${h.ticket.id}` })) }
+        : null;
+      return { nodes, edges: links, columns: layout.columns, startHold };
     },
 
     /** What a ticket waits on and what waits on it. */

@@ -6,7 +6,7 @@ import { and, asc, eq, inArray, isNull, ne, or, sql, type SQL, type SQLWrapper }
 import type { Db } from "../db/client.js";
 import { openBlockers } from "./ticket-links.js";
 import { ticketBlockerOpenSql } from "./blocker-sql.js";
-import { activity, agents, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { activity, agents, companies, decisions, engagements, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 
 /** Default tickets in progress per agent: one being worked, one waiting on its check. */
 export const DEFAULT_AGENT_WIP_LIMIT = 2;
@@ -92,7 +92,37 @@ export async function wasStarted(db: Db, ticketId: string): Promise<boolean> {
 /** The status reason a wake carries when its launch was refused by a WIP limit: such a wake doesn't use up the day's idle-slot allowance (BOS-1180). */
 export const WIP_REFUSED_REASON = "held by the WIP limit";
 
-export type WipHold = { reason: string; limit: number; scope: "agent" | "company" };
+export type WipHold = { reason: string; limit: number; scope: "agent" | "company" | "queue" };
+
+/**
+ * The two counts the start hold reads (BOS-1489): approved merges waiting in the merge line (the Merge queue page's own
+ * figure, `mergeQueue.waitingCount`) and quick checks queued in the check queue. app.ts registers the source at start-up,
+ * so this module needs no second way to count; with none registered, nothing is held.
+ */
+export type StartHoldCounts = (companyId: string) => Promise<{ merges: number; quickChecks: number }>;
+let startHoldCounts: StartHoldCounts | null = null;
+export function setStartHoldCounts(fn: StartHoldCounts | null): void {
+  startHoldCounts = fn;
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * "Held: 31 merges waiting (limit 20)" when the company's merge line is at or over its setting, and the same for queued
+ * quick checks; both are named when both apply. Null when neither setting is on or both counts are under their limits.
+ */
+export async function queueStartHold(db: Db, companyId: string): Promise<WipHold | null> {
+  if (!startHoldCounts) return null;
+  const [c] = await db.select({ merges: companies.holdStartsMergesWaiting, checks: companies.holdStartsQuickChecksQueued }).from(companies).where(eq(companies.id, companyId));
+  if (!c || (c.merges == null && c.checks == null)) return null;
+  const counts = await startHoldCounts(companyId);
+  const parts: string[] = [];
+  let limit = 0;
+  if (c.merges != null && counts.merges >= c.merges) { parts.push(`${plural(counts.merges, "merge", "merges")} waiting (limit ${c.merges})`); limit = c.merges; }
+  if (c.checks != null && counts.quickChecks >= c.checks) { parts.push(`${plural(counts.quickChecks, "quick check", "quick checks")} queued (limit ${c.checks})`); limit ||= c.checks; }
+  if (!parts.length) return null;
+  return { scope: "queue", limit, reason: `Held: ${parts.join("; ")}. It starts by itself when the line is shorter.` };
+}
 
 /**
  * Whether a move of `t` into in_progress is a new start that the limit holds. Only backlog or ready tickets
@@ -117,13 +147,19 @@ export async function agentWipHold(db: Db, t: typeof tickets.$inferSelect): Prom
     if (n >= limits.company) hold = { limit: limits.company, scope: "company", reason: `Waiting: the company is at the limit of ${limits.company} in-progress tickets; starts when one finishes.` };
   }
   if (hold && t.urgent) return { hold: null, urgentOver: true };
+  // The queue hold (BOS-1489) is checked first and named first: a long merge line is why nothing starts, whatever the agent's own room.
+  // An urgent ticket carries on, as it does over a WIP limit; work already started never reaches here (wasStarted above).
+  if (!t.urgent) {
+    const queue = await queueStartHold(db, t.companyId);
+    if (queue) return { hold: queue, urgentOver: false };
+  }
   return { hold, urgentOver: false };
 }
 
 /** Ready tickets whose start a WIP limit has refused (`wip_held_at` set), with the limit that refuses each one now (BOS-1479). */
-export async function heldReadyTickets(db: Db, companyId: string): Promise<{ ticket: typeof tickets.$inferSelect; scope: "agent" | "company" | null }[]> {
+export async function heldReadyTickets(db: Db, companyId: string): Promise<{ ticket: typeof tickets.$inferSelect; scope: WipHold["scope"] | null }[]> {
   const rows = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), sql`${tickets.wipHeldAt} is not null`));
-  const out: { ticket: typeof tickets.$inferSelect; scope: "agent" | "company" | null }[] = [];
+  const out: { ticket: typeof tickets.$inferSelect; scope: WipHold["scope"] | null }[] = [];
   for (const ticket of rows) out.push({ ticket, scope: (await agentWipHold(db, ticket)).hold?.scope ?? null });
   return out;
 }
@@ -137,6 +173,7 @@ export async function wipQueuedNote(db: Db, ticketId: string | null | undefined)
   const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (!t) return "";
   const { hold } = await agentWipHold(db, t);
+  if (hold?.scope === "queue") return ` Queued in Ready, not started. ${hold.reason}`;
   return hold ? ` Queued in Ready: the agent is at its WIP limit (${hold.limit} in-progress ticket${hold.limit === 1 ? "" : "s"}), so this has not started; it starts when one of their tickets finishes.` : "";
 }
 

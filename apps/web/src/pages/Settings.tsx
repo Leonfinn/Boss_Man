@@ -309,7 +309,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <div style={{ display: "contents" }}>{line}</div>
         )}
         <RunLimits />
-        <WipLimits />
+        <WipLimits company={company ?? undefined} onChanged={onChanged} />
         <CheckQueueSetting />
         <EmailSetting />
         <ServerPanel />

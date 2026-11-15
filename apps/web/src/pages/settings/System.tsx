@@ -519,10 +519,58 @@ export function RunLimits() {
 }
 
 /**
+ * Hold new starts while the merge line or the quick-check queue is long (BOS-1489), per company. Empty = off. Saved on its
+ * own, since the two limits above are for every company and these are this company's.
+ */
+function HoldStarts({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+  const act = useAction();
+  const text = (n: number | null | undefined) => (n == null ? "" : String(n));
+  const [edit, setEdit] = useState<{ merges: string; checks: string } | null>(null);
+  const v = edit ?? { merges: text(company.holdStartsMergesWaiting), checks: text(company.holdStartsQuickChecksQueued) };
+  const parse = (s: string) => (s.trim() === "" ? null : Number(s));
+  const [m, q] = [parse(v.merges), parse(v.checks)];
+  const ok = (n: number | null) => n === null || (Number.isInteger(n) && n >= 1 && n <= 1000);
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-merges">Hold new starts while this many merges are waiting (leave empty for off)</label>
+        <input id="hold-merges" type="number" min={1} max={1000} placeholder="Off" value={v.merges} onChange={(e) => setEdit({ ...v, merges: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. While at least this many approved tickets wait in the merge line (the figure on the Merge queue page), a Ready ticket is not started: it shows "Held: 31 merges waiting (limit 20)" and starts by itself when the line is shorter. Work already in progress, reviews, sent-back work, merges, after-merge checks and urgent tickets carry on.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="hold-checks">Hold new starts while this many quick checks are queued (leave empty for off)</label>
+        <input id="hold-checks" type="number" min={1} max={1000} placeholder="Off" value={v.checks} onChange={(e) => setEdit({ ...v, checks: e.target.value })} style={{ width: 100 }} />
+        <p className="muted" style={{ fontSize: 14 }}>Off by default. The same hold, for quick checks waiting in the check queue. If both limits are set, either one holds new starts.</p>
+      </div>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !ok(m) || !ok(q)}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { holdStartsMergesWaiting: m, holdStartsQuickChecksQueued: q } });
+              setEdit(null);
+              onChanged?.();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </>
+  );
+}
+
+/**
  * Tickets in progress per agent (BOS-1029): an agent finishes before it starts more. Only in-progress tickets
  * count (review, blocked and done don't). Empty box = No limit.
  */
-export function WipLimits() {
+export function WipLimits({ company, onChanged }: { company?: Company; onChanged?: () => void } = {}) {
   const view = usePoll((signal) => api<{ agent: number | null; company: number | null; defaultAgent: number }>("/api/wip-limits", { signal }), 30_000, "wip-limits");
   const act = useAction();
   const [edit, setEdit] = useState<{ agent: string; company: string } | null>(null);
@@ -546,6 +594,7 @@ export function WipLimits() {
         <input id="wip-company" type="number" min={1} max={1000} placeholder="No limit" value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 100 }} />
         <p className="muted" style={{ fontSize: 14 }}>Off by default. A ceiling on all in-progress tickets together; new starts wait in Ready the same way.</p>
       </div>
+      {company ? <HoldStarts company={company} onChanged={onChanged} /> : null}
       <div>
         <button
           type="button"

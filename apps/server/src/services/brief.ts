@@ -129,11 +129,15 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const audit = await db.select().from(paAnswers).where(and(eq(paAnswers.companyId, companyId), eq(paAnswers.sampled, true), isNull(paAnswers.verdict))).orderBy(asc(paAnswers.createdAt));
     const hold = await getHold(db);
     // Ready work the company limit is refusing, so agents sitting idle are not a mystery (BOS-1479).
-    const companyRefused = (await heldReadyTickets(db, companyId)).filter((h) => h.scope === "company").length;
+    const heldReady = await heldReadyTickets(db, companyId);
+    const companyRefused = heldReady.filter((h) => h.scope === "company").length;
+    const queueHeld = heldReady.filter((h) => h.scope === "queue");
+    const queueWhy = queueHeld[0] ? queueHeld[0].ticket.stateNote?.replace(/\. It starts by itself.*$/, "") : null;
     body = [
       ...(hold ? [`UPDATE PENDING: Boss Man is waiting for runs to finish so it can update the runners (${hold.reason}, since ${hold.since.slice(0, 16).replace("T", " ")} UTC). No new run starts anywhere until it is done: do not delegate new work or open new tickets for now, finish what is in flight, and leave the rest for after.`, ""] : []),
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
       ...(companyRefused ? [`At company limit: ${companyRefused} Ready ticket${companyRefused === 1 ? "" : "s"} refused. Agents may sit idle until one in-progress ticket finishes or the owner raises the limit in Settings.`] : []),
+      ...(queueHeld.length ? [`New starts held: ${queueHeld.length} Ready ticket${queueHeld.length === 1 ? "" : "s"} wait${queueHeld.length === 1 ? "s" : ""} while the merge line or check queue is long${queueWhy ? ` (${queueWhy.replace(/^Held: /, "")})` : ""}. Finish and merge work in flight; they start by themselves when it is shorter.`] : []),
       ...section("Needs you", capped(needLines, 8)),
       ...section("Merge-line conflicts (warnings, nothing linked)", capped(conflictLines, 6)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),
