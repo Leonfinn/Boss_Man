@@ -5,10 +5,13 @@
 sections: 
   - Agents
   - Dashboard
-  - Recent activity
+  - Needs you Checking…
+  - Needs you …
   - Recent tasks
+  - Right now …
 reads: 
   - /api/companies/:id/dashboard
+  - /api/companies/:id/merge-queue
 
 ## #/agents
 sections: 
@@ -60,10 +63,13 @@ sections:
   - Dashboard
   - Decisions
   - Finish setting up
-  - Recent activity
+  - Needs you Checking…
+  - Needs you …
   - Recent tasks
+  - Right now …
 reads: 
   - /api/companies/:id/dashboard
+  - /api/companies/:id/merge-queue
   - /api/companies/:id/setup-checklist
   - /api/companies/:id/skill-proposals/:id
   - /api/decisions/tally
