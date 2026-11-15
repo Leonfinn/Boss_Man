@@ -13,7 +13,8 @@ chmod 644 secrets/master.key
 touch secrets/runner-app-co.token
 
 export POSTGRES_PASSWORD=ci BOSSMAN_DATA="$data" BOSSMAN_LAUNCHER=1 COMPOSE_PROFILES=launcher BOSSMAN_INSECURE_COOKIES=1
-export BOSSMAN_DOCKER_GID="$(stat -c %g /var/run/docker.sock)" BOSSMAN_HOST_PORT="${BOSSMAN_HOST_PORT:-3100}"
+BOSSMAN_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+export BOSSMAN_DOCKER_GID BOSSMAN_HOST_PORT="${BOSSMAN_HOST_PORT:-3100}"
 runner=boss-man-runner-ci-co
 guard="boss-man-netguard-ci-co"
 network=boss-man_default

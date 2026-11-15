@@ -66,6 +66,75 @@ export type EnqueueResult = { job: CheckJob; reused: "passed" | "live" | null };
 export type Machine = string | null | { workerId: string };
 const isWorker = (m: Machine): m is { workerId: string } => typeof m === "object" && m !== null;
 
+/**
+ * BOS-1602: which kinds of check a machine takes, set by the owner per machine (the company runner in one setting, each
+ * worker on its row). "checks" means pre-review checks (quick, and the rare full one an agent is told to ask for).
+ */
+export const MACHINE_TAKES = ["both", "merge", "checks"] as const;
+export type MachineTakes = (typeof MACHINE_TAKES)[number];
+/** `mergeKept`: with takes "both", how many of the machine's slots only ever run merge checks; the rest take either kind. */
+export type SlotPolicy = { takes: MachineTakes; mergeKept: number };
+/** Nothing set: every slot takes either kind, and the DR-056 / BOS-1264 last-slot rule applies, exactly as before BOS-1602. */
+export const DEFAULT_SLOT_POLICY: SlotPolicy = { takes: "both", mergeKept: 0 };
+export const RUNNER_SLOT_POLICY_KEY = "check_runner_slot_policy";
+export const isDefaultPolicy = (p: SlotPolicy) => p.takes === "both" && p.mergeKept <= 0;
+
+/** How a machine's slots split: kept for merges (or a merges-only machine), checks only, and either kind. */
+export function slotShape(limit: number, p: SlotPolicy): { mergeOnly: number; checkOnly: number; either: number } {
+  if (p.takes === "merge") return { mergeOnly: limit, checkOnly: 0, either: 0 };
+  if (p.takes === "checks") return { mergeOnly: 0, checkOnly: limit, either: 0 };
+  // Clamped here, not only when saved: a worker can report fewer slots than the owner set.
+  const kept = Math.min(Math.max(0, Math.floor(p.mergeKept)), limit);
+  return { mergeOnly: kept, checkOnly: 0, either: limit - kept };
+}
+
+/** Running jobs on one machine: merge checks, pre-review checks, and how many of those are full scope. */
+export type SlotUse = { merge: number; check: number; longCheck: number };
+
+/**
+ * BOS-1602: may this machine start this job now? Merges fill kept slots first, then either slots; pre-review checks use a
+ * checks-only machine or an either slot. Slots have no identity, so a running merge counts as in a kept slot while one is free.
+ *
+ * How this combines with DR-056 / BOS-1264 (a long job may not take the last slot while a quick check waits):
+ *  - default machine (both, none kept): unchanged, the rule applies to its whole limit from two slots up;
+ *  - machine with kept slots: merges already have their own slots, so the rule applies to the either slots and keeps the
+ *    last free one for a waiting quick check even when there is only one (that is the "either" slot's point);
+ *  - checks-only machine: the rule still holds between full and quick pre-review checks;
+ *  - merges-only machine: no quick check can wait for it, so no reserve.
+ * A merge that fixes main is exempt from the reserve, as before. Neither kind starves: a job is refused only when every slot
+ * it may use is busy, or a quick check is waiting for the last free either slot (and quick checks finish in minutes).
+ *
+ * `dedicatedOnly` (the dispatcher's first pass): only kept slots, merges-only and checks-only machines, so a quick check goes
+ * to a checks-only machine before an either slot and a merge to a kept slot before an either slot.
+ */
+export function admits(limit: number, p: SlotPolicy, use: SlotUse, j: Pick<CheckJob, "kind" | "scope" | "fixesMain">, opts: { quickWaits: boolean; dedicatedOnly?: boolean }): boolean {
+  if (use.merge + use.check >= limit) return false;
+  const s = slotShape(limit, p);
+  const long = isLong(j);
+  if (j.kind === "merge") {
+    if (use.merge < s.mergeOnly) return true;
+  } else if (s.checkOnly > 0) {
+    // A checks-only machine: DR-056 between full and quick pre-review checks.
+    return !(long && opts.quickWaits && limit >= 2 && use.longCheck >= limit - 1);
+  }
+  if (opts.dedicatedOnly || s.either === 0) return false;
+  const mergeInEither = Math.max(0, use.merge - s.mergeOnly);
+  if (mergeInEither + use.check >= s.either) return false;
+  if (long && opts.quickWaits && !j.fixesMain && s.either >= (s.mergeOnly > 0 ? 1 : 2) && mergeInEither + use.longCheck >= s.either - 1) return false;
+  return true;
+}
+
+/** Normalise a stored or posted policy; anything unknown reads as the default. */
+export function readPolicy(v: unknown): SlotPolicy {
+  const o = (v && typeof v === "object" ? v : {}) as { takes?: unknown; mergeKept?: unknown };
+  const takes = MACHINE_TAKES.includes(o.takes as MachineTakes) ? (o.takes as MachineTakes) : "both";
+  const kept = Number(o.mergeKept);
+  return { takes, mergeKept: takes === "both" && Number.isInteger(kept) && kept > 0 ? Math.min(kept, MAX_CHECK_SLOTS) : 0 };
+}
+
+/** One machine as the queue view sees it, for "why it waits" (BOS-1602). */
+export type MachineView = { workerId: string | null; limit: number; policy: SlotPolicy };
+
 export function checkQueue(db: Db) {
   async function mode(): Promise<CheckQueueMode> {
     const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, CHECK_QUEUE_MODE_KEY));
@@ -86,6 +155,17 @@ export function checkQueue(db: Db) {
   async function setSlots(n: number): Promise<void> {
     if (!Number.isInteger(n) || n < 1 || n > MAX_CHECK_SLOTS) throw new Error(`Check slots must be a whole number from 1 to ${MAX_CHECK_SLOTS}.`);
     await db.insert(settings).values({ key: CHECK_SLOTS_KEY, value: n }).onConflictDoUpdate({ target: settings.key, set: { value: n } });
+  }
+
+  /** BOS-1602: the company runner's split (one setting for every company's runner, like check_slots). */
+  async function runnerPolicy(): Promise<SlotPolicy> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, RUNNER_SLOT_POLICY_KEY));
+    return readPolicy(row?.value);
+  }
+
+  async function setRunnerPolicy(p: SlotPolicy): Promise<void> {
+    const value = readPolicy(p);
+    await db.insert(settings).values({ key: RUNNER_SLOT_POLICY_KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
   }
 
   /** Jobs still waiting to start, in every company: switching back to legacy cancels them, since nothing would start them. */
@@ -356,49 +436,73 @@ export function checkQueue(db: Db) {
   }
 
   /** Give the free slots (per company: one runner each) to the next jobs, marking them running on this runner. Returns what to start. */
-  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number): Promise<CheckJob[]> {
+  async function claimNext(runnerId: string | null, now = new Date(), companyId?: string, runnerSlots?: number, opts: { dedicatedOnly?: boolean } = {}): Promise<CheckJob[]> {
     // BOS-1471: never more than the runner says it runs at once, or the extra jobs show as running while they wait for its slot lock.
-    return claimOn(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId);
+    return claimOn(runnerId, Math.min(await slots(), runnerSlots ?? Infinity), now, companyId, undefined, { policy: await runnerPolicy(), dedicatedOnly: opts.dedicatedOnly });
   }
+
+  /** Running jobs on one machine by kind (see `admits`). */
+  async function useOn(d: Db, onMachine: ReturnType<typeof and>): Promise<SlotUse> {
+    const [u] = (await d
+      .select({
+        merge: sql<number>`count(*) filter (where ${checkJobs.kind} = 'merge')::int`,
+        check: sql<number>`count(*) filter (where ${checkJobs.kind} <> 'merge')::int`,
+        longCheck: sql<number>`count(*) filter (where ${checkJobs.kind} <> 'merge' and ${checkJobs.scope} = 'full')::int`,
+      })
+      .from(checkJobs)
+      .where(and(eq(checkJobs.state, "running"), onMachine))) as [SlotUse];
+    return u;
+  }
+  const machineCond = (worker: string | null, companyId?: string) => (worker ? eq(checkJobs.workerId, worker) : and(isNull(checkJobs.workerId), companyId ? eq(checkJobs.companyId, companyId) : undefined));
 
   /**
    * BOS-1435: claim for one machine with its own slot limit. A company runner's running jobs are counted per company (worker
    * jobs left out), exactly as before; a check worker's are counted across every company, since its slots are shared.
    */
-  async function claimOn(machine: Machine, limit: number, now = new Date(), companyId?: string, skip?: (jobId: string) => boolean): Promise<CheckJob[]> {
+  async function claimOn(
+    machine: Machine,
+    limit: number,
+    now = new Date(),
+    companyId?: string,
+    skip?: (jobId: string) => boolean,
+    opts: { policy?: SlotPolicy; dedicatedOnly?: boolean } = {},
+  ): Promise<CheckJob[]> {
     // A server update waiting for a quiet machine (BOS-420): running jobs finish, queued ones wait (they don't fail).
     // BOS-1435: this holds workers too; their checks report to this server, which is about to restart.
     if ((await softHold(db, now)).on) return [];
+    const policy = opts.policy ?? DEFAULT_SLOT_POLICY;
     const worker = isWorker(machine) ? machine.workerId : null;
     // BOS-1436: `skip` leaves out jobs this machine couldn't get the code for, so they go elsewhere instead of looping.
     const candidates = (await servable(now, limit >= 2)).filter((j) => (!companyId || j.companyId === companyId) && !skip?.(j.id));
-    const onMachine = worker ? eq(checkJobs.workerId, worker) : and(isNull(checkJobs.workerId), companyId ? eq(checkJobs.companyId, companyId) : undefined);
+    const onMachine = machineCond(worker, companyId);
     // Count and claim under one lock so two concurrent pumps can't both see a free slot.
     return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"check_jobs_claim"}))`);
-    const [{ n }] = (await tx.select({ n: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), onMachine))) as [{ n: number }];
-    const free = limit - n;
-    if (free <= 0) return [];
     // BOS-1264: with two or more slots, merge checks (15 minutes) may not take the last slot while a quick pre-review check
     // (2 to 5 minutes) waits, or a full line of merges keeps every developer waiting 30 to 60 minutes. Merges that fix main are exempt.
     // DR-056: long jobs (merge or full scope) count against the reserve; only a quick-scope job may use the reserved slot.
-    // BOS-1435: the reserve is per machine, with that machine's own limit.
-    const [{ m }] = (await tx.select({ m: sql<number>`count(*)::int` }).from(checkJobs).where(and(eq(checkJobs.state, "running"), or(eq(checkJobs.kind, "merge"), eq(checkJobs.scope, "full")), onMachine))) as [{ m: number }];
-    let longRoom = limit >= 2 && candidates.some((j) => !isLong(j)) ? Math.max(0, limit - 1 - m) : Infinity;
+    // BOS-1435: the reserve is per machine, with that machine's own limit. BOS-1602: `admits` holds both rules, and the
+    // owner's per-machine split (what it takes, slots kept for merges); with nothing set it is the rule above, unchanged.
+    const use = await useOn(tx as unknown as Db, onMachine);
+    if (use.merge + use.check >= limit) return [];
+    const quickWaits = candidates.some((j) => !isLong(j));
     const claimed: CheckJob[] = [];
     for (const j of candidates) {
-      if (claimed.length >= free) break;
-      if (isLong(j)) {
-        if (longRoom <= 0 && !j.fixesMain) continue;
-        longRoom--;
-      }
+      if (use.merge + use.check >= limit) break;
+      if (!admits(limit, policy, use, j, { quickWaits, dedicatedOnly: opts.dedicatedOnly })) continue;
       // Guarded on state so two callers can't both start the same job.
       const [row] = await tx
         .update(checkJobs)
         .set({ state: "running", runnerId: worker ? null : (machine as string | null), workerId: worker, startedAt: now, lastOutputAt: now, reason: null })
         .where(and(eq(checkJobs.id, j.id), eq(checkJobs.state, "queued")))
         .returning();
-      if (row) claimed.push(row);
+      if (!row) continue;
+      claimed.push(row);
+      if (row.kind === "merge") use.merge++;
+      else {
+        use.check++;
+        if (row.scope === "full") use.longCheck++;
+      }
     }
     return claimed;
     });
@@ -531,9 +635,11 @@ export function checkQueue(db: Db) {
    * Every live check of a company for the Merge queue's "Queued checks" tab (BOS-1174): running first, then waiting in
    * serving order, then those a red main holds back. Read-only. `position` counts the waiting ones only.
    */
-  async function list(companyId: string, now = new Date(), capacity?: number) {
+  async function list(companyId: string, now = new Date(), capacity?: number, machines?: MachineView[]) {
     // BOS-1435: with check workers the caller passes the company's whole capacity (runner plus ready workers).
     const limit = capacity ?? (await slots());
+    // BOS-1602: once any machine has a split, a waiting check says which kind of slot it waits for and how busy those are.
+    const waitWhy = machines?.some((m) => !isDefaultPolicy(m.policy)) ? await kindWaits(companyId, machines) : null;
     const prefix = (await db.select({ p: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId)))[0]?.p ?? null;
     const live = await db
       .select({ job: checkJobs, number: tickets.number, title: tickets.title, urgent: tickets.urgent, requester: agents.name, worker: checkWorkers.name })
@@ -578,10 +684,37 @@ export function checkQueue(db: Db) {
     };
     const rows = [
       ...runningJobs.map((r) => row(r.job, null, null)),
-      ...order.map((j, i) => row(j, i + 1, full ? `all ${limit} check ${limit === 1 ? "slot is" : "slots are"} busy` : null)),
+      ...order.map((j, i) => row(j, i + 1, waitWhy ? waitWhy(j) : full ? `all ${limit} check ${limit === 1 ? "slot is" : "slots are"} busy` : null)),
       ...held.map((j) => row(j, null, served.trainHeld.has(j.id) ? `${TRAIN_HELD}, so this merge check waits until the ticket is seated` : "main is red, so this merge check waits until main is fixed")),
     ];
     return { mode: await mode(), slots: limit, running: runningJobs.length, rows };
+  }
+
+  /**
+   * BOS-1602: per kind, how many slots on the given machines can run it and how many of those are busy, as the owner's
+   * reason for a waiting check ("waiting for a merge slot: 2 of 2 busy"). Null while a slot it may use is free.
+   */
+  async function kindWaits(companyId: string, machines: MachineView[]): Promise<(j: CheckJob) => string | null> {
+    const seen = { merge: { busy: 0, slots: 0 }, check: { busy: 0, slots: 0 } };
+    for (const m of machines) {
+      const use = await useOn(db, machineCond(m.workerId, companyId));
+      const s = slotShape(m.limit, m.policy);
+      const total = use.merge + use.check;
+      const forMerge = s.mergeOnly + s.either;
+      const forCheck = s.checkOnly + s.either;
+      seen.merge.slots += forMerge;
+      seen.merge.busy += Math.min(forMerge, total);
+      seen.check.slots += forCheck;
+      // On a machine with kept slots, a check can only use the either slots: those hold every check plus the merges past the kept ones.
+      seen.check.busy += s.checkOnly ? Math.min(forCheck, total) : Math.min(forCheck, use.check + Math.max(0, use.merge - s.mergeOnly));
+    }
+    return (j) => {
+      const merge = j.kind === "merge";
+      const k = merge ? seen.merge : seen.check;
+      const what = merge ? "merge" : "check";
+      if (!k.slots) return merge ? "no machine that takes merge checks is ready" : "no machine that takes pre-review checks is ready";
+      return k.busy >= k.slots ? `waiting for a ${what} slot: ${k.busy} of ${k.slots} busy` : null;
+    };
   }
 
   /** The owner's merge train switch (BOS-1366, DR-059): off unless set to true. */
@@ -596,5 +729,5 @@ export function checkQueue(db: Db) {
 
   const place = (ticketId: string) => mergePlace(db, ticketId);
 
-  return { list, mode, slots, setMode, setSlots, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
+  return { list, mode, slots, setMode, setSlots, runnerPolicy, setRunnerPolicy, train, setTrain, place, liveMergeOrder, queuedIds, enqueue, retarget, moveToFront, moveSeatWaiter, claimNext, claimOn, progress, complete, readLog, logChars, pruneLogs, cancel, markStuck, requeue, requeueRunning, requeueWorker, sweepStuck, setMainState, status };
 }

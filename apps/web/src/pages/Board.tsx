@@ -646,6 +646,12 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
       {merging && t.mergeNote && !mergeLine && <span className="note">{t.mergeNote}</span>}
       {mergeLine && <span className="note" data-testid="board-merge-line">{statusLineText(mergeLine)}</span>}
+      {/* BOS-1565: a held card says what it waits for even before the merge queue's own line has loaded or if it has none. */}
+      {t.reviewStage === "held" && t.hold && !mergeLine && (
+        <span className="note" data-testid="board-held-note">
+          {t.hold.system ? `Approved. Boss Man holds the merge: ${t.hold.label}. It merges by itself afterwards.` : `Approved. ${t.hold.reviewer ?? "A reviewer"} holds the merge: ${t.hold.label}.`}
+        </span>
+      )}
       {t.goLiveNote && (
         <span className="note" data-testid="board-go-live-note">
           {t.goLiveNote.text}{" "}
@@ -776,6 +782,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       { col, tickets: waiting, mine: true },
     ];
   });
+  const heldCount = lanes.find((l) => l.held)?.tickets.length ?? 0;
   const shownTotal = lanes.reduce((n, l) => n + l.tickets.filter(passes).length, 0);
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
@@ -1068,7 +1075,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <h2 id="lane-held">Passed, held</h2>
                       <span className="mono">{shown.length}</span>
                     </div>
-                    <span className="lane-hint">A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends.</span>
+                    <span className="lane-hint">
+                      {tickets.every((t) => t.hold?.system)
+                        ? "Approved, but the merge waits on another ticket to be merged and live. Nothing is wrong: each one merges by itself afterwards."
+                        : "A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends."}
+                    </span>
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
@@ -1098,7 +1109,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     </button>
                   </p>
                 ) : (
-                  shown.length === 0 && <p className="lane-empty">{merging ? "Nothing approved is waiting to merge." : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
+                  shown.length === 0 && <p className="lane-empty">{merging ? (heldCount > 0 ? `Nothing is merging right now. ${heldCount === 1 ? "1 approved task is" : `${heldCount} approved tasks are`} held, waiting: see "Passed, held" next.` : "Nothing approved is waiting to merge.") : (EMPTY_HINT[col.systemState] ?? "No tasks here.")}</p>
                 )}
                 {done ? (
                   <>

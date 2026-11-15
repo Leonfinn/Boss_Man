@@ -180,6 +180,9 @@ done
   if [ -f scripts/scan-added-lines.mjs ]; then
     step "secrets scan" node scripts/scan-added-lines.mjs "$base"
   fi
+  # BOS-1549: two guides in docs/ must not share a number, counting pages main added since this branch left it. Runs on
+  # every branch (it takes well under a second), since a clash can come from main even when the branch touched no doc.
+  step "docs numbers are unique" node scripts/check-doc-numbers.mjs "$base"
   # The same lint check-all runs first; a branch that adds an unnoted Map/Set fails the merge gate otherwise (BOS-460, 492, 516, 702).
   if has '^apps/server/src/|^scripts/check-in-memory-state'; then step "in-memory-state lint" node scripts/check-in-memory-state.mjs apps/server/src; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi

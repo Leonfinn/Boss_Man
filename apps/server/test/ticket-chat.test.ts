@@ -163,12 +163,51 @@ describe("ticket conversation (R65)", () => {
     const client = await c.mcp(c.starts()[0]!.runId);
     // A plain status reply gets no hint.
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "The footer is done. Details: the app and the site now match." } }))).toBe("Posted on the ticket's conversation.");
-    // Asking the owner to do something without a decision on their queue gets the hint.
-    const ask = textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }));
-    expect(ask).toContain("Call raise_decision with blocksTicketId set to this ticket");
-    // Once an open decision blocks this ticket, the reply needs no hint.
+    // Asking the owner to do something without a decision on their queue is held, not posted (BOS-1576; it was only a hint before).
+    const heldAsk = await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } });
+    expect(heldAsk).toMatchObject({ isError: true });
+    expect(textOf(heldAsk)).toContain("call raise_decision with blocksTicketId set to this ticket");
+    expect(textOf(heldAsk)).toContain("ownerSetup");
+    expect(await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).toHaveLength(1);
+    // Once an open decision blocks this ticket, the reply posts.
     await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
     expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("a card about another ticket, or the agent's own card elsewhere, does not cover a reply; ownerSetup and notAnAsk do (BOS-1576)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the header", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const ask = "Please run scripts/deploy.sh on the server, then let me know.";
+    const posted = async () => (await c.db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).length;
+    // The agent has an open card, but on another ticket: it must not cover this reply (it did before).
+    await client.callTool({ name: "raise_decision", arguments: { question: "Apply the header deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: other.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
+    expect(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } })).toMatchObject({ isError: true });
+    expect(await posted()).toBe(0);
+    // notAnAsk posts a status reply that only sounds like an ask.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please don't deploy yet.", notAnAsk: true } }))).toBe("Posted on the ticket's conversation.");
+    // Steps for after go-live in ownerSetup cover it.
+    await c.db.update(tickets).set({ ownerSetup: "Settings → Funding → Add funding source" }).where(eq(tickets.id, t.id));
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: ask } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
+  it("refuses a state note that says the ticket waits on the owner when no card is open, in any state (BOS-1576)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    const refused = await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Waiting on the owner to say keep or drop." } });
+    expect(refused).toMatchObject({ isError: true });
+    expect(textOf(refused)).toContain("raise_decision");
+    // A note that only mentions the owner, or negates the wait, is saved.
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Nothing is waiting on the owner; building the footer." } }))).toContain("is now in_progress");
+    // With a card on the ticket the same note is saved.
+    await client.callTool({ name: "raise_decision", arguments: { question: "Keep or drop the footer fix?", options: ["Keep", "Drop"], recommended: "Keep", blocksTicketId: t.id, triedFirst: "I looked at the cost and it is small, but it is the owner's call." } });
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Waiting on the owner to say keep or drop." } }))).toContain("is now in_progress");
     await client.close();
   });
 

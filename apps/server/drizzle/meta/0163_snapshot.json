@@ -1,5 +1,5 @@
 {
-  "id": "e255767a-9782-453a-a769-d1399a00add6",
+  "id": "ea35efb1-c3f1-4276-a59c-8e29fad55e67",
   "prevId": "f6b346b2-e058-4ff2-bd73-4152495e4207",
   "version": "7",
   "dialect": "postgresql",
@@ -3561,13 +3561,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "priority_one": {
-          "name": "priority_one",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "portal_visible": {
           "name": "portal_visible",
           "type": "boolean",
@@ -4331,163 +4324,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.github_watches": {
-      "name": "github_watches",
-      "schema": "",
-      "columns": {
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "interval_minutes": {
-          "name": "interval_minutes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 60
-        },
-        "watch_issues": {
-          "name": "watch_issues",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "watch_discussions": {
-          "name": "watch_discussions",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "skip_logins": {
-          "name": "skip_logins",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "issues_cursor": {
-          "name": "issues_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "comments_cursor": {
-          "name": "comments_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "discussions_cursor": {
-          "name": "discussions_cursor",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'idle'"
-        },
-        "last_error": {
-          "name": "last_error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failures": {
-          "name": "failures",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "backoff_until": {
-          "name": "backoff_until",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_run_at": {
-          "name": "last_run_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_new_notes": {
-          "name": "last_new_notes",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "github_watches_project_id_projects_id_fk": {
-          "name": "github_watches_project_id_projects_id_fk",
-          "tableFrom": "github_watches",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "github_watches_company_id_companies_id_fk": {
-          "name": "github_watches_company_id_companies_id_fk",
-          "tableFrom": "github_watches",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -10047,6 +9883,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "live_at": {
+          "name": "live_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "live_evidence": {
           "name": "live_evidence",
           "type": "text",
@@ -10255,13 +10097,6 @@
         },
         "urgent": {
           "name": "urgent",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "urgent_by_owner": {
-          "name": "urgent_by_owner",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
@@ -12054,6 +11889,163 @@
           "tableTo": "projects",
           "columnsFrom": [
             "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.github_watches": {
+      "name": "github_watches",
+      "schema": "",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "repo": {
+          "name": "repo",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "interval_minutes": {
+          "name": "interval_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 60
+        },
+        "watch_issues": {
+          "name": "watch_issues",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "watch_discussions": {
+          "name": "watch_discussions",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "skip_logins": {
+          "name": "skip_logins",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "issues_cursor": {
+          "name": "issues_cursor",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "comments_cursor": {
+          "name": "comments_cursor",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "discussions_cursor": {
+          "name": "discussions_cursor",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'idle'"
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failures": {
+          "name": "failures",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "backoff_until": {
+          "name": "backoff_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_run_at": {
+          "name": "last_run_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_new_notes": {
+          "name": "last_new_notes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "github_watches_project_id_projects_id_fk": {
+          "name": "github_watches_project_id_projects_id_fk",
+          "tableFrom": "github_watches",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "github_watches_company_id_companies_id_fk": {
+          "name": "github_watches_company_id_companies_id_fk",
+          "tableFrom": "github_watches",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
           ],
           "columnsTo": [
             "id"

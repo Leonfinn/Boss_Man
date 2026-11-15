@@ -84,7 +84,21 @@ jobs:
           # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
           BOSSMAN_SCRATCH: ${{ runner.temp }}
         run: |
+          # The failing test names are repeated as an error annotation, which anyone can read through the public
+          # check-runs API (the raw job log needs a login). Without it a red run said only "exit code 1" (BOS-1590).
+          set +e
           pnpm --filter @boss-man/web exec vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/web-tests.json"
+          rc=$?
+          set -e
+          if [ "$rc" != 0 ]; then
+            node -e '
+              let r; try { r = require(process.argv[1]); } catch { console.log("::error title=web tests failed::no JSON report was written"); process.exit(0); }
+              const bad = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status === "failed").map((t) => `${f.name.split("/").pop()}: ${t.title}: ${(t.failureMessages[0] || "").split("\n")[0]}`));
+              const lost = r.testResults.filter((f) => f.status === "failed" && !f.assertionResults.length).map((f) => `${f.name.split("/").pop()}: ${(f.message || "").split("\n")[0]}`);
+              console.log(`::error title=web tests failed::${[...bad, ...lost].slice(0, 12).join(" | ").replace(/[\r\n%]/g, " ").slice(0, 1500)}`);
+            ' "$RUNNER_TEMP/web-tests.json"
+            exit "$rc"
+          fi
           node -e '
             const r = require(process.argv[1]);
             const skipped = r.testResults.flatMap((f) => f.assertionResults.filter((t) => t.status !== "passed" && t.status !== "failed").map((t) => `${f.name}: ${t.fullName}`));
@@ -354,7 +368,13 @@ jobs:
               pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" != 0 ]; then
-            echo "::error title=check worker image typecheck/tests failed::$(grep -E 'FAIL|Error|error TS|✗|×' "$RUNNER_TEMP/worker-check.log" | head -15 | tr '\n' '|' | cut -c1-1500)"
+            # Colour codes stripped first: they ate most of the 1500 characters and hid the error text itself (BOS-1595).
+            # First the error blocks (the line and the 6 after it, for the first 4 matches), then the failed test names.
+            clean="$RUNNER_TEMP/worker-check.clean.log"
+            sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/worker-check.log" > "$clean"
+            # GitHub workflow-command escaping: % becomes %25 (first) and a carriage return %0D; newlines already became '|'.
+            echo "::error title=check worker image: first errors::$(grep -E -m4 -A6 'FAIL|Error|error TS' "$clean" | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            echo "::error title=check worker image: failed tests::$(grep -E '✗|×' "$clean" | head -40 | tr '\n' '|' | cut -c1-3000 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
           fi
           exit "$rc"
 

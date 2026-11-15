@@ -390,6 +390,8 @@ export function QueuedChecks({ data }: { data: CheckQueueData }) {
                 {r.requestedBy ? `, requested by ${r.requestedBy}` : ""}.
                 {/* BOS-1435: only a check on a check worker says where; the company runner is the usual place. */}
                 {r.ranOn && r.ranOn !== "company runner" ? <span data-check-ran-on="worker"> Running on the check worker {r.ranOn}.</span> : null}
+                {/* BOS-1602: why a waiting check waits, e.g. "waiting for a merge slot: 2 of 2 busy". */}
+                {r.state === "waiting" && r.heldBy ? <span className="muted" data-check-wait-why=""> {upFirst(r.heldBy)}.</span> : null}
               </p>
             </article>
           ))}

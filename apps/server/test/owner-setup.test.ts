@@ -74,7 +74,8 @@ describe("a ticket carries the owner's setup steps (DR-011)", () => {
     expect((await row(t.id)).ownerSetup).toBeNull();
     // Another move can carry the steps; the field is theirs to write.
     await ctx.db.update(tickets).set({ systemState: "in_progress" }).where(eq(tickets.id, t.id));
-    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it.", ownerSetup: "Settings → Funding → Add funding source\nSign in to the second plan" } }));
+    // Steps for the owner bring the usability gate (BOS-1571), which the author reports like any criterion.
+    textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Built it. 1 pass: one-time setup, nothing to repeat.", ownerSetup: "Settings → Funding → Add funding source\nSign in to the second plan" } }));
     expect((await row(t.id)).ownerSetup).toBe("Settings → Funding → Add funding source\nSign in to the second plan");
   });
 
