@@ -16,9 +16,9 @@ import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
-import { allMergeOrder, liveServerCommit, serverContains } from "./go-live-wait.js";
+import { allMergeOrder, commitIsLive, liveServerCommit, serverContains } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
-import { imageContains, mergeCommitOrder, runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
+import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -464,7 +464,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const runnerTickets = target === "runner" ? (await runnerOnlyTickets(db, companyId, commit)).map((t) => ({ ticketId: t.ticketId, title: t.title })) : [];
     // The button still raises its card when the runners already have the commit (the owner may know of a runner fault), but says so.
     const image = target === "runner" && requested ? await runnerImageCommit(db, companyId) : null;
-    const alreadyRun = image && imageContains(image, commit, await mergeCommitOrder(db, companyId)) ? `The runners already run ${short(image)}, which includes this. Nothing to do.\n\n` : "";
+    const alreadyRun = image && (await commitIsLive(db, companyId, commit, "runner")) ? `The runners already run ${short(image)}, which includes this. Nothing to do.\n\n` : "";
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
     // Merge commits only repeat the ticket's title; the commits under them say what changed.
     const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
@@ -790,9 +790,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   async function imageHas(commit: string | null | undefined) {
     const companyId = await homeCompany();
     if (!companyId || !commit) return false;
-    const image = await runnerImageCommit(db, companyId);
-    if (!image) return false;
-    return imageContains(image, commit, await mergeCommitOrder(db, companyId));
+    return commitIsLive(db, companyId, commit, "runner");
   }
 
   /**
@@ -808,12 +806,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const companyId = await homeCompany();
     const image = companyId ? await runnerImageCommit(db, companyId) : null;
     if (!companyId || !image) return;
-    const order = await mergeCommitOrder(db, companyId);
     for (const o of open) {
       const c = o.context as SelfDeployContext;
       // A rebuild the owner asked for with the button (its key carries a random suffix) is never closed under them.
       if (c.requested || /^self-deploy:runner:[0-9a-f]+:[0-9a-f]{6}$/.test(o.dedupeKey ?? "")) continue;
-      if (!c.commit || !imageContains(image, c.commit, order)) continue;
+      if (!c.commit || !(await commitIsLive(db, companyId, c.commit, "runner"))) continue;
       const now = new Date();
       const withdrawal = { by: "system" as const, note: `The runners were already rebuilt from commit ${short(image)}, which has this change, so there is nothing left to build. You don't need to do anything.`, at: now.toISOString() };
       // The shared withdraw path (BOS-788): it frees the key, marks the notification read and, for a card the owner had
@@ -823,7 +820,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await record(db, { companyId: o.companyId, kind: "decision_withdrawn", summary: withdrawal.note, at: now });
       deps.log?.(`self-deploy: runner update card for ${short(c.commit)} closed; the runner image is built from ${short(image)}`);
     }
-    if (due?.needs && !due.pressed && imageContains(image, due.needs, order)) await putSetting(RUNNER_DUE, null);
+    if (due?.needs && !due.pressed && (await commitIsLive(db, companyId, due.needs, "runner"))) await putSetting(RUNNER_DUE, null);
   }
   const DEFAULT_SOAK_SECONDS = 900;
   type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };

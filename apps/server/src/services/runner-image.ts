@@ -5,9 +5,10 @@
 // change goes live. The server has no git, so "contains" is read from merge order, the same way DR-011 places a
 // ticket: the merge gate merges one ticket at a time, so a commit that merged at or before the image's commit is
 // inside it. A commit Boss Man can't place is never assumed to be inside the image.
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { runners, tickets } from "../db/schema.js";
+import { allMergeOrder, commitIsLive, serverContains } from "./go-live-wait.js";
 
 const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
 
@@ -15,20 +16,6 @@ const isSha = (sha: unknown): sha is string => typeof sha === "string" && /^[0-9
 export async function runnerImageCommit(db: Db, companyId: string): Promise<string | null> {
   const [row] = await db.select({ commit: runners.imageCommit }).from(runners).where(eq(runners.companyId, companyId));
   return isSha(row?.commit) ? row.commit.toLowerCase() : null;
-}
-
-/**
- * This company's merge commits, oldest merge first (the merge gate merges one at a time, so this is merge order).
- * Ordered by stateChangedAt, which is set when the ticket moves to done and not by later notes or touches;
- * lastActivityAt keeps moving on a done ticket and would reorder merges. Release-log shares this helper.
- */
-export async function mergeCommitOrder(db: Db, companyId: string): Promise<string[]> {
-  const rows = await db
-    .select({ mergeCommit: tickets.mergeCommit })
-    .from(tickets)
-    .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done")))
-    .orderBy(asc(tickets.stateChangedAt));
-  return [...new Set(rows.map((r) => r.mergeCommit?.toLowerCase()).filter((c): c is string => !!c))];
 }
 
 /**
@@ -77,16 +64,14 @@ export async function runnerOnlyTickets(db: Db, companyId: string, liveCommit: s
     return steps.length > 0 && steps.every(isRunnerOnlyStep);
   });
   if (!only.length) return [];
-  const [image, order] = [await runnerImageCommit(db, companyId), await mergeCommitOrder(db, companyId)];
+  const order = await allMergeOrder(db, companyId);
   const live = liveCommit.toLowerCase();
-  const liveAt = order.indexOf(live);
-  return only
-    .filter((t) => {
-      const merge = t.mergeCommit!.toLowerCase();
-      const at = order.indexOf(merge);
-      const isLive = merge === live || (at >= 0 && liveAt >= 0 && at <= liveAt);
-      return isLive && !imageContains(image, merge, order);
-    })
+  const lacking: typeof only = [];
+  for (const t of only) {
+    // The live side is the commit being asked about (a deploy not yet recorded); the runner side is the one answer.
+    if (serverContains(live, t.mergeCommit!, order) && !(await commitIsLive(db, companyId, t.mergeCommit, "runner"))) lacking.push(t);
+  }
+  return lacking
     .sort((a, b) => order.indexOf(a.mergeCommit!.toLowerCase()) - order.indexOf(b.mergeCommit!.toLowerCase()))
     .map((t) => ({ ticketId: t.id, title: t.title, mergeCommit: t.mergeCommit!.toLowerCase() }));
 }

@@ -162,7 +162,7 @@ reads:
 ## #/scrum-master
 sections: 
   - Open now…
-  - Scrum Master
+  - Scrum Master log
 reads: 
   - /api/companies/:id/watchdog
   - /api/companies/:id/watchdog/actions
@@ -377,7 +377,7 @@ sections:
   - Latest retro
   - Roles
   - Sizes
-  - Workflow
+  - Workflow report
 reads: 
   - /api/companies/:id/retros/latest
   - /api/companies/:id/workflow

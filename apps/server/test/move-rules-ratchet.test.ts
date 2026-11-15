@@ -57,6 +57,19 @@ describe("move rules ratchet: Q2a is this ticket held in Blocked (BOS-1532)", ()
   });
 });
 
+describe("move rules ratchet: Q5 is this change live", () => {
+  it("there is one merge order (allMergeOrder) and callers ask commitIsLive: no done-only mergeCommitOrder, no raw imageContains outside the go-live and runner-image modules", () => {
+    const offenders: string[] = [];
+    for (const f of files(SRC)) {
+      const rel = relative(SRC, f).split("\\").join("/");
+      const text = readFileSync(f, "utf8");
+      if (/mergeCommitOrder/.test(text)) offenders.push(`${rel}: mergeCommitOrder`);
+      if (!["services/go-live-wait.ts", "services/runner-image.ts"].includes(rel) && /\bimageContains\(/.test(text)) offenders.push(`${rel}: imageContains`);
+    }
+    expect(offenders, "ask commitIsLive(db, companyId, commit, side) in services/go-live-wait.ts").toEqual([]);
+  });
+});
+
 describe("move rules ratchet: Q1 has this blocker finished", () => {
   const found = new Map<string, { joins: number; canonical: boolean }>();
   for (const f of files(SRC)) {

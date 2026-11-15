@@ -14,6 +14,9 @@ const DEFAULTS: ReviewPolicy = {
 };
 
 const cap = (r: string) => r[0]!.toUpperCase() + r.slice(1);
+/** Each review kind's column name in plain words, and a line of help where the name alone doesn't say it (BOS-1494). */
+const KIND_LABEL: Record<ReviewKindName, string> = { security: "Security review", infra: "Infrastructure review", adversarial: "Adversarial review" };
+const KIND_HELP: Partial<Record<ReviewKindName, string>> = { adversarial: "a reviewer told to try to break it" };
 const SEVERAL = "__several";
 
 /**
@@ -86,7 +89,15 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
           <th>Plan approved by</th>
           <th>Code reviewed by</th>
           {REVIEW_KINDS.map((k) => (
-            <th key={k}>{cap(k)} review</th>
+            <th key={k}>
+              <span>{KIND_LABEL[k]}</span>
+              {KIND_HELP[k] && (
+                <>
+                  <br />
+                  <small className="muted" style={{ fontWeight: "normal" }}>{KIND_HELP[k]}</small>
+                </>
+              )}
+            </th>
           ))}
           <th>You sign off</th>
         </tr>
@@ -107,7 +118,7 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
             </td>
             {REVIEW_KINDS.map((k) => (
               <td key={k}>
-                <ReviewerCell label={`${cap(tier)}: ${k} review by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k]} onChange={(v) => setKind(tier, k, v)} team={team} off />
+                <ReviewerCell label={`${cap(tier)}: ${KIND_LABEL[k].toLowerCase()} by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k]} onChange={(v) => setKind(tier, k, v)} team={team} off />
               </td>
             ))}
             <td>
