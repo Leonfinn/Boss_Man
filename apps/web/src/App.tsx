@@ -311,6 +311,18 @@ function Signed({ onLogout }: { onLogout: () => void }) {
     `decisions-tally-${current?.id}`,
   );
   useEffect(() => decisionsTally.reload(), [current?.id]);
+  // (BOS-1485) The company switcher's figure for every company: the same tally call, once per company.
+  const companyIds = (companies.data ?? []).map((c) => c.id);
+  const companyTallies = usePoll(
+    async (signal) => {
+      const rows = await Promise.all(companyIds.map((id) => api<DecisionTally>(`/api/decisions/tally?companyId=${id}`, { signal }).catch(() => null)));
+      const out: Record<string, DecisionTally> = {};
+      companyIds.forEach((id, i) => { const t = rows[i]; if (t) out[id] = t; });
+      return out;
+    },
+    10_000,
+    `decisions-tally-all-${companyIds.join(",")}`,
+  );
   const pick = (id: string) => {
     remember(id, setChosen);
     if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
@@ -349,6 +361,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         decisionsTally={decisionsTally.data}
+        companyTallies={companyTallies.data ?? undefined}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         mergeWaiting={mergeQueue.data?.waitingCount ?? 0}
