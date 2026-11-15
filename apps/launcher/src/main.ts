@@ -2,7 +2,7 @@
 //   BOSSMAN_DATA           host folder for company data, mounted at the same path here
 //   BOSSMAN_RUNNER_NETWORK the compose network runners join (default boss-man_default)
 //   BOSSMAN_RUNNER_URL     where runners reach the server (default ws://server:3100/api/runner/connect)
-//   BOSSMAN_RUNNER_MEMORY  optional upper bound on a runner's memory, e.g. 8g. Normally unset: "Agents at once" and "Checks at once" in Settings size it (BOS-993, BOS-1498)
+//   BOSSMAN_RUNNER_MEMORY  optional runner memory, e.g. 8g: an upper bound until the server sends Agents at once, then the size itself. Normally unset: "Agents at once" and "Checks at once" in Settings size it (BOS-993, BOS-1498)
 //   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_RUNNER_CPU_SHARES  CPU weight per runner against 1024 for the server and database (default 512)
 //   BOSSMAN_CHECK_SLOTS         optional upper bound on the full checks a runner may run at once. Normally unset: "Checks at once" in Settings decides (BOS-993)

@@ -176,8 +176,9 @@ const gb = (b: number) => `${Math.round((b / GIB) * 10) / 10} GB`;
 const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
 
 /**
- * The runner's check slots and memory (BOS-993, BOS-1498). The settings drive both; .env values are upper bounds and the host's
- * memory limits what fits. With no setting pushed yet the .env values apply as before.
+ * The runner's check slots and memory (BOS-993, BOS-1498). The settings drive both and the host's memory limits what fits.
+ * BOSSMAN_CHECK_SLOTS is an upper bound; BOSSMAN_RUNNER_MEMORY is an upper bound on the old path and the size itself once the
+ * agents number is known. With no setting pushed yet the .env values apply as before.
  *
  * Memory = 2 GB + 1 GB per agent at once + 3 GB per check. Until the server sends the agents number, the old 13 GB base stands in.
  * `kept` (recorded by the launcher when the agents number first arrives and runners already exist) keeps those runners' memory
@@ -191,30 +192,38 @@ export function planChecks(cfg: LauncherConfig): ChecksPlan {
   }
   const want = cfg.requestedSlots;
   const agents = cfg.requestedAgents;
-  const base = agents === undefined ? RUNNER_BASE_BYTES : RUNNER_AGENT_BASE_BYTES + RUNNER_PER_AGENT_BYTES * agents;
-  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, RUNNER_MIN_BYTES) : Infinity;
-  const ceiling = Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
+  const sized = agents !== undefined;
+  const base = sized ? RUNNER_AGENT_BASE_BYTES + RUNNER_PER_AGENT_BYTES * agents : RUNNER_BASE_BYTES;
+  // Before the agents number (the old path, unchanged): never below 4 GB, and .env is only an upper bound.
+  // With it (BOS-1498, the CEO's rules): a size the owner wrote in .env is used as it is, and on a small machine the host's limit
+  // wins over the 4 GB floor, so the runner never takes the memory the server needs; the line then says it is under 4 GB.
+  // The 1 GB floor only stops a nonsense limit on a host under 3 GB.
+  const hostCeiling = cfg.hostMemoryBytes ? Math.max(cfg.hostMemoryBytes - HOST_RESERVE_BYTES, sized ? GIB : RUNNER_MIN_BYTES) : Infinity;
+  const envWins = sized && cfg.envMemoryCap !== undefined;
+  const ceiling = envWins ? cfg.envMemoryCap! : sized ? hostCeiling : Math.max(Math.min(cfg.envMemoryCap ?? Infinity, hostCeiling), RUNNER_MIN_BYTES);
   const fits = Number.isFinite(ceiling) ? Math.max(1, Math.floor((ceiling - base) / RUNNER_PER_SLOT_BYTES)) : Infinity;
   const slots = Math.min(want, cfg.envSlotsCap ?? Infinity, fits);
   const need = base + RUNNER_PER_SLOT_BYTES * slots;
-  const kept = agents !== undefined && cfg.kept && want >= cfg.kept.slots && agents >= cfg.kept.agents ? cfg.kept.bytes : 0;
+  const kept = sized && cfg.kept && want >= cfg.kept.slots && agents >= cfg.kept.agents ? cfg.kept.bytes : 0;
   const target = Math.max(need, kept);
-  const memoryBytes = Math.min(target, ceiling);
-  const what = agents === undefined ? `the earlier fixed size for ${n(slots, "check", "checks")} at once (13 GB plus 3 GB a check)` : `${n(agents, "agent", "agents")} at once and ${n(slots, "check", "checks")}`;
+  const memoryBytes = envWins ? cfg.envMemoryCap! : Math.min(target, ceiling);
+  const what = sized ? `${n(agents, "agent", "agents")} at once and ${n(slots, "check", "checks")}` : `the earlier fixed size for ${n(slots, "check", "checks")} at once (13 GB plus 3 GB a check)`;
   const machine = cfg.hostMemoryBytes ? `this ${gb(cfg.hostMemoryBytes)} machine` : "this machine";
   let why: string;
-  if (memoryBytes < target)
+  if (envWins) why = `${gb(memoryBytes)}: set by BOSSMAN_RUNNER_MEMORY in the host's .env (${what} would need ${gb(target)}).`;
+  else if (memoryBytes < target)
     why =
       cfg.envMemoryCap !== undefined && cfg.envMemoryCap <= hostCeiling
         ? `${gb(memoryBytes)}: ${what} would need ${gb(target)}, but BOSSMAN_RUNNER_MEMORY in the host's .env caps it.`
-        : `${gb(memoryBytes)}: ${what} would need ${gb(target)}; ${machine} keeps ${gb(HOST_RESERVE_BYTES)} for the server and database.`;
+        : `${gb(memoryBytes)}: ${what} would need ${gb(target)}; ${machine} keeps ${gb(HOST_RESERVE_BYTES)} for the server and database.` +
+          (memoryBytes < RUNNER_MIN_BYTES ? ` That is under the ${gb(RUNNER_MIN_BYTES)} a runner should have, so expect slow or failed runs: lower Agents at once or use a bigger machine.` : "");
   else if (kept > need) why = `${gb(memoryBytes)}: kept from before (${what} need ${gb(need)}). Lower Agents at once or Checks at once to use the smaller size.`;
-  else if (agents === undefined) why = `${gb(memoryBytes)}: ${what}, until Boss Man sends your Agents at once.`;
+  else if (!sized) why = `${gb(memoryBytes)}: ${what}, until Boss Man sends your Agents at once.`;
   else why = `${gb(memoryBytes)}: ${what}${cfg.hostMemoryBytes ? `, on a ${gb(cfg.hostMemoryBytes)} machine` : ""}.`;
   let reason: string | null = null;
   if (slots < want) {
     if (cfg.envSlotsCap !== undefined && slots === cfg.envSlotsCap) reason = `The host's .env caps it at ${slots} (BOSSMAN_CHECK_SLOTS).`;
-    else if (cfg.envMemoryCap !== undefined && slots === fits && cfg.envMemoryCap <= hostCeiling) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
+    else if (cfg.envMemoryCap !== undefined && slots === fits && (envWins || cfg.envMemoryCap <= hostCeiling)) reason = `The host's .env caps runner memory at ${gb(cfg.envMemoryCap)} (BOSSMAN_RUNNER_MEMORY), which fits ${slots}.`;
     else reason = `Not enough free memory for ${want}: this host has ${cfg.hostMemoryBytes ? gb(cfg.hostMemoryBytes) : "too little"}, which fits ${slots}.`;
   }
   return { requested: want, slots, memoryBytes, reason, agents: agents ?? null, why };

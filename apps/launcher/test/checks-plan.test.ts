@@ -17,13 +17,34 @@ describe("planChecks from Agents at once (BOS-1498)", () => {
     const p = planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, hostMemoryBytes: 8 * GIB });
     expect(p).toMatchObject({ slots: 1, memoryBytes: 6 * GIB, reason: null });
     expect(p.why).toBe("6 GB: 6 agents at once and 1 check would need 11 GB; this 8 GB machine keeps 2 GB for the server and database.");
-    // Never below 4 GB, even on a tiny host.
-    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 2, hostMemoryBytes: 4 * GIB })).toMatchObject({ memoryBytes: 4 * GIB });
   });
-  it("names the .env line when that is what caps it", () => {
-    const p = planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, envMemoryCap: 8 * GIB, hostMemoryBytes: 64 * GIB });
-    expect(p.memoryBytes).toBe(8 * GIB);
-    expect(p.why).toMatch(/^8 GB: 6 agents at once and 1 check would need 11 GB, but BOSSMAN_RUNNER_MEMORY in the host's \.env caps it\.$/);
+  it("on a small machine the machine's limit wins over the 4 GB floor, and the line says so", () => {
+    const p = planChecks({ ...base, requestedSlots: 1, requestedAgents: 2, hostMemoryBytes: 5 * GIB });
+    expect(p).toMatchObject({ slots: 1, memoryBytes: 3 * GIB });
+    expect(p.why).toBe(
+      "3 GB: 2 agents at once and 1 check would need 7 GB; this 5 GB machine keeps 2 GB for the server and database. That is under the 4 GB a runner should have, so expect slow or failed runs: lower Agents at once or use a bigger machine.",
+    );
+    // A host under 3 GB still gets a usable number, never zero or less.
+    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 0, hostMemoryBytes: 2 * GIB }).memoryBytes).toBe(GIB);
+  });
+  it("uses a size the owner set in .env as it is, above or below the formula", () => {
+    const low = planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, envMemoryCap: 8 * GIB, hostMemoryBytes: 64 * GIB });
+    expect(low.memoryBytes).toBe(8 * GIB);
+    expect(low.why).toBe("8 GB: set by BOSSMAN_RUNNER_MEMORY in the host's .env (6 agents at once and 1 check would need 11 GB).");
+    // Above the formula and above the machine's limit: still the owner's number.
+    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 2, envMemoryCap: 20 * GIB, hostMemoryBytes: 16 * GIB }).memoryBytes).toBe(20 * GIB);
+    // It also wins over a kept size.
+    expect(planChecks({ ...base, requestedSlots: 1, requestedAgents: 6, envMemoryCap: 12 * GIB, kept: { bytes: 16 * GIB, slots: 1, agents: 6 } }).memoryBytes).toBe(12 * GIB);
+    // The slots still fit inside it, with the .env named as the reason.
+    expect(planChecks({ ...base, requestedSlots: 4, requestedAgents: 2, envMemoryCap: 10 * GIB })).toMatchObject({ slots: 2, reason: "The host's .env caps runner memory at 10 GB (BOSSMAN_RUNNER_MEMORY), which fits 2." });
+  });
+  it("our own install (16 GB runners today) gets no less after the upgrade, at its settings or higher ones", () => {
+    // What the launcher records on the first push when runners exist (launcher.test.ts covers the recording): the runners' 16 GB.
+    const kept = { bytes: 16 * GIB, slots: 1, agents: 6 };
+    const ours = (slots: number, agents: number) => planChecks({ ...base, requestedSlots: slots, requestedAgents: agents, kept, hostMemoryBytes: 64 * GIB }).memoryBytes;
+    const before = planChecks({ ...base, requestedSlots: 1, hostMemoryBytes: 64 * GIB }).memoryBytes; // the old formula
+    expect(before).toBe(16 * GIB);
+    for (const [s, a] of [[1, 6], [1, 7], [2, 6], [3, 12], [4, 20]] as const) expect(ours(s, a), `${s} checks, ${a} agents`).toBeGreaterThanOrEqual(before);
   });
   it("fits slots around the agents' share, not the old 13 GB", () => {
     // 24 GB host: 22 GB for the runner, 2 + 4 = 6 GB for the agents, so 5 checks fit (6 + 15 = 21).
