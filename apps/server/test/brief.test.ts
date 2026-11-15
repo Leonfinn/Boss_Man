@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, runners, runs, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, agents, checkWorkers, decisions, runners, runs, ticketDependencies, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { record } from "../src/services/activity.js";
 import { buildBrief } from "../src/services/brief.js";
@@ -354,5 +354,22 @@ describe("whats_new and the owner's page", () => {
     expect(markdown).not.toContain("<untrusted");
     expect((await ctx.req("GET", `/api/companies/${randomUUID()}/brief`)).statusCode).toBe(404);
     expect((await ctx.req("GET", `/api/companies/${cid()}/wiki`)).json()).toEqual([]);
+  });
+});
+
+describe("owner-facing text the record contradicts (BOS-1596)", () => {
+  it("holds a ticket reply, a notification and a card that call a never-connected worker installed, and posts the same text once one has connected", async () => {
+    const a = await ctx.ticket("A");
+    const [run] = await liveRun(ctx.dev.id, a.id).returning();
+    const c = await agent(ctx.dev.id, run!.id);
+    const claim = "Your existing check worker is set up but idle.";
+    const reply = await c.callTool({ name: "ticket_reply", arguments: { ticketId: a.id, text: claim } });
+    expect(textOf(reply)).toMatch(/Not sent[\s\S]*0 ever connected/);
+    expect(textOf(await c.callTool({ name: "notify_owner", arguments: { level: "note", title: "Worker", body: claim } }))).toMatch(/Not sent/);
+    const card = await c.callTool({ name: "raise_decision", arguments: { question: claim, options: ["Redo it", "Leave it"], recommended: "Leave it", triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
+    expect(textOf(card)).toMatch(/Not sent/);
+    await ctx.db.insert(checkWorkers).values({ name: "box", tokenHash: randomUUID(), lastSeenAt: new Date() });
+    expect(textOf(await c.callTool({ name: "notify_owner", arguments: { level: "note", title: "Worker", body: claim } }))).toMatch(/Sent as/);
+    await c.close();
   });
 });

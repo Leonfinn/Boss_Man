@@ -19,6 +19,11 @@ import { MAX_CHECK_SLOTS } from "./check-queue.js";
 
 type Tc = { fingerprint: string; tools: Record<string, string> };
 
+/** Ids of workers with an open socket on this process, for the owner's-setup record (BOS-1596); mirrors each service's `connected` map. */
+// shortcut: this process only (the leader holds the sockets); lost on restart, harmless because a worker redials.
+const liveWorkerIds = new Set<string>();
+export const onlineWorkerCount = () => liveWorkerIds.size;
+
 export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
 /** The feature a worker announces once it can fetch a job's code itself (BOS-1436). Until then it never gets a job. */
@@ -168,11 +173,13 @@ export function checkWorkersService(db: Db) {
       // Its jobs are re-synced by the newer machine's hello; if it redials, each hello cancels the other's leftovers.
       const prev = connected.get(id);
       connected.set(id, entry);
+      liveWorkerIds.add(id);
       if (prev) prev.close(WORKER_REPLACED_CLOSE, "replaced by a newer connection");
       features.set(id, feats);
       return () => {
         if (connected.get(id) === entry) {
           connected.delete(id);
+          liveWorkerIds.delete(id);
           features.delete(id);
         }
       };
