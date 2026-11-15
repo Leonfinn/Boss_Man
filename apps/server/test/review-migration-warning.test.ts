@@ -88,7 +88,8 @@ describe("review-time migration warning (BOS-689)", () => {
     const c = (ctx = await setup("main"));
     const text = await c.move();
     expect(text).toContain("is now review");
-    expect(text).toMatch(/Rename it to 0114/);
+    expect(text).toMatch(/gate renumbers it \(to 0114 or later\).*don't rename it by hand/);
+    expect(text).not.toMatch(/Rename it/);
     expect(text).toContain("already taken on the default branch");
   });
 

@@ -1983,17 +1983,8 @@ export function reviewService(
         if (!v.ok) return checkFailed(named(command), v);
       }
 
-      // Its migrations must not take a number another branch already has (BOS-219): the merge is the
-      // moment it matters, so this is checked again here and, when taken, the ticket goes back with
-      // the number free right now. A check that can't say never blocks the merge.
-      const migrations = await this.migrations(ticketId, undefined, false).catch(() => null);
-      if (migrations?.needed) {
-        const delivered = await sendBack(
-          `The review was approved, but a migration number is already taken: ${migrations.why.join("; ")}. Another branch merged a migration with the same number, so this can't land as it is. Rename it to ${String(migrations.next).padStart(4, "0")} (and any others it moved), set its journal entry's \`when\` later than the newest one already on ${defaultBranch}, run \`node scripts/lint-migrations.mjs\` (which now catches this), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${migrations.others.length ? `\nOther numbers taken: ${migrations.others.join("; ")}.` : ""}`,
-          "migration number taken",
-        );
-        return { outcome: "verify_failed", delivered, detail: migrations };
-      }
+      // BOS-1540: no migration-number send-back here. The runner's merge renumbers a clashing branch itself
+      // (BOS-690) and records migration_renamed; a clash it refuses comes back below as conflicts or migration_journal.
 
       // A pull request: the host must be known and reachable before anything is pushed (R59).
       const pr = landing === "pull_request" ? await prTarget(t.companyId, repoUrl, gitHost, gitApiBase) : null;
@@ -2140,7 +2131,8 @@ export function reviewService(
        * members ahead, checked, and landed only as the head, with finish's expectBase = the base it was prepared on. The runner
        * refuses any other push, so a wrong train costs checks, never main. Notes on the rules:
        * - a stacked prepare that isn't clean (a clash with a member ahead that may never land) is not sent back: the ticket
-       *   re-joins as head only and gets the real answer on main alone;
+       *   re-joins as head only and gets the real answer on main alone, unless it already clashes with main alone (asked at
+       *   once, BOS-1518), which sends it back without waiting;
        * - a failed check counts only once every member ahead has passed (attribution); a stale member restacks instead, uncharged;
        * - a failure that stands runs once more on the same tree (a flaky test then costs one check, no restarts behind);
        *   killed, timed-out or unanswered checks keep today's handling;
@@ -2220,7 +2212,12 @@ export function reviewService(
               badBase = null;
               if (prep.status !== "prepared") {
                 if (b.base && prep.status !== "uncommitted") {
-                  // Not clean on the tickets ahead: maybe theirs, not this ticket's. Its own answer comes on main alone.
+                  // Not clean on the tickets ahead: maybe theirs, not this ticket's. BOS-1518: ask main alone now (a merge-tree,
+                  // no check job, the same call the head makes). A clash with main itself is the real answer, so it goes back at
+                  // once instead of holding the line until the train drains; only a clash with the tickets ahead waits as head
+                  // only. main_moved isn't an answer, so that case waits too (fails safe).
+                  const alone = await prepare();
+                  if (alone.status !== "prepared" && alone.status !== "main_moved") return alone;
                   train.leave(ticketId);
                   headOnly = true;
                   continue seat;
@@ -2372,7 +2369,7 @@ export function reviewService(
       }
       if (m.status === "conflicts") {
         const delivered = await sendBack(
-          `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}. Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
+          `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}.${"why" in m && m.why ? ` The gate tried to renumber the migration itself and refused: ${m.why}.` : ""} Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
           "merge conflicts",
         );
         return { outcome: "conflicts", delivered, detail: m };

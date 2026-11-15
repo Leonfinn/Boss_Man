@@ -1399,10 +1399,11 @@ export function commandRisks(command: string | string[]): Risk[] {
           // is the -i (BOS-571 security review round 2).
           // ruby also has long options (--encoding, --external-encoding, --internal-encoding) whose value is the next
           // word, and --inplace is its long form of -i; an unknown long option could hide a following -i too.
-          const edit = inPlaceSwitches(args, "0lFKWTx", "rICE", "e", ["--encoding", "--external-encoding", "--internal-encoding"], "Cx", true);
+          const edit = inPlaceSwitches(args, "0lFKWTx", "rICEX", "e", ["--encoding", "--external-encoding", "--internal-encoding"], "CxX", true);
           // -C/--chdir changes the directory before the files resolve, so a relative path no longer names a file in
           // the checkout; its base is unknown, so a -i edit goes to the owner (BOS-571 review).
-          // -C or -x[dir] inside a bundle (-pC/, -px/) changes directory too (BOS-858).
+          // -C or -x[dir] inside a bundle (-pC/, -px/) changes directory too (BOS-858). -X[dir] is ruby's other
+          // spelling of -C[dir]; it takes its value like -C (joined or the next word).
           const chdirs = edit.chdir || args.slice(0, edit.end).some((a) => a.text === "-C" || a.text === "--chdir" || /^-C./.test(a.text) || /^--chdir=/.test(a.text));
           // An unknown long option stops the read, so a -i after it can't be shown absent: send it to the owner.
           if (edit.unknownLong) destroys("edits files outside the working copy and /tmp (ruby -i after an unknown long option)");

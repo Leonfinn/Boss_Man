@@ -12,7 +12,7 @@ const CANONICAL = "services/ticket-links.ts";
 
 /** A join from the dependency row to its blocker ticket, in query-builder or raw SQL form. */
 const JOIN_RE = /(?:left|inner)Join\(tickets, eq\(tickets\.id, ticketDependencies\.blockerTicketId\)\)|join tickets \w+ on \w+\.id = \w+\.blocker_ticket_id/g;
-const CANONICAL_RE = /ticketBlockerFinished|openBlockers|ticketBlockerOpenSql|ticketInForce/;
+const CANONICAL_RE = /ticketBlockerFinished|openBlockers|ticketBlockerOpenSql|ticketInForce|blockedHolds/;
 
 /** Joins that do not decide "finished" (display, ordering, a fingerprint, a note about what finished) or that already use the canonical answer. */
 const KNOWN_JOINS: Record<string, number> = {
@@ -22,7 +22,7 @@ const KNOWN_JOINS: Record<string, number> = {
   "services/planning.ts": 0,
   "services/priority-watch.ts": 1, // uses ticketBlockerFinished
   "services/scheduler.ts": 4, // stoppedTree uses ticketBlockerFinished; the watch report lines, fingerprint and parked-note time only describe
-  "services/sweeps.ts": 2, // release sweep: one uses ticketBlockerOpenSql, one reads the finish time
+  "services/sweeps.ts": 3, // release sweep: two use ticketBlockerOpenSql (incl. the stranded-Blocked prefilter, blockedHolds judges), one reads the finish time
   "services/watchdog.ts": 1, // uses ticketBlockerFinished
   "services/agent-wip.ts": 1, // uses ticketBlockerOpenSql
 };
@@ -33,6 +33,42 @@ function files(dir: string): string[] {
     return statSync(p).isDirectory() ? files(p) : p.endsWith(".ts") ? [p] : [];
   });
 }
+
+describe("move rules ratchet: Q2a is this ticket held in Blocked (BOS-1532)", () => {
+  const read = (rel: string) => readFileSync(join(SRC, rel), "utf8");
+
+  it("Blocked's entry and every release path ask blockedHolds", () => {
+    for (const rel of ["mcp-tickets.ts", "services/decisions.ts", "services/sweeps.ts", "services/scheduler.ts"]) {
+      expect(read(rel), rel).toMatch(/blockedHolds\(/);
+    }
+  });
+
+  it("the hold parts are defined once, in the canonical module", () => {
+    const re = /(?:async )?function (?:openCardIds|mergedAwaitingChecks|hasOpenCard|hasOpenBlocker)\b/;
+    const offenders = files(SRC)
+      .filter((f) => relative(SRC, f).split("\\").join("/") !== CANONICAL)
+      .filter((f) => re.test(readFileSync(f, "utf8")))
+      .map((f) => relative(SRC, f));
+    expect(offenders).toEqual([]);
+  });
+
+  it("the stranded sweep no longer reads its own holds out of SQL", () => {
+    expect(read("services/sweeps.ts")).not.toMatch(/isNull\(tickets\.blockedUntil\), isNull\(tickets\.goLiveWait\)/);
+  });
+});
+
+describe("move rules ratchet: Q5 is this change live", () => {
+  it("there is one merge order (allMergeOrder) and callers ask commitIsLive: no done-only mergeCommitOrder, no raw imageContains outside the go-live and runner-image modules", () => {
+    const offenders: string[] = [];
+    for (const f of files(SRC)) {
+      const rel = relative(SRC, f).split("\\").join("/");
+      const text = readFileSync(f, "utf8");
+      if (/mergeCommitOrder/.test(text)) offenders.push(`${rel}: mergeCommitOrder`);
+      if (!["services/go-live-wait.ts", "services/runner-image.ts"].includes(rel) && /\bimageContains\(/.test(text)) offenders.push(`${rel}: imageContains`);
+    }
+    expect(offenders, "ask commitIsLive(db, companyId, commit, side) in services/go-live-wait.ts").toEqual([]);
+  });
+});
 
 describe("move rules ratchet: Q1 has this blocker finished", () => {
   const found = new Map<string, { joins: number; canonical: boolean }>();
@@ -59,6 +95,22 @@ describe("move rules ratchet: Q1 has this blocker finished", () => {
     const displayOnly = new Set(["mcp-tickets.ts"]);
     const bad = [...found].filter(([k, v]) => !v.canonical && !displayOnly.has(k)).map(([k]) => k);
     expect(bad).toEqual([]);
+  });
+
+  // Q3 ("is this agent busy?", DR-061 / BOS-1534): the busy rule lives in services/agent-wip.ts.
+  it("Q3: nobody re-spells the busy rule or reads the hold by truthiness", () => {
+    const wipFile = "services/agent-wip.ts";
+    const rel = (f: string) => relative(SRC, f).split("\\").join("/");
+    const all = files(SRC).map((f) => ({ rel: rel(f), text: readFileSync(f, "utf8") }));
+    // No private "busy agents" function: ask agentBusy / busyAgentIds (the queued-wake spelling is used elsewhere for wake handling, so it is not matched).
+    const privateBusy = all.filter((f) => f.rel !== wipFile && /(?:async function|const) busyAgents\s*(?:=\s*(?:async\s*)?\(\)\s*=>\s*\{|\()/.test(f.text)).map((f) => f.rel);
+    expect(privateBusy, "ask agentBusy / busyAgentIds (services/agent-wip.ts)").toEqual([]);
+    // The old name for "the ticket to carry on with" included tickets nobody can work on.
+    expect(all.filter((f) => /\boldestInProgress\b/.test(f.text)).map((f) => f.rel)).toEqual([]);
+    // Start gates ask holdBlocksStarts; a drain past its deadline must not freeze the sweeps.
+    const gates = ["services/sweeps.ts", "services/scheduler.ts", "services/watchdog.ts"];
+    const truthy = all.filter((f) => gates.includes(f.rel) && /\(await getHold\(db\)\)\s*(\)|return|\|\|)|if \(await getHold\(db\)\)/.test(f.text)).map((f) => f.rel);
+    expect(truthy).toEqual([]);
   });
 
   it("no one re-spells the finished test outside the canonical module", () => {

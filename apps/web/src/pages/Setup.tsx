@@ -285,17 +285,26 @@ function TicketStep({ company }: { company: Company }) {
 }
 
 /** "Finish setting up" (R56): what's still undone, on Decisions, until it's done or dismissed. */
-export function SetupChecklist({ companyId, go }: { companyId: string | undefined; go: (to: string) => void }) {
+export function SetupChecklist({ companyId, go, folded = false }: { companyId: string | undefined; go: (to: string) => void; folded?: boolean }) {
   const progress = usePoll((signal) => api<Progress>("/api/setup-progress", { signal }), 60_000, "setup-progress");
   const list = usePoll((signal) => (companyId ? api<ChecklistItem[]>(`/api/companies/${companyId}/setup-checklist`, { signal }) : Promise.resolve([])), 30_000, `setup-checklist-${companyId ?? "none"}`);
   const items = list.data ?? [];
   if (!companyId || !progress.data || progress.data.dismissed || !items.length || items.every((i) => i.done)) return null;
+  const doneCount = items.filter((i) => i.done).length;
+  const Wrap = folded ? "details" : "section";
   return (
-    <section className="card" aria-labelledby="finish-setup-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
-          Finish setting up
-        </h2>
+    <Wrap className="card" aria-labelledby={folded ? undefined : "finish-setup-h"} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {folded && (
+        <summary style={{ fontSize: 16, fontWeight: 600, cursor: "pointer" }}>
+          Finish setting up: {doneCount} of {items.length} done
+        </summary>
+      )}
+      <div style={{ display: "flex", justifyContent: folded ? "flex-end" : "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {!folded && (
+          <h2 id="finish-setup-h" style={{ fontSize: 16, fontWeight: 600 }}>
+            Finish setting up
+          </h2>
+        )}
         <span style={{ display: "flex", gap: 8 }}>
           <button type="button" className="btn primary" onClick={() => go("setup")}>
             Continue
@@ -313,7 +322,7 @@ export function SetupChecklist({ companyId, go }: { companyId: string | undefine
           </li>
         ))}
       </ul>
-    </section>
+    </Wrap>
   );
 }
 
