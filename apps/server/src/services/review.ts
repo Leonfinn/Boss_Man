@@ -905,6 +905,9 @@ export function reviewService(
             if (r.head === newest) continue;
             if (!(await this.signoffCovers(t.id, r.head!, newest).catch(() => null))?.covers) stale.push(r);
           }
+          // Covered rows only saw clean merges of main since: restamp them to the newest head, so the round has one passed
+          // head (passedHead and the merge pin would otherwise see mixed heads and send the ticket back at merge).
+          if (!stale.length) for (const r of stamped) if (r.head !== newest) await db.update(reviewRequests).set({ head: newest }).where(eq(reviewRequests.id, r.id));
           if (stale.length) {
             for (const r of stale) await db.update(reviewRequests).set({ status: "pending", head: null, decidedAt: null, notes: null }).where(eq(reviewRequests.id, r.id));
             await record(db, { companyId: t.companyId, ticketId: t.id, kind: "review_reopened", summary: `The branch moved from ${stale.map((r) => r.head!.slice(0, 8)).join(", ")} to ${newest.slice(0, 8)} while the round was open, so ${stale.map((r) => (r.kind === "code" ? "the code" : `the ${r.kind}`)).join(" and ")} review${stale.length > 1 ? "s were" : " was"} reopened to read the newer code.` });

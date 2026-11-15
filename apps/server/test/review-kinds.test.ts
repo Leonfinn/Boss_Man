@@ -156,6 +156,21 @@ describe("review kinds", () => {
       branch.covers = true;
       expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
       expect((await c.rows()).filter((r) => r.status === "pending")).toHaveLength(0);
+      // The covered rows are restamped, so the merge sees one reviewed head and goes ahead instead of sending the ticket back.
+      expect((await c.rows()).map((r) => r.head)).toEqual([NEW_HEAD, NEW_HEAD, NEW_HEAD]);
+      await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
+      expect(c.sent.some((m) => m.type === "workspace.merge")).toBe(true);
+    });
+
+    it("refuses to merge when one approval has no recorded head, and sends the ticket back", async () => {
+      const c = await kinds();
+      await c.call(c.senior.id, { action: "submit", verdict: "approved" });
+      await c.call(c.sec.id, { action: "submit", verdict: "approved" });
+      // This approval's head is unknown (as if the runner could not say it when it was given).
+      await c.db.update(reviewRequests).set({ head: null }).where(and(eq(reviewRequests.ticketId, c.t.id), eq(reviewRequests.kind, "security")));
+      expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+      await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("in_progress"));
+      expect(c.sent.some((m) => m.type === "workspace.merge")).toBe(false);
     });
   });
 
