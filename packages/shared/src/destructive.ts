@@ -357,9 +357,60 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
 
 const plainWords = (texts: string[]): Word[] => texts.map((text) => ({ text, dynamic: false, lead: false, split: false, many: false, quoted: false }));
 
+/**
+ * BOS-1454: the runner sets BOSSMAN_SCRATCH and TMPDIR to absolute paths (session-manager.ts), so a word that starts
+ * with one of them, `$BOSSMAN_SCRATCH/x.mjs`, can't turn into an option such as -e. Also `${NAME}` and `${NAME:-/abs}`
+ * (the default only when it is a literal absolute path), then a `/` and plain path characters: nothing that expands again.
+ */
+const ROOT_NAME = "(?:BOSSMAN_SCRATCH|TMPDIR)";
+const PLAIN_PATH = "[\\w./@+-]*";
+const SAFE_ROOT_PATH = new RegExp(`^(?:\\$${ROOT_NAME}(?![\\w])|\\$\\{${ROOT_NAME}(?::-/${PLAIN_PATH})?\\})/${PLAIN_PATH}$`);
+/** A read of one of the two variables, whole: $NAME, ${NAME} or ${NAME:-/abs}. */
+const ROOT_READ = new RegExp(`\\$${ROOT_NAME}(?![\\w])|\\$\\{${ROOT_NAME}(?::-/${PLAIN_PATH})?\\}`, "g");
+// Builtins and wrappers that can set, bind or unset a variable, or build a name or command from text.
+const BINDERS = new Set("export declare typeset readonly local read printf mapfile readarray getopts unset let env command builtin set eval exec source . for select".split(" "));
+
+/**
+ * False when the command could change BOSSMAN_SCRATCH or TMPDIR before the words that use them are expanded, so
+ * `$TMPDIR/x` could mean something else. Read on the command's text with quotes and escapes taken out, so it also
+ * covers scripts passed to `bash -c` and anything nested. The only change allowed is a plain prefix assignment
+ * to an expression built from those variables, a literal absolute path and plain path characters
+ * (`TMPDIR=${BOSSMAN_SCRATCH:-/tmp}/t`). Anything it can't be sure of counts as a change (fails closed).
+ * Accepted limit: a file the command sources could set them; a script file isn't read at all, by design.
+ */
+function rootsKept(text: string): boolean {
+  // $'…' and $"…" hide characters of a name behind escapes Boss Man doesn't decode.
+  if (/\$['"]/.test(text)) return false;
+  const t = text.replace(/[\\'"]/g, "").replace(ROOT_READ, "\u0001");
+  const name = new RegExp(ROOT_NAME);
+  const safeValue = new RegExp(`^${ROOT_NAME}=[\\u0001/][\\w./@+\\u0001-]*$`);
+  for (const seg of t.split(/[;&|\n(){}`]/)) {
+    const ws = seg.split(/\s+/).filter(Boolean);
+    let i = 0;
+    // Prefix assignments: only the safe expression may name one of the two.
+    while (i < ws.length && /^[^\s=]*=/.test(ws[i]!)) {
+      const w = ws[i]!;
+      if (/[$`]/.test(w.slice(0, w.indexOf("=")))) return false; // a name built when it runs
+      if (name.test(w) && !safeValue.test(w)) return false;
+      i++;
+    }
+    const rest = ws.slice(i);
+    // A command word that is itself an expansion (other than a read of the two) could be export or declare.
+    if (rest.length > 1 && /^[$`]/.test(rest[0]!)) return false;
+    const binds = rest.some((w) => BINDERS.has(w));
+    for (const w of rest) {
+      if (name.test(w)) return false; // named other than as a read, outside the safe prefix form
+      if (binds && /[$`]/.test(w.replace(/\u0001/g, ""))) return false;
+    }
+  }
+  return true;
+}
+
 /** True when a word before the program's first plain operand may turn into an option, so whether it runs inline code (bash -c, python -c) is only known when it runs. */
-function unknownMode(args: Word[]): boolean {
+function unknownMode(args: Word[], roots = false): boolean {
   for (const a of args) {
+    // $BOSSMAN_SCRATCH/x.mjs: the runner sets the variable to an absolute path, so the word starts with / (BOS-1454).
+    if (roots && SAFE_ROOT_PATH.test(a.text)) return false;
     if (mayBeOption(a)) return true;
     if (!a.text.startsWith("-")) return false;
   }
@@ -620,6 +671,8 @@ export function commandRisks(command: string | string[]): Risk[] {
   try {
     const whole = typeof command === "string" ? command : command.join(" ");
     const top = typeof command === "string" ? parse(command) : { cmds: [{ words: plainWords(command), stdin: [], piped: false, nested: false }], unparsed: false };
+    // BOS-1454: false when the command could change $BOSSMAN_SCRATCH or $TMPDIR, or can't be read.
+    const roots = !top.unparsed && rootsKept(whole);
     const flat = top.cmds.flatMap((c) => [...c.words, ...c.stdin].map((w) => w.text)).join(" ");
     if (top.unparsed) risks.push({ kind: "destroys", why: "Boss Man couldn't read this command", text: whole, plain: false });
     // Words judged inside containers, where every position is tried: a cap keeps nested `docker exec` cheap.
@@ -1433,7 +1486,7 @@ export function commandRisks(command: string | string[]): Risk[] {
             return readScript(script.text, depth + 1, cmd.elsewhere);
           }
           // x=-c; bash $x 'rm -rf /x'
-          if (unknownMode(args)) return destroys("runs a shell whose options are only known when it runs");
+          if (unknownMode(args, roots)) return destroys("runs a shell whose options are only known when it runs");
           if (script && streamed(script)) return;
           if (script && !stdin) return; // runs a script file (see the shortcut at the top)
           return readStream();
@@ -1457,7 +1510,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           const opts = args.filter((a) => a.text.startsWith("-") || prog === "deno");
           const isInline = prog.endsWith("awk") ? !args.some((a) => /^-[a-zA-Z]*f/.test(a.text)) : opts.some((a) => inline.test(a.text));
           // x=-c; python3 $x '…'
-          if (!isInline && unknownMode(args)) return destroys(`runs ${prog} with options only known when they run`);
+          if (!isInline && unknownMode(args, roots)) return destroys(`runs ${prog} with options only known when they run`);
           // BOS-393: python3 /dev/stdin <<< '…' or python3 <(curl …) reads its code from the input stream or from code
           // made when it runs. Any such word counts, since which word is the script can't be told for every
           // interpreter: `python3 x.py <(git log)` asks needlessly.
