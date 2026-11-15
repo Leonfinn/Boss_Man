@@ -169,8 +169,9 @@ export async function signoffHistory(db: Db, ticketId: string, limit = 5): Promi
  * transaction, so a crash can't leave a card without its hold or a hold without its card. The card closes
  * itself once the ticket stops waiting on the sign-off (`signoffNotWaiting`, DR-021).
  */
-export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; /** How many files the branch changes at that head (BOS-1236); kept on the card so listing it needs no runner call. */ files?: number; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string; /** Why the owner has to approve this one whatever its risk (BOS-1094), e.g. it changes scripts/check-all.sh. */ because?: string }): Promise<string> {
+export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string; reviewerAgentId: string | null; head?: string | null; /** How many files the branch changes at that head (BOS-1236); kept on the card so listing it needs no runner call. */ files?: number; earlier?: SignedOff | null; /** Why this replaces an earlier card for older code (BOS-734). */ changed?: string; /** Why the owner has to approve this one whatever its risk (BOS-1094), e.g. it changes scripts/check-all.sh. */ because?: string; /** A real conflict with a branch ahead in the merge line (BOS-1411): one line on the card, never a hold. */ conflictsBecause?: string }): Promise<string> {
   const earlier = o.earlier ? `\n\nYou approved an earlier version (${o.earlier.head.slice(0, 8)}) on ${hhmm(new Date(o.earlier.at))}; the code has changed since.` : o.changed ? `\n\nThis replaces an earlier card: since then the branch changed (${o.changed}).` : "";
+  const conflict = o.conflictsBecause ? `\n\n${o.conflictsBecause}` : "";
   return db.transaction(async (txn) => {
     const tx = txn as unknown as Db;
     await supersedeSignoffs(tx, t.id, { by: "system", note: "Replaced by a newer sign-off card after a new review round.", at: new Date().toISOString() });
@@ -179,13 +180,13 @@ export async function raiseSignoffCard(db: Db, t: Ticket, o: { reviewer: string;
       .values({
         companyId: t.companyId,
         kind: "approval",
-        question: `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${o.because ? `\n\n${o.because}` : ""}${earlier}`,
+        question: `Merge "${t.title}"? ${o.reviewer} approved it, and it is rated ${riskOf(t.risk)} risk.${o.because ? `\n\n${o.because}` : ""}${earlier}${conflict}`,
         options: [APPROVE_MERGE, "Send it back"],
         recommendedOption: APPROVE_MERGE,
         raisedByAgentId: o.reviewerAgentId,
         tier: "owner",
         dedupeKey: `risk-review:${t.id}:${Date.now()}`,
-        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), ...(o.files !== undefined ? { files: o.files } : {}), clearWhen: [{ kind: "signoffNotWaiting", ticketId: t.id }] },
+        context: { type: "risk_review", ticketId: t.id, reviewer: o.reviewer, ...(o.head ? { head: o.head, risk: riskOf(t.risk) } : {}), ...(o.files !== undefined ? { files: o.files } : {}), ...(o.conflictsBecause ? { conflictsBecause: o.conflictsBecause } : {}), clearWhen: [{ kind: "signoffNotWaiting", ticketId: t.id }] },
       })
       .returning({ id: decisions.id });
     await addTicketDependency(tx, { companyId: t.companyId, blockedTicketId: t.id, blockerDecisionId: d!.id, actor: { type: "system" } });

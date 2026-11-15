@@ -151,6 +151,7 @@ export function registerDecisionTools(
                     steps?: string[];
                     lastFailure?: { note: string };
                     lint?: CardLint;
+                    conflictsBecause?: string;
                   };
                   const tickets = [...new Set([...(r.about ?? []).map((a) => (a.ref ? `${a.ref} "${a.title}"` : a.title)), ...(r.blocks ?? []).map((b) => b.ref ?? "")].filter((x): x is string => !!x))];
                   const advice = adviceOf(r.context);
@@ -174,6 +175,7 @@ export function registerDecisionTools(
                     ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
                     ...(ctx.steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", ctx.steps.join(" / "))}`] : []),
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
+                    ...(ctx.conflictsBecause ? [`Merge line: ${ctx.conflictsBecause}`] : []),
                     // Findings quote the agent's own step text, so they are untrusted like the steps (BOS-417).
                     ...(ctx.lint?.warn.length ? [`Boss Man flagged its steps: ${untrusted("decision card lint", lintLines(ctx.lint.warn))}`] : []),
                     ...(ctx.lint?.override ? [`Lint overridden by the CEO: ${untrusted("decision card lint", `${ctx.lint.override.reason}\n${lintLines(ctx.lint.override.findings)}`)}`] : []),
