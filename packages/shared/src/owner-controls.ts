@@ -152,6 +152,8 @@ export const OWNER_CONTROLS = {
     "Turn off", "Send test email",
     // Checks → Check workers (BOS-1435): add one (its token is shown once), change, turn on or off, remove.
     "Add a check worker", "Add", "Done", "Change", "Turn on", "Remove", "Cancel",
+    // BOS-1550: copy the ready-filled compose file shown after adding.
+    "Copy compose file",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
   "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
