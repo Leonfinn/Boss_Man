@@ -88,13 +88,19 @@ describe("merge train: held-alone and stall facts (BOS-1515)", () => {
   });
 
   it("the thresholds: no alarm at 2:59 or 44:59, one at 3:00 and 45:00", () => {
-    const base = { seats: 2, seated: ["a"], waiting: ["b"], heldAlone: [], lastLandingAt: null, seeding: false };
+    const base = { seats: 2, seated: ["a"], waiting: ["b"], heldAlone: [], lastLandingAt: null, seeding: false, thrashSince: null };
     expect(stalls({ ...base, emptySeatSince: 0, noLandingSince: null }, EMPTY_SEAT_MS - SEC)).toEqual([]);
     expect(stalls({ ...base, emptySeatSince: 0, noLandingSince: null }, EMPTY_SEAT_MS)).toEqual([{ cause: "empty_seat", since: 0 }]);
     expect(stalls({ ...base, emptySeatSince: null, noLandingSince: 0 }, NO_LANDING_MS - SEC)).toEqual([]);
     expect(stalls({ ...base, emptySeatSince: null, noLandingSince: 0 }, NO_LANDING_MS)).toEqual([{ cause: "no_landing", since: 0 }]);
     // The seed wait after a restart is never an empty-seat stall.
     expect(stalls({ ...base, seeding: true, emptySeatSince: 0, noLandingSince: null }, EMPTY_SEAT_MS)).toEqual([]);
+  });
+
+  it("a restack loop (BOS-1604) is a stall at once, with no 45-minute wait", () => {
+    const base = { seats: 2, seated: ["a"], waiting: [], heldAlone: [], lastLandingAt: null, seeding: false, emptySeatSince: null, noLandingSince: 0 };
+    expect(stalls({ ...base, thrashSince: null }, SEC)).toEqual([]);
+    expect(stalls({ ...base, thrashSince: 0 }, SEC)).toEqual([{ cause: "thrash", since: 0 }]);
   });
 
   it("its wake reason is a waiting-class wake (never dropped)", () => {

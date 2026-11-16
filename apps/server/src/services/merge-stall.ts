@@ -16,18 +16,21 @@ import { ageWords, ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkJobs, companies, notifications, projects, settings, tickets } from "../db/schema.js";
 import { clashWords } from "./merge-line.js";
-import { trainFacts, trainProjects, type TrainFacts } from "./merge-train.js";
+import { TRAIN_RESTACK_BACKOFF_MAX_MS, trainFacts, trainProjects, type TrainFacts } from "./merge-train.js";
 import { OWNER_AFTER_MS } from "./priority-watch.js";
 
 export const MERGE_STALL_REASON = "merge line stalled";
 export const EMPTY_SEAT_MS = 3 * 60_000;
 export const NO_LANDING_MS = 45 * 60_000;
 
-export type StallCause = "empty_seat" | "no_landing";
+// - thrash (BOS-1604): members keep restacking sooner than a check can run (the train's thrashSince); told at once, since on
+//   15 Nov such a loop ran for over an hour before anyone noticed, and no_landing waits 45 minutes.
+export type StallCause = "empty_seat" | "no_landing" | "thrash";
 
 /** Pure: the stalls standing now, each with when it began (its identity: a new start is a new stall, told again). */
 export function stalls(f: TrainFacts, now: number): Array<{ cause: StallCause; since: number }> {
   const out: Array<{ cause: StallCause; since: number }> = [];
+  if (f.thrashSince !== null && f.seated.length > 0) out.push({ cause: "thrash", since: f.thrashSince });
   if (f.emptySeatSince !== null && !f.seeding && now - f.emptySeatSince >= EMPTY_SEAT_MS) out.push({ cause: "empty_seat", since: f.emptySeatSince });
   if (f.noLandingSince !== null && f.seated.length + f.waiting.length > 0 && now - f.noLandingSince >= NO_LANDING_MS) out.push({ cause: "no_landing", since: f.noLandingSince });
   return out;
@@ -48,6 +51,7 @@ export type MergeTrainStatus = {
   lastLandingAt: string | null;
   noLandingSince: string | null;
   seeding: boolean;
+  thrashSince: string | null;
 };
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
@@ -91,6 +95,7 @@ export async function mergeTrainStatus(db: Db, companyId: string, facts: (projec
       lastLandingAt: iso(f.lastLandingAt),
       noLandingSince: iso(f.noLandingSince),
       seeding: f.seeding,
+      thrashSince: iso(f.thrashSince),
     });
   }
   return out;
@@ -132,6 +137,9 @@ export function mergeStallService(
       const blocking = f.heldAlone.filter((h) => h.holdsLine).map(heldText);
       const why = blocking.length ? blocking.join("; ") : "no reason known: likely a fault, check server_status mergeTrain";
       return `Merge line stalled: a merge-train seat has been empty for ${ageWords(at - since)} while tickets wait (${facts}). Cause: ${why}.`;
+    }
+    if (cause === "thrash") {
+      return `Merge line stalled: merge-train tickets have been restacking in a loop for ${ageWords(at - since)}, each going stale before its check could run (${facts}). Each now backs off up to ${Math.round(TRAIN_RESTACK_BACKOFF_MAX_MS / 60_000)} minutes between tries. Likely a fault in the train's idea of main: check server_status mergeTrain and the merge-line records (restacked rows); turning the merge train off in Settings → Server and runner → Checks lands tickets one at a time meanwhile.`;
     }
     const running = f.seated.length
       ? await db.select({ ticketId: checkJobs.ticketId, startedAt: checkJobs.startedAt }).from(checkJobs).where(and(inArray(checkJobs.ticketId, f.seated), eq(checkJobs.kind, "merge"), eq(checkJobs.state, "running")))
@@ -178,7 +186,7 @@ export function mergeStallService(
             out.told++;
           } else if (!e.ownerTold && at - new Date(e.toldAt).getTime() >= OWNER_AFTER_MS) {
             const body = `${await describe(s.cause, s.facts, s.since, n, at)} The CEO was told ${ageWords(at - new Date(e.toldAt).getTime())} ago and it has not moved.`;
-            const sent = await deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}` }).catch(() => null);
+            const sent = await deps.notify({ companyId, level: "flag", title: s.cause === "empty_seat" ? "The merge line has an empty seat it isn't using" : s.cause === "thrash" ? "The merge line is stuck in a loop" : "Nothing has merged for a long time", body, link: `#/merge-queue/${companyId}` }).catch(() => null);
             e = { ...e, ownerTold: true, ownerNotificationId: sent?.id ?? null };
             out.ownerTold++;
           } else continue;
