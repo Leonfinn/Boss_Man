@@ -68,13 +68,13 @@ export async function mergedAwaitingChecks(db: Db, ticketId: string): Promise<bo
   return !!t?.mergeCommit && unreportedAfterMerge(t.criteria, t.note).length > 0;
 }
 
-export type BlockedHold = { kind: "date" | "blocker" | "card" | "checks" | "go_live" };
+export type BlockedHold = { kind: "date" | "blocker" | "card" | "go_live" };
 
 /**
  * DR-061 Q2a, the one answer to "is this ticket held in Blocked?" (BOS-1532): what Blocked accepts on the way in
  * and what it must keep on the way out are the same list. Held while any of these is true: a "blocked until" time
- * still ahead; an open blocker (`openBlockers`); an open card naming the ticket, linked or not; a merged ticket with
- * after-merge criteria not yet reported; a go-live wait. An empty list means nothing holds it.
+ * still ahead; an open blocker (`openBlockers`); an open card naming the ticket, linked or not; a go-live wait (a merged
+ * ticket not yet live; once it is live its after-merge checks hold nothing, R36). An empty list means nothing holds it.
  *
  * `blockedUntil` is the date to judge: pass the one being set on the way in (null for none); leave it out to read
  * the stored one. A date that has passed holds nothing. A state note that says "parked" is not a hold here: the
@@ -88,7 +88,8 @@ export async function blockedHolds(db: Db, ticketId: string, opts: { now?: Date;
   if (until && until.getTime() > at.getTime()) holds.push({ kind: "date" });
   if ((await openBlockers(db, ticketId)).length) holds.push({ kind: "blocker" });
   if ((await openCardIds(db, ticketId)).length) holds.push({ kind: "card" });
-  if (await mergedAwaitingChecks(db, ticketId)) holds.push({ kind: "checks" });
+  // R36 (BOS-1679): a merged ticket's after-merge checks hold it only until it is live (the go-live wait, which wakes the
+  // assignee). After that nothing ends such a hold, so a ticket whose checks need someone must link them or use a date.
   if (t?.goLiveWait) holds.push({ kind: "go_live" });
   return holds;
 }
