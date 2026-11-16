@@ -409,6 +409,15 @@ describe("nothing can start: free slots and idle agents, but every open ticket w
     expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
     expect(await c.wakesOf(NOTHING_STARTABLE_REASON)).toHaveLength(1);
 
+    // The list changes (a third ticket now waits on the release): a new wake with the new count.
+    const third = await c.working("Needs the release 3", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: third, blockerTicketId: release });
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 1 });
+    const asks2 = await c.wakesOf(NOTHING_STARTABLE_REASON);
+    expect(asks2).toHaveLength(2);
+    expect(asks2.map((w) => w.note).join("\n")).toMatch(/"The release" .* holds 3 waiting tickets/);
+    await c.db.update(wakes).set({ status: "launched", createdAt: new Date(Date.now() - 31 * MIN) }).where(eq(wakes.reason, NOTHING_STARTABLE_REASON));
+
     // Work the CEO can hand out appears: the usual idle-agents ask goes out and the clock is reset.
     await c.working("Free to start", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
     expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 1 });
