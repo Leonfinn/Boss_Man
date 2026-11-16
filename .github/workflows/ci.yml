@@ -169,8 +169,10 @@ jobs:
           node --test scripts/*.test.mjs
           node scripts/lint-migrations.mjs
           node scripts/check-in-memory-state.mjs
-      - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm -r --no-bail typecheck
+      # Runs even when typecheck failed, so one run reports every fault (BOS-1661).
+      - if: ${{ !cancelled() }}
+        run: pnpm -r --no-bail test
       - run: pnpm build
       - name: Migrations match the schema
         run: |
@@ -397,7 +399,9 @@ jobs:
           docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
             -e CI=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
-              pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
+              pnpm -r --no-bail typecheck; tc=$?;
+              pnpm -r --no-bail test; ts=$?;
+              [ "$tc" = 0 ] && [ "$ts" = 0 ]' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" != 0 ]; then
             # Colour codes stripped first: they ate most of the 1500 characters and hid the error text itself (BOS-1595).
