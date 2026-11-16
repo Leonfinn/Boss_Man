@@ -3,8 +3,8 @@
 // never colour alone, and a line that couldn't be read says "not known" instead of turning green.
 import type { Decision, DecisionTally } from "../api";
 import { raisedAgo } from "../age";
-import type { MergeHealthView, StuckSummary } from "./MergesStuckBanner";
-import { waitedText } from "./MergesStuckBanner";
+import type { MergeHealthView, SlowSummary, StuckSummary } from "./MergesStuckBanner";
+import { slowText, waitedText } from "./MergesStuckBanner";
 
 export const NEEDS_YOU_MAX = 5;
 
@@ -35,8 +35,8 @@ const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hou
 const hoursText = (ms: number) => waitedText(Math.max(0, Math.round(ms / 60_000)));
 
 /** The four lines, always in this order: Runner, Merges, Usage limits, Update. */
-export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
-  const { health, merges, stuck, running, companyId } = input;
+export function healthLines(input: { health: HealthData | null | undefined; merges: MergeHealthView | null | undefined; stuck: StuckSummary | null; slow?: SlowSummary | null; running: number; companyId: string; now?: number }): HealthLine[] {
+  const { health, merges, stuck, slow, running, companyId } = input;
   const now = input.now ?? Date.now();
   const system = `#/settings/${companyId}/system`;
 
@@ -54,6 +54,8 @@ export function healthLines(input: { health: HealthData | null | undefined; merg
   else if (stuck) {
     const behind = merges.waitingCount > 0 ? ` ${merges.waitingCount} in the line.` : "";
     mergesLine = { key: "merges", tone: "bad", symbol: "!", state: "Merges stuck", pill: "Merges stuck", text: `${stuck.title}.${behind}`, href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
+  } else if (slow) {
+    mergesLine = { key: "merges", tone: "warn", symbol: "…", state: "Merging, but slowly", pill: "Merging slowly", text: slowText(slow), href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
   } else mergesLine = { key: "merges", tone: "ok", symbol: "✓", state: "Merges moving", pill: "Merges moving", text: merges.waitingCount > 0 ? `${merges.waitingCount} waiting, none stuck.` : "Nothing waiting to merge.", href: `#/merge-queue/${companyId}`, linkText: "Merge queue" };
 
   let usage: HealthLine;
