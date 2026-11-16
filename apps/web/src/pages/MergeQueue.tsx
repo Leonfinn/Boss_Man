@@ -10,7 +10,7 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
-import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
+import { HeldBehindFixLine, heldSummary, type HeldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
@@ -350,8 +350,23 @@ type CheckQueueData = { mode: "legacy" | "server"; slots: number; running: numbe
 const KIND: Record<CheckRow["kind"], string> = { merge: "merge check", quick: "quick check", full: "full check" };
 
 /** The one "main is red" banner (BOS-1207): said once, naming the ticket that fixes main when one is queued. */
-function MainRedBanner({ held, rows }: { held: number; rows: CheckRow[] }) {
+function MainRedBanner({ held, rows, heldBehind }: { held: number; rows: CheckRow[]; heldBehind?: HeldSummary | null }) {
   const fix = rows.find((r) => r.fixesMain);
+  // The other red (R28): approved tickets held behind a marked fix before any check was queued. Same banner, same fact.
+  if (held === 0 && heldBehind) {
+    return (
+      <div className="mq-red" data-main-red="true">
+        <strong>Main is red.</strong> {heldBehind.held} approved {heldBehind.held === 1 ? "ticket is" : "tickets are"} held until the fix{" "}
+        {heldBehind.fixes.map((f, i) => (
+          <span key={f.ticketId}>
+            {i > 0 ? " and " : ""}
+            (<a href={`#/tickets/${f.ticketId}`} title={f.title}>{f.ref ?? f.title}</a>, {f.stateText})
+          </span>
+        ))}{" "}
+        is merged and live. Checks that fix main still run.
+      </div>
+    );
+  }
   return (
     <div className="mq-red" data-main-red="true">
       <strong>Main is failing its check, so new checks wait.</strong>{" "}
@@ -369,14 +384,14 @@ function MainRedBanner({ held, rows }: { held: number; rows: CheckRow[] }) {
 }
 
 /** The "Queued checks" tab (BOS-1174): every check running or waiting in the server's check queue. Read-only. */
-export function QueuedChecks({ data }: { data: CheckQueueData }) {
+export function QueuedChecks({ data, heldBehind }: { data: CheckQueueData; heldBehind?: HeldSummary | null }) {
   const held = data.rows.filter((r) => r.heldByMain).length;
   const free = Math.max(0, data.slots - data.running);
   return (
     <section>
       <SectionHead title="Queued checks" fact={`${data.running} of ${slotsText(data.slots)} busy · running first, then in start order`} />
       {data.mode === "legacy" && <p className="muted" style={{ fontSize: 14 }}>The server-owned check queue is switched off, so only checks it already knows about are listed.</p>}
-      {held > 0 && <MainRedBanner held={held} rows={data.rows} />}
+      {(held > 0 || heldBehind) && <MainRedBanner held={held} rows={data.rows} heldBehind={heldBehind} />}
       {!data.rows.length ? (
         <div className="card mq-empty" data-checks-empty="true">
           <strong>No checks queued.</strong> When an agent or the merge gate asks for a check, it shows here until it finishes.{" "}
@@ -493,7 +508,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
       </div>
       {tab === "checks" ? (
         <div role="tabpanel" id="mq-panel-checks" aria-labelledby="mq-tab-checks">
-          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} /> : <Loader label="Loading the queued checks" />}
+          {cqPoll.error && !cqPoll.data ? <p className="banner" role="alert">Couldn't load the queued checks. It will try again shortly.</p> : cq ? <QueuedChecks data={cq} heldBehind={heldBehind} /> : <Loader label="Loading the queued checks" />}
         </div>
       ) : (
         <div role="tabpanel" id="mq-panel-merges" aria-labelledby="mq-tab-merges">

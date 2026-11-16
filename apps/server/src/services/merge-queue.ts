@@ -39,27 +39,46 @@ async function heldBehindFixOf(
   const fixIds = new Set(fixes.map((f) => f.id));
   const rows = [...heldWaits.values()].filter((h) => h.ids.some((id) => fixIds.has(id)));
   const out: HeldFix[] = [];
+  let updateCardId: string | null | undefined;
   for (const f of fixes) {
     const run = view.running.find((r) => r.ticketId === f.id);
     const wait = view.waiting.find((w) => w.ticketId === f.id);
-    const landingMin = run?.minutes ?? wait?.minutes ?? 0;
     const goLive = f.mergeCommit ? await goLiveWaitOf(db, f).catch(() => null) : null;
     let stateText: string;
     let stalled: HeldFix["stalled"] = null;
     if (f.mergeCommit) stateText = goLive === "own" ? "merged, waiting for the CEO to mark it live" : goLive ? `merged, ${goLiveWaitWords(goLive).replace(/^waiting for go-live: /, "waiting for ")}` : "merged";
     else if (run) {
       stateText = `merge check running, ${run.minutes} min`;
-      if (run.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been landing for ${run.minutes} minutes with no result` };
+      // The time with no result: the wait for GitHub CI when there is one, else the check's own run.
+      const noResult = Math.max(run.minutes, run.ci?.minutes ?? 0);
+      if (noResult >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been ${run.ci ? "waiting for GitHub CI" : "landing"} for ${noResult} minutes with no result` };
     } else if (wait) {
       stateText = `approved, waiting to land, ${wait.minutes} min`;
-      if (landingMin >= FIX_LANDING_LIMIT_MIN && wait.actor === "system") stalled = { reason: `it has been landing for ${landingMin} minutes with no result` };
+      // Whoever owns the wait (Boss Man, the CEO, an agent), an approved fix that has not landed in an hour is stalled.
+      if (wait.minutes >= FIX_LANDING_LIMIT_MIN) stalled = { reason: `it has been approved for ${wait.minutes} minutes and has not landed` };
     } else if (f.state === "review") stateText = "in review";
-    else if (f.state === "in_progress") stateText = "being fixed";
-    else {
+    else if (f.state === "in_progress") {
+      // Sent back: its latest review round asked for changes. Nobody's review is moving it now, so the line is stuck on it.
+      const [last] = await db.select({ round: reviewRequests.round }).from(reviewRequests).where(eq(reviewRequests.ticketId, f.id)).orderBy(desc(reviewRequests.round)).limit(1);
+      const sentBack = last ? (await db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, f.id), eq(reviewRequests.round, last.round), eq(reviewRequests.status, "changes_requested"))).limit(1)).length > 0 : false;
+      stateText = sentBack ? "sent back for changes" : "being fixed";
+      if (sentBack) stalled = { reason: "it was sent back from review, so it is not landing yet" };
+    } else {
       stateText = f.state === "blocked" ? "blocked" : f.state === "ready" || f.state === "backlog" ? "not started" : f.state;
       stalled = { reason: `it is ${stateText}, so nobody is working on it` };
     }
-    out.push({ ticketId: f.id, ref: ticketRef(prefix, f.number), title: f.title, stateText, ownerUpdate: !!f.mergeCommit && !!goLive && goLive !== "own", stalled });
+    const ownerUpdate = !!f.mergeCommit && !!goLive && goLive !== "own";
+    // Only the owner's server update is left: link the update card that is already open, and never raise a new one.
+    if (ownerUpdate && updateCardId === undefined) {
+      const [card] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.companyId, f.companyId), eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'deploy'`))
+        .orderBy(desc(decisions.createdAt))
+        .limit(1);
+      updateCardId = card?.id ?? null;
+    }
+    out.push({ ticketId: f.id, ref: ticketRef(prefix, f.number), title: f.title, stateText, ownerUpdate, updateCardId: ownerUpdate ? (updateCardId ?? null) : null, stalled });
   }
   const since = rows.map((h) => h.since).sort()[0] ?? null;
   return { held: rows.length, fixes: out, since };

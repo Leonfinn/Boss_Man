@@ -16,7 +16,7 @@ export type MergeLine =
   | { state: "held_behind_fix"; held: number; fixes: HeldFix[]; since: string | null };
 
 /** A ticket that fixes the merge check and holds approved work (R28). */
-export type HeldFix = { ticketId: string; ref: string | null; title: string; stateText: string; ownerUpdate: boolean };
+export type HeldFix = { ticketId: string; ref: string | null; title: string; stateText: string; ownerUpdate: boolean; updateCardId?: string | null };
 export type HeldSummary = { held: number; fixes: HeldFix[]; since: string | null };
 
 /** Approved work held behind a main fix, or null: only the server's "held_behind_fix" verdict counts. */
@@ -44,6 +44,12 @@ export function HeldBehindFixLine({ held }: { held: HeldSummary }) {
         </span>
       ))}
       {held.since ? `, since ${clock(held.since)}` : ""}. {held.fixes.some((f) => f.ownerUpdate) ? "They go on once the server update runs." : "They merge by themselves once it is merged and live."}
+      {held.fixes.filter((f) => f.ownerUpdate && f.updateCardId).slice(0, 1).map((f) => (
+        <span key={f.updateCardId}>
+          {" "}
+          <a href={`#/decisions/${f.updateCardId}`} data-update-card={f.updateCardId}>Open the update card</a>.
+        </span>
+      ))}
     </div>
   );
 }

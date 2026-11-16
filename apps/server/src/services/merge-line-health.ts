@@ -28,6 +28,8 @@ export type HeldFix = {
   stateText: string;
   /** The fix is merged and only the owner's server update (or runner rebuild) is left. */
   ownerUpdate: boolean;
+  /** With ownerUpdate: the owner's open update card, to link; null when none is open (no new card is raised for this line). */
+  updateCardId?: string | null;
   /** The fix was sent back / parked, or has been landing for over an hour with no result (set by the caller). */
   stalled: { reason: string } | null;
 };
