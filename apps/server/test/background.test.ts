@@ -27,22 +27,29 @@ it("skips a loop's ticks while its last pass is still running, and only that loo
   let slowStarted = 0;
   let slowFinished = 0;
   let fast = 0;
+  // The slow pass stays open until the test releases it, so no wall-clock window decides
+  // how many ticks it sees: it is held across several of the fast loop's ticks, however slow the machine.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
   const bg = createBackground([
     {
       name: "slow",
       everyMs: 5,
       run: async () => {
         slowStarted++;
-        await new Promise((r) => setTimeout(r, 60));
+        await gate;
         slowFinished++;
       },
     },
     { name: "fast", everyMs: 5, run: async () => void fast++ },
   ]);
   bg.startBackground();
-  await new Promise((r) => setTimeout(r, 40));
+  // Wait for the fast loop to tick more than 3 times while the slow pass is still held (deadline, not a fixed sleep).
+  const deadline = Date.now() + 30_000;
+  while (fast <= 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+  release();
   await bg.stopBackground();
-  // Twelve ticks fit in 60 ms; the slow pass that was still running skipped all of them.
+  // Several ticks fired while the slow pass was running; it skipped all of them.
   expect(slowStarted).toBe(1);
   expect(slowFinished).toBe(1);
   // The other loop kept its own pace.
