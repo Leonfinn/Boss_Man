@@ -5,6 +5,21 @@ import { GitHostError, gitHostService, MAX_LOG_CHARS } from "../src/services/git
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", owner: "leon", repo: "site" });
 
+describe("jobLogBlock: a failed job's log for a ticket message (BOS-1667)", () => {
+  const withLog = (res: () => Response) => gitHostService({ fetch: (async () => res()) as unknown as typeof fetch });
+  it("never throws and never gives an empty block: each failure says what is wrong", async () => {
+    expect((await withLog(() => json(403, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/isn't allowed to read job logs.*Actions: Read/);
+    expect((await withLog(() => json(404, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/no longer has it/);
+    expect((await withLog(() => new Response("x", { headers: { "content-length": "99000000" } })).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/too large/);
+    expect((await withLog(() => new Response("")).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/was empty/);
+    expect((await withLog(() => json(200, {})).jobLogBlock(cfg("gitea"), "t", 7)).join(" ")).toMatch(/isn't available from this git host/);
+  });
+  it("gives the error lines then the end of the log", async () => {
+    const block = await withLog(() => new Response("setup\nFAIL a.test.ts\nmore\nlast line")).jobLogBlock(cfg("github"), "t", 7);
+    expect(block).toEqual(["FAIL a.test.ts", "… end of the log:", "setup", "more", "last line"]);
+  });
+});
+
 describe("CI on a commit for the merge gate (BOS-1070, read through Actions since BOS-1630)", () => {
   const SHA = "e".repeat(40);
   /**

@@ -10,7 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
-import { GitHostError, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
+import { errorLines, GitHostError, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
 /** The owner's switch: absent means on. Server-wide, like the other background watchers. */
 export const MAIN_CI_SWITCH = "main_ci_watch";
@@ -20,8 +20,6 @@ const EVENTS = new Set(["push", "schedule", "workflow_dispatch"]);
 const BAD = new Set(["failure", "timed_out", "startup_failure"]);
 /** How many older runs are read to find the first one that broke. */
 const LOOK_BACK = 10;
-const MAX_LINES = 15;
-const MAX_LINE = 300;
 
 /** The parent's rule, carried on every ticket this opens. */
 export const NEVER_WEAKEN = "Fix the cause. Never make CI green by weakening a test: no skipping, loosening an assertion, raising a time limit or deleting the check just to pass.";
@@ -43,16 +41,8 @@ export type Failure = { key: string; workflow: string; job: string; step: string
 
 const keyOf = (workflow: string, job: string, step: string) => `${workflow} / ${job} / ${step}`.toLowerCase();
 
-/** The lines of a log that most likely say what went wrong: error-looking ones, timestamps and colour codes removed, secrets redacted. */
-export function errorLines(log: string, max = MAX_LINES): string[] {
-  const clean = log
-    .split(/\r?\n/)
-    .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "").replace(/\u001b\[[0-9;]*m/g, "").replace(/^##\[(error|warning|group|endgroup)\]/, "$1: ").trim())
-    .filter(Boolean);
-  const hits = clean.filter((l) => /(^error\b|\berror[: ]|\bfail(ed|ure|ing)?\b|✗|✕|×|assert|exception|\bFAIL\b|exit code|cannot find|not found|expected)/i.test(l));
-  // The last ones are nearest the failure.
-  return (hits.length ? hits : clean).slice(-max).map((l) => redactForModel(l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}…` : l));
-}
+// The log trimming lives in git-hosts.ts, shared with the merge gate's CI bounce message (BOS-1667).
+export { errorLines };
 
 export function mainCiService(
   db: Db,

@@ -2303,8 +2303,16 @@ export function reviewService(
             if (o.status.billing || found.some((f) => f.billing)) return ciCard("billing", o.status.failed.map((r) => r.name).join(", ") || "jobs not started");
             const jobs = o.status.failed.map((r) => r.name);
             const listed = found.length ? found : o.status.failed.map((run) => ({ run, lines: [] as string[] }));
+            // The agent can't read GitHub's logs and never holds the token, so the server reads each failed job's log (BOS-1667).
+            const logs = new Map<number, string[]>();
+            for (const f of listed.slice(0, 5)) if (f.run.id) logs.set(f.run.id, await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, f.run.id));
             const body = listed.length
-              ? listed.map((f) => `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}`).join("\n")
+              ? listed
+                  .map((f) => {
+                    const log = logs.get(f.run.id);
+                    return `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}${log ? `\n  Log lines (secrets redacted):\n${log.map((l) => `  > ${l}`).join("\n")}` : ""}`;
+                  })
+                  .join("\n")
               : "- the workflow failed before any job ran; open the commit's checks on GitHub";
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
