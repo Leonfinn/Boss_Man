@@ -405,7 +405,8 @@ export async function buildApp(opts: AppOptions) {
     afterLive: (companyId) => releaseGoLive?.(companyId) ?? Promise.resolve(),
     // DR-052: go-live setup cards are filled and checked with the host's facts, like every other owner card.
     // hostFacts is created just below; this only runs on a later release pass.
-    ownerSetupFacts: () => ownerSetupFacts(hostFacts),
+    // BOS-1650: the values behind `[when <fact>]` steps come from the same record server_status shows; null when it can't be read.
+    ownerSetupFacts: async () => ({ ...(await ownerSetupFacts(hostFacts)), when: { "network guard allow line can go": await netguardAllow().then((r) => (r ? r.lineCanGo : null)).catch(() => null) } }),
     log: (m) => app.log.warn(m),
   });
   // What each host says about itself (BOS-427), for the owner-card lint's R6 and the hand-apply cards' host line.
@@ -1771,6 +1772,8 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       ownerSetup: z.string().max(4000).nullable(),
+      ownerSetupWhy: z.string().max(240).nullable(),
+      ownerSetupIfSkipped: z.string().max(240).nullable(),
       noCode: z.boolean(),
       urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
