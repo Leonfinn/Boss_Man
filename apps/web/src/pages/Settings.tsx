@@ -297,7 +297,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ),
     limits: (
       <>
-        <RunLimits />
+        <RunLimits updatesHref={companyId ? `#/${settingsPath(companyId, "updates")}` : undefined} />
         <WipLimits company={company ?? undefined} onChanged={onChanged} />
         <CheckQueueSetting />
       </>

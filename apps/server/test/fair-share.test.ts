@@ -76,23 +76,43 @@ describe("a server update waiting for a quiet machine caps runs (BOS-420)", () =
     const c = (ctx = await setup({ instance: 16, company: 12 }));
     const settingsView = async () => (await c.app.inject({ method: "GET", url: "/api/run-limits", headers: { cookie: c.cookie } })).json();
 
-    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({ allCompanies: { limit: 16, running: 0, saved: 16 }, company: { limit: 12, running: 0 } });
-    expect(await settingsView()).toMatchObject({ instance: 16, inForce: { limit: 16, saved: 16, because: null, until: null } });
+    const none = { because: null, since: null, until: null };
+    const dashboard = async () => (await c.app.inject({ method: "GET", url: `/api/companies/${c.A}/dashboard`, headers: { cookie: c.cookie } })).json();
 
+    // Hold off: what the owner saved is what is in force, with no reason anywhere.
+    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({
+      allCompanies: { limit: 16, running: 0, saved: 16, ...none },
+      company: { limit: 12, running: 0 },
+      background: { limit: 2, running: 0, saved: 2, ...none },
+      mergeChecks: { paused: false, ...none },
+    });
+    expect((await settingsView()).inForce).toEqual({ allCompanies: { saved: 16, inForce: 16, ...none }, background: { saved: 2, inForce: 2, ...none }, mergeChecks: { paused: false, ...none } });
+    expect((await dashboard()).health.runLimit).toEqual({ saved: 16, inForce: 16, ...none });
+
+    // Hold on: 3 in force, the saved 16 kept, with the reason, since when and the latest end, from the same function everywhere.
     const approvedAt = new Date();
     await c.db.insert(settings).values({ key: "deploy_wait", value: { phase: "waiting", approvedAt: approvedAt.toISOString() } });
-    const until = new Date(approvedAt.getTime() + 3 * 60 * MIN).toISOString();
-    expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({
-      allCompanies: { limit: 3, saved: 16, cappedBecause: expect.stringContaining("a server update is waiting for a quiet machine"), cappedUntil: until },
-      company: { limit: 12 },
+    const held = { because: "a server update is waiting for a quiet machine", since: approvedAt.toISOString(), until: new Date(approvedAt.getTime() + 3 * 60 * MIN).toISOString() };
+    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({
+      allCompanies: { limit: 3, running: 0, saved: 16, ...held },
+      company: { limit: 12, running: 0 },
+      background: { limit: 0, running: 0, saved: 2, ...held },
+      mergeChecks: { paused: true, ...held },
     });
-    expect(await settingsView()).toMatchObject({ instance: 16, inForce: { limit: 3, saved: 16, because: expect.stringContaining("at most 3 runs"), until } });
+    expect((await settingsView()).inForce).toEqual({ allCompanies: { saved: 16, inForce: 3, ...held }, background: { saved: 2, inForce: 0, ...held }, mergeChecks: { paused: true, ...held } });
+    expect((await settingsView()).instance).toBe(16); // the saved setting itself is untouched
+    expect((await dashboard()).health.runLimit).toEqual({ saved: 16, inForce: 3, ...held });
+
+    // Hold over: back to 16 with no reason, nothing for the owner to redo.
+    await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
+    expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({ allCompanies: { limit: 16, saved: 16, ...none }, mergeChecks: { paused: false } });
   });
 
-  it("a hold that would not lower the saved number reports no cap", async () => {
+  it("a hold that would not lower a saved number gives that number no reason", async () => {
     const c = (ctx = await setup({ instance: 2, company: 2 }));
     await c.db.insert(settings).values({ key: "deploy_wait", value: { phase: "window", approvedAt: new Date().toISOString() } });
-    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({ allCompanies: { limit: 2, running: 0, saved: 2 }, company: { limit: 2, running: 0 } });
+    const { runLimits } = await c.serverStatus.status(c.A);
+    expect(runLimits).toMatchObject({ allCompanies: { limit: 2, saved: 2, because: null, until: null }, mergeChecks: { paused: true, because: "a server update has just gone live and the old server is still on standby" } });
   });
 });
 
@@ -114,7 +134,7 @@ describe("fair share at the all-companies run limit (BOS-582)", () => {
     // server_status shows it to Idle Co's CEO, with the limits and counts (no other company's names).
     const status = await c.serverStatus.status(c.B);
     expect(status.wakes.waiting.find((w) => w.id === msg.id)?.held).toBe("at a concurrency limit: all companies");
-    expect(status.runLimits).toEqual({ allCompanies: { limit: 4, running: 4, saved: 4 }, company: { limit: 4, running: 0 } });
+    expect(status.runLimits).toMatchObject({ allCompanies: { limit: 4, running: 4, saved: 4, because: null }, company: { limit: 4, running: 0 } });
 
     // One slot frees (the one kept for cards): Idle Co gets it.
     await c.end(aRuns[0]!);

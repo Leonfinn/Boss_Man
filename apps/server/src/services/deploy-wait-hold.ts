@@ -20,17 +20,30 @@ export function quietRuns(env: NodeJS.ProcessEnv = process.env): number {
 export type SoftHold = { on: false } | { on: true; phase: string; maxRuns: number; approvedAt: string };
 
 /**
- * BOS-1634: why the hold caps the all-companies limit, in the owner's words, and the latest time it lifts (the
- * 3-hour cap; it usually ends sooner, when the update is live and its standby window is over).
+ * BOS-1634: a limit as saved and as enforced. `because`, `since` and `until` are set only when `inForce` is lower than
+ * `saved`, so a screen that shows this object can never show a silent difference.
  */
-export function softHoldReason(h: Extract<SoftHold, { on: true }>): { reason: string; until: string } {
-  const why =
+export type LimitInForce = { saved: number; inForce: number; because: string | null; since: string | null; until: string | null };
+
+/**
+ * BOS-1634: why the hold is on, in the owner's words, since when, and the latest time it lifts (the 3-hour cap; it
+ * usually ends sooner, once the update is live and its standby window is over).
+ */
+export function softHoldReason(h: Extract<SoftHold, { on: true }>): { because: string; since: string; until: string } {
+  const because =
     h.phase === "waiting"
       ? "a server update is waiting for a quiet machine"
       : h.phase === "sent"
         ? "a server update is being applied"
         : "a server update has just gone live and the old server is still on standby";
-  return { reason: `${why}, so Boss Man starts at most ${h.maxRuns} runs at once until it is done`, until: new Date(Date.parse(h.approvedAt) + SOFT_HOLD_MAX_MS).toISOString() };
+  return { because, since: h.approvedAt, until: new Date(Date.parse(h.approvedAt) + SOFT_HOLD_MAX_MS).toISOString() };
+}
+
+/** BOS-1634: `saved` as the hold leaves it (at most `capTo` while it is on), with the reason when that is lower. */
+export function limitUnderHold(saved: number, soft: SoftHold, capTo: number): LimitInForce {
+  const inForce = soft.on ? Math.min(saved, capTo) : saved;
+  const why = soft.on && inForce < saved ? softHoldReason(soft) : null;
+  return { saved, inForce, because: why?.because ?? null, since: why?.since ?? null, until: why?.until ?? null };
 }
 
 export async function softHold(db: Db, now: Date = new Date(), maxRuns: number = quietRuns()): Promise<SoftHold> {

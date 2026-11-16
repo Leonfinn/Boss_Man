@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Company } from "../../api";
 import { usePoll } from "../../hooks";
+import { inForceHeadline, inForceReason, type LimitInForce } from "../../limit-in-force";
 import { setHold, useHold } from "../../hold";
 import { MoreAbout } from "../../components/MoreAbout";
 import { when } from "../Runs";
@@ -476,7 +477,18 @@ function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress
  * How many agents may run at once, in total and per company, plus the separate background slots for
  * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
  */
-export function RunLimits() {
+/** BOS-1634: one limit's "Saved X · in force Y" line with its reason and a link to the update holding it; nothing when they match. */
+function InForceLine({ limit, testId, updatesHref }: { limit: LimitInForce | undefined; testId: string; updatesHref?: string }) {
+  const head = inForceHeadline(limit);
+  if (!head || !limit) return null;
+  return (
+    <p role="status" data-testid={testId} style={{ fontSize: 14 }}>
+      <strong>{head}</strong>. {inForceReason(limit)} {updatesHref ? <a href={updatesHref}>See the waiting update</a> : null}
+    </p>
+  );
+}
+
+export function RunLimits({ updatesHref }: { updatesHref?: string } = {}) {
   const view = usePoll(
     (signal) =>
       api<{
@@ -485,7 +497,7 @@ export function RunLimits() {
         background: number;
         defaults: { instance: number; company: number; background: number };
         // BOS-1634: absent from an older server.
-        inForce?: { limit: number; saved: number; because: string | null; until: string | null };
+        inForce?: { allCompanies: LimitInForce; background: LimitInForce; mergeChecks: { paused: boolean; because: string | null; since: string | null; until: string | null } };
       }>("/api/run-limits", { signal }),
     30_000,
     "run-limits",
@@ -502,17 +514,8 @@ export function RunLimits() {
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
-        {d.inForce?.because ? (
-          // BOS-1634: never a silent difference between the saved number and the one in force.
-          <p role="status" data-testid="run-limits-in-force" style={{ fontSize: 14 }}>
-            <strong>
-              Saved {d.inForce.saved}, in force {d.inForce.limit}
-            </strong>{" "}
-            because {d.inForce.because}.{" "}
-            {d.inForce.until ? `Back to ${d.inForce.saved} by ${new Date(d.inForce.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} at the latest. ` : ""}
-            Nothing to change: runs already going carry on, and your number comes back by itself.
-          </p>
-        ) : null}
+        {/* BOS-1634: never a silent difference between the saved number and the one in force. */}
+        <InForceLine limit={d.inForce?.allCompanies} testId="run-limits-in-force" updatesHref={updatesHref} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer (you'll see "at a concurrency limit: all companies"). When a slot frees, a company with nothing running gets it first, so one busy company can't keep the others waiting.
         </p>
@@ -529,10 +532,16 @@ export function RunLimits() {
           Background agents at once (0 to 16) <code className="mono">infinite mode</code>
         </label>
         <input id="limit-background" type="number" min={0} max={16} value={v.background} onChange={(e) => setEdit({ ...v, background: e.target.value })} style={{ width: 80 }} />
+        <InForceLine limit={d.inForce?.background} testId="run-limits-background-in-force" updatesHref={updatesHref} />
         <p className="muted" style={{ fontSize: 14 }}>
           Agents on Synthetic's Infinite mode ("free, slow" models) get their own slots (default {d.defaults.background}), separate from the two numbers above. They don't spend your Synthetic plan's credits, so they never wait for the quota; keeping them on their own small number means a slow free run can't take a normal slot or hold up paid work. 0 stops background runs starting.
         </p>
       </div>
+      {d.inForce?.mergeChecks.paused && d.inForce.mergeChecks.because ? (
+        <p role="status" data-testid="run-limits-merge-checks" style={{ fontSize: 14 }}>
+          New merge checks wait too, because {d.inForce.mergeChecks.because}; they start by themselves once it is done.
+        </p>
+      ) : null}
       <p className="muted" style={{ fontSize: 14 }}>
         Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits. A company's runner is given memory to match: 2 GB, plus 1 GB for each agent it can run at once (one company's number plus the background number), plus 3 GB for each check; a change reaches each runner the next time it restarts.
       </p>
