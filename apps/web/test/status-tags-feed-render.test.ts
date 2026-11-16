@@ -3,7 +3,7 @@
 //  - Status tags: sentence case, 12 px body font (not the code font), a coloured dot, 4.5:1 text contrast.
 //  - Notifications: a "<Company> needs a decision" card shows its question as the title, the company in the
 //    small line above, and a very long title is cut to its lines with the full text on hover.
-// Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or CI.
+// Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or BOSSMAN_REQUIRE_BROWSER.
 import { execFileSync } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -17,8 +17,11 @@ import { feedTitle } from "../src/components/FeedItem";
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
 const builtNow = () => existsSync(path.join(DIST, "index.html"));
 const built = builtNow();
-// At the merge gate and in CI a missing build or browser fails the test; on a bare dev machine it skips.
-const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.CI);
+// Where a browser is promised, a missing build or browser fails the test: the merge gate (BOSSMAN_MERGE_CHECK) and
+// the CI jobs that install one (the web-browser job and the worker-image job set BOSSMAN_REQUIRE_BROWSER=1).
+// CI's plain `check` job has no browser and runs `pnpm test` without it, so there the test skips (the web-browser
+// job re-runs every web test in a browser and fails on any skip). On a bare dev machine it skips too.
+const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.BOSSMAN_REQUIRE_BROWSER);
 
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", nextTicketNumber: 12, agents: [], projects: [] };

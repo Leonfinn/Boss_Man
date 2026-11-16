@@ -15,7 +15,8 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, checkResults, decisions, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { holdView } from "../src/services/review-holds.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -200,6 +201,35 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(wake!.note).toContain("apps/server/test/fence.test.ts:42: fence > blocks a write outside the clone: AssertionError: expected 0 to be 1");
     expect(wake!.note).not.toContain("Process completed with exit code");
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+  });
+
+  // BOS-1643: main's CI broke while this merge's CI ran, and the CEO marked a fix (or linked a waits-on) meanwhile. The red
+  // CI is main's, so the ticket stays approved in "Passed, held", as a failed own check does (BOS-1173), and isn't sent back.
+  const markedMidCi = async (mark: (c: Awaited<ReturnType<typeof setup>>, fix: string) => Promise<unknown>) => {
+    const c = (ctx = await setup());
+    const fix = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix main's CI", state: "in_progress" })).json() as { id: string };
+    let marked = false;
+    c.gh.state.ci = (sha) => (sha === MERGE ? (marked ? red([job("check", "failure", 3, "Run tests")]) : running()) : green());
+    const approved = approveAndWait(c.req, c.ticket.id);
+    for (let i = 0; i < 300 && !(c.gh.reads.get(MERGE) ?? 0); i++) await new Promise((r) => setTimeout(r, 10));
+    await mark(c, fix.id);
+    marked = true;
+    const res = (await approved).json();
+    expect(res).toMatchObject({ outcome: "held", message: expect.stringMatching(/^This ticket's merge waits on .*"Passed, held"/) });
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect(await c.state()).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(await holdView(c.db, c.ticket.id)).toMatchObject({ system: true });
+    // Not sent back: no wake for the author, no loop failure, no CI failure recorded against the ticket.
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([]);
+  };
+
+  it("a red CI after a merge-check fix was marked mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.update(tickets).set({ fixesMergeCheck: true }).where(eq(tickets.id, fix)));
+  });
+
+  it("a red CI after a waits-on link was added mid-CI holds the ticket instead of sending it back (BOS-1643)", async () => {
+    await markedMidCi((c, fix) => c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerTicketId: fix }));
   });
 
   it("waits while CI runs, says so on the merge queue, and runs its own check at the same time", async () => {
