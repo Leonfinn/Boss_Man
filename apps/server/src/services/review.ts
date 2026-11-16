@@ -208,9 +208,13 @@ type CiOutcome =
   | { kind: "failed"; status: CiStatus }
   | { kind: "refused"; message: string }
   | { kind: "error"; message: string }
-  | { kind: "timeout"; waiting: string[] };
+  | { kind: "timeout"; waiting: string[] }
+  /** GitHub cancelled this commit's run because a newer run on the same branch replaced it: nothing failed, the attempt starts again. */
+  | { kind: "superseded"; newerSha: string }
+  /** GitHub cancelled the run with no newer run behind it, and one re-run didn't help (or wasn't allowed). Not a test failure. */
+  | { kind: "cancelled"; runs: string[]; rerunTried: boolean };
 /** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
-const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout";
+const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout" || o.kind === "superseded" || o.kind === "cancelled";
 /** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
 type CiStop = { stopped: boolean };
 
@@ -2221,6 +2225,9 @@ export function reviewService(
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${pub.branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
         const since = Date.now();
         ciWaits.set(ticketId, { since, waiting: [] });
+        // A cancelled run is never a failure (nothing was tested). One re-run is tried when no newer run replaced it; the
+        // run's state is read as still pending for a few polls after, as GitHub takes a moment to show it queued again.
+        let rerunAt: number | null = null;
         try {
           for (;;) {
             if (stop.stopped) return { kind: "stopped" };
@@ -2228,6 +2235,18 @@ export function reviewService(
             if ("kind" in s) return s;
             if (s.state === "passed") return { kind: "passed" };
             if (s.state === "failed") return { kind: "failed", status: s };
+            if (s.state === "cancelled" && !(rerunAt !== null && Date.now() - rerunAt < ciTiming.pollMs * 3)) {
+              const mine = s.cancelled![0]!;
+              const branchRuns = await deps.gitHosts!.workflowRuns(ci!.cfg, ci!.token, pub.branch).catch(() => []);
+              const own = branchRuns.find((r) => r.id === mine.id);
+              // A run for another commit, started after this one: the branch was pushed again and that push replaced this run.
+              const newer = branchRuns.find((r) => r.headSha !== prep.commit && (!own || r.createdAt > own.createdAt));
+              if (newer) return { kind: "superseded", newerSha: newer.headSha };
+              if (rerunAt !== null) return { kind: "cancelled", runs: s.cancelled!.map((r) => r.name), rerunTried: true };
+              if (!(await deps.gitHosts!.rerunRun(ci!.cfg, ci!.token, mine.id))) return { kind: "cancelled", runs: s.cancelled!.map((r) => r.name), rerunTried: false };
+              rerunAt = Date.now();
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${prep.commit.slice(0, 12)} and no newer run replaced it, so Boss Man asked GitHub to run it once more. Nothing to do.` });
+            }
             const waited = Date.now() - since;
             if (s.state === "none" && waited >= ciTiming.graceMs) return { kind: "none" };
             if (waited >= ciTiming.ceilingMs) return { kind: "timeout", waiting: s.waiting };
@@ -2294,6 +2313,16 @@ export function reviewService(
             await raiseCheckStuck(db, t, "GitHub CI", `was still running after ${mins} minutes${o.waiting.length ? ` (${o.waiting.join(", ")})` : ""}`, "");
             await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub CI was still running after ${mins} minutes; it's in your Decisions.` });
             return { outcome: "check_stuck", delivered: null, detail: { ci: "timeout", waiting: o.waiting } };
+          }
+          case "superseded":
+            // A newer push to the CI branch replaced this run: not a failure. Start the attempt again on the current main.
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `GitHub cancelled the CI run for ${prep.commit.slice(0, 12)} because a newer run on the same branch (${o.newerSha.slice(0, 12)}) replaced it. No test failed; the merge starts again. Nothing to do.` });
+            return { outcome: "lock_wait", delivered: null, detail: { status: "ci_superseded", newerSha: o.newerSha } };
+          case "cancelled": {
+            const what = o.runs.join(", ") || "the CI run";
+            await raiseCheckStuck(db, t, "GitHub CI", `was cancelled on GitHub (${what})${o.rerunTried ? ", and cancelled again after one re-run" : "; Boss Man's token couldn't re-run it (it needs Actions: Read and write)"}. No test failed. Open the run on GitHub and re-run it, then choose "${CHECK_AGAIN}"`, "");
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: GitHub cancelled the run (${what}); no test failed. It's in your Decisions.` });
+            return { outcome: "check_stuck", delivered: null, detail: { ci: "cancelled", runs: o.runs } };
           }
           case "refused":
             return ciCard("access", o.message);
