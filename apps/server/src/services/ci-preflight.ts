@@ -13,7 +13,8 @@ import type { gitHostService } from "./git-hosts.js";
 export const PREFLIGHT_KIND = "ci_preflight";
 export const PREFLIGHT_NA_KIND = "ci_preflight_na";
 /** A run was started for this sha (detail: the agent to wake); with no PREFLIGHT_KIND row after it, a restart lost the run. */
-export const PREFLIGHT_STARTED_KIND = "ci_preflight_started";export const PREFLIGHT_ACTIVITY = "ci_preflight";
+export const PREFLIGHT_STARTED_KIND = "ci_preflight_started";
+export const PREFLIGHT_ACTIVITY = "ci_preflight";
 
 /** What the service needs from the project's host and runner; null: GitHub CI can't be used here, so nothing is asked or refused. */
 export type PreflightContext = {

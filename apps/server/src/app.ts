@@ -106,7 +106,7 @@ import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { PrivateDetailsRejected, privateDetailsService } from "./services/private-details.js";
-import type { ScanListWarning } from "./services/scan-list.js";
+import { scanListReader, type ScanListWarning } from "./services/scan-list.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { checkDispatcher } from "./services/check-dispatcher.js";
 import { checkWorkersService } from "./services/check-workers.js";
@@ -1209,6 +1209,7 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   // BOS-1664: GitHub's own jobs before review, for a branch that changes CI or image files (GitHub projects with a readable token only).
+  const preflightScanList = scanListReader({ read: () => privateDetails.forRunner(), ...scanListWarning });
   const ciPreflight = ciPreflightService(db, {
     hosts: gitHosts,
     timing: { ...CI_PUBLISH_TIMING, ...opts.ciTiming },
@@ -1218,7 +1219,9 @@ export async function buildApp(opts: AppOptions) {
       const repo = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
       if (!p || p.gitHost !== "github" || !p.gitApiBase || !repo) return null;
       const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, t.companyId));
-      if (!runner || !runners.can(runner.id, "ci-publish")) return null;
+      // "ci-publish-scan": only a runner that applies the owner's private-details list before the push gets the early run;
+      // an older one pushes unscanned (or without the list), and the push can't be undone (the sha stays readable).
+      if (!runner || !runners.can(runner.id, "ci-publish") || !runners.can(runner.id, "ci-publish-scan")) return null;
       const token = (await secretsSvc.resolveCompanyEnv(t.companyId, "pull_request")).GIT_TOKEN;
       if (!token) return null;
       const merge = (phase: "prepare" | "publish" | "unpublish", extra: Record<string, unknown> = {}) =>
@@ -1226,7 +1229,12 @@ export async function buildApp(opts: AppOptions) {
       return {
         target: { cfg: { kind: "github" as const, apiBase: p.gitApiBase, owner: repo.owner, repo: repo.repo }, token },
         prepare: () => merge("prepare"),
-        publish: (commit) => merge("publish", { commit }),
+        publish: async (commit) => {
+          const scanList = await preflightScanList.forScan();
+          // A list that is set but can't be read is not skipped: the push can't be taken back.
+          if (!scanList && (await privateDetails.isSet().catch(() => true))) throw new Error("Not pushed to GitHub: the owner's private-details list couldn't be read, so the scan before the push couldn't run in full. Saving the list again in Settings fixes it.");
+          return merge("publish", { commit, ...(scanList ? { scanList } : {}) });
+        },
         unpublish: () => merge("unpublish"),
       };
     },

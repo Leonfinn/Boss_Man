@@ -2178,7 +2178,11 @@ export function reviewService(
             target: ci!,
             timing: ciTiming,
             passedTrees: ciPassedTrees,
-            publish: (commit) => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit }), MERGE_WAIT_MS),
+            // BOS-1664: the runner scans before this push with the owner's list too (a runner without "ci-publish-scan" drops the field).
+            publish: async (commit) => {
+              const scanList = await scanListWarning.forScan();
+              return ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit, ...(scanList ? { scanList } : {}) }), MERGE_WAIT_MS);
+            },
             announce: async (branch) => {
               await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
             },

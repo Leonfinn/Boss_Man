@@ -1883,8 +1883,8 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string): Promise<MergeResult> {
-    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase);
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string, scanList?: string): Promise<MergeResult> {
+    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase, scanList);
     if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
     if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, expectTree, pin);
     const auth = gitAuthEnv(secrets);
@@ -1978,7 +1978,7 @@ export class Workspaces {
    * no CI to run, so nothing is pushed and the server is told. "unpublish" deletes that branch once the merge is done.
    * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
    */
-  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }): Promise<MergeResult> {
+  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }, scanList?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = ciBranchFor(spec.ticketId);
@@ -2003,7 +2003,7 @@ export class Workspaces {
       const scanDir = path.join(this.scratch("ci-scan"), "tree");
       try {
         await this.git(["worktree", "add", "--quiet", "--detach", scanDir, phase.commit], { cwd: repo });
-        const blocked = await this.scanBeforeCheck(scanDir, spec.projectId);
+        const blocked = await this.scanBeforeCheck(scanDir, spec.projectId, scanList);
         if (blocked) throw new Error(`Not pushed to GitHub: the secrets scan found something in the branch.\n${blocked.slice(0, 800)}`);
       } finally {
         await this.git(["worktree", "remove", "--force", scanDir], { cwd: repo }).catch(() => undefined);
