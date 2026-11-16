@@ -77,9 +77,13 @@ const api: Record<string, unknown> = {
     ticketCostCapMicros: 5000000,
     monthlyCapMicros: 50000000,
     monthStart: now,
+    plan: [
+      { provider: "anthropic", monthRuns: 42, totalRuns: 180, monthMicros: 38000000, totalMicros: 190000000 },
+      { provider: "synthetic", monthRuns: 6, totalRuns: 14, monthMicros: 0, totalMicros: 0 },
+    ],
     topTickets: [
-      { id: "a", title: "UI quick wins 4", micros: 1800000 },
-      { id: "b", title: "Features table", micros: 900000 },
+      { id: "a", title: "UI quick wins 4", micros: 1800000, planMicros: 6200000 },
+      { id: "b", title: "Features table", micros: 900000, planMicros: 0 },
     ],
   },
 };

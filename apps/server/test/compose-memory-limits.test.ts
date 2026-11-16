@@ -21,9 +21,10 @@ describe("compose memory limits", () => {
         .filter(([name, s]) => !NOT_RUN.has(name) && s.mem_limit === undefined)
         // Blue/green parks the single server (profiles overridden) and gives the colours the limit through an anchor.
         .map(([name]) => name);
-      // truenas-bluegreen.yml's `server` is parked and `runner-app-co` is inherited from docker-compose.yml.
-      // Overrides of services docker-compose.yml already limits (tailscale.yml adds only an env var to `server`).
-      const allowed = file.endsWith("truenas-bluegreen.yml") ? ["server", "runner-app-co"] : file.endsWith("tailscale.yml") ? ["server"] : [];
+      // An overlay may override a service (parked `server`, `runner-app-co`, `claude-pack`, tailscale's `server`) without
+      // repeating the limit, but only if docker-compose.yml already gives that service one. A new service must carry its own.
+      const base = file === "docker-compose.yml" ? {} : services("docker-compose.yml");
+      const allowed = Object.keys(base).filter((n) => base[n]!.mem_limit !== undefined);
       expect(missing.filter((n) => !allowed.includes(n)), `no mem_limit in ${file}`).toEqual([]);
     });
   }

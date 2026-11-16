@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, apiOnce, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { raisedAgo } from "../age";
+import { defaultLinkAddress, type LinkAddress } from "../link-address";
+import type { HostFactsView } from "../host-facts-display";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
@@ -20,6 +22,7 @@ type LoginPoll =
   | { status: "pending" }
   | { status: "timeout"; message: string }
   | { status: "done"; result: "created" | "reset"; password: string; user: string }
+  | { status: "done"; result: "setup"; message: string }
   | { status: "done"; result: "exists" | "missing" | "failed" | "rejected" | "unavailable"; message: string };
 type LoginView =
   | { kind: "idle" }
@@ -109,6 +112,61 @@ export function PhoneLoginButton({ available, why, pollMs = 3000 }: { available:
               </button>
             </>
           )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Set up ntfy for me" (BOS-1581): the host makes (or finds) the publish user, its write-only access and a token. The
+ * server keeps the token in the encrypted secrets store; it never comes to this page, so there is nothing to copy.
+ */
+export function NtfySetupButton({ available, why, onDone, pollMs = 3000 }: { available: boolean; why?: string; onDone: () => void; pollMs?: number }) {
+  const [view, setView] = useState<{ kind: "idle" | "working" } | { kind: "msg"; ok: boolean; text: string }>({ kind: "idle" });
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const run = async () => {
+    setView({ kind: "working" });
+    try {
+      const { id } = await apiOnce<{ id: string }>("/api/notification-settings/phone-login", { method: "POST", body: { action: "setup" } });
+      for (let i = 0; i < 130 && alive.current; i++) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        if (!alive.current) return;
+        const r = await apiOnce<LoginPoll>(`/api/notification-settings/phone-login/${id}`);
+        if (r.status === "pending") continue;
+        if (r.status === "timeout") return setView({ kind: "msg", ok: false, text: r.message });
+        if (!("message" in r)) return setView({ kind: "msg", ok: false, text: "The host sent an unexpected answer. Press the button again." });
+        if (r.result === "setup") {
+          setView({ kind: "msg", ok: true, text: `${r.message} Press "Send a test to my phone" to check it.` });
+          return onDone();
+        }
+        return setView({ kind: "msg", ok: false, text: r.message });
+      }
+      if (alive.current) setView({ kind: "msg", ok: false, text: "No answer from the host. Check the host deployer is running, then try again." });
+    } catch (err) {
+      if (alive.current) setView({ kind: "msg", ok: false, text: (err as Error).message });
+    }
+  };
+  if (!available) return <p className="muted" style={{ fontSize: 14 }}>Boss Man can't set ntfy up for you here: {why ?? "the host has not reported yet."}</p>;
+  return (
+    <div data-testid="ntfy-setup" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div>
+        <button className="btn" type="button" disabled={view.kind === "working"} onClick={() => void run()}>
+          {view.kind === "working" ? "Waiting for the host…" : "Set up ntfy for me"}
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+        Makes the publish user and access token and picks a topic if you have none. Safe to press again: it changes nothing that is already there.
+      </p>
+      {view.kind === "msg" && (
+        <p className={view.ok ? "muted" : "error"} role="status" style={{ fontSize: 14, margin: 0 }}>
+          {view.text}
         </p>
       )}
     </div>
@@ -233,7 +291,7 @@ type Form = {
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-function toForm(s: NotifySettings): Form {
+function toForm(s: NotifySettings, suggested = ""): Form {
   return {
     quiet: !!s.quietHours,
     start: s.quietHours?.start ?? "22:00",
@@ -247,7 +305,8 @@ function toForm(s: NotifySettings): Form {
     clearToken: false,
     pushLevels: s.pushLevels ?? [],
     phonePush: s.phonePush === "all" ? "all" : "urgent",
-    publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
+    // BOS-1603: not the browser's own address (often a Tailscale name or LAN IP the phone can't open): a suggestion or nothing.
+    publicUrl: s.publicUrl ?? suggested,
     approveButtons: s.approveButtons !== false,
     phoneType: s.phoneType ?? "",
   };
@@ -259,8 +318,17 @@ function SettingsForm() {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const sv = useSaveState(form);
+  const [guess, setGuess] = useState<LinkAddress | null>(null);
   useEffect(() => {
-    void api<NotifySettings>("/api/notification-settings").then((s) => (setSaved(s), setForm(toForm(s))), (err: Error) => setNote({ ok: false, text: err.message }));
+    void (async () => {
+      // The host facts are only a hint: a failure here must not stop the settings loading.
+      const facts = await api<HostFactsView>("/api/host-facts").then((h) => h.facts, () => undefined);
+      const g = defaultLinkAddress({ origin: window.location.origin, facts, who: "phone" });
+      setGuess(g);
+      const s = await api<NotifySettings>("/api/notification-settings");
+      setSaved(s);
+      setForm(toForm(s, g.url));
+    })().catch((err: Error) => setNote({ ok: false, text: err.message }));
   }, []);
   // After a test send, look for the phone's "Got it" tap every 5 seconds, for up to 15 minutes.
   const [watching, setWatching] = useState(false);
@@ -304,8 +372,8 @@ function SettingsForm() {
         },
       });
       setSaved(s);
-      setForm(toForm(s));
-      sv.markSaved(toForm(s));
+      setForm(toForm(s, guess?.url));
+      sv.markSaved(toForm(s, guess?.url));
       return "Saved.";
     });
   };
@@ -374,6 +442,17 @@ function SettingsForm() {
           <input type="checkbox" checked={form.phone} onChange={(e) => set({ phone: e.target.checked })} />
           Send to my phone through my own ntfy server
         </label>
+        {(saved?.phoneLogin?.available === true || form.phone) && <NtfySetupButton
+          available={saved?.phoneLogin?.available === true}
+          why={saved?.phoneLogin && !saved.phoneLogin.available ? saved.phoneLogin.why : undefined}
+          onDone={() => {
+            // The server has saved the address, topic and token. Take them in, and keep whatever else is being edited.
+            void apiOnce<NotifySettings>("/api/notification-settings").then((s) => {
+              setSaved(s);
+              setForm((f) => (f ? { ...f, phone: !!s.ntfy, url: s.ntfy?.url ?? f.url, topic: s.ntfy?.topic ?? f.topic, token: "", clearToken: false } : f));
+            }, () => {});
+          }}
+        />}
         {form.phone && (
           <>
             <div style={row}>
@@ -424,6 +503,11 @@ function SettingsForm() {
             <div className="field">
               <label htmlFor="public-url">Boss Man's address on your phone, so a tap opens the evidence</label>
               <input id="public-url" type="url" placeholder="https://bossman.your-tailnet.ts.net" value={form.publicUrl} onChange={(e) => set({ publicUrl: e.target.value })} spellCheck={false} />
+              {guess && !saved?.publicUrl && (
+                <span className="muted" style={{ fontSize: 13 }} data-testid="public-url-note">
+                  {guess.note}
+                </span>
+              )}
             </div>
             <label style={check}>
               <input type="checkbox" checked={form.approveButtons} onChange={(e) => set({ approveButtons: e.target.checked })} />

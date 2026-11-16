@@ -40,7 +40,7 @@ Start with the CEO and one or two agents. All of them share one plan's allowance
 
 ## What do I need to run it?
 
-A 64-bit Linux machine with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or any OpenAI-compatible API key. You need to be comfortable copying commands into a shell. Each company's runner uses up to 4 GB of memory by default.
+A 64-bit Linux machine with Docker and Docker Compose v2, a GitHub or Gitea account, and an AI account: a Claude or ChatGPT plan, or any OpenAI-compatible API key. You need to be comfortable copying commands into a shell. Plan on 16 GB of memory for one company with the default settings, or 8 GB if fewer agents run at once: see [What machine do I need](/guides/install-boss-man#what-machine-do-i-need).
 
 Why Linux? The install and update scripts expect it, and two safety features use the Linux kernel: the network guard keeps agents off your home network, and the agent fence keeps each agent in its own folder. Settings shows whether each one is working on your machine.
 

@@ -68,8 +68,13 @@ ARG AGENT_BROWSER_VERSION=0.39.0
 # webkit: Playwright's WebKit build (Safari's engine) and the libraries it needs, in a shared folder the
 # node user can read. It is Playwright's own download; Debian has no WebKit package Playwright can drive.
 ARG PLAYWRIGHT_VERSION=1.64.1
+# A check worker image (WITH_HARNESS=0) always carries both: the project's web tests need the playwright module AND a
+# browser, and a worker that lacks either fails a full check on code that is fine (BOS-1606). Forcing it here means an
+# existing worker's compose file needs no edit: its next Redeploy rebuilds with them. Declared again below, same default.
+ARG WITH_HARNESS=1
 RUN --mount=type=secret,id=extra_ca,required=false \
     set -e; : > /etc/bossman-addons; \
+    if [ "$WITH_HARNESS" = 0 ]; then RUNNER_ADDONS="${RUNNER_ADDONS},agent-browser,webkit"; fi; \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi; \
     case ",$RUNNER_ADDONS," in *,agent-browser,*) \
       apt-get update && apt-get install -y --no-install-recommends chromium fonts-liberation && rm -rf /var/lib/apt/lists/*; \

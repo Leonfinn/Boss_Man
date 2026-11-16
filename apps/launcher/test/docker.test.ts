@@ -98,6 +98,15 @@ describe("docker network hold calls (BOS-576)", () => {
   });
 });
 
+/** Waits for the other side to be ready (not a fixed sleep: GitHub's runners are slower), failing after a deadline. */
+async function until(ready: () => boolean, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for the fake Docker socket");
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
 /** A Docker socket whose /events answers the given lines, then holds the stream open until told to end it. */
 function fakeEvents(lines: string[], status = 200) {
   const dir = mkdtempSync(path.join(tmpdir(), "bm-dock-ev-"));
@@ -125,7 +134,7 @@ describe("docker events (BOS-335)", () => {
     const f = fakeEvents([]);
     const abort = new AbortController();
     const done = dockerClient(f.sock).events({ type: "container", action: ["start", "restart", "die"], label: "boss-man.launcher=1" }, 1_700_000_000, () => undefined, () => undefined, abort.signal);
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => f.seen.length > 0);
     const filters = decodeURIComponent(f.seen[0]!);
     expect(filters).toContain("since=1700000000");
     expect(filters).toContain('"type":["container"]');
@@ -140,7 +149,7 @@ describe("docker events (BOS-335)", () => {
     const abort = new AbortController();
     const got: string[] = [];
     const done = dockerClient(f.sock).events({ type: "container" }, 0, (e) => got.push(e.Action ?? "?"), () => undefined, abort.signal);
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => got.length >= 2);
     expect(got).toEqual(["restart", "start"]);
     abort.abort();
     await done;

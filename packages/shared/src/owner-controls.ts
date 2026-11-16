@@ -50,14 +50,14 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
+  Notifications: ["Turn on browser notifications", "Mark read", "Send a test to my phone", "Copy address", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …", "Show the whole", "Create phone login", "Set up ntfy for me", "Reset password", "Copy password", "I've saved it", "Waiting for the host"],
   Chat: ["Ask the CEO", "Send", "Show more", "Show less", "Running now"],
   // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
     "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Show fewer",
-    "Show all done tasks", "Run now", "Discard draft",
+    "Show all done tasks", "Run now", "Discard draft", "Add limit",
     // The filters behind one Filter button (BOS-1194): its button and count, the chips' and panel's ways to clear,
     // and the way out of a column emptied by filters. "Working now" is a switch with only a label there now, not a button.
     "Filter", "Clear all", "Clear filters",
@@ -82,7 +82,7 @@ export const OWNER_CONTROLS = {
   // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
   // not under Settings.
   Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
-  Projects: ["Open …", "Unarchive", "Re-detect"],
+  Projects: ["Open …", "Unarchive", "Re-detect", "Check now"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   // The Runs page's emergency stop: every run going now, in every company (BOS-837).
   Runs: ["End all running runs", "Ending"],
@@ -159,7 +159,11 @@ export const OWNER_CONTROLS = {
     "Copy compose file",
   ],
   // Tool servers and deploy targets (a funding source is added on Funding, not here).
-  "Tools and deploys": ["Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel"],
+  "Tools and deploys": [
+    "Remove", "Add tool server", "Add target", "Edit", "Delete", "Save", "Cancel",
+    // The Penpot form (BOS-1582).
+    "Set up Penpot", "Change Penpot", "Save Penpot", "Remove Penpot", "Remove export login",
+  ],
   // Who approves and reviews work at each risk level, and whether it moved the goal.
   Reviews: ["Reset to defaults", "Save"],
   // Standing rules, the CEO chapters, the advice setting, nudges, the run time limit and the retros.
@@ -170,7 +174,7 @@ export const OWNER_CONTROLS = {
   Watchdog: ["Save", "Switch off", "Switch back on", "Switch on", "Test on the past 48 hours"],
   "Import and export": ["Check name", "Import as a new company", "Open …"],
   // Spend, the hold and the Claude accounts' order, and adding or editing a funding source.
-  Funding: ["Save", "Add funding source", "Edit", "Delete", "Cancel"],
+  Funding: ["Save", "Add funding source", "Add limit", "Edit", "Delete", "Cancel"],
   // Every stored credential: adding one (the Claude token included), granting and rotating it.
   Secrets: ["Revoke", "Rotate", "Delete", "Save", "Check with Claude", "Check", "Remove"],
   Workflow: [],
@@ -211,7 +215,7 @@ export const OWNER_FIELDS = {
   Board: [
     "Column name", "Title", "What problem does it solve, and for whom", "Description",
     "Done when (one acceptance criterion per line)", "Objective or milestone", "Ask the CEO to plan it", "Part of feature",
-    "Assign to", "Risk", "Project", "Assigned to", "Feature",
+    "Assign to", "Risk", "Project", "Assigned to", "Feature", "Spending limit per month (USD)", "At the limit",
   ],
   Ticket: [
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
@@ -227,6 +231,9 @@ export const OWNER_FIELDS = {
   Projects: [
     "Reviews for this project", "Name", "Cost cap per task (USD)", "Monthly spend cap (USD)", "Git repo", "Default branch",
     "When work is approved", "Before merging, Boss Man will", "For high-risk work, also",
+    // The GitHub feedback watcher panel (BOS-1393).
+    "Watch this repo", "GitHub repo (owner/name)", "Check every (minutes, at least 15)", "Issues", "Discussions",
+    "Skip posts by these GitHub logins (yours, Boss Man's account)",
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
   Wiki: [
@@ -265,6 +272,8 @@ export const OWNER_FIELDS = {
     // Settings → Server and runner → Agents at once (BOS-1029).
     "Tickets in progress per agent (leave empty for no limit)",
     "Tickets in progress, whole company (leave empty for no limit)",
+    // Settings → Server and runner → Main's CI (BOS-1072).
+    "Watch main's CI and open tickets for failures",
     // Settings → Server and runner → Tickets in progress: the start hold (BOS-1489).
     "Hold new starts while this many merges are waiting (leave empty for off)",
     "Hold new starts while this many quick checks are queued (leave empty for off)",
@@ -274,6 +283,8 @@ export const OWNER_FIELDS = {
     "Merge approved work in the order it was approved",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
     "Name", "Checks at once on this machine (1 to", "Test threads per check (optional)", "Memory per check, in GB (optional)",
+    // Settings → Checks: each machine's split between merge checks and quick checks (BOS-1602).
+    "Takes", "Kept for merge checks (0 to",
     // Workspace disk.
     "Most disk to use (GB)",
     // Settings → Server and runner → Outgoing email (BOS-1387).
@@ -285,6 +296,8 @@ export const OWNER_FIELDS = {
     // Deploy targets (BOS-619), with the tag that moves after a successful deploy.
     "Name", "Kind", "Address", "Production (you approve every deploy, and high-risk work must deploy to staging first)",
     "Requires approval (you approve each deploy here too)", "After a successful deploy, move tag", "Tag name", "In the repo of",
+    // The Penpot form (BOS-1582).
+    "Penpot address", "Access token", "Export email (optional)", "Export password (optional)",
   ],
   // Who reviews at each risk level, and the "did it move the goal?" check.
   Reviews: ["Ask after (days)"],
@@ -310,6 +323,8 @@ export const OWNER_FIELDS = {
     "Order (1 is used first; leave empty to keep this account out of the list)", "Login for this account",
     // Adding or editing a funding source (BOS-1019: it lives here, not on a separate tab).
     "Editing …", "New funding source", "Kind", "Provider", "Monthly grant (USD)", "Cycle starts on",
+    // A project's monthly spending limit (its Budget tab, BOS-1564).
+    "Spending limit per month (USD)", "At the limit",
   ],
   // "Add" is the kind of credential to add (Claude token, GitHub token, Other…).
   Secrets: ["Add", "Value", "Name", "Variable name", "Rotate: new value"],

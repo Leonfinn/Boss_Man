@@ -191,6 +191,8 @@ export const runners = pgTable("runners", {
   imageVersion: text("image_version"),
   /** The git commit the runner image was built from (BOS-764), from its last hello; null for an image built before it was recorded. */
   imageCommit: text("image_commit"),
+  /** The tools checks run with and their fingerprint (BOS-1570), from its last hello; null from an image built before it. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -366,6 +368,8 @@ export const tickets = pgTable(
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),
     /** For a company that puts its own work live (BOS-1345): when its CEO marked the merge live, and the evidence given (a sha or a note). */
     liveMarkedAt: timestamp("live_marked_at", { withTimezone: true }),
+    /** BOS-1586: when the merge went live (the go-live wait ended). Null when none was recorded; readers fall back to mergedAt. A host report older than this proves nothing about the new code. */
+    liveAt: timestamp("live_at", { withTimezone: true }),
     liveEvidence: text("live_evidence"),
     /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
     checkedCommit: text("checked_commit"),
@@ -1064,12 +1068,18 @@ export const checkWorkers = pgTable("check_workers", {
   companyIds: jsonb("company_ids").$type<string[]>().notNull().default([]),
   /** The owner's slot count for this machine (1 to MAX_CHECK_SLOTS); the worker's own reported count can only lower it. */
   slots: integer("slots").notNull().default(1),
+  /** BOS-1602: what kinds of check this machine takes: "both", "merge" (merge checks only) or "checks" (pre-review checks only). */
+  takes: text("takes").notNull().default("both"),
+  /** BOS-1602: how many of its slots only ever run merge checks (with takes "both"); 0 = none kept. */
+  mergeKept: integer("merge_kept").notNull().default(0),
   /** Per-check caps for this host, sent with each job (BOSSMAN_CHECK_THREADS / BOSSMAN_CHECK_MEMORY_MB); null leaves the image default. */
   checkThreads: integer("check_threads"),
   checkMemoryMb: integer("check_memory_mb"),
   enabled: boolean("enabled").notNull().default(true),
-  /** From the worker's last hello. A job goes to it only when imageCommit equals the company runner's (DR-042). */
+  /** From the worker's last hello. Shown to the owner; a job goes to it when its toolchain matches the runner's (BOS-1570), or, for an image that reports none, when imageCommit equals the runner's (DR-042). */
   imageCommit: text("image_commit"),
+  /** The tools it checks with and their fingerprint (BOS-1570), from its last hello. */
+  toolchain: jsonb("toolchain").$type<{ fingerprint: string; tools: Record<string, string> }>(),
   imageVersion: text("image_version"),
   reportedSlots: integer("reported_slots"),
   features: jsonb("features").$type<string[]>(),
@@ -1661,6 +1671,8 @@ export const feedbackNotes = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
     portalVoter: text("portal_voter"),
+    /** Who the note is, out in the world (BOS-1393): the GitHub watcher's id for an issue, discussion or comment, so a repeat fetch never files it twice. */
+    externalId: text("external_id"),
     /** BOS-1388: set while the visitor has not yet clicked the emailed link (SHA-256 of the link's token). Such a
      * note is hidden from everyone and counts for nothing; confirming clears it. Null means counted. */
     confirmTokenHash: text("confirm_token_hash"),
@@ -1671,8 +1683,44 @@ export const feedbackNotes = pgTable(
     createdAt: createdAt(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
   },
-  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt), uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash)],
+  (t) => [
+    index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt),
+    uniqueIndex("feedback_notes_confirm_token").on(t.confirmTokenHash),
+    uniqueIndex("feedback_notes_external_id").on(t.companyId, t.externalId).where(sql`${t.externalId} is not null`),
+  ],
 );
+
+/**
+ * The GitHub watcher's setting and cursor, one row per project (BOS-1393). Off by default. The token is a
+ * secret granted to the company as GITHUB_WATCH_TOKEN, never stored here. The cursors live here, in the
+ * database, so a restart or a server takeover carries on where the last pass stopped.
+ */
+export const githubWatches = pgTable("github_watches", {
+  projectId: uuid("project_id").primaryKey().references(() => projects.id, { onDelete: "cascade" }),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  /** "owner/name" on github.com. */
+  repo: text("repo"),
+  /** Minutes between passes: 60 unless the owner says otherwise (BOS-1393); never below 15 (the service and the route both clamp it). */
+  intervalMinutes: integer("interval_minutes").notNull().default(60),
+  watchIssues: boolean("watch_issues").notNull().default(true),
+  watchDiscussions: boolean("watch_discussions").notNull().default(true),
+  /** Logins whose posts are skipped (the owner's own, Boss Man's account), compared without case. */
+  skipLogins: jsonb("skip_logins").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  /** Everything updated up to here has been filed (issues and their comments; discussions and theirs). Null: not yet synced. */
+  issuesCursor: timestamp("issues_cursor", { withTimezone: true }),
+  /** Issue comments are a separate stream on GitHub (repo-wide, by update time), so they have their own cursor. */
+  commentsCursor: timestamp("comments_cursor", { withTimezone: true }),
+  discussionsCursor: timestamp("discussions_cursor", { withTimezone: true }),
+  /** "ok", "error" or "backoff"; the plain reason is in lastError. */
+  status: text("status").notNull().default("idle"),
+  lastError: text("last_error"),
+  failures: integer("failures").notNull().default(0),
+  backoffUntil: timestamp("backoff_until", { withTimezone: true }),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  lastNewNotes: integer("last_new_notes").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** A link from (a passage of) a note to a feature, with how much it matters to them. */
 export const insights = pgTable(

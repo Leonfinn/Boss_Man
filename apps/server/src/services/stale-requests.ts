@@ -322,7 +322,10 @@ export async function recheckDeadlines(db: Db, input: { wake?: WakeFn | null; no
   return { lapsed: lapsed.map((l) => l.id), movedToCeo: toCeo.map((c) => c.id) };
 }
 
-export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date };
+export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date; /** The answered card, for a decision (BOS-1591). */ cardId?: string; /** The ticket the card was about, like "BOS-976" (BOS-1591). */ ticketRef?: string | null };
+
+/** How far back a company-wide look for an answered question goes (BOS-1591). */
+export const ANSWERED_LOOKBACK_MS = 30 * 86_400_000;
 
 const askWords = (s: string) =>
   new Set(
@@ -366,9 +369,16 @@ export async function recentOwnerAnswer(db: Db, input: {
   decisionId?: string | null;
   /** Only a decision whose question closely matches `question` counts, whoever asked it (BOS-175). */
   question?: string;
+  /**
+   * Look at every question the owner answered in the company, not only cards about `ticketIds` (BOS-1591):
+   * the answer to "is the repo public?" sits on whichever ticket asked first. Needs `question`; defaults to
+   * the last 30 days; leaves out a question the CEO settled, which isn't the owner's word.
+   */
+  companyWide?: boolean;
 }): Promise<OwnerAnswer | null> {
   const ids = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
-  const since = input.since ?? new Date(Date.now() - 7 * 86_400_000);
+  const wide = !!input.companyWide && input.question !== undefined && !input.decisionId;
+  const since = input.since ?? new Date(Date.now() - (wide ? ANSWERED_LOOKBACK_MS : 7 * 86_400_000));
   const found: OwnerAnswer[] = [];
 
   // The ticket ids this card holds up are already known, so the check is one row read, no extra query.
@@ -389,6 +399,30 @@ export async function recentOwnerAnswer(db: Db, input: {
     if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) return null;
     if (input.question !== undefined && !similarQuestion(input.question, d.question)) return null;
     found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
+  } else if (wide) {
+    const answered = await db
+      .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since)))
+      .orderBy(desc(decisions.answeredAt))
+      .limit(500);
+    for (const d of answered) {
+      if (!d.answer || !d.answeredAt) continue;
+      const ctx = (d.context as { type?: string; ticketId?: string; settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null) ?? {};
+      if (input.decisionTypes && !input.decisionTypes.includes(ctx.type ?? "")) continue;
+      if (ctx.settled) continue; // the CEO settled it: not the owner's answer
+      // A plan or a job for the owner's hands ("Done") records no fact that stays true, and can be asked again.
+      if (ctx.plan || ctx.ownerMustDo || ctx.steps?.length) continue;
+      if (!similarQuestion(input.question!, d.question)) continue;
+      let ticketId = ctx.ticketId ?? null;
+      if (!ticketId) {
+        const [dep] = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id)).limit(1);
+        ticketId = dep?.id ?? null;
+      }
+      const [tk] = ticketId ? await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, ticketId)) : [];
+      found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt, cardId: d.id, ticketRef: tk ? `BOS-${tk.number}` : null });
+      break; // newest first: the latest match is the one quoted
+    }
   } else if (ids.length) {
     // A card is about a ticket when its context names it by id, or when it blocks one. Both filters
     // run in SQL, so an owner action doesn't run one query per answered card (BOS-175). Compared as
@@ -423,8 +457,23 @@ export async function recentOwnerAnswer(db: Db, input: {
   return found.sort((a, b) => b.at.getTime() - a.at.getTime())[0] ?? null;
 }
 
+/**
+ * The duplicate-ask check every new owner card and "needs you" notice runs (BOS-123, BOS-1591): an answer to a
+ * close question on this ticket or the tickets it waits on, else one anywhere in the company in the last 30 days.
+ */
+export async function answeredBefore(db: Db, input: { companyId: string; ticketId?: string | null; question: string }): Promise<OwnerAnswer | null> {
+  const ticketIds: string[] = [];
+  if (input.ticketId) {
+    const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
+    ticketIds.push(input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id));
+  }
+  const base = { companyId: input.companyId, includeMessages: false, decisionTypes: ["question"], question: input.question };
+  return (ticketIds.length ? await recentOwnerAnswer(db, { ...base, ticketIds }) : null) ?? (await recentOwnerAnswer(db, { ...base, ticketIds: [], companyWide: true }));
+}
+
 /** A short quoted reading of an earlier owner answer, for a refusal or a card. */
 export function quotedAnswer(a: OwnerAnswer, at = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ")): string {
   const what = a.kind === "decision" && a.question ? `your question "${a.question}"` : "this ticket";
-  return `The owner already answered ${what} on ${at(a.at)} UTC: "${a.answer}"`;
+  const where = a.cardId ? ` (card ${a.cardId}${a.ticketRef ? ` on ${a.ticketRef}` : ""})` : "";
+  return `The owner already answered ${what}${where} on ${at(a.at)} UTC: "${a.answer}"`;
 }

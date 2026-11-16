@@ -15,7 +15,11 @@ const TOPIC = /^[A-Za-z0-9_-]{1,64}$/;
 /** How long a request's key is kept, and so how long the owner has to pick the answer up. */
 export const PHONE_LOGIN_TTL_MS = 10 * 60_000;
 
-export type PhoneLoginAction = "create" | "reset";
+/** BOS-1581: the account Boss Man itself publishes with. Fixed here, like the phone's; the host checks it again. */
+export const PUBLISH_USER = "bossman-publish";
+const TOKEN = /^tk_[a-z0-9]{29}$/;
+
+export type PhoneLoginAction = "create" | "reset" | "setup";
 
 /** What the page needs to decide whether to show the button and what to say when it can't. */
 export type PhoneLoginAvailability = { ok: true; container: string } | { ok: false; why: string };
@@ -32,9 +36,11 @@ export type PhoneLoginPoll =
   | { status: "gone" }
   | { status: "timeout"; message: string }
   | { status: "done"; result: "created" | "reset"; password: string; user: string }
+  // setup: the token was saved by the server; the answer never carries it.
+  | { status: "done"; result: "setup"; message: string }
   | { status: "done"; result: "exists" | "missing" | "failed" | "rejected" | "unavailable"; message: string };
 
-type Entry = { key: KeyObject; expires: number; taken: boolean; user: string };
+type Entry = { key: KeyObject; expires: number; taken: boolean; user: string; action: PhoneLoginAction; topic: string };
 
 export function phoneLoginService(deps: {
   /** The deployer folder; absent when the server has none (then nothing can be asked of a host). */
@@ -42,6 +48,8 @@ export function phoneLoginService(deps: {
   /** A host fact by dotted key, e.g. "addon.ntfy". */
   fact: (key: string) => Promise<string | null>;
   now?: () => number;
+  /** BOS-1581: keeps the publish token (encrypted secret) and the topic in the notification settings. The token goes nowhere else. */
+  saveSetup?: (r: { token: string; topic: string }) => Promise<void>;
 }) {
   const now = deps.now ?? Date.now;
   // shortcut: one-time private keys, 10-minute expiry; lost on restart, harmless because the owner just clicks again and gets a new password.
@@ -79,11 +87,12 @@ export function phoneLoginService(deps: {
     entries.clear();
     const { publicKey, privateKey } = await genKeyPair("rsa", { modulusLength: 3072, publicKeyEncoding: { type: "spki", format: "der" }, privateKeyEncoding: { type: "pkcs8", format: "der" } });
     const id = randomUUID();
-    const body = JSON.stringify({ id, action, user: PHONE_USER, topic, pubkey: publicKey.toString("base64") }) + "\n";
+    const user = action === "setup" ? PUBLISH_USER : PHONE_USER;
+    const body = JSON.stringify({ id, action, user, topic, pubkey: publicKey.toString("base64") }) + "\n";
     const tmp = `${inbox}.tmp`;
     await writeFile(tmp, body, { mode: 0o640 });
     await chmod(tmp, 0o640);
-    entries.set(id, { key: createPrivateKey({ key: privateKey, format: "der", type: "pkcs8" }), expires: now() + PHONE_LOGIN_TTL_MS, taken: false, user: PHONE_USER });
+    entries.set(id, { key: createPrivateKey({ key: privateKey, format: "der", type: "pkcs8" }), expires: now() + PHONE_LOGIN_TTL_MS, taken: false, user, action, topic });
     await rename(tmp, inbox);
     return { ok: true, id };
   }
@@ -111,7 +120,22 @@ export function phoneLoginService(deps: {
     entries.delete(id);
     await unlink(outbox).catch(() => undefined);
     const message = answer.message.slice(0, 300);
-    if (answer.result === "created" || answer.result === "reset") {
+    if (answer.result === "setup" && e.action === "setup") {
+      const bad = { status: "done", result: "failed", message: "The host sent an answer this server could not read. Press the button again." } as const;
+      if (!deps.saveSetup) return bad;
+      try {
+        const token = privateDecrypt(
+          { key: e.key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+          Buffer.from(answer.sealed, "base64"),
+        ).toString("utf8");
+        if (!TOKEN.test(token)) return bad;
+        await deps.saveSetup({ token, topic: e.topic });
+        return { status: "done", result: "setup", message };
+      } catch {
+        return bad;
+      }
+    }
+    if (e.action !== "setup" && (answer.result === "created" || answer.result === "reset")) {
       try {
         const password = privateDecrypt(
           { key: e.key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },

@@ -1132,6 +1132,19 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     expect(await ctx.smWakes()).toHaveLength(before);
   });
 
+  it("refuses a Scrum Master card the owner already answered on another ticket, quoting it; stillNeeded lets it through (BOS-1591)", async () => {
+    await ctx.switchOn();
+    const t = await handed({ stateChangedAt: ctx.ago(300) });
+    const home = await ctx.ticket({ title: "Raise the memory limit" });
+    const [earlier] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Is more memory granted to the runner?", options: ["Granted", "No"], recommendedOption: "Granted", status: "answered", answer: "Granted", answeredAt: new Date(), context: { type: "question", ticketId: home.id } } as never).returning();
+    await ctx.db.update(watchdogFlags).set({ lastFlaggedAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    const args = { action: "raise_decision", ticketId: t.id, question: "Is more memory granted to the runner now?", options: ["Granted", "No"], recommended: "Granted", triedFirst: "Looked at it; it is a host setting.", reason: "Only the owner can change the host." };
+    const refused = await call(args);
+    expect(isError(refused)).toBe(true);
+    expect(textOf(refused)).toContain(earlier!.id);
+    expect(isError(await call({ ...args, stillNeeded: "The limit was reset by a host update." }))).toBe(false);
+  });
+
   it("undoing a raised decision still puts the ticket back when its old column is full", async () => {
     await ctx.switchOn();
     const t = await handed({ stateChangedAt: ctx.ago(300) });

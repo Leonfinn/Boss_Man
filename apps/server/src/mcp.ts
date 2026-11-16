@@ -4,10 +4,11 @@
 // to use each tool so Claude Code's tool search finds them.
 import { checkRequestService, CheckRequestError } from "./services/check-request.js";
 import { checkQueue } from "./services/check-queue.js";
-import { FULL_LOG_RETENTION_DAYS } from "@boss-man/shared";
+import { FULL_LOG_RETENTION_DAYS, PLAN_REAL_USE_REFUSAL, realUseWalkthrough, usabilityGated } from "@boss-man/shared";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { ticketHasOpenCard } from "./services/owner-todo.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -20,6 +21,7 @@ import { wipQueuedNote } from "./services/agent-wip.js";
 import { goLiveLine, goLiveWaitOf, liveClaimWarning } from "./services/go-live-wait.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, seenImageDates, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
+import { screenMismatchSites } from "./services/outside-site-mismatch.js";
 import { readZip, ZipReadError } from "./services/attachment-zip.js";
 import { ceoPlanText } from "./services/ceo-plan.js";
 import { AnswerError, APPROVE_PLAN, CEO_QUESTION_HANDOVER_MINUTES, KEEP_PLANNING, OWNER_ONLY_KINDS, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, type DroppedOrderLink, type decisionsService } from "./services/decisions.js";
@@ -28,7 +30,7 @@ import type { hostFactsService } from "./services/host-facts.js";
 import { HOST_TOKEN_HELP } from "./services/owner-setup-check.js";
 import { loadCompanyFacts } from "./services/company-facts.js";
 import type { deviceProfilesService } from "./services/device-profiles.js";
-import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
+import { answeredBefore, quotedAnswer } from "./services/stale-requests.js";
 import { clearsWhenToConditions, type ClearWhen } from "./services/alert-clearing.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
@@ -55,6 +57,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { ownerFactHeld, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
@@ -87,17 +90,13 @@ const OWNER_ASK = /\b(please|you(?:'ll| will)? (?:need|have|must|should)|could y
  */
 async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<{ uncovered: boolean; message: string } | null> {
   if (!OWNER_ASK.test(body)) return null;
-  // An open decision covers it when it blocks this ticket, or this agent already asked about it.
-  const covering = await db
-    .select({ id: decisionsTable.id })
-    .from(decisionsTable)
-    .leftJoin(ticketDependencies, eq(ticketDependencies.blockerDecisionId, decisionsTable.id))
-    .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
-    .limit(1);
-  if (covering.length) return null;
+  // Covered means this ticket (BOS-1576): an open card that names it or that it waits on, or steps in its
+  // ownerSetup (Boss Man raises their card at go-live). A card the agent raised about another ticket covers nothing here.
+  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  if (t?.ownerSetup?.trim()) return null;
+  if (await ticketHasOpenCard(db, ticketId)) return null;
   // A ticket owed the owner's sign-off whose card is missing: Boss Man raises the card itself rather than leave
   // the warning in the agent's run (BOS-503). Agents can't see decision state, so they couldn't act on it.
-  const [t] = await db.select().from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
   const restored = t ? await restoreSignoffCard(db, t, "an agent's reply asked the owner to review it") : null;
   if (restored) return { uncovered: false, message: `This ticket passed every review and waits on the owner's sign-off, but its card was missing, so Boss Man raised it (card ${restored}). It is in the owner's Decisions and the board's Your review lane; you don't need to raise one.` };
   return { uncovered: true, message: "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted." };
@@ -110,7 +109,7 @@ async function ceoUrgentHold(db: Db, scope: Scope, body: string, ticketId: strin
   return me?.role === "ceo" ? urgentHeldMessage(db, scope.companyId, body, ticketId) : null;
 }
 /** What the CEO is told when a reply asking the owner to act is held (BOS-901). */
-const CEO_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open decision covers it, and the owner doesn't watch tickets, so the ask would be lost. Call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
+const OWNER_ASK_HELD = "Not posted. This reply asks the owner to do something, but no open card covers this ticket, and the owner only looks at their Decisions queue, so the ask would be lost. If they need to act now: call raise_decision with blocksTicketId set to this ticket (what you tried first, and the steps they need), then send the reply again. If the steps are for after this change goes live: put them in the ticket's ownerSetup (set_ticket_state); Boss Man raises a checked card for them at go-live, and the reply then posts. If the reply only reports status and asks nothing of the owner, send it again with notAnAsk set to true and it will post.";
 export { cut };
 const OUTLINE_OVER = 8000;
 
@@ -304,20 +303,20 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. If you are the CEO, a reply that asks the owner to act is not posted until an open decision covers it; a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
-      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("CEO only: send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a CEO reply that asks the owner to act is held (not posted) until an open decision covers it."), quotesUrgent: QUOTES_URGENT },
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. A reply that asks the owner to act is not posted until an open decision on this ticket covers it (or, for steps after go-live, the ticket's ownerSetup is set); a status-only reply that trips this can be sent again with notAnAsk true. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000), notAnAsk: z.boolean().optional().describe("Send a reply that only reports status and asks nothing of the owner, even though its wording looks like an ask. Without it, a reply that asks the owner to act is held (not posted) until an open decision on this ticket covers it."), quotesUrgent: QUOTES_URGENT },
     },
     async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
       const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
       if (urgentHold) return fail(urgentHold);
-      // The CEO's owner-ask is held, not posted, until a card covers it (BOS-901): the hint after posting is too late for them.
+      const factHold = await ownerFactHeld(db, scope.companyId, body); // BOS-1596
+      if (factHold) return fail(factHold);
+      // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
+      // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
       let hint: { uncovered: boolean; message: string } | null = null;
-      if (scope.agentId) {
-        const [me] = await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId)));
-        if (me?.role === "ceo") {
-          hint = await ownerActionHint(db, scope, ticketId, body);
-          if (hint?.uncovered && !notAnAsk) return fail(CEO_ASK_HELD);
-        }
+      if (scope.agentId && !notAnAsk) {
+        hint = await ownerActionHint(db, scope, ticketId, body);
+        if (hint?.uncovered) return fail(OWNER_ASK_HELD);
       }
       try {
         await ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId: scope.agentId, runId: scope.runId, text: body });
@@ -333,7 +332,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
-      hint ??= await ownerActionHint(db, scope, ticketId, body);
+      // (Held above for agents; this is only the raised-sign-off-card message, or the owner's own reply.)
+      if (!scope.agentId || notAnAsk) hint = null;
+      else hint ??= await ownerActionHint(db, scope, ticketId, body);
       const links = await missingPageNote(db, scope.companyId, body);
       return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint.message}` : ""}${notLiveWarning ? `\n\n${notLiveWarning}` : ""}`);
     },
@@ -372,11 +373,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
         recommended: z.string(),
         blocksTicketId: z.string().uuid().optional(),
+        // BOS-1591: every other ticket that waits on this same answer is held by this one card, so one answer releases them all.
+        alsoBlocks: z.array(z.string().uuid()).max(10).optional().describe("Other tickets (ids) that wait on this same answer. The card holds them too, and the owner's one answer releases and wakes every one. Use it instead of a second card, and instead of a note that says a ticket waits for this."),
         // BOS-1078: the card holds blocksTicketId's merge until it is answered. Without it, an approved ticket merges past it.
         holdsMerge: z.boolean().optional(),
         triedFirst: z.string().max(1000),
         ownerMustDo: z.boolean().optional(),
-        steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17). A step on someone else's website (a URL not on this server, or a vendor console such as Cloudflare or GitHub) must say where its clicks came from (R19): "seen: <ticket image id>" for a screenshot under 30 days old, or "not seen: <doc URL>, <YYYY-MM-DD>"; a card with a not-seen step must also offer the option "My screen looks different (I'll attach a screenshot)".`),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional().describe(`The owner's steps, one per item. ${HOST_TOKEN_HELP} A vague host step (".env" with no path, "restart the add-on" with no command or Settings → path) is refused (R17). A step on someone else's website (a URL not on this server, or a vendor console such as Cloudflare or GitHub) must say where its clicks came from (R19): "seen: <ticket image id>" for a screenshot under 30 days old, or "not seen: <doc URL>, <YYYY-MM-DD>"; a card with a not-seen step must also offer the option "My screen looks different (I'll attach a screenshot)". Such a card opens with a checkpoint step naming something concrete the owner will see ('You should see "holidayhours" listed'), and offers that option as the stop. For 30 days after a site's docs didn't match the owner's screen, a not-seen step for that site is refused: ask the owner for one screenshot of their starting page first and use seen:.`),
         stillNeeded: z.string().max(500).optional(),
         lintOverride: z.string().max(500).optional(),
         setsUp: z.enum(ADDONS).optional(),
@@ -406,7 +409,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -415,6 +418,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         clearWhen = made.clearWhen;
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
+      const factHold = await ownerFactHeld(db, scope.companyId, question, ...options, ...(steps ?? []));
+      if (factHold) return fail(factHold);
       if (holdsMerge && !blocksTicketId) return fail("holdsMerge holds a ticket's merge, so it goes with blocksTicketId set to that ticket.");
       // A card that records an after-merge check can only be answered once the merge is live: holding that merge would never end.
       if (holdsMerge && criterion !== undefined) return fail("A card that settles an after-merge check can't hold the merge: it can only be answered once the merge is live. Leave holdsMerge out.");
@@ -422,7 +428,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
       if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
-      const ask = checkAsk({ triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))) });
+      const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
       if (ask.error) return fail(ask.error);
       steps = ask.steps ?? steps; // {{host.…}} filled in
       if (blocksTicketId) {
@@ -436,6 +442,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const [m] = await db.select({ companyId: tickets.companyId, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt }).from(tickets).where(eq(tickets.id, blocksTicketId));
         const notLive = m ? await goLiveWaitOf(db, m) : null;
         if (notLive) return fail(`This ticket's merge isn't live yet (${goLiveWaitWords(notLive)}), so the owner is not asked about it. Boss Man wakes you when it is live; don't raise this card before then.`);
+      }
+      const alsoIds = [...new Set(alsoBlocks ?? [])].filter((id) => id !== blocksTicketId);
+      if (alsoIds.length) {
+        if (!blocksTicketId) return fail("alsoBlocks goes with blocksTicketId: name the first ticket there and the others in alsoBlocks.");
+        if (holdsMerge || criterion !== undefined) return fail("alsoBlocks can't be used with holdsMerge or criterion: those settle one ticket's merge or check. Raise a card per ticket for that.");
+        for (const id of alsoIds) {
+          const [o] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId)));
+          if (!o) return fail(`alsoBlocks: no ticket ${id} in your company.`);
+          const refused = await reviewTicketWriteRefusal(db, scope.companyId, id, scope.agentId);
+          if (refused) return fail(`alsoBlocks ${id}: ${refused}`);
+        }
       }
       // A card can name the after-merge criterion it settles (BOS-963), by number or by its text. Refuse now
       // if it points at nothing, or at a criterion that isn't checked after merge, rather than after an answer.
@@ -462,16 +479,16 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
       // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
-      if (blocksTicketId) {
-        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
-        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question });
-        if (earlier && !stillNeeded?.trim()) {
+      // BOS-1591: looks at every owner answer in the company from the last 30 days, not only this ticket's own.
+      if (!stillNeeded?.trim()) {
+        const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: blocksTicketId, question });
+        if (earlier) {
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -494,10 +511,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       inputSchema: { ticketId: z.string().uuid(), plan: z.string().min(1).max(40000) },
     },
     async ({ ticketId, plan }) => {
-      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      const [t] = await db.select({ id: tickets.id, title: tickets.title, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt, featureId: tickets.featureId, ownerSetup: tickets.ownerSetup, noCode: tickets.noCode, acceptanceCriteria: tickets.acceptanceCriteria }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (!t.planFirst) return fail("This ticket is not plan-first, so it needs no plan card.");
       if (t.planApprovedAt) return fail("This ticket's plan is already approved; go ahead with it.");
+      // BOS-1571: the approver sees how the owner lives with it before any code is written.
+      if (usabilityGated(t) && !realUseWalkthrough(plan)) return fail(PLAN_REAL_USE_REFUSAL);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
       let d: { id: string };
@@ -793,14 +812,15 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       },
     },
     async (input) => {
+      const factHold = await ownerFactHeld(db, scope.companyId, input.title, input.body); // BOS-1596
+      if (factHold) return fail(factHold);
       if (input.ticketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
         // Don't tell the owner they still must act on something they have already answered (BOS-123).
         const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
         if (asks && !input.stillNeeded?.trim()) {
-          const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
-          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: `${input.title} ${input.body ?? ""}` });
+          const earlier = await answeredBefore(db, { companyId: scope.companyId, ticketId: input.ticketId, question: `${input.title} ${input.body ?? ""}` });
           if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
         }
       }
@@ -854,9 +874,10 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(
             rows
               .map(({ note: n, customer }) => {
-                const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title ? `: ${n.title}` : ""}`;
+                // A title from outside is a stranger's text too (BOS-1393): it goes inside the block with the body.
+                const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title && !n.untrusted ? `: ${n.title}` : ""}`;
                 const body = cut(n.text, 2000, () => `read it all with feedback note noteId=${n.id}`);
-                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, body) : body}`;
+                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, `${n.title ? `Title: ${n.title}\n` : ""}${body}`) : body}`;
               })
               .join("\n\n"),
           );
@@ -864,7 +885,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (input.action === "note") {
           if (!input.noteId) return fail("Give the noteId.");
           const { note: n } = await feedback.noteDetail(input.noteId, scope.companyId);
-          return text(`${n.title ? `${n.title}\n` : ""}${n.untrusted ? untrusted(`feedback via ${n.source}`, n.text) : n.text}`);
+          return text(n.untrusted ? untrusted(`feedback via ${n.source}`, `${n.title ? `Title: ${n.title}\n` : ""}${n.text}`) : `${n.title ? `${n.title}\n` : ""}${n.text}`);
         }
         if (input.action === "features") {
           const all = await feedback.scored(scope.companyId);
@@ -1040,7 +1061,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1230,7 +1251,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it; pass offset to page further back when a page has a long history) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. A page of 40,000 characters or more can only be shortened by passing both replace: true and confirmReplace set to the page's slug; never do that to a log. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default, or position \"oldest\" at the end of that section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output), append (slug, entry, optional heading and position), history (slug: every version of a page, newest first, with its size and who saved it; pass offset to page further back when a page has a long history) and restore (slug and version id: put an old version back as a new version), and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). write always sets the whole page: it takes no section or offset (those are for read). A write to an existing page that would remove more than about a quarter of its text, or any of its headings, is refused unless you pass replace: true; only the CEO or the owner may replace a page another agent created. A page of 40,000 characters or more can only be shortened by passing both replace: true and confirmReplace set to the page's slug; never do that to a log. For a running log (a release log, a cock-ups log, a status page) never re-send the whole body to write: add one entry with append, which inserts it under a heading (newest first by default after the heading's intro text, or position \"oldest\" at the end of that heading's own text, or bottom at the end of the whole section) or at the top or the end of the page, and never shortens the page (one entry is a line or two, at most 20,000 characters). An append needs a real heading: \"intro\" (the text above the first heading) is refused, and an entry whose code fence (```) never closes is refused so it can't swallow the page after it. If a page was wiped, history shows the full version and restore puts it back; the CEO and the page's last writer may restore. Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
         action: z.enum(["list", "read", "write", "append", "history", "restore", "attach"]),
         q: z.string().max(200).optional(),

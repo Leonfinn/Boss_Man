@@ -172,6 +172,31 @@ describe("board lanes", () => {
     columns.pop();
   });
 
+  // BOS-1565: approved tickets Boss Man holds until another ticket is live sat in a "Passed, held" lane off screen,
+  // while "Approved, merging" said 0 and gave no pointer.
+  it("says what held approved tickets wait for, and points to them from the empty merging lane", async () => {
+    const hold = { id: "h1", system: true, reason: "x", reviewer: null, releaseAt: null, ready: false, label: "waits on BOS-1557", waits: [] };
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t10", title: "Held by Boss Man", reviewStage: "held", hold })] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const merging = await screen.findByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText(/Nothing is merging right now\. 1 approved task is held/)).toBeTruthy();
+    const held = screen.getByRole("region", { name: "Passed, held" });
+    expect(within(held).getByText(/the merge waits on another ticket to be merged and live/)).toBeTruthy();
+    expect(within(held).getByTestId("board-held-note").textContent).toBe("Approved. Boss Man holds the merge: waits on BOS-1557. It merges by itself afterwards.");
+    columns.pop();
+  });
+
+  it("keeps the plain empty text when nothing is held or merging", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const merging = await screen.findByRole("region", { name: "Approved, merging" });
+    expect(within(merging).getByText("Nothing approved is waiting to merge.")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Passed, held" })).toBeNull();
+    columns.pop();
+  });
+
   it("finds tasks by reference, title or description words", async () => {
     (columns[0]!.tickets as unknown[]).push(card({ id: "t9", title: "Fix the header", number: 42, body: "The Safari menu overlaps." }));
     withColumns([]);

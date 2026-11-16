@@ -26,7 +26,8 @@ import { setupService } from "./services/setup.js";
 import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { allowsPrivate, type HostLookup, LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
-import { AnswerError, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { AnswerError, clearOwnerTodo, decisionsService, setDecisionSettledListener } from "./services/decisions.js";
+import { githubWatchService, WATCH_TOKEN_ENV } from "./services/github-watch.js";
 import { markOwnerOpened, recentClosedNotices } from "./services/closed-notice.js";
 import { getHold, holdBlocksStarts, maintenanceService, runnerCardHold } from "./services/maintenance.js";
 import { runnerBusy } from "./services/runner-busy.js";
@@ -82,7 +83,9 @@ import { dashboardService } from "./services/dashboard.js";
 import { mergeQueueService } from "./services/merge-queue.js";
 import { setStartHoldCounts } from "./services/agent-wip.js";
 import { mergeJamService } from "./services/merge-jam.js";
+import { mainCiService } from "./services/main-ci.js";
 import { PRIORITY_WATCH_REASON, priorityWatchService } from "./services/priority-watch.js";
+import { MERGE_STALL_REASON, mergeStallService, mergeTrainStatus } from "./services/merge-stall.js";
 import { checkGate } from "./services/check-gate.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
@@ -115,6 +118,7 @@ import { runnerIngestWaiting, runnerSocketRoutes } from "./routes/runner-socket.
 import { serverAdminRoutes } from "./routes/server-admin.js";
 import { settingsLimitsRoutes } from "./routes/settings-limits.js";
 import { emailSettingsRoutes } from "./routes/email-settings.js";
+import { PENPOT_ENV, penpotRoutes } from "./routes/penpot.js";
 import { mailerService } from "./services/mailer.js";
 import { wikiRoutes } from "./routes/wiki.js";
 import { skillRoutes } from "./routes/skills.js";
@@ -122,7 +126,7 @@ import { policyRoutes } from "./routes/policy.js";
 import { projectRoutes } from "./routes/projects.js";
 import { featureRoutes } from "./routes/features.js";
 import { objectiveRoutes, roadmapRoutes } from "./routes/roadmap.js";
-import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, phoneApproveRoutes } from "./routes/devices-notifications.js";
+import { deviceRoutes, notificationRoutes, notificationSettingsRoutes, ntfySetupSaver, phoneApproveRoutes } from "./routes/devices-notifications.js";
 import { agentRunsRoutes } from "./routes/agents-runs.js";
 import { createMemorySampler, readRssAndPeak } from "./services/memory-sampler.js";
 import { readNativeDetail } from "./services/native-memory.js";
@@ -307,7 +311,11 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
-  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup });
+  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch, lookup: opts.lookup, penpotUrl: (companyId) => secretsSvc.grantedValue(companyId, PENPOT_ENV.url) });
+  // BOS-1582: the guard opens the company's Penpot from its PENPOT_URL grant, so a change to that grant re-sends the list.
+  secretsSvc.onGrantChange(({ companyId, envName }) => {
+    if (envName === PENPOT_ENV.url) void launch.syncAllow(companyId);
+  });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   setDecisionSettledListener((decisionId) => notes.clearPush(decisionId));
@@ -585,6 +593,7 @@ export async function buildApp(opts: AppOptions) {
     netguardAllow,
     runLimits: (id) => scheduler.runLimits(id),
     mergeFailures: (id) => failuresForStatus(db, id),
+    mergeTrain: (id) => mergeTrainStatus(db, id),
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
     isSettling: (id, at) => runners.isSettling(id, at),
@@ -797,6 +806,7 @@ export async function buildApp(opts: AppOptions) {
     // built below, so this resolves it per pass.
     mergeJam: () => mergeJam.run(),
     priorityWatch: () => priorityWatch.run(),
+    mergeStall: () => mergeStall.run(),
     // Also flags a card whose own ticket changed state since it was raised (BOS-1161); that never closes it.
     clearAlerts: async () => {
       const wakeAgent = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => scheduler.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number });
@@ -949,6 +959,17 @@ export async function buildApp(opts: AppOptions) {
     },
     now: opts.now,
   });
+  // The GitHub watcher (BOS-1393): main.ts runs runDue() on the leader's timer; the owner's routes save the setting and check now.
+  const githubWatch = githubWatchService(db, {
+    fetch: opts.fetch,
+    now: opts.now,
+    token: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "github_watch"))[WATCH_TOKEN_ENV],
+    feedback,
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    alert: (input) => alerts.raise(input),
+    clearCard: (key, summary) => clearOwnerTodo(db, key, summary),
+    log: (m) => app.log.warn(m),
+  });
   // Offline runners and the post-deploy "every runner is back" check (BOS-467).
   const runnerWatch = runnerWatchService(db, { isConnected: (id) => runners.isConnected(id), holdOn: async () => !!(await getHold(db)), wantedCompanies: () => launch.wantedCompanies(), guardFault: async (companyId) => ((await launch.status(companyId))?.container?.guardReason ?? null), notify: (n) => notes.notify(n), alert: (input) => alerts.raise(input), now: opts.now, log: (m) => app.log.warn(m) });
   // Server-health alerts (BOS-640): memory to the CEO, freezes to the owner. main.ts runs check() on the leader.
@@ -989,10 +1010,19 @@ export async function buildApp(opts: AppOptions) {
     scanListWarning,
     isLeader: () => leader.isLeader(),
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
-    checkCapacity: (companyId) => checks.capacity(companyId),
+    // BOS-1602: train seats count only slots that can run a merge check.
+    checkCapacity: (companyId) => checks.mergeCapacity(companyId),
     alert: (input) => alerts.raise(input as Parameters<typeof alerts.raise>[0]),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
+  // The main-CI watcher (BOS-1072): a ticket for each distinct failing step of GitHub CI on main.
+  const mainCi = mainCiService(db, {
+    gitHosts,
+    gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    log: (m) => app.log.warn(m),
+  });
   checkWake = (agentId, w) => scheduler.notify(agentId, w);
   releaseGoLive = (companyId) => review.releaseGoLiveWaiters(companyId);
   // The owner's read-only merge queue screen (BOS-587): what runs, what waits, how the last ones ended.
@@ -1043,6 +1073,8 @@ export async function buildApp(opts: AppOptions) {
         mainRed: q.rows.some((r) => r.heldByMain),
         fixRef: fix ? (fix.ref ?? fix.title) : null,
         seatWait: q.rows.filter((r) => r.heldBySeat).map((r) => r.ticketId),
+        // BOS-1515: tickets the train holds to land on main alone, with the clash.
+        heldAlone: (await mergeTrainStatus(db, companyId).catch(() => [])).flatMap((p) => p.heldAlone),
       };
     },
     now: opts.now,
@@ -1102,6 +1134,15 @@ export async function buildApp(opts: AppOptions) {
     tellCeo: async ({ companyId, ticketId, note }) => {
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (ceo) await scheduler.notify(ceo.id, { reason: PRIORITY_WATCH_REASON, ticketId, priority: 2, note });
+    },
+    notify: (input) => notes.notify(input),
+    now: opts.now,
+  });
+  // Merge stall alarm (BOS-1515): an empty train seat or no landing while tickets wait; the CEO first, the owner as in fix A.
+  const mergeStall = mergeStallService(db, {
+    tellCeo: async ({ companyId, ticketId, note }) => {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo) await scheduler.notify(ceo.id, { reason: MERGE_STALL_REASON, ticketId, priority: 2, note });
     },
     notify: (input) => notes.notify(input),
     now: opts.now,
@@ -1446,7 +1487,7 @@ export async function buildApp(opts: AppOptions) {
         throw err;
       }
     });
-    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, checkWorkers: checkWorkersSvc });
+    settingsLimitsRoutes(owner, { db, scheduler, checkQueueSvc, launch, maintenance, checks, review, runners, mainCi, checkWorkers: checkWorkersSvc });
 
     // BOS-419: Settings → This host. The facts the host reported (with source and any conflict) and the ones only the owner can give.
     owner.get("/api/host-facts", async () => ({ ...(await hostFacts.sync()), ownerFacts: [...OWNER_FACTS], deployerScript: await selfDeploy.deployerScript().catch(() => ({ state: "none" as const })) }));
@@ -1461,9 +1502,11 @@ export async function buildApp(opts: AppOptions) {
       }
     });
     // Notification settings (R44, BOS-243): what is on, the ntfy server and topic, and a test push.
-    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()) }) });
+    notificationSettingsRoutes(owner, { notes, phoneApprove, secretsSvc, hostFacts, phoneLogin: phoneLoginService({ dir: opts.deployerDir, fact: (k) => hostFacts.value(k), now: () => (opts.now ? opts.now().getTime() : Date.now()), saveSetup: ntfySetupSaver({ notes, secretsSvc }) }) });
     // BOS-1387: Settings → Outgoing email.
     emailSettingsRoutes(owner, { mailer, secretsSvc });
+    // BOS-1582: Settings → Tools → Penpot, one form for the four Penpot secrets.
+    penpotRoutes(owner, { db, secretsSvc });
 
     /** Issues the company's runner token. It is shown once; issuing again replaces it. */
     owner.post("/api/companies/:id/runner", async (req, reply) => {
@@ -1736,7 +1779,7 @@ export async function buildApp(opts: AppOptions) {
     };
 
     // Projects, their review policy, spend, checks and brief, and the setup wizard: routes/projects.ts, on this owner scope.
-    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, now: opts.now });
+    projectRoutes(owner, db, { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch, now: opts.now });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
 
@@ -1914,7 +1957,7 @@ export async function buildApp(opts: AppOptions) {
     // The live check queue, for the Merge queue page's "Queued checks" tab (BOS-1174). Read-only.
     owner.get("/api/companies/:id/check-queue", async (req) => {
       const id = IdParam.parse(req.params).id;
-      return checkQueueSvc.list(id, new Date(), await checks.capacity(id));
+      return checkQueueSvc.list(id, new Date(), await checks.capacity(id), await checks.machines(id));
     });
     // BOS-1517: one ticket's status line for its page; null when it isn't in the merge pipeline.
     owner.get("/api/companies/:id/merge-queue/:ticketId/status", async (req) => {
@@ -2411,5 +2454,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, mailer, launcher: launch, memory, serverHealth, checks, releaseLog, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
+  return { app, mailer, launcher: launch, githubWatch, memory, serverHealth, checks, releaseLog, mainCi, runnerWatch, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, deployWait, maintenance, runnerReport, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat, ownerReplies, mergeQueue, errors: errorBuffer };
 }

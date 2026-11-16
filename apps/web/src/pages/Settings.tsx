@@ -5,14 +5,14 @@ import { CompanyReviews } from "../components/ReviewPolicy";
 import { Section, useAction } from "./settings/shared";
 import { Runner } from "./settings/Runner";
 import { Credentials } from "./settings/Credentials";
-import { ToolServers, DeployTargets } from "./settings/Tools";
+import { ToolServers, DeployTargets, PenpotSettings } from "./settings/Tools";
 import { Funding, ProjectBudgets } from "./settings/Funding";
 import { BudgetLimits, FundingCards } from "./Funding";
 import { ProjectsPage, ProjectRow, ProjectBrief, ArchiveProject } from "./settings/Projects";
 import { Watchdog } from "./settings/Watchdog";
 import { GoalCheck, StandingRules, Chapters, AdviceTimeout, WorkflowRetros, TicketPrefix, PermissionJudgeSetting, AutoTempCleanupSetting } from "./settings/Team";
 import { FenceSetting, SecondOpinionSetting, NudgeCap, RunTimeLimit } from "./settings/Permissions";
-import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
+import { WorkspaceDisk, RunLimits, WipLimits, CheckQueueSetting, EmailSetting, MainCiSetting, PrivateDetails, StopAllWork, SelfDeploy } from "./settings/System";
 import { ServerPanel, ThisHost, NetguardAllow } from "./settings/ThisHost";
 import { Devices } from "./settings/Devices";
 import { ExportCompany, ImportCompany } from "./settings/Transfer";
@@ -245,6 +245,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     tools: company ? (
       <div key={company.id} style={{ display: "contents" }}>
         <ToolServers company={company} />
+        <PenpotSettings company={company} />
         <DeployTargets company={company} />
       </div>
     ) : (
@@ -309,7 +310,12 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
     ) : (
       line
     ),
-    email: <EmailSetting />,
+    email: (
+      <>
+        <EmailSetting />
+        <MainCiSetting />
+      </>
+    ),
     server: (
       <>
         <ServerPanel />
