@@ -8,7 +8,7 @@ import { SENIOR_DEV_TEMPLATE, type RunnerCommand, type WorkspaceDiff } from "@bo
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, projects, reviewHolds, reviewRequests, runners, settings, ticketDependencies, tickets } from "../src/db/schema.js";
-import { holdView } from "../src/services/review-holds.js";
+import { holdView, wakeReadyHolds } from "../src/services/review-holds.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 afterEach(async () => {
@@ -361,6 +361,31 @@ describe("a merge-check fix that needs no deploy releases at merge (BOS-1609)", 
     await settled(id);
     expect(await holdView(ctx.db, id)).toBeNull();
     expect(await ctx.db.select().from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "review_hold_released")))).toHaveLength(1);
+  });
+
+  // BOS-1693 criterion 3: a reviewer's own hold (here also waiting on an ordinary ticket, so Boss Man doesn't end it
+  // itself) wakes the reviewer once when the same test-only fix is live. Fails on the code before it: the fix never
+  // counted as in force, so the hold never became ready and nobody was woken.
+  it("wakes a holding reviewer once when a fix that changed runner tests is live, with no runner rebuild", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { fixesMergeCheck: true });
+    const other = await ctx.ticket("Something else", { systemState: "in_progress" });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    await ctx.review.submit(id, { verdict: "approved", reviewer: "Reviewer", reviewerAgentId: ctx.reviewer.id, hold: { reason: "Wait for main's CI fix", waitsOn: [{ ticketId: fix }, { ticketId: other }], releaseAt: null } });
+    const woke: string[] = [];
+    const wake = async (w: { agentId: string }) => void woke.push(w.agentId);
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, other));
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(0);
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: MERGE } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    ctx.state.files = ["apps/runner/test/check-job-cleanup.test.ts", "apps/runner/vitest.config.ts", "scripts/check-quick.sh"];
+    await ctx.slot(fix);
+    await ctx.approve(fix);
+    expect(await ctx.row(fix)).toMatchObject({ mergeCommit: MERGE, touchesRunner: false });
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(1);
+    expect(await wakeReadyHolds(ctx.db, new Date(), wake)).toBe(0);
+    expect(woke).toEqual([ctx.reviewer.id]);
   });
 });
 
