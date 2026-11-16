@@ -15,7 +15,7 @@ vi.hoisted(() => {
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, checkJobs, checkResults, decisions, settings, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, checkJobs, checkResults, decisions, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -399,6 +399,59 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
       expect(c.gh.reads.get(MERGE)).toBeGreaterThan(0);
       const merges = c.sent.filter((m): m is Extract<RunnerCommand, { type: "workspace.merge" }> => m.type === "workspace.merge");
       expect(merges.some((m) => m.base || m.expectBase)).toBe(false);
+    });
+  });
+
+  describe("a ticket holding the merge line sent back by GitHub CI wakes the CEO (R32, BOS-1669)", () => {
+    const redImages = () => red([job("check", "success", 1), { ...job("images (amd64)", "failure", 7, "Shell tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }]);
+    const ceoWakes = async (c: Awaited<ReturnType<typeof setup>>) => {
+      const [ceo] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, c.company.id), eq(agents.role, "ceo")));
+      return c.db.select().from(wakes).where(and(eq(wakes.agentId, ceo!.id), eq(wakes.reason, "line holder sent back")));
+    };
+    const waiter = async (c: Awaited<ReturnType<typeof setup>>) => {
+      const w = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Waits on the fix", assigneeAgentId: c.worker.id })).json() as { id: string };
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: w.id, blockerTicketId: c.ticket.id, until: "merged" });
+    };
+
+    it("marked fixesMergeCheck: the assignee and the CEO are both told, once, with what failed and the attempt", async () => {
+      const c = (ctx = await setup());
+      await c.db.update(tickets).set({ fixesMergeCheck: true }).where(eq(tickets.id, c.ticket.id));
+      c.gh.state.ci = (sha) => (sha === MERGE ? redImages() : green());
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+      expect(await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "ci failed")))).toHaveLength(1);
+      const told = await ceoWakes(c);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.ticketId).toBe(c.ticket.id);
+      expect(told[0]!.note).toContain("GitHub CI failed on commit eeeeeeeeeeee (images (amd64))");
+      expect(told[0]!.note).toContain("back to Engineer on merge attempt 1");
+      expect(told[0]!.note).toContain("marked as fixing the merge check");
+    });
+
+    it("a main-CI fix ticket another ticket waits on: the CEO hears how many wait", async () => {
+      const c = (ctx = await setup());
+      await c.db.insert(activity).values({ companyId: c.company.id, ticketId: c.ticket.id, kind: "main_ci_failure", summary: "Opened for a failing step on main" });
+      await waiter(c);
+      c.gh.state.ci = (sha) => (sha === MERGE ? redImages() : green());
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+      const told = await ceoWakes(c);
+      expect(told).toHaveLength(1);
+      expect(told[0]!.note).toContain("the fix for main's failing CI; 1 ticket waits on it");
+    });
+
+    it("an ordinary ticket, a main-CI ticket nobody waits on, or a plain waits-on link: only the assignee is told", async () => {
+      for (const kind of ["plain", "main_ci_alone", "waited_on"] as const) {
+        const c = (ctx = await setup());
+        if (kind === "main_ci_alone") await c.db.insert(activity).values({ companyId: c.company.id, ticketId: c.ticket.id, kind: "main_ci_failure", summary: "Opened" });
+        if (kind === "waited_on") await waiter(c);
+        c.gh.state.ci = (sha) => (sha === MERGE ? redImages() : green());
+        expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
+        expect(await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "ci failed")))).toHaveLength(1);
+        expect(await ceoWakes(c), kind).toEqual([]);
+        c.release();
+        await c.app.close();
+        await c.close();
+        ctx = undefined;
+      }
     });
   });
 
