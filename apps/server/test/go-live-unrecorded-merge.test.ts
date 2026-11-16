@@ -129,6 +129,25 @@ describe("go-live resolves for every merge the live commit contains (BOS-1640)",
     expect(await goLiveLine(c.db, early)).toContain("live on the server: yes");
   });
 
+  it("the runner-update guard (BOS-1467) clears once the unrecorded live commit is placed", { timeout: 60_000 }, async () => {
+    // What the owner hit: "Build and update runners" refused with "Waiting for BOS-1583 to go live", though BOS-1583 was
+    // inside 24b77dd8. The guard reads "live" the same way as the Go-live line, so it was stuck the same way.
+    const c = (ctx = await setupApp());
+    await merged(c, EARLY, "2026-11-15T23:53:00Z");
+    await c.db.update(tickets).set({ touchesRunnerUpdate: true }).where(eq(tickets.mergeCommit, EARLY));
+    await merged(c, PREV, "2026-11-16T10:44:00Z");
+    await c.db.insert(settings).values({ key: `live_release:${c.companyId}`, value: { old: LOST, new: LOST } });
+    await writeFile(path.join(c.dir, "outbox", "available.json"), JSON.stringify({ checkedAt: new Date().toISOString(), deployed: LOST, tip: LOST, commits: [], paths: [], infraPaths: [], runnerChanged: false }));
+    const before = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(before.statusCode).toBe(409);
+    expect(before.json().message).toContain("to go live: it fixes the runner update itself.");
+
+    await hostReports(c, { from: PREV, to: LOST });
+    const after = await c.req("POST", "/api/self-deploy/update-runners");
+    // Accepted (it may queue behind the server update's trial); never the BOS-1467 refusal again.
+    expect(after.statusCode).toBe(200);
+  });
+
   it("a rollback says nothing about what the commit contains: still never assumed live", { timeout: 60_000 }, async () => {
     const c = (ctx = await setupApp());
     const early = await merged(c, EARLY, "2026-11-15T23:53:00Z");
