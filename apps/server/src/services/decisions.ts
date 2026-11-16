@@ -935,6 +935,8 @@ export const CEO_HANDOVER_MINUTES = 5;
 
 /** How long a team question waits with the CEO before it moves to the owner (BOS-1318). Housekeeping isn't urgent, and nobody's run waits on it. */
 export const CEO_QUESTION_HANDOVER_MINUTES = 60;
+/** (R39) Said at raise time to the agent and to the CEO: a card that landed CEO-first reaches the owner only after the handover, so one that needs their hands is raised with steps or ownerOnly. No refusal by wording (BOS-1318). */
+export const OWNER_HANDS_HINT = `If the owner has to do something themselves (GitHub, the host, a secret, a payment), raise it again with steps or ownerOnly: this card reaches them only after ${CEO_QUESTION_HANDOVER_MINUTES} minutes.`;
 
 /**
  * The only reasons an agent's card stays on the owner's queue without steps (BOS-1318): a fixed list,
@@ -2181,6 +2183,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           `A team question is waiting for you (decision ${raised.id}):\n${untrusted("agent's question", input.question.slice(0, 1000))}`,
           "An agent asked it, and it needs none of the owner's hands, money, secrets or sign-off, so it came to you before the owner. Settle it yourself: answer with the decisions tool (action answer, one of its options) and a note saying why. The agent is woken with your answer and the owner can read the note.",
           `If it really is the owner's call (product direction, a secret, money, a host step or a sign-off), escalate it at once (decisions tool, action escalate, with triedFirst). If you don't answer within ${CEO_QUESTION_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+          `If the asker wanted the owner to act (GitHub, the host, a secret, a payment) and left out steps, escalate it with steps rather than waiting. ${OWNER_HANDS_HINT}`,
         ].join("\n").slice(0, 4000));
       }
       // Links that weren't stored come back so the tool's reply can say which, and why (BOS-625).
