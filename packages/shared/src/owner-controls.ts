@@ -348,3 +348,30 @@ export const OWNER_TABS = {
   ],
   Board: ["Kanban", "Budget", "Config"],
 } as const;
+
+/**
+ * The section headings on each tab, as the page shows them (Section titles, h3 headings and the "Advanced" folds). A
+ * card's path may name one after its tab ("Settings → Server and runner → This server → Network guard"); a path part
+ * that is none of a tab, a heading, a button or a field is refused (R8, BOS-1649). `owner-control-list.test.ts` reads
+ * the web app and fails when an entry here is no longer on its page or a literal Section title is missing here.
+ */
+export const OWNER_SECTIONS = {
+  Funding: ["Funding sources", "Budgets", "What the provider controls"],
+  Secrets: ["All stored secrets"],
+  "Tools and deploys": ["Tool servers (MCP)", "Penpot", "Deploy targets", "If the git host protects the tag"],
+  Reviews: ["Reviews"],
+  "Team and CEO": [
+    "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
+    "Did it move the goal?", "Cleaning up temp files",
+  ],
+  Watchdog: ["Watchdog"],
+  Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],
+  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "What the host said"],
+  "Limits and checks": ["Agents at once", "Tickets in progress", "Checks", "Check workers"],
+  Runner: ["Runner", "Add-ons", "Workspace disk"],
+  Email: ["Outgoing email", "Main's CI"],
+  "This server": ["Server", "This host", "Facts only you can give", "Network guard", "Allowed automatically", "Extra lines from your .env"],
+  "Devices and privacy": ["Your devices", "Private details to block"],
+  "Import and export": ["Import a company"],
+  Budget: ["Spending limit", "Pay-as-you-go spend", "On your subscriptions", "Tokens", "Costliest tasks"],
+} as const satisfies Record<string, readonly string[]>;

@@ -402,7 +402,7 @@ export function schedulerService(
     for (const other of pool.filter((p) => p.id !== source.id)) {
       if (holdingWindows(other, await latestQuotaWindows(other.id), now()).length === 0) return ` New runs move to ${other.name} automatically.`;
     }
-    return " To keep agents working on a second Claude plan now: Settings → Secrets → the Claude token → Rotate, paste the second plan's token. It moves every agent in the company at once; runs already going finish on the first plan. To undo, Rotate back to the first token (keep it saved elsewhere: Boss Man never shows it again). Or add the second plan on the Funding page so new runs switch by themselves.";
+    return " To keep agents working on a second Claude plan now: Settings → Secrets, find the Claude token and press Rotate, then paste the second plan's token. It moves every agent in the company at once; runs already going finish on the first plan. To undo, Rotate back to the first token (keep it saved elsewhere: Boss Man never shows it again). Or add the second plan on the Funding page so new runs switch by themselves.";
   }
 
   /**
