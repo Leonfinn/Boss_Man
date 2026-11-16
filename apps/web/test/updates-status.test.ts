@@ -155,6 +155,38 @@ describe("updateStatus: one row per state, first match wins", () => {
     expect(s.more).toContain("Server updated");
   });
 
+  // BOS-1648: the runner line is the server's one answer, word for word; never "may be needed".
+  describe("8b. the runner line", () => {
+    const at = (runnerUpdate: SelfDeployView["runnerUpdate"]) => updateStatus(base({ status: st({ result: "deployed" }), runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" }, runnerUpdate }), null, null, NOW);
+
+    it("not needed: green, names the server-only changes", () => {
+      const words = "Runners are up to date: the changes since they were built (BOS-1635) are server-only.";
+      const s = at({ state: "not_needed", words, tickets: ["BOS-1635"] });
+      expect([s.tone, s.tag, s.say]).toEqual(["green", "Up to date", "Boss Man is up to date."]);
+      expect(s.more).toContain(words);
+    });
+
+    it("needed: amber, names the tickets and the button", () => {
+      const words = "Runner update needed: BOS-1583 changes what the runners are built from (they were built from aaaaaaa1; the server runs bbbbbbb2).";
+      const s = at({ state: "needed", words, tickets: ["BOS-1583"] });
+      expect([s.tone, s.tag]).toEqual(["amber", "Runner update needed"]);
+      expect(s.more).toContain(`${words} Press Build and update runners under Other actions.`);
+    });
+
+    it("can't tell: amber, says why, never 'not needed'", () => {
+      const words = "Boss Man can't tell whether a runner update is needed, because the server runs bbbbbbb2, which isn't a merge Boss Man recorded.";
+      const s = at({ state: "unknown", words, tickets: [] });
+      expect([s.tone, s.tag]).toEqual(["amber", "Can't tell"]);
+      expect(s.more).toContain(words);
+      expect(s.more).not.toMatch(/up to date: the changes/);
+    });
+
+    it("never says 'may', in any state", () => {
+      for (const state of ["needed", "not_needed", "unknown"] as const) expect(at({ state, words: "x.", tickets: [] }).more).not.toMatch(/\bmay\b/);
+      expect(at(null).more).not.toMatch(/\bmay\b|Runner image/);
+    });
+  });
+
   it("never more than one blue main button, in any row", () => {
     const rows = [
       updateStatus(offered(), null, null, NOW),
@@ -202,7 +234,7 @@ describe("plain failure reasons", () => {
       expect(s.primary?.disabled).toBeFalsy();
       const upToDate = updateStatus(base({ status: refusal, deployWait: { until: iso(2), target: "runner" }, runnerImage: { running: "aaaaaaa1", needed: "bbbbbbb2" } }), null, null, NOW);
       expect(upToDate.more).toContain("Runner update: press Build and update runners again from ");
-      expect(upToDate.more).toContain("Runner image: aaaaaaa1; the live server needs bbbbbbb2 (a runner update may still be needed).");
+      expect(upToDate.more).not.toMatch(/may still be needed/);
     });
   });
 

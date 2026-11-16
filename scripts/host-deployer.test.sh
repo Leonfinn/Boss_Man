@@ -621,7 +621,7 @@ has "$D/outbox/status.json" "have not passed their merge check yet. ${c5:0:8} is
 # 13h. Deploy latest pressed for the tip, then two more merges land, both checked: the new tip goes out, and the runner
 # change it brings is reported, though the card's own range had none.
 rm -f "$D/state/last-server"
-c7="$(push apps/runner/x)"; c8="$(push apps/server/f)"
+c7="$(push apps/runner/src/x)"; c8="$(push apps/server/f)"
 printf '%s\n' "$c5" "$c6" "$c7" "$c8" >"$D/inbox/checked"
 before="$(calls)"
 req server "$c6"; host
