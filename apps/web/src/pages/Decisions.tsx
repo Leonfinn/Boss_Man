@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, type StepPiece, type Where } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -308,11 +308,19 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
  * its commands as blocks, labelled fence lines and indented list items included.
  */
 function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  const parsed = parseStep(text);
-  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text }];
+  // The R19 "seen:" / "not seen:" tag is for the card checker: the owner reads a small muted line instead (BOS-1665).
+  const { text: shown, source } = splitStepSource(text);
+  const parsed = parseStep(shown);
+  const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text: shown }];
   return (
     <>
       {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
+      {source?.kind === "seen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={`/api/ticket-images/${source.imageId}`} target="_blank" rel="noreferrer">your screenshot</a></span>
+      )}
+      {source?.kind === "notSeen" && (
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={source.url} target="_blank" rel="noreferrer noopener">the vendor's docs</a>, {source.date}</span>
+      )}
     </>
   );
 }

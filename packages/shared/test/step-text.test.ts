@@ -63,3 +63,22 @@ describe("one reading of a step's fences (BOS-550)", () => {
     expect(parseStep("")).toEqual([]);
   });
 });
+
+import { splitStepSource } from "../src/step-text.js";
+
+describe("R19 source tags are hidden from the owner's text (BOS-1665)", () => {
+  const id = "66010c79-1111-4222-8333-444455556666";
+  it("takes a seen tag out of the text and reads it into source", () => {
+    const r = splitStepSource(`Click Save (seen: ${id})`);
+    expect(r.text).toBe("Click Save");
+    expect(r.source).toEqual({ kind: "seen", imageId: id });
+  });
+  it("takes a not-seen tag out and keeps the url and date", () => {
+    const r = splitStepSource("Open DNS. not seen: https://docs.example.com/dns, 2026-11-01");
+    expect(r.text).toBe("Open DNS.");
+    expect(r.source).toEqual({ kind: "notSeen", url: "https://docs.example.com/dns", date: "2026-11-01" });
+  });
+  it("leaves a step with no tag as it is", () => {
+    expect(splitStepSource("Click Save")).toEqual({ text: "Click Save" });
+  });
+});

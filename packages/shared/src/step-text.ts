@@ -83,3 +83,33 @@ export function strayFence(pieces: StepPiece[]): string | null {
   }
   return null;
 }
+
+/** Where a step's clicks came from (R19): the card checker's tag, kept in the stored step, never shown as written. */
+export type StepSource = { kind: "seen"; imageId: string } | { kind: "notSeen"; url: string; date: string };
+
+const SEEN_TAG = /(?<!not )\bseen:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[ \t]*[.,;]?/i;
+const NOT_SEEN_TAG = /\bnot seen:\s*(https?:\/\/[^\s,]+)\s*,\s*(\d{4}-\d{2}-\d{2})[ \t]*[.,;]?/i;
+
+/**
+ * A step with its R19 "seen: <id>" / "not seen: <url>, <date>" tag taken out, and the tag read into `source`. The
+ * stored step keeps the tag (the card checker needs it); the owner's views (card, Decisions, review lane, push)
+ * show `text` and, at most, a muted line built from `source`.
+ */
+export function splitStepSource(step: string): { text: string; source?: StepSource } {
+  let source: StepSource | undefined;
+  let text = step;
+  const notSeen = NOT_SEEN_TAG.exec(text);
+  if (notSeen) {
+    source = { kind: "notSeen", url: notSeen[1]!, date: notSeen[2]! };
+    text = text.replace(NOT_SEEN_TAG, "");
+  }
+  const seen = SEEN_TAG.exec(text);
+  if (seen) {
+    source ??= { kind: "seen", imageId: seen[1]!.toLowerCase() };
+    text = text.replace(SEEN_TAG, "");
+  }
+  if (!source) return { text: step };
+  // Tidy what the tag leaves behind: an empty "()" or "[]", doubled spaces, a dangling separator.
+  text = text.replace(/\s*[(\[]\s*[)\]]/g, "").replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/gm, "").replace(/\s*[-–—;,]\s*$/, "").trim();
+  return { text, source };
+}
