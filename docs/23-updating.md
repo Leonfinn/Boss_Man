@@ -44,11 +44,13 @@ The host deployer refuses changes to files that control how Boss Man runs or dep
 
 If the health check fails, the script changes nothing by itself and prints the commands to roll back. `scripts/deploy.sh --rollback` puts the previous commit back. It never touches the database.
 
-## 3. Copy the deployer script if it changed
+## 3. The deployer script copies itself
 
 Skip this step if you do not use the host deployer.
 
-The host deployer runs from its own copy of `scripts/host-deployer.sh`, so an update to the checkout does not change it. You do not need to compare the copies yourself. When the host's copy is behind, Boss Man puts a card on Decisions with the copy command for your folders, a check and an undo, and Settings → Server and runner → This server says "Deployer script: behind". Read the new script, then run the card's commands. The card closes by itself once the host runs the new copy.
+The host deployer runs from its own copy of `scripts/host-deployer.sh`. A change to that script is never deployed from the panel (it is what root runs), so you apply it by hand with `scripts/deploy.sh` as the card says. That deploy refreshes the copy by itself with `scripts/install-deployer.sh`: it writes the new file beside the old one, keeps the owner and mode, and renames it over, so the new version is used from the deployer's next run. You do not need to copy anything.
+
+If the deploy output says "the deployer copy was not refreshed", or this is the first update that brings this feature in, the host's copy stays behind. Boss Man then puts a card on Decisions with the copy command for your folders, a check and an undo, and Settings → Server and runner → This server says "Deployer script: behind". Read the new script, then run the card's commands. The card closes by itself once the host runs the new copy.
 
 Do not link to the checkout instead of copying. A link would let a merged change alter what root runs.
 
@@ -73,7 +75,7 @@ How the drain works is in [docs/09](09-self-deploy.md).
 
 A runner update takes no backup. Runners hold no database.
 
-**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/34](34-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
 
 ## Backups
 

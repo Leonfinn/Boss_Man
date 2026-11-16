@@ -29,7 +29,7 @@ const leader = createLeader({
 
 const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-const { app, mailer, launcher, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
+const { app, mailer, mainCi, launcher, githubWatch, memory, serverHealth, checks, runnerWatch, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, deployWait, maintenance, runners, refreshSyntheticQuota, deploys } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -96,6 +96,8 @@ const bg = createBackground(
     { name: "server health", everyMs: Number(env.BOSSMAN_SERVER_HEALTH_MS ?? 60_000), run: async () => { await serverHealth.check(); } },
     // Boss Man's own alerts that sat on the Scrum Master or the CEO past the time limit move up a rung (BOS-64).
     { name: "alert ladder", everyMs: Number(env.BOSSMAN_ALERT_LADDER_MS ?? 60_000), run: () => alerts.sweep() },
+    // Main's GitHub CI (BOS-1072): one ticket per distinct failing step, later runs added to it, a note when green again. Quiet where there is no GitHub CI. // leader-only
+    { name: "main CI watch", everyMs: Number(env.BOSSMAN_MAIN_CI_MS ?? 10 * 60_000), run: async () => { await mainCi.run(); } },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
     // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
@@ -108,6 +110,8 @@ const bg = createBackground(
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     // BOS-1152: the runners follow "Checks at once" after any rebuild, swap or launcher restart, not only after the owner changes it. // leader-only
     { name: "check limit", everyMs: Number(env.BOSSMAN_CHECK_LIMIT_MS ?? 60_000), run: () => checkLimit.step() },
+    // The GitHub watcher (BOS-1393): files new issues, discussions and comments into the feedback inbox. Each watch has its own interval (default 60 min, minimum 15); this tick only runs the ones that are due. Calls api.github.com. // leader-only
+    { name: "github watch", everyMs: Number(env.BOSSMAN_GITHUB_WATCH_MS ?? 60_000), run: () => githubWatch.runDue() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
     // A server update waiting for a quiet machine (BOS-420): sends it when quiet, asks the owner at 30 min, follows it through the standby window. // leader-only
     { name: "deploy wait", everyMs: Number(env.BOSSMAN_DEPLOY_WAIT_MS ?? 15_000), run: async () => { await deployWait.step(); } },

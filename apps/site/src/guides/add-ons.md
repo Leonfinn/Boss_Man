@@ -33,7 +33,7 @@ Penpot is an open-source design tool. Boss Man runs it as a separate Compose pro
 2. Start it with `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot up -d`.
 3. Sign-up is off. To make accounts, add `PENPOT_REGISTRATION=enable` to `.env`, start it again, make the accounts, then delete the line and start it again.
 
-For agents to reach it, add its address to `BOSSMAN_NETGUARD_ALLOW` in `.env` (the network guard blocks home-network addresses), then run `scripts/update-runner.sh --settings`. Back it up with `scripts/backup-penpot.sh`. The full steps, including giving agents access, are in [`docs/15-penpot.md`](@repo/blob/main/docs/15-penpot.md) and [`docs/16-penpot-agent-setup.md`](@repo/blob/main/docs/16-penpot-agent-setup.md).
+To give agents access, open **Settings → Tools and deploys → Penpot** and save its address and the agent account's access token. Boss Man opens that address in the network guard by itself, so there is no `.env` line to add. Back it up with `scripts/backup-penpot.sh`. The full steps, including giving agents access, are in [`docs/15-penpot.md`](@repo/blob/main/docs/15-penpot.md) and [`docs/16-penpot-agent-setup.md`](@repo/blob/main/docs/16-penpot-agent-setup.md).
 
 ## Runner add-ons: extra tools for agents
 

@@ -9,6 +9,7 @@ import { NO_CHECK, STANDARD_CHECKS, SYSTEM_STATES, findCredential, parseRepoUrl,
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, fundingSources, projects, runners as runnersTable, runs as runsTable, secretGrants, tickets } from "../db/schema.js";
 import type { gitHostService } from "../services/git-hosts.js";
+import { DEFAULT_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES, MIN_INTERVAL_MINUTES, WATCH_TOKEN_ENV, type githubWatchService } from "../services/github-watch.js";
 import type { launcherService } from "../services/launcher.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "../services/project-brief.js";
 import { monthStartUtc, projectSpendMicros } from "../services/project-spend.js";
@@ -37,10 +38,11 @@ export function projectRoutes(
     checkPolicy: (companyId: string, body: unknown) => ReturnType<typeof checkPolicyIn>;
     /** Notes new scope for the CEO's next run; app.ts uses it for objectives and milestones too. */
     teamCheck: (companyId: string, what: string) => Promise<void>;
+    githubWatch: ReturnType<typeof githubWatchService>;
     now?: () => Date;
   },
 ) {
-  const { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck } = deps;
+  const { work, launch, gitHosts, setup, runners, secretsSvc, checkPolicy, teamCheck, githubWatch } = deps;
 
   /** The project's own policy, or null when it uses the company's. */
   owner.get("/api/projects/:id/review-policy", async (req, reply) => {
@@ -59,6 +61,55 @@ export function projectRoutes(
   owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
     const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
     return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
+  });
+
+  // The GitHub watcher's setting (BOS-1393): owner only, never an agent tool. The token is a company secret
+  // (GITHUB_WATCH_TOKEN); only whether it is there is shown, never its value.
+  const WatchBody = z
+    .object({
+      enabled: z.boolean(),
+      repo: z.string().trim().max(140).regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, "The repository must look like owner/name."),
+      intervalMinutes: z.number().int().min(MIN_INTERVAL_MINUTES, `Check at most every ${MIN_INTERVAL_MINUTES} minutes.`).max(MAX_INTERVAL_MINUTES),
+      watchIssues: z.boolean(),
+      watchDiscussions: z.boolean(),
+      skipLogins: z.array(z.string().trim().max(45)).max(20),
+    })
+    .partial();
+  const watchView = async (projectId: string, companyId: string) => {
+    const w = await githubWatch.get(projectId);
+    // The grant's name only: reading it doesn't decrypt the token.
+    const hasToken = (await secretsSvc.grantsForCompany(companyId)).some((g) => g.envName === WATCH_TOKEN_ENV && !g.deployTargetId);
+    return {
+      enabled: w?.enabled ?? false,
+      repo: w?.repo ?? "",
+      intervalMinutes: w?.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES,
+      watchIssues: w?.watchIssues ?? true,
+      watchDiscussions: w?.watchDiscussions ?? true,
+      skipLogins: w?.skipLogins ?? [],
+      status: w?.status ?? "idle",
+      lastError: w?.lastError ?? null,
+      lastRunAt: w?.lastRunAt ?? null,
+      lastNewNotes: w?.lastNewNotes ?? 0,
+      backoffUntil: w?.backoffUntil ?? null,
+      hasToken,
+      tokenName: WATCH_TOKEN_ENV,
+    };
+  };
+  owner.get("/api/projects/:id/github-watch", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    return p ? watchView(p.id, p.companyId) : reply.code(404).send({ error: "not_found" });
+  });
+  owner.put("/api/projects/:id/github-watch", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await githubWatch.save(p.id, p.companyId, WatchBody.parse(req.body));
+    return watchView(p.id, p.companyId);
+  });
+  owner.post("/api/projects/:id/github-watch/check-now", async (req, reply) => {
+    const [p] = await db.select({ id: projects.id, companyId: projects.companyId }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+    if (!p) return reply.code(404).send({ error: "not_found" });
+    await githubWatch.runOne(p.id, { force: true });
+    return watchView(p.id, p.companyId);
   });
 
   owner.get("/api/companies/:id/projects", async (req) => {

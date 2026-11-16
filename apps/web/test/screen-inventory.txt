@@ -36,6 +36,7 @@ sections:
   - Filter tasks
   - Passed, held
   - Project brief
+  - Spending limit
   - Tokens
   - Your review
 reads: 
@@ -191,15 +192,18 @@ reads:
 
 ## #/settings/<company>/email
 sections: 
+  - Main's CI
   - Outgoing email
 reads: 
   - /api/settings/email
+  - /api/settings/main-ci
 
 ## #/settings/<company>/funding
 sections: 
   - Budgets
   - Costliest tasks
   - Funding sources
+  - Spending limit
   - Spending limits
   - Tokens
 reads: 
@@ -218,6 +222,7 @@ sections:
   - Tickets in progress
 reads: 
   - /api/companies
+  - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
   - /api/wip-limits
@@ -295,10 +300,12 @@ reads:
 ## #/settings/<company>/tools
 sections: 
   - Deploy targets
+  - Penpot
   - Tool servers (MCP)
 reads: 
   - /api/companies/:id/deploy-targets
   - /api/companies/:id/mcp-servers
+  - /api/companies/:id/penpot
   - /api/companies/:id/projects
 
 ## #/settings/<company>/transfer

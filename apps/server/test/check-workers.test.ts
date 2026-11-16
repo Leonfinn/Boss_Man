@@ -102,6 +102,14 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.d.capacity(s.co.id)).toBe(1);
   });
 
+  it("a worker that never connected shows the can't-find-the-address hint, not only 'has not connected yet' (BOS-1601)", async () => {
+    const s = await setup({ runnerSlots: 1 });
+    const { worker: w } = await s.workers.register({ name: "never", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+    const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+    expect(row.reason).toMatch(/Has not connected yet/);
+    expect(row.reason).toMatch(/Can't find the address.*ENOTFOUND.*Tailscale name.*tailnet.*local network address/s);
+  });
+
   it("gives no job to a worker that can't fetch code yet, is built from another commit, is off or isn't set up for the company, and says why", async () => {
     const s = await setup({ runnerSlots: 1 });
     const other = await s.company("Other");
@@ -117,7 +125,7 @@ describe("check workers: scheduling (BOS-1435)", () => {
     const by = (id: string) => list.find((x) => x.id === id)!;
     expect(by(noBundle.id).reason).toMatch(/can't fetch the code/);
     expect(by(oldCommit.id).reason).toBeNull();
-    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/different commit than the company's runner/) });
+    expect(by(oldCommit.id).companies[0]).toMatchObject({ ready: false, reason: expect.stringMatching(/its commit differs from your runner's.*one time only/) });
     expect(by(off.id).reason).toBe("Turned off.");
     expect(by(elsewhere.id).companies[0]!.id).toBe(other.id);
     const w = await s.workers.get(elsewhere.id);
@@ -135,7 +143,54 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(ran(s.toWorker)).toEqual([]);
     await s.db.update(runners).set({ imageCommit: COMMIT }).where(eq(runners.id, s.co.runnerId));
     const quiet = await s.worker({ commit: null });
-    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which commit/);
+    expect((await s.workers.list()).find((x) => x.id === quiet.id)!.reason).toMatch(/hasn't said which tools or commit/);
+  });
+
+  // BOS-1570: a runner update (new commit, same tools) must not idle a worker; only a tool change does, and it says which.
+  describe("toolchain match (BOS-1570)", () => {
+    const TOOLS = { node: "22.11.0", pnpm: "10.28.0", git: "2.39.5" };
+    const tc = (tools: Record<string, string>, fingerprint?: string) => ({ fingerprint: fingerprint ?? JSON.stringify(Object.entries(tools).sort()).replace(/\W/g, "").padEnd(64, "0").slice(0, 64), tools });
+    const withTools = async (s: Awaited<ReturnType<typeof setup>>, workerTc: ReturnType<typeof tc> | null, runnerTc: ReturnType<typeof tc> | null, o: { workerCommit?: string | null; runnerCommit?: string | null } = {}) => {
+      await s.db.update(runners).set({ toolchain: runnerTc, imageCommit: o.runnerCommit === undefined ? COMMIT : o.runnerCommit }).where(eq(runners.id, s.co.runnerId));
+      const { worker: w } = await s.workers.register({ name: `W${Math.random()}`, companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      await s.workers.touch(w.id, { imageCommit: o.workerCommit === null ? undefined : (o.workerCommit ?? OTHER), toolchain: workerTc ?? undefined, imageVersion: "1", features: ["check-jobs", BUNDLE_FEATURE] });
+      s.workers.connect(w.id, () => true, () => undefined, ["check-jobs", BUNDLE_FEATURE]);
+      return (await s.workers.get(w.id))!;
+    };
+
+    it("takes jobs with a different commit when the tools match, with no owner action", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc(TOOLS), tc(TOOLS));
+      expect(s.workers.readiness(w, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toEqual([w.id]);
+      // The commit is information only: a worker with no commit at all still matches.
+      const bare = await withTools(s, tc(TOOLS), tc(TOOLS), { workerCommit: null });
+      expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toContain(bare.id);
+    });
+
+    it("goes idle when a tool differs, and the reason names the tool", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const w = await withTools(s, tc({ ...TOOLS, node: "22.10.0" }), tc(TOOLS));
+      expect(await s.workers.eligible(s.co.id)).toEqual([]);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.companies[0]!.reason).toMatch(/Out of date.*node 22\.10\.0 here, 22\.11\.0 on your runner.*Redeploy.*no file edit/);
+    });
+
+    it("says 'worker code too old' when a worker's protocol is refused, instead of a bare Offline", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const { worker: w } = await s.workers.register({ name: "Old", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+      s.workers.refuse(w.id, 0);
+      const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+      expect(row.reason).toMatch(/Out of date: worker code too old \(it speaks protocol 0, your server needs 1\).*Redeploy/);
+    });
+
+    it("falls back to the commit when either side can't report its tools", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const oldWorker = await withTools(s, null, tc(TOOLS), { workerCommit: COMMIT });
+      expect(s.workers.readiness(oldWorker, s.co.id, COMMIT, tc(TOOLS))).toEqual({ ok: true, limit: 1 });
+      const oldRunner = await withTools(s, tc(TOOLS), null, { workerCommit: OTHER });
+      expect(s.workers.readiness(oldRunner, s.co.id, COMMIT, null)).toMatchObject({ ok: false, reason: expect.stringMatching(/rebuild the runner/) });
+    });
   });
 
   it("caps a worker at the smaller of the owner's slots and what it reports, and counts its slots across companies", async () => {

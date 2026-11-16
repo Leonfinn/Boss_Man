@@ -7,6 +7,7 @@ import { when } from "../Runs";
 import { DraftTextarea } from "../../components/DraftTextarea";
 import { Section, useAction } from "./shared";
 import { CheckWorkers, type CheckWorkerView } from "./CheckWorkers";
+import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type SlotPolicy } from "./SlotSplit";
 import { LiveState, atTime, historyTag, historyWhat, inAbout, runnerProgress, updateStatus, type RunnerProgress, type DeployWaitView, type HistoryRow, type MaintenanceView, type Report, type SelfDeployView, type UpdateStatus, type WrapUpRun, type WrapUpStatus } from "./updates";
 
 /** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
@@ -620,7 +621,7 @@ export function WipLimits({ company, onChanged }: { company?: Company; onChanged
   );
 }
 
-type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[] };
+type CheckQueueView = { mode: "legacy" | "server"; slots: number; effectiveSlots?: number; runnerSlotsReported?: number | null; maxSlots: number; defaultSlots: number; runnersTooOld: string[]; train?: boolean; runnersTooOldForTrain?: string[]; cancelled?: number; applying?: boolean; runner?: { slots: number; memoryBytes: number; perCheckBytes?: number; reason: string | null; pending: number; applying: boolean; runnerCount?: number; memoryLine?: string | null } | null; workers?: CheckWorkerView[]; runnerPolicy?: SlotPolicy };
 
 /**
  * Settings → Server and runner → Stop all work (BOS-836): the server-wide hold the scheduler already honours. It only
@@ -712,13 +713,14 @@ export function PrivateDetails() {
 export function CheckQueueSetting() {
   const view = usePoll((signal) => api<CheckQueueView>("/api/settings/check-queue", { signal }), 30_000, "check-queue");
   const act = useAction();
-  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean } | null>(null);
+  const [edit, setEdit] = useState<{ mode: "legacy" | "server"; slots: string; train: boolean; policy: SlotPolicy } | null>(null);
   const d = view.data;
   if (!d) return null;
-  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train };
+  const v = edit ?? { mode: d.mode, slots: String(d.slots), train: !!d.train, policy: d.runnerPolicy ?? DEFAULT_POLICY };
   const n = Number(v.slots);
-  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots;
-  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train;
+  const valid = Number.isInteger(n) && n >= 1 && n <= d.maxSlots && policyValid(v.policy, n);
+  const was = d.runnerPolicy ?? DEFAULT_POLICY;
+  const changed = v.mode !== d.mode || n !== d.slots || v.train !== !!d.train || v.policy.takes !== was.takes || v.policy.mergeKept !== was.mergeKept;
   return (
     <Section id="check-queue-h" title="Checks">
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -742,6 +744,15 @@ export function CheckQueueSetting() {
         <p className="muted" style={{ fontSize: 14 }}>
           How many queued checks one company's runner runs at the same time (default {d.defaultSlots}). Only used by the server queue. Each check uses a lot of memory and CPU: raise it only if the runner's machine has room, or checks start failing with out-of-memory errors. The runners' memory follows this number; there is nothing to edit on the host.
         </p>
+        {/* BOS-1602: what the company runner's slots take; shown only to a server that knows the setting. */}
+        {d.runnerPolicy && (
+          <>
+            <p style={{ fontSize: 14, margin: 0 }} data-testid="check-runner-split">
+              Company runner: <strong>{policyLine(d.runnerPolicy, d.slots)}</strong>.
+            </p>
+            <SlotSplitFields value={v.policy} onChange={(policy) => setEdit({ ...v, policy })} slots={Number.isInteger(n) && n >= 1 ? n : 1} idPrefix="check-runner" />
+          </>
+        )}
         {d.effectiveSlots !== undefined && d.mode === "server" && (
           <p style={{ fontSize: 14 }} data-testid="check-effective-slots">
             Checks running at once right now: <strong>{d.effectiveSlots}</strong>.
@@ -792,7 +803,7 @@ export function CheckQueueSetting() {
           disabled={act.busy || !valid || !changed}
           onClick={() =>
             void act.run(async () => {
-              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train } });
+              const r = await api<CheckQueueView>("/api/settings/check-queue", { method: "PUT", body: { mode: v.mode, slots: n, train: v.train, ...(d.runnerPolicy ? { runnerPolicy: v.policy } : {}) } });
               setEdit(null);
               view.reload();
               const applied = r.applying ? " The runners are restarted with the new limit as each company goes idle." : "";
@@ -803,6 +814,47 @@ export function CheckQueueSetting() {
           Save
         </button>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type MainCiView = { on: boolean; projects: Array<{ projectId: string; project: string; status: { state: string; detail?: string } }> };
+
+/** Settings → Server and runner → Main's CI (BOS-1072): the switch for the watcher that opens a ticket when GitHub CI fails on main, and its plain line per project. */
+export function MainCiSetting() {  const view = usePoll((signal) => api<MainCiView>("/api/settings/main-ci", { signal }), 60_000, "main-ci");
+  const act = useAction();
+  const d = view.data;
+  if (!d) return null;
+  return (
+    <Section id="main-ci-h" title="Main's CI">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When GitHub's CI fails on a project's main branch (a push or the nightly run), Boss Man opens one ticket for each failing step, adds later failed runs to it instead of opening another, and says so on it when main is green again. It sends no cards and no alerts.
+      </p>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api<MainCiView>("/api/settings/main-ci", { method: "PUT", body: { on: e.target.checked } });
+              view.reload();
+              return e.target.checked ? "Watching main's CI." : "Stopped watching main's CI.";
+            })
+          }
+        />
+        Watch main's CI and open tickets for failures
+      </label>
+      {d.on && d.projects.length > 0 && (
+        <ul style={{ fontSize: 14 }} data-testid="main-ci-status">
+          {d.projects.map((p) => (
+            <li key={p.projectId}>
+              <strong>{p.project}:</strong> {p.status.detail ?? "Not checked yet."}
+            </li>
+          ))}
+        </ul>
+      )}
       {act.view}
     </Section>
   );
