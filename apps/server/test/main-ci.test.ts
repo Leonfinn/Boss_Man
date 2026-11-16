@@ -134,7 +134,7 @@ describe("the main-CI watcher", () => {
     expect(made[0]!.body).toContain("Error lines weren't readable with this token");
     const [s] = await c.service.statuses();
     expect(s!.status.state).toBe("failing");
-    expect(s!.status.detail).not.toMatch(/can't read/);
+    expect("detail" in s!.status ? s!.status.detail : "").not.toMatch(/can't read/);
   });
 
   it("finds the breaking commit within the failing workflow only, ignoring other workflows' runs", async () => {
