@@ -518,3 +518,15 @@ a { color: inherit; text-underline-offset: 3px; }
   .g-next { grid-template-columns: 1fr; }
   .g-next .next { text-align: left; }
 }
+
+/* What's new (/whats-new): the guide layout without the guide list, the dates in the right-hand column. After the
+   guide media queries so these win at every width. */
+.guide.news { grid-template-columns: minmax(0, 1fr) 220px; max-width: 1100px; }
+.news .g-main { max-width: 760px; }
+.news .g-main > h2 { margin-top: 48px; padding-top: 24px; border-top: 2px solid var(--line-light); font-size: 26px; }
+@media (max-width: 1100px) {
+  .guide.news { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .news .g-main > h2 { font-size: 22px; margin-top: 36px; }
+}

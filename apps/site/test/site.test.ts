@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync, existsSync, rmSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { build, checkPortalUrl, fill, parsePage, portalBlocks, requireSiteUrlOnPages } from "../scripts/build.mjs";
+import { build, checkPortalUrl, fill, parsePage, portalBlocks, readChangelog, requireSiteUrlOnPages } from "../scripts/build.mjs";
 import { checkSite } from "../scripts/check.mjs";
 
 let tmp: string;
@@ -176,6 +176,51 @@ describe("About page", () => {
     }
     expect(read("about.html")).toContain('<a href="/about" aria-current="page">About</a>');
     expect(read("index.html")).not.toContain('href="/about" aria-current');
+  });
+});
+
+describe("What's new page", () => {
+  const changelog = (text: string) => {
+    const f = path.join(tmp, "CHANGELOG-test.md");
+    writeFileSync(f, text);
+    return () => readChangelog(f);
+  };
+
+  it("builds /whats-new from the repo's CHANGELOG.md, newest entry first, without the file's preamble or the release-step comment", () => {
+    const html = read("whats-new.html");
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    const first = /^## (.+)$/m.exec(source)![1];
+    expect(html).toContain("<h1>What's new</h1>");
+    expect(html).toContain(`<h2 id="${first.toLowerCase().replace(/ /g, "-")}">${first}</h2>`);
+    expect(html).toContain(`Latest entry: ${first}.`);
+    expect(html).not.toContain("# What's new in Boss Man");
+    expect(html).not.toMatch(/release step|<!--/i);
+    expect(html).toContain('href="/guides/updates-and-backups"');
+  });
+
+  it("is linked from the footer of every page and from the updating guide", () => {
+    for (const f of htmlFiles()) {
+      const footer = read(f).slice(read(f).indexOf('<nav aria-label="Footer">'));
+      expect(footer, f).toContain('<a href="/whats-new">What\'s new</a>');
+    }
+    expect(read("guides/updates-and-backups.html")).toContain('href="/whats-new"');
+  });
+
+  it("stops the build on an entry that is not a date, dates out of order or repeated, a ticket number, or no entries", () => {
+    const ok = "# What's new\n\nIntro.\n\n## 16 November 2026\n\n- A change.\n\n## 2 November 2026\n\n- Another.\n";
+    expect(changelog(ok)().dates).toEqual(["16 November 2026", "2 November 2026"]);
+    expect(changelog(ok.replace("16 November", "Week 46"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "31 November"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "16 Nov"))).toThrow(/is not a date/);
+    expect(changelog(ok.replace("16 November", "1 November"))).toThrow(/out of order/);
+    expect(changelog(ok.replace("16 November", "2 November"))).toThrow(/out of order/);
+    expect(changelog(ok.replace("A change.", "A change (BOS-1658)."))).toThrow(/ticket number/);
+    expect(changelog("# What's new\n\nNothing yet.\n")).toThrow(/no entries/);
+  });
+
+  it("keeps the release-step comment out of the page but in the file, so the next release knows what to add", () => {
+    const source = readFileSync(path.join(__dirname, "..", "..", "..", "CHANGELOG.md"), "utf8");
+    expect(source).toMatch(/<!--[\s\S]*release step[\s\S]*-->/i);
   });
 });
 
