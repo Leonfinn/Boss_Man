@@ -1389,10 +1389,7 @@ export function reviewService(
         return `CI on branch head ${at}: passed${c.total ? ` (${c.total} check${c.total === 1 ? "" : "s"})` : ""}.`;
       } catch (err) {
         if (err instanceof GitHostError) {
-          const hint = err.status === 401 || err.status === 403 || err.status === 404
-            ? " The company's git token may lack read access to CI: on GitHub a fine-grained token needs Repository permissions → Actions: Read-only (and Metadata: Read-only)."
-            : "";
-          return `CI on branch head: not available (${err.message}).${hint}`;
+          return `CI on branch head: not available (${err.message}).`;
         }
         return null;
       }
@@ -2308,8 +2305,16 @@ export function reviewService(
             if (o.status.billing || found.some((f) => f.billing)) return ciCard("billing", o.status.failed.map((r) => r.name).join(", ") || "jobs not started");
             const jobs = o.status.failed.map((r) => r.name);
             const listed = found.length ? found : o.status.failed.map((run) => ({ run, lines: [] as string[] }));
+            // The agent can't read GitHub's logs and never holds the token, so the server reads each failed job's log (BOS-1667).
+            const logs = new Map<number, string[]>();
+            for (const f of listed.slice(0, 5)) if (f.run.id) logs.set(f.run.id, await deps.gitHosts!.jobLogBlock(ci!.cfg, ci!.token, f.run.id));
             const body = listed.length
-              ? listed.map((f) => `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}`).join("\n")
+              ? listed
+                  .map((f) => {
+                    const log = logs.get(f.run.id);
+                    return `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}${log ? `\n  Log lines (secrets redacted):\n${log.map((l) => `  > ${l}`).join("\n")}` : ""}`;
+                  })
+                  .join("\n")
               : "- the workflow failed before any job ran; open the commit's checks on GitHub";
             // As for the gate's own check (checkFailed, BOS-1173): a merge-check fix marked, or a waits-on link added, while
             // CI ran means the failure is main's until that fix is in force (BOS-1643). The throw ends the attempt held, the

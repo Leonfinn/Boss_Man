@@ -57,6 +57,8 @@ function fakeGitHub() {
     status: null as number | null,
     checks: false,
     annotations: new Map<number, unknown[]>(),
+    /** A job's log text, or the HTTP status the log read is refused with. Absent: 404. */
+    logs: new Map<number, string | number>(),
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -77,6 +79,11 @@ function fakeGitHub() {
       return json(200, { total_count: list.length, workflow_runs: list.map(({ jobs: _jobs, ...r }) => ({ ...r, head_sha: sha })) });
     }
     if (jobs) return json(200, { jobs: last.get(Number(jobs[1]))?.jobs ?? [] });
+    const logUrl = /\/actions\/jobs\/(\d+)\/logs/.exec(url);
+    if (logUrl) {
+      const l = state.logs.get(Number(logUrl[1]));
+      return typeof l === "number" ? json(l, { message: "Resource not accessible by personal access token" }) : l === undefined ? json(404, { message: "Not Found" }) : new Response(l, { status: 200 });
+    }
     if (notes) return json(200, state.annotations.get(Number(notes[1])) ?? []);
     return json(404, { message: `no fake for ${url}` });
   }) as typeof globalThis.fetch;
@@ -165,6 +172,24 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     expect(c.gh.calls.some((u) => u.includes("/check-runs/7/annotations"))).toBe(true);
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
     expect(await c.db.select().from(checkResults).where(and(eq(checkResults.ticketId, c.ticket.id), eq(checkResults.kind, "ci")))).toEqual([expect.objectContaining({ passed: false, detail: "images (arm64)" })]);
+  });
+
+  it("a red CI goes back with the failed job's log lines, secrets redacted, and says plainly when the log can't be read (BOS-1667)", async () => {
+    // Built at run time so the source holds no token-shaped string for the secrets scan to flag.
+    const fakeToken = ["ghp", "_", "abcdefghijklmnopqrstuvwxyz", "0123456789ABCD"].join("");
+    const redRun = (sha: string) => (sha === MERGE ? red([{ ...job("images (amd64)", "failure", 7, "Shell tests"), html_url: "https://github.com/leon/site/actions/runs/9/job/7" }, { ...job("images (arm64)", "failure", 8, "Shell tests") }]) : green());
+    const c = (ctx = await setup());
+    c.gh.state.ci = redRun;
+    c.gh.state.logs.set(7, ["2026-11-16T10:00:01Z starting", "2026-11-16T10:00:02Z FAIL host-deployer.test.sh: expected 3 got 4", `2026-11-16T10:00:03Z token ${fakeToken} used`, "2026-11-16T10:00:04Z ##[error]Process completed with exit code 1."].join("\n"));
+    c.gh.state.logs.set(8, 403);
+    const res = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(res).toMatchObject({ outcome: "verify_failed" });
+    const [wake] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id));
+    expect(wake!.note).toContain("Log lines (secrets redacted):");
+    expect(wake!.note).toContain("> FAIL host-deployer.test.sh: expected 3 got 4");
+    expect(wake!.note).toContain("> … end of the log:");
+    expect(wake!.note).not.toContain(fakeToken);
+    expect(wake!.note).toContain("The job log couldn't be read: the git token isn't allowed to read job logs");
   });
 
   it("a workflow run that failed before any job (a broken workflow file) goes back naming the run", async () => {
