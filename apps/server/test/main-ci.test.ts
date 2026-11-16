@@ -106,7 +106,7 @@ describe("the main-CI watcher", () => {
     const made = await c.failingTickets();
     expect(made).toHaveLength(1);
     expect(made[0]!.assigneeAgentId).toBe(c.dev.id);
-    expect(made[0]!.urgent).toBe(false);
+    expect(made[0]!.urgent).toBe(true); // every main-CI ticket is urgent, whoever it goes to (BOS-1635)
     expect(made[0]!.body).toContain("https://github.com/leon/site/actions/runs/11");
     expect(made[0]!.body).toContain("test");
     expect(made[0]!.body).toContain("Run tests");
@@ -147,6 +147,20 @@ describe("the main-CI watcher", () => {
     const [made] = await ctx.failingTickets();
     expect(made!.assigneeAgentId).toBe(ctx.ceo.id);
     expect(made!.urgent).toBe(true);
+  });
+
+  it("gives the ticket to the CEO, not a background-lane agent, and names them as a lead (BOS-1635)", async () => {
+    ctx = await setup();
+    const c = ctx;
+    const [bg] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Bea", title: "Background Developer", role: "worker", agentKind: "claude" }).returning();
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Tidy helpers", systemState: "done", columnId: (await c.work.board(c.project.id)).columns.at(-1)!.id, assigneeAgentId: bg!.id, mergeCommit: sha("e") });
+    failedRun(c, 15, sha("e"));
+    await c.service.run();
+    const [made] = await c.failingTickets();
+    expect(made!.assigneeAgentId).toBe(c.ceo.id);
+    expect(made!.urgent).toBe(true);
+    expect(made!.body).toContain("Lead: Bea");
+    expect(made!.body).toContain("Tidy helpers");
   });
 
   it("adds a later failed run to the open ticket instead of opening another", async () => {

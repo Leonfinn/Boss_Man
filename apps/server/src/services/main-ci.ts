@@ -9,6 +9,7 @@ import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { isBackgroundLaneTitle } from "./check-gate.js";
 import { GitHostError, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
 /** The owner's switch: absent means on. Server-wide, like the other background watchers. */
@@ -110,14 +111,17 @@ export function mainCiService(
   }
 
   /** The ticket whose merge produced `sha`: its assignee takes the failure; otherwise the CEO. */
-  async function breaker(projectId: string, companyId: string, sha: string): Promise<{ agentId: string | null; ticketTitle: string | null; byCeo: boolean }> {
+  async function breaker(projectId: string, companyId: string, sha: string): Promise<{ agentId: string | null; ticketTitle: string | null; byCeo: boolean; lead: string | null }> {
     const [t] = await db.select({ assignee: tickets.assigneeAgentId, title: tickets.title }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.mergeCommit, sha)));
+    let lead: string | null = null;
     if (t?.assignee) {
-      const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, t.assignee), isNull(agents.retiredAt)));
-      if (a) return { agentId: a.id, ticketTitle: t.title, byCeo: false };
+      const [a] = await db.select({ id: agents.id, name: agents.name, title: agents.title }).from(agents).where(and(eq(agents.id, t.assignee), isNull(agents.retiredAt)));
+      // A background-lane agent never takes it: Boss Man doesn't interrupt a run, so urgent work would wait behind their long low-priority one (BOS-1635).
+      if (a && !isBackgroundLaneTitle(a.title)) return { agentId: a.id, ticketTitle: t.title, byCeo: false, lead: null };
+      if (a) lead = a.name;
     }
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
-    return { agentId: ceo?.id ?? null, ticketTitle: t?.title ?? null, byCeo: true };
+    return { agentId: ceo?.id ?? null, ticketTitle: t?.title ?? null, byCeo: true, lead };
   }
 
   /** The first run of the current streak of failures in one workflow: the change that broke it. */
@@ -223,6 +227,7 @@ export function mainCiService(
           `- Step: ${f.step}`,
           `- First failing commit: ${first.headSha.slice(0, 8)}${first.headMessage ? ` — ${first.headMessage.split("\n")[0]!.slice(0, 120)}` : ""} (${first.url})`,
           who.ticketTitle ? `- That commit came from the ticket "${who.ticketTitle}".` : "- Boss Man couldn't tell which ticket that commit came from.",
+          ...(who.lead ? [`- Lead: ${who.lead} merged that ticket (background lane, so this went to the CEO to give to a foreground agent).`] : []),
           "",
           "Error lines (secrets redacted):",
           "```",
@@ -233,7 +238,7 @@ export function mainCiService(
           "",
           "Boss Man opens one ticket for each failing step and adds later failed runs here. It says here when main is green again.",
         ].join("\n");
-        const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: who.byCeo, risk: "medium", state: "ready" });
+        const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: true, risk: "medium", state: "ready" });
         state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url] };
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
         await writeState(p.id, state);
