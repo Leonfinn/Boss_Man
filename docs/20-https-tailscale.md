@@ -78,7 +78,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    docker network inspect $(docker network ls -q --filter name=edge) --format '{{.Name}}: {{range .Containers}}{{.Name}} {{.IPv4Address}}; {{end}}'
    ```
 8. From your phone, on the tailnet, open the address. The padlock should be valid and login should work. After logging in, open the browser developer tools (Application or Storage > Cookies) and check the `bm_session` cookie is marked **Secure**. If it is not, Serve is not passing the HTTPS marker on; logins still work but tell Boss Man's engineer rather than guessing. Off the tailnet (mobile data with Tailscale turned off) it must not load.
-9. Open Boss Man through the ts.net address, then open **Notifications**. **Boss Man's address on your phone** is already filled in with that address if it was empty, so check it and save. Notification links then open it.
+9. In Boss Man, open **Notifications**, type the ts.net address into **Boss Man's address on your phone** and save, so notification links open it. Boss Man does not fill in a ts.net address for you, because only devices on your tailnet can open it.
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
 

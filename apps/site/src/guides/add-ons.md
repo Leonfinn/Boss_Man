@@ -17,7 +17,7 @@ Tailscale gives Boss Man an address such as `https://boss-man.<tailnet>.ts.net` 
 3. In `.env`, add `:deploy/tailscale.yml` to the end of `COMPOSE_FILE`, and add `TS_AUTHKEY=` with the key.
 4. Run `docker compose up -d tailscale server`.
 5. Once it has logged in, remove the `TS_AUTHKEY` line from `.env`.
-6. Open Boss Man at the new address, then open **Notifications**: **Boss Man's address on your phone** is already filled in with it if it was empty. Check it and save.
+6. In Boss Man, open **Notifications**, type the new address into **Boss Man's address on your phone** and save. Boss Man does not fill in a ts.net address for you.
 
 Back up `$BOSSMAN_DATA/tailscale` with your other backups. The full steps are in [`docs/20-https-tailscale.md`](@repo/blob/main/docs/20-https-tailscale.md).
 
