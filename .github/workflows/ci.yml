@@ -396,8 +396,10 @@ jobs:
           # The log is kept in a file and its tail is repeated as an error annotation, which anyone can read through the
           # public check-runs API (the raw job log needs a login). BOS-1553: the first failure here left no trace.
           set +e
+          # The image sets NODE_ENV=production for the runner; React's production build has no act(), so the web
+          # component tests fail under it ("React.act is not a function"). Tests run as tests, as in the other jobs.
           docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
-            -e CI=1 -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+            -e CI=1 -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
               pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
