@@ -113,6 +113,8 @@ jobs:
         env:
           # Opt-in screenshot proofs (e.g. decisions-closed-fold.test.tsx, BOS-809) run instead of skipping.
           BOSSMAN_SCRATCH: ${{ runner.temp }}
+          # This job supplies a browser, so a browser test that can't launch one fails instead of skipping.
+          BOSSMAN_REQUIRE_BROWSER: "1"
         run: |
           # The failing test names are repeated as an error annotation, which anyone can read through the public
           # check-runs API (the raw job log needs a login). Without it a red run said only "exit code 1" (BOS-1590).
@@ -395,7 +397,7 @@ jobs:
           # public check-runs API (the raw job log needs a login). BOS-1553: the first failure here left no trace.
           set +e
           docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
-            -e CI=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+            -e CI=1 -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
               pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
