@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, apiOnce, type Company, type Notice, type NoticeCounts, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { raisedAgo } from "../age";
+import { defaultLinkAddress, type LinkAddress } from "../link-address";
+import type { HostFactsView } from "../host-facts-display";
 import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { when } from "./Runs";
@@ -289,7 +291,7 @@ type Form = {
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-function toForm(s: NotifySettings): Form {
+function toForm(s: NotifySettings, suggested = ""): Form {
   return {
     quiet: !!s.quietHours,
     start: s.quietHours?.start ?? "22:00",
@@ -303,7 +305,8 @@ function toForm(s: NotifySettings): Form {
     clearToken: false,
     pushLevels: s.pushLevels ?? [],
     phonePush: s.phonePush === "all" ? "all" : "urgent",
-    publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
+    // BOS-1603: not the browser's own address (often a Tailscale name or LAN IP the phone can't open): a suggestion or nothing.
+    publicUrl: s.publicUrl ?? suggested,
     approveButtons: s.approveButtons !== false,
     phoneType: s.phoneType ?? "",
   };
@@ -315,8 +318,17 @@ function SettingsForm() {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const sv = useSaveState(form);
+  const [guess, setGuess] = useState<LinkAddress | null>(null);
   useEffect(() => {
-    void api<NotifySettings>("/api/notification-settings").then((s) => (setSaved(s), setForm(toForm(s))), (err: Error) => setNote({ ok: false, text: err.message }));
+    void (async () => {
+      // The host facts are only a hint: a failure here must not stop the settings loading.
+      const facts = await api<HostFactsView>("/api/host-facts").then((h) => h.facts, () => undefined);
+      const g = defaultLinkAddress({ origin: window.location.origin, facts, who: "phone" });
+      setGuess(g);
+      const s = await api<NotifySettings>("/api/notification-settings");
+      setSaved(s);
+      setForm(toForm(s, g.url));
+    })().catch((err: Error) => setNote({ ok: false, text: err.message }));
   }, []);
   // After a test send, look for the phone's "Got it" tap every 5 seconds, for up to 15 minutes.
   const [watching, setWatching] = useState(false);
@@ -360,8 +372,8 @@ function SettingsForm() {
         },
       });
       setSaved(s);
-      setForm(toForm(s));
-      sv.markSaved(toForm(s));
+      setForm(toForm(s, guess?.url));
+      sv.markSaved(toForm(s, guess?.url));
       return "Saved.";
     });
   };
@@ -491,6 +503,11 @@ function SettingsForm() {
             <div className="field">
               <label htmlFor="public-url">Boss Man's address on your phone, so a tap opens the evidence</label>
               <input id="public-url" type="url" placeholder="https://bossman.your-tailnet.ts.net" value={form.publicUrl} onChange={(e) => set({ publicUrl: e.target.value })} spellCheck={false} />
+              {guess && !saved?.publicUrl && (
+                <span className="muted" style={{ fontSize: 13 }} data-testid="public-url-note">
+                  {guess.note}
+                </span>
+              )}
             </div>
             <label style={check}>
               <input type="checkbox" checked={form.approveButtons} onChange={(e) => set({ approveButtons: e.target.checked })} />
