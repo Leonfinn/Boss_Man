@@ -55,7 +55,7 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, company.id), eq(agents.role, "ceo")));
 
   // A fake GitHub: the runs, jobs and logs the test sets.
-  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", runsError: null as Error | null, calls: 0 };
+  const gh = { runs: [] as WorkflowRun[], jobs: {} as Record<number, WorkflowJob[]>, log: "", logError: null as Error | null, runsError: null as Error | null, calls: 0 };
   const gitHosts = {
     workflowRuns: async () => {
       gh.calls++;
@@ -63,7 +63,10 @@ async function setup(opts: { token?: string | undefined; github?: boolean } = {}
       return gh.runs;
     },
     runJobs: async (_c: unknown, _t: unknown, id: number) => gh.jobs[id] ?? [],
-    jobLog: async () => gh.log,
+    jobLog: async () => {
+      if (gh.logError) throw gh.logError;
+      return gh.log;
+    },
     commitAnnotations: async () => [],
   };
   const woken: Array<{ agentId: string; ticketId: string }> = [];
@@ -115,6 +118,23 @@ describe("the main-CI watcher", () => {
     expect(made[0]!.body).toContain(NEVER_WEAKEN);
     expect(c.woken).toEqual([{ agentId: c.dev.id, ticketId: made[0]!.id }]);
     expect(t).toBeTruthy();
+  });
+
+  it("with a token that reads runs but not logs or check-run annotations, still opens one ticket with link, job and step, and shows no fault", async () => {
+    ctx = await setup();
+    const c = ctx;
+    failedRun(c, 40, sha("f"));
+    c.gh.logError = new Error("HTTP 403");
+    await c.service.run();
+    await c.service.run();
+    const made = await c.failingTickets();
+    expect(made).toHaveLength(1);
+    expect(made[0]!.body).toContain("https://github.com/leon/site/actions/runs/40");
+    expect(made[0]!.body).toContain("Run tests");
+    expect(made[0]!.body).toContain("Error lines weren't readable with this token");
+    const [s] = await c.service.statuses();
+    expect(s!.status.state).toBe("failing");
+    expect("detail" in s!.status ? s!.status.detail : "").not.toMatch(/can't read/);
   });
 
   it("finds the breaking commit within the failing workflow only, ignoring other workflows' runs", async () => {

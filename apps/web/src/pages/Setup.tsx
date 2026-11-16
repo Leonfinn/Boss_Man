@@ -152,7 +152,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
             <li>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.</li>
             <li>Name it (e.g. boss-man) and pick an expiry. 90 days is a sensible default.</li>
             <li>Repository access: Only select repositories, then pick {repo}'s repo.</li>
-            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Checks read (so Boss Man can read CI results); Metadata read-only (added automatically).</li>
+            <li>Repository permissions: Contents read and write; Pull requests read and write; Workflows read and write (so agents can change the repo's CI files); Actions read-only (so Boss Man can read CI runs); Metadata read-only (added automatically).</li>
             <li>Generate, copy it once, paste it here, then use "Check the token against {repo}".</li>
           </ol>
           <p style={{ margin: "4px 0" }}>
