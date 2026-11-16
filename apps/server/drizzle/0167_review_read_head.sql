@@ -1,0 +1,1 @@
+ALTER TABLE "review_requests" ADD COLUMN "read_head" text;
