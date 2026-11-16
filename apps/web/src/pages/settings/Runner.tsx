@@ -31,6 +31,9 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
   const ticked = edit ?? start;
   const installed = (report ?? []).map((r) => r.id).filter((id) => known.includes(id));
   const enabled = choice?.enabled === true;
+  // No saved choice, no build record and no runner report (offline): the starting set is unknown, and a save would store
+  // an empty choice that drops add-ons set by hand in .env. Hold the boxes and Save until it is known (BOS-1656).
+  const unknownStart = enabled && choice?.saved == null && choice?.built == null && report == null;
   const dirty = edit !== null && !sameSet(edit, start);
   // The choice differs from what the runner has now: it takes effect at the next Build and update runners.
   const waiting = !dirty && enabled && choice?.saved != null && !sameSet(choice.saved.filter((id) => known.includes(id)), installed);
@@ -51,7 +54,7 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
           return (
             <li key={a.id}>
               <label style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <input type="checkbox" checked={ticked.includes(a.id)} disabled={!enabled || act.busy} onChange={(e) => toggle(a.id, e.target.checked)} />
+                <input type="checkbox" checked={ticked.includes(a.id)} disabled={!enabled || unknownStart || act.busy} onChange={(e) => toggle(a.id, e.target.checked)} />
                 <strong>{a.title}</strong>
               </label>{" "}
               {r?.ok ? <span className="tag green">Working, {r.version}</span> : r ? <span className="tag red">Not working</span> : <span className="tag">Not installed</span>}
@@ -73,11 +76,11 @@ function RunnerAddons({ report }: { report: AddonReport[] | null }) {
       </ul>
       {enabled ? (
         <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <button type="button" className="btn" disabled={!dirty || act.busy} onClick={() => void save()}>
+          <button type="button" className="btn" disabled={!dirty || unknownStart || act.busy} onClick={() => void save()}>
             Save add-ons
           </button>
           <span className="muted" style={{ fontSize: 13 }}>
-            {waiting ? "Saved. Not on the runner yet: press Build and update runners (Settings → Server and runner → Updates)." : "Tick the add-ons you want, then save. They are built in the next time you press Build and update runners, and stay on every update after."}
+            {unknownStart ? "Can't tell which add-ons are on yet: the runner is offline and nothing has been built or saved. Saving now could drop add-ons you set in .env. This unlocks when the runner connects." : waiting ? "Saved. Not on the runner yet: press Build and update runners (Settings → Server and runner → Updates)." : "Tick the add-ons you want, then save. They are built in the next time you press Build and update runners, and stay on every update after."}
           </span>
         </div>
       ) : (
