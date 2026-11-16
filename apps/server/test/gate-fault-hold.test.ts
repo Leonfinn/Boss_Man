@@ -330,6 +330,38 @@ describe("a merge-check fix that needs no deploy releases at merge (BOS-1609)", 
     await ctx.approve(code);
     expect((await ctx.row(code))).toMatchObject({ mergeCommit: MERGE, deploysNothing: false });
   });
+
+  // BOS-1693: BOS-1641 (main's CI fix) changed runner tests and the runner's vitest config next to a gate script. It
+  // was stored as touching runner code, so with the server live and no runner rebuild ~35 held merges never released.
+  // Fails on the code before it: touchesRunner was true and releaseHolds returned [].
+  it("a fix that changed runner tests releases once the server runs it, with no runner rebuild", async () => {
+    ctx = await setup();
+    const fix = await ctx.ticket("Main's CI is failing", { fixesMergeCheck: true });
+    const id = await ctx.ticket("Approved work");
+    await ctx.slot(id);
+    expect(await ctx.approve(id)).toMatchObject({ outcome: "held" });
+    // The server runs the fix's merge (the deploy takeover); the runners still run an older image.
+    await ctx.db.insert(settings).values({ key: `live_release:${ctx.company.id}`, value: { new: MERGE } });
+    await ctx.db.update(runners).set({ imageCommit: "f".repeat(40) }).where(eq(runners.companyId, ctx.company.id));
+    ctx.state.files = [
+      ".github/workflows/ci.yml",
+      "apps/runner/test/check-job-cleanup.test.ts",
+      "apps/runner/test/setup-env.ts",
+      "apps/runner/vitest.config.ts",
+      "apps/web/test/status-tags-feed-render.test.ts",
+      // BOS-1641 changed scripts/check-all.sh; any script makes the merge "needs a deploy" (that one also needs the owner's sign-off).
+      "scripts/check-quick.sh",
+      "scripts/check-all.test.sh",
+    ];
+    await ctx.slot(fix);
+    await ctx.approve(fix);
+    expect(await ctx.row(fix)).toMatchObject({ mergeCommit: MERGE, touchesRunner: false, deploysNothing: false });
+    // The merge's own release may have started it already; a second pass never starts it twice (conditional close).
+    await ctx.review.releaseHolds();
+    await settled(id);
+    expect(await holdView(ctx.db, id)).toBeNull();
+    expect(await ctx.db.select().from(activity).where(and(eq(activity.ticketId, id), eq(activity.kind, "review_hold_released")))).toHaveLength(1);
+  });
 });
 
 describe("a reviewer's hold placed only for a gate fault ends by itself (criterion 5)", () => {
