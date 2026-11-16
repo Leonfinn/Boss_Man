@@ -484,6 +484,12 @@ export type WorkspaceDiff = {
    * work area from the shared repo, so a check of head would fail with "invalid reference": request_check refuses instead.
    */
   unsynced?: string;
+  /**
+   * BOS-1647: set (only on a diff measured against a fetched base branch) when the ticket's head is already inside that
+   * branch, with the commit on it that brought the head in (the merge commit, or head itself for a fast-forward) and,
+   * for a merge commit, the files it changed. A push that landed but was never recorded shows up as exactly this.
+   */
+  mergedInto?: { commit: string; files?: string[] };
 };
 
 /** The outcome of a ticket's check (R47). */
