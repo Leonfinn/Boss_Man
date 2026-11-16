@@ -19,9 +19,20 @@ for t in "${tests[@]}"; do
   extra=()
   [ -z "${CADDY:-}" ] || extra+=("CADDY=$CADDY")
   began=$SECONDS; rc=0
-  env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" || rc=$?
+  out=$(mktemp)
+  env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" >"$out" 2>&1 || rc=$?
+  cat "$out"
   # BOSSMAN_SHELL_TIMES_FILE (set by check-all.sh): one "<script>\t<seconds>\t<exit>" line per test, for the result store (BOS-654).
   [ -z "${BOSSMAN_SHELL_TIMES_FILE:-}" ] || printf '%s\t%s\t%s\n' "$t" "$((SECONDS - began))" "$rc" >>"$BOSSMAN_SHELL_TIMES_FILE" 2>/dev/null || true
   # Name the failing test: GitHub keeps only "exit code 1" for the step, so the log line is how a failure is found (BOS-1641).
-  [ "$rc" -eq 0 ] || { echo "test-shell: FAILED $t (exit $rc)" >&2; exit "$rc"; }
+  if [ "$rc" -ne 0 ]; then
+    echo "test-shell: FAILED $t (exit $rc)" >&2
+    # On GitHub the step log needs a sign-in, but an annotation shows on the public job page: put the test name and the last lines there.
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      tail_text=$(tail -n 15 "$out" | cut -c1-300 | sed -e 's/%/%25/g' -e ':a;N;$!ba;s/\n/%0A/g' -e 's/\r//g')
+      echo "::error title=test-shell FAILED $t (exit $rc)::$tail_text"
+    fi
+    exit "$rc"
+  fi
+  rm -f "$out"
 done
