@@ -397,7 +397,10 @@ if command -v flock >/dev/null; then
   # Ageing: a hand-run check that has waited CHECK_ALL_AGE_AFTER is served before merge checks queued after it. A merge
   # check (a live process that never takes the slot, standing for a steady stream of them) sits ahead of it in the name order.
   rm -rf "$t/lock.queue" "$t/lock.slotlog"; mkdir -p "$t/lock.queue"
-  sleep 120 & mproc=$!
+  # It lives until killed at the end of these cases (BOS-1697): a timed "sleep 120" ran out on GitHub's slower runners before
+  # BOS-613 (b), and check-slot.sh rightly drops a queue entry whose process is gone, so nothing was left to wait behind.
+  sleep 3600 & mproc=$!
+  mproc_alive() { [ -d "/proc/$mproc" ] || fail "$1: the stand-in merge check (pid $mproc) ended early, so the case proves nothing"; }
   hold 1 3600; h1=$!; sleep 0.3
   # Young hand-run check, merge check queued: the merge check goes first, so the hand-run check gives up without a slot.
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
@@ -456,6 +459,7 @@ if command -v flock >/dev/null; then
   waitq 2; sleep 2
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (a)"
   ! grep -q "lock held" "$t/older.out" || fail "BOS-613 (a): an aged hand-run check went ahead of an older merge check: $(cat "$t/older.out")"
   wait "$a" || true
   # BOS-613 (b): two slots, a merge check waiting, one hand-run check running: a second hand-run check waits, even aged and
@@ -468,6 +472,7 @@ if command -v flock >/dev/null; then
   : >"$t/lock.queue/0-$(date +%s%N)-$mproc"
   kill "$h2" 2>/dev/null || true; wait "$h2" 2>/dev/null || true
   sleep 2
+  mproc_alive "BOS-613 (b)"
   ! grep -q "lock held" "$t/cap.out" || fail "BOS-613 (b): a second hand-run check took a slot while a merge check waited: $(cat "$t/cap.out")"
   kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
   for _ in $(seq 300); do grep -q "lock held" "$t/cap.out" 2>/dev/null && break; sleep 0.2; done
