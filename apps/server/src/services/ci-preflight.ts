@@ -7,12 +7,13 @@ import type { MergeResult, WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { checkResults, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { CI_TIMING, CiPublishError, publishAndWait, touchesGithubOnlyJobs, type CiOutcome, type CiTarget, type CiTiming } from "./ci-publish.js";
+import { CI_TIMING, CiPublishError, needsEarlyGithubRun, publishAndWait, touchesGithubOnlyJobs, touchesWorkflows, type CiOutcome, type CiTarget, type CiTiming } from "./ci-publish.js";
 import type { gitHostService } from "./git-hosts.js";
 
 export const PREFLIGHT_KIND = "ci_preflight";
 export const PREFLIGHT_NA_KIND = "ci_preflight_na";
-export const PREFLIGHT_ACTIVITY = "ci_preflight";
+/** A run was started for this sha (detail: the agent to wake); with no PREFLIGHT_KIND row after it, a restart lost the run. */
+export const PREFLIGHT_STARTED_KIND = "ci_preflight_started";export const PREFLIGHT_ACTIVITY = "ci_preflight";
 
 /** What the service needs from the project's host and runner; null: GitHub CI can't be used here, so nothing is asked or refused. */
 export type PreflightContext = {
@@ -35,7 +36,8 @@ export type PreflightDeps = {
 const short = (s: string) => s.slice(0, 8);
 
 export function ciPreflightService(db: Db, deps: PreflightDeps) {
-  const running = new Map<string, string>(); // ticket → branch head being run; lost on restart, harmless because a re-request just starts the run again
+  // ticket → head being run and its promise; lost on restart, so a "started" row is kept and recover() restarts the run.
+  const running = new Map<string, { head: string; done: Promise<void> }>();
   const timing = deps.timing ?? CI_TIMING;
 
   const latest = async (ticketId: string, kind: string, sha?: string) => {
@@ -88,7 +90,6 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         const w = await words(ctx, outcome, short(prep.commit));
         passed = w.passed;
         text = w.text;
-        void ctx.unpublish().catch(() => undefined);
       }
     } catch (err) {
       text = err instanceof CiPublishError ? err.message : `GitHub's CI run could not be started: ${(err as Error).message}`;
@@ -98,13 +99,58 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     await Promise.resolve(deps.wake?.(agentId, { ticketId: t.id, reason: "check_result", note: `GitHub CI before review (commit ${short(head)}): ${passed ? "passed" : "FAILED"}.\n${text}`, priority: 2 })).catch(() => undefined);
   }
 
+  /**
+   * Starts a run and records that it started (a row that survives a restart, see recover). A run for a newer head waits for
+   * the older head's run on the same ticket, so two runs never share the one bossman-ci/<ticket> branch. The branch is removed
+   * whether the run ended or threw.
+   */
+  function launch(t: { id: string; companyId: string; projectId: string }, agentId: string, head: string, ctx: PreflightContext) {
+    const before = running.get(t.id)?.done ?? Promise.resolve();
+    const done: Promise<void> = before
+      .then(async () => {
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId: t.id, sha: head, kind: PREFLIGHT_STARTED_KIND, passed: false, detail: agentId });
+        await run(t, agentId, head, ctx);
+      })
+      .catch(() => undefined)
+      .finally(async () => {
+        await ctx.unpublish().catch(() => undefined);
+        if (running.get(t.id)?.done === done) running.delete(t.id);
+      });
+    running.set(t.id, { head, done });
+  }
+
   return {
+    /**
+     * After a server restart: a run that started (row) but has no result (row) lost its in-memory run, and the author was told
+     * to wait for a wake that would never come. Start those again. Safe to call twice: a run in memory is skipped.
+     */
+    async recover(): Promise<number> {
+      const started = await db.select().from(checkResults).where(eq(checkResults.kind, PREFLIGHT_STARTED_KIND)).orderBy(desc(checkResults.at)).limit(200);
+      let n = 0;
+      const seen = new Set<string>();
+      for (const s of started) {
+        if (seen.has(s.ticketId) || !s.sha || !s.detail) continue;
+        seen.add(s.ticketId); // only the newest start per ticket matters
+        if (running.has(s.ticketId)) continue;
+        if (await latest(s.ticketId, PREFLIGHT_KIND, s.sha)) continue;
+        const [t] = await db.select().from(tickets).where(eq(tickets.id, s.ticketId));
+        if (!t || (t.systemState !== "in_progress" && t.systemState !== "review")) continue;
+        const ctx = await deps.context(t).catch(() => null);
+        if (!ctx) continue;
+        launch(t, s.detail, s.sha, ctx);
+        n++;
+      }
+      return n;
+    },
+
     /**
      * Called by request_check with the branch's diff. Returns a sentence to add to the answer, or null when the branch changes
      * nothing GitHub-only (or GitHub CI can't be used for this project). `notApplicable` is the author's reason for skipping it.
      */
     async start(t: { id: string; companyId: string; projectId: string }, agentId: string, d: Pick<WorkspaceDiff, "head" | "files">, notApplicable?: string): Promise<string | null> {
-      if (!touchesGithubOnlyJobs(d.files.map((f) => f.path))) return null;
+      const paths = d.files.map((f) => f.path);
+      if (!touchesGithubOnlyJobs(paths)) return null;
+      if (touchesWorkflows(paths)) return "This branch edits GitHub workflow files. Those are not pushed to GitHub before review (GitHub would run an unreviewed workflow with its own token); they run once, at the merge gate, after the reviews. Nothing is held for them.";
       const ctx = await deps.context(t);
       if (!ctx) return null;
       const reason = notApplicable?.trim();
@@ -113,11 +159,10 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: PREFLIGHT_ACTIVITY, summary: `The author marked GitHub's CI jobs before review as not applicable: ${reason.slice(0, 300)}` }).catch(() => undefined);
         return "GitHub's CI jobs are marked not applicable with your reason; the move to review is no longer held for them.";
       }
-      if (running.get(t.id) === d.head) return "GitHub's CI jobs for this commit are already running; you will be woken with the result.";
+      if (running.get(t.id)?.head === d.head) return "GitHub's CI jobs for this commit are already running; you will be woken with the result.";
       const done = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (done?.passed) return `GitHub's CI jobs already passed on this commit, so none were started.`;
-      running.set(t.id, d.head);
-      void run(t, agentId, d.head, ctx).finally(() => running.delete(t.id));
+      launch(t, agentId, d.head, ctx);
       return "This branch changes CI or image files, so GitHub's own CI jobs run on it merged with main as well (this can take a while). The ticket can't move to review until they pass. You will be woken with the result; do not poll. If they truly don't apply, ask again with ciNotApplicable and a reason.";
     },
 
@@ -133,11 +178,12 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
       } catch {
         return null; // can't tell: carry on, the gate's own run at landing still stands
       }
-      if (!touchesGithubOnlyJobs(d.files.map((f) => f.path))) return null;
-      if (await latest(t.id, PREFLIGHT_NA_KIND)) return null;
+      if (!needsEarlyGithubRun(d.files.map((f) => f.path))) return null;
+      // The mark covers this commit only: a later commit re-arms the hold.
+      if (await latest(t.id, PREFLIGHT_NA_KIND, d.head)) return null;
       const r = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (r?.passed) return null;
-      if (running.get(t.id) === d.head) return "GitHub's CI jobs are still running on this branch. Wait for the result (you are woken), then move it to review.";
+      if (running.get(t.id)?.head === d.head) return "GitHub's CI jobs are still running on this branch. Wait for the result (you are woken), then move it to review.";
       return r
         ? `GitHub's CI jobs did not pass on this commit: ${r.detail ?? "see the ticket"}. Fix it, commit, and run request_check again.`
         : "This branch changes CI or image files, so GitHub's own CI jobs must pass before review. Commit, then run request_check (it starts them and wakes you with the result). If they truly don't apply, run request_check with ciNotApplicable and a reason.";

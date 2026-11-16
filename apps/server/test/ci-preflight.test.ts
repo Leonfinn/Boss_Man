@@ -15,7 +15,9 @@ afterAll(async () => (await shared).close());
 
 const FAST = { pollMs: 5, graceMs: 50, ceilingMs: 2000, retryMs: 1 };
 const cfg = { kind: "github" as const, apiBase: "https://api.example.com", owner: "example-org", repo: "example-repo" };
-const wf = { path: ".github/workflows/ci.yml", added: 1, removed: 0 };
+// `wf` is an image-path change (runs early). A workflow edit is never pushed before review (security review F1): see below.
+const wf = { path: "apps/runner/Dockerfile", added: 1, removed: 0 };
+const wfEdit = { path: ".github/workflows/ci.yml", added: 1, removed: 0 };
 const diff = (files: WorkspaceDiff["files"], head = "headcommit1"): WorkspaceDiff => ({ baseCommit: "b", head, tree: `tree-${head}`, commits: [{ sha: head, subject: "x" }], files, diff: "", truncated: false });
 
 async function setup(opts: { files: WorkspaceDiff["files"]; ci?: "passed" | "failed"; head?: string; context?: boolean }) {
@@ -100,6 +102,48 @@ describe("GitHub CI before review (BOS-1664)", () => {
     await settled(s);
     const moved = checkRequestService(s.db, { diff: async () => diff([wf], "headcommit2"), preflight: ciPreflightService(s.db, { hosts: {} as never, context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "main_moved" }), publish: s.publish, unpublish: s.unpublish }) }) });
     expect(await moved.reviewRefusal(s.co, s.ticket)).toMatch(/request_check/);
+  });
+
+  it("a workflow edit is never pushed before review and never holds the move to review", async () => {
+    const s = await setup({ files: [wfEdit, wf] });
+    const msg = await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    expect(msg).toMatch(/not pushed to GitHub before review/);
+    expect(s.publish).not.toHaveBeenCalled();
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+
+  it("with the check queue off the move to review is not held (request_check would refuse)", async () => {
+    const s = await setup({ files: [wf] });
+    await s.db.delete(settings);
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+  });
+
+  it("a not-applicable mark covers that commit only; a new commit re-arms the hold", async () => {
+    const s = await setup({ files: [wf], head: "headcommit1" });
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket, ciNotApplicable: "docs-only touch" });
+    expect(await s.svc.reviewRefusal(s.co, s.ticket)).toBeNull();
+    const next = checkRequestService(s.db, { diff: async () => diff([wf], "headcommit2"), preflight: ciPreflightService(s.db, { hosts: {} as never, context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "main_moved" }), publish: s.publish, unpublish: s.unpublish }) }) });
+    expect(await next.reviewRefusal(s.co, s.ticket)).toMatch(/request_check/);
+  });
+
+  it("a run lost to a restart is started again and wakes the author", async () => {
+    const s = await setup({ files: [wf], ci: "passed" });
+    // The state a restart leaves: a started row, no result row, nothing in memory.
+    await s.db.insert(checkResults).values({ companyId: s.co, ticketId: s.ticket, sha: "headcommit1", kind: "ci_preflight_started", passed: false, detail: s.agent });
+    const fresh = ciPreflightService(s.db, { hosts: { ciStatus: async () => ({ state: "passed", waiting: [], failed: [] }), failures: async () => [] } as never, timing: FAST, wake: (_a, w) => void s.wakes.push(w), context: async () => ({ target: { cfg, token: "x" }, prepare: async () => ({ status: "prepared", commit: "mergecommit1", tree: "t", targetSha: "mainhead1" }), publish: s.publish, unpublish: s.unpublish }) });
+    expect(await fresh.recover()).toBe(1);
+    await settled(s);
+    expect(s.wakes[0]!.note).toMatch(/passed/);
+    expect(await fresh.recover()).toBe(0);
+  });
+
+  it("the pushed branch is removed even when the run throws after publishing", async () => {
+    const s = await setup({ files: [wf] });
+    s.publish.mockRejectedValueOnce(new Error("push failed"));
+    await s.svc.request({ companyId: s.co, agentId: s.agent, ticketId: s.ticket });
+    await settled(s);
+    expect(s.wakes[0]!.note).toMatch(/FAILED/);
+    await vi.waitFor(() => expect(s.unpublish).toHaveBeenCalled(), { timeout: 5000 });
   });
 
   it("a branch that changes neither workflows nor image files is never held or run", async () => {

@@ -1998,6 +1998,18 @@ export class Workspaces {
       const workflows = await this.gitCode(["ls-tree", "--name-only", phase.commit, ".github/workflows/"], { cwd: repo });
       const hasWorkflows = workflows.code === 0 && /\.ya?ml$/m.test(workflows.stdout);
       if (!hasWorkflows) return { status: "published", branch, commit: phase.commit, hasWorkflows: false };
+      // BOS-1664: the push makes the commit public (and readable by sha after the branch is deleted), so the secrets scan
+      // (BOS-979, the runner's own installed copy) must pass on exactly this commit first. A runner without it skips the scan.
+      const scanDir = path.join(this.scratch("ci-scan"), "tree");
+      try {
+        await this.git(["worktree", "add", "--quiet", "--detach", scanDir, phase.commit], { cwd: repo });
+        const blocked = await this.scanBeforeCheck(scanDir, spec.projectId);
+        if (blocked) throw new Error(`Not pushed to GitHub: the secrets scan found something in the branch.\n${blocked.slice(0, 800)}`);
+      } finally {
+        await this.git(["worktree", "remove", "--force", scanDir], { cwd: repo }).catch(() => undefined);
+        rmSync(path.dirname(scanDir), { recursive: true, force: true });
+        await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
+      }
       const r = await this.gitCode(["push", "--quiet", "--force", url, `${phase.commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
       if (r.code !== 0) throw new Error(`Couldn't push the merge commit to ${branch} for the git host's CI: ${r.stderr.slice(0, 500)}`);
       return { status: "published", branch, commit: phase.commit, hasWorkflows: true };

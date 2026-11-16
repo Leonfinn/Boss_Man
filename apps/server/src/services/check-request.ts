@@ -89,6 +89,8 @@ export function checkRequestService(db: Db, deps: CheckRequestDeps) {
     /** BOS-1664: the move to review is refused while GitHub's CI jobs for a CI or image change haven't passed (or been marked not applicable). */
     async reviewRefusal(companyId: string, ticketId: string): Promise<string | null> {
       if (!deps.preflight) return null;
+      // With the queue off, request_check refuses, so a hold on it could never be lifted: no hold.
+      if ((await queue.mode()) !== "server") return null;
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
       if (!runner) return null;
       return deps.preflight.reviewRefusal(ticketId, (t) => deps.diff(runner.id, t.projectId, t.id));

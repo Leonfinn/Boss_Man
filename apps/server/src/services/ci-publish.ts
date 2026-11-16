@@ -107,3 +107,10 @@ export async function publishAndWait(deps: PublishDeps, prep: { commit: string; 
 /** Whether the files a branch changed need GitHub's own jobs: workflows or image paths (the changes job's images_paths in ci.yml). */
 export const CI_IMAGES_PATHS = /(^|\/)Dockerfile|^docker-compose|^deploy\/|^scripts\/|^skills\/|^pnpm-lock\.yaml|^\.github\/workflows\/|^apps\/runner\/|check-worker|^packages\/shared\/src\/protocol/;
 export const touchesGithubOnlyJobs = (files: string[]) => files.some((f) => CI_IMAGES_PATHS.test(f));
+/**
+ * BOS-1664 (security, F1): GitHub runs the workflow files of whatever commit is pushed, with a token the workflow can widen, so
+ * a branch that edits workflows is NOT pushed before review: its GitHub run happens only at the gate, after the reviews.
+ */
+export const touchesWorkflows = (files: string[]) => files.some((f) => /^\.github\/workflows\//.test(f));
+/** Whether the pre-review GitHub run (and the hold on the move to review) applies to these changed files. */
+export const needsEarlyGithubRun = (files: string[]) => touchesGithubOnlyJobs(files) && !touchesWorkflows(files);
