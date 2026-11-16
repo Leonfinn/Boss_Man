@@ -9,6 +9,7 @@
 
 import { HOST_NAME, OWNER_CONTROLS, parseStep, recurringDutyHits, strayFence, type OwnerScreen, type StepPiece, type Where } from "@boss-man/shared";
 import { ADDONS, type Addon, type AddonFacts, type AddonState } from "./addons.js";
+import { type ComposeFacts, type ComposeStep, composeFindings } from "./compose-steps.js";
 import { BRANCH_MARKER, formStepFindings } from "./owner-form-steps.js";
 import { norm, screenFindings, type Pressed } from "./owner-screens.js";
 
@@ -60,7 +61,7 @@ export function step(sentence: string, ...rest: Array<string | Command>): string
 }
 
 /** One thing the owner-step lint found (BOS-417, DR-008 Q1). `step` counts from 1. */
-export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "warn"; problem: string };
+export type LintFinding = { step: number; rule: "R1" | "R2" | "R3" | "R4" | "R6" | "R7" | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15" | "R16" | "R17" | "R18" | "R18b" | "R19" | "R31" | "warn"; problem: string };
 
 /**
  * The words that mean a step relies on an add-on (R9, DR-023). A fixed table, so what triggers the rule
@@ -77,7 +78,7 @@ const ADDON_STATE_WORDS: Record<AddonState, string> = { not_set_up: "not set up"
  * up and that Boss Man has no record for yet (`newHost`, DR-046), the card's options, and the machine's own update
  * card for R15 (DR-036) with the drain in progress (`selfDeploy.hold`, for R16, DR-046 part 2). Each may be absent,
  * and then that rule only checks what it can without them. */
-export type LintFacts = { addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** Sites (siteKey) whose docs misled the owner → when (ISO), for R19b; absent when the caller has no record to give. */ mismatchedSites?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
+export type LintFacts = { /** The host's compose files, blue/green state and live colour, for R31 (compose-steps.ts); absent: R31 stays quiet. */ compose?: ComposeFacts; addons?: AddonFacts; setsUp?: Addon; hosts?: HostFacts[]; serverHost?: string | null; newHost?: string; options?: readonly string[]; selfDeploy?: SelfDeployFacts; /** Ticket image id (lower case) → created-at, for R19's 30-day rule; absent when the caller couldn't look them up. */ images?: Record<string, string>; /** Sites (siteKey) whose docs misled the owner → when (ISO), for R19b; absent when the caller has no record to give. */ mismatchedSites?: Record<string, string>; /** The clock for R19; tests set it. */ now?: Date };
 
 /**
  * The drain state R16 needs (DR-046 part 2): a runner image update or setting change that is waiting for runs to
@@ -819,6 +820,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
   let hostStep = 0;
   let notSeenStep = 0;
   let anyOutside = false;
+  // not state: scratch for one call over one card; nothing is kept between calls.
+  const composeSteps: ComposeStep[] = [];
   if (steps.length > STEP_LIMIT) warn.push({ step: STEP_LIMIT + 1, rule: "warn", problem: `has ${steps.length} steps, which suggests one card doing several stages' work` });
   steps.forEach((text, i) => {
     const step = i + 1;
@@ -826,6 +829,7 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     // A ``` the parser couldn't pair would reach the owner as raw text, with no Copy button (BOS-550).
     if (stray !== null) refuse.push({ step, rule: "R3", problem: `has a \`\`\` that isn't a complete command block, so the owner would see it as raw text ("${stray.slice(0, 80)}"). Put the opening fence line, the command and a closing \`\`\` each on a line of its own` });
     const code = [...blocks, ...inline];
+    composeSteps.push({ prose, code });
     for (const [re, problem] of DOC_POINTERS) {
       const m = re.exec(prose);
       if (m) {
@@ -894,6 +898,8 @@ export function lintOwnerSteps(steps: string[], facts?: LintFacts | HostFacts[],
     const duty = recurringDutyHits(prose)[0];
     if (duty) warn.push({ step, rule: "warn", problem: `reads as something the owner must repeat ("${duty.slice(0, 80)}"); say how often, or make Boss Man do it so the owner needn't` });
   });
+  // R31 (BOS-1666): compose steps against the host's reported compose files and blue/green state.
+  refuse.push(...composeFindings(composeSteps, given.compose));
   // R19: a card built on a doc nobody saw on a screen must let the owner say the screen differs. Only checked when
   // the caller gave the card's options (a setup-steps check has none).
   if (notSeenStep && given.options && !given.options.some((o) => SCREEN_DIFFERENT.test(o))) {
