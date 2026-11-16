@@ -20,7 +20,9 @@ const BASE: Record<Kind, string> = { github: "https://api.example.com", gitea: "
 
 /** A fake host: one branch head, and whatever the test queues for the checks call. */
 function fakeHost(kind: Kind) {
-  const state = { checks: { status: 200, body: {} as unknown }, branch: { status: 200 }, calls: 0 };
+  // `actions`: GitHub's Actions runs on the commit, read when the Checks API refuses the token (BOS-1630); the same as
+  // `checks` unless a test sets it.
+  const state = { checks: { status: 200, body: {} as unknown }, actions: null as { status: number; body: unknown } | null, branch: { status: 200 }, calls: 0 };
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request) => {
     const url = String(input);
@@ -29,6 +31,10 @@ function fakeHost(kind: Kind) {
     if (url.startsWith(`${repo}/commits/${SHA}/`)) {
       state.calls++;
       return json(state.checks.status, state.checks.body);
+    }
+    if (url === `${repo}/actions/runs?head_sha=${SHA}&per_page=100`) {
+      const a = state.actions ?? state.checks;
+      return json(a.status, a.body);
     }
     return json(404, { message: `no fake for ${url}` });
   }) as typeof globalThis.fetch;
@@ -114,9 +120,20 @@ describe.each(["github", "gitea"] as const)("build result on %s", (kind) => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ci: null });
     const line = await x.review.branchChecksLine(x.ticketId, x.companyId);
-    expect(line).toContain(`CI on branch head: not available (Couldn't read the checks on ${at}: Resource not accessible`);
-    expect(line).toContain("Checks: Read-only.");
+    expect(line).toContain(`CI on branch head: not available (Couldn't read the ${kind === "github" ? "Actions runs" : "checks"} on ${at}: Resource not accessible`);
+    expect(line).toContain("Repository permissions → Actions: Read-only (and Metadata: Read-only).");
+    expect(line).not.toContain("Checks:");
   });
+
+  if (kind === "github") {
+    it("a token with Actions: Read-only and no Checks gets the line from the Actions runs (BOS-1630)", async () => {
+      const x = (ctx = await setup(kind));
+      x.host.state.checks = { status: 403, body: { message: "Resource not accessible by personal access token" } };
+      x.host.state.actions = { status: 200, body: { workflow_runs: [ghRun("CI", "completed", "success", 1), ghRun("Docs", "completed", "failure", 2)] } };
+      expect((await x.req("GET", `/api/tickets/${x.ticketId}/ci`)).json().ci).toMatchObject({ state: "failed", failing: ["Docs"], total: 2, url: "https://example.com/runs/2" });
+      expect(await x.review.branchChecksLine(x.ticketId, x.companyId)).toBe(`CI on branch head ${at}: FAILED (Docs).`);
+    });
+  }
 
   it("a branch the host doesn't know gives null", async () => {
     const x = (ctx = await setup(kind));

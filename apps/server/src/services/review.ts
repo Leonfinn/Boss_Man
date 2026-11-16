@@ -1360,7 +1360,7 @@ export function reviewService(
       } catch (err) {
         if (err instanceof GitHostError) {
           const hint = err.status === 401 || err.status === 403 || err.status === 404
-            ? " The company's git token may lack read access to checks: on GitHub a fine-grained token needs Repository permissions → Checks: Read-only."
+            ? " The company's git token may lack read access to CI: on GitHub a fine-grained token needs Repository permissions → Actions: Read-only (and Metadata: Read-only)."
             : "";
           return `CI on branch head: not available (${err.message}).${hint}`;
         }
@@ -2150,7 +2150,7 @@ export function reviewService(
       const checkMerged = !serverChecks && landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
 
       // BOS-1070: with the owner's switch on, a GitHub project's merge also waits for GitHub CI on the exact merge commit.
-      // The gate pushes that commit to bossman-ci/<ticket>, reads its check suites and runs, and merges only on green.
+      // The gate pushes that commit to bossman-ci/<ticket>, reads its Actions runs (BOS-1630), and merges only on green.
       // Everything here sits behind the switch: off, the flow below is unchanged.
       let ci: { cfg: GitHostConfig; token: string } | null = null;
       if (!opts?.skipChecks && landing !== "pull_request" && gitHost === "github" && deps.gitHosts && (await waitForCi())) {
@@ -2164,7 +2164,7 @@ export function reviewService(
       }
       const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
       // One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
-      // A refusal (401/403/404) is never retried: the token lacks Checks: Read-only or can't see the repo.
+      // A refusal (401/403/404) is never retried: the token lacks Actions: Read-only or can't see the repo.
       const readCi = async (sha: string, stop: CiStop): Promise<CiStatus | CiOutcome> => {
         for (let fails = 0; ; fails++) {
           try {
@@ -2180,7 +2180,7 @@ export function reviewService(
       const publishAndWait = async (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> => {
         // The same tree on new parents keeps its pass (P11a), so nothing is pushed again.
         if (ciPassedTrees.has(prep.tree)) return { kind: "passed", reused: true };
-        // Asked on the target's head before anything is pushed, so a token that can't read checks costs no CI run.
+        // Asked on the target's head before anything is pushed, so a token that can't read Actions runs costs no CI run.
         const probe = await readCi(prep.targetSha, stop);
         if ("kind" in probe) return probe;
         const pub = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit: prep.commit }), MERGE_WAIT_MS);
@@ -2224,17 +2224,17 @@ export function reviewService(
         const switchOff = `To stop waiting for GitHub CI instead, turn off "Wait for GitHub CI" in Settings → Server and runner → Checks, then choose "${CHECK_AGAIN}".`;
         const question =
           why === "access"
-            ? `GitHub CI: the company's git token can't read GitHub's checks (${message}), so Boss Man can't tell whether CI passed. Nothing in this project merges until it can. To fix it on GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → open the token Boss Man uses → Repository permissions → Checks: Read-only → Update token. Then choose "${CHECK_AGAIN}". ${switchOff}`
+            ? `GitHub CI: the company's git token can't read GitHub Actions runs (${message}), so Boss Man can't tell whether CI passed. Nothing in this project merges until it can. To fix it on GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens → open the token Boss Man uses → Repository permissions → Actions: Read-only (Metadata: Read-only is set with it) → Update token. Then choose "${CHECK_AGAIN}". ${switchOff}`
             : why === "billing"
               ? `GitHub CI didn't run for "${t.title}": GitHub wouldn't start its jobs because of the account's spending limit or a failed payment. This isn't a problem with the agent's work. To fix it on GitHub: Settings → Billing and licensing → check the payment method and the Actions budget. Then choose "${CHECK_AGAIN}". ${switchOff}`
               : `GitHub CI: Boss Man couldn't read the CI result for "${t.title}" from GitHub after several tries (${message}), so nothing was merged. If GitHub is having trouble (githubstatus.com), wait for it to recover, then choose "${CHECK_AGAIN}". ${switchOff}`;
-        const raised = await raiseCheckStuck(db, t, "GitHub CI", why === "access" ? "couldn't read GitHub's checks" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: "owner", dedupeKey: `ci-${why}:${t.projectId}` });
+        const raised = await raiseCheckStuck(db, t, "GitHub CI", why === "access" ? "couldn't read GitHub Actions runs" : why === "billing" ? "wasn't started by GitHub (billing)" : "couldn't be read from GitHub", message, { question, tier: "owner", dedupeKey: `ci-${why}:${t.projectId}` });
         if (raised === null) {
           const held = ciCardWaiting.get(t.projectId) ?? new Set<string>();
           held.add(ticketId);
           ciCardWaiting.set(t.projectId, held);
         }
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub's checks" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Not merged: ${why === "access" ? "the git token can't read GitHub Actions runs" : why === "billing" ? "GitHub didn't start CI (billing)" : "GitHub's CI result couldn't be read"} (${message.slice(0, 200)}). ${raised === null ? "It waits on the card already open for this project and starts again when it's answered." : "It's in the owner's Decisions."}` });
         return { outcome: "check_stuck", delivered: null, detail: { ci: why, message } };
       };
       // What a CI wait means for this attempt: null carries on to the merge, anything else ends it.
