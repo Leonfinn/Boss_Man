@@ -82,7 +82,7 @@ if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && r
     scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
     # shellcheck disable=SC2144
     # The failure names what GitHub's step log hides: this user, what sits in /tmp under the name, and the script's own output.
-    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log 2>/dev/null || fail "scratch: no fallback log beside a taken name (uid $(id -u), kept name: $(stat -c '%U %a' "$keep" 2>&1), siblings: $(echo /tmp/bossman-scratch-"$tid"*), protected_regular: $(cat /proc/sys/fs/protected_regular 2>&1)): $(tr '\n' ' ' <"$t/out")"
+    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log 2>/dev/null || fail "scratch: no fallback log beside a taken name (uid $(id -u), kept name: $(stat -c '%U %a' "$keep" 2>&1), siblings: $(echo /tmp/bossman-scratch-"$tid"*), protected_regular: $(cat /proc/sys/fs/protected_regular 2>&1), kept file holds $(wc -c <"$keep" 2>&1) bytes, starts: $(head -c 120 "$keep" 2>&1 | tr '\n' ' ')): $(tr '\n' ' ' <"$t/out")"
     rm -f /tmp/bossman-scratch-"$tid".*.log
   else
     echo "SKIP scratch: kept /tmp name not writable (this runner writes through a read-only file, so no fallback name is needed)"
