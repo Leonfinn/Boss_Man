@@ -398,8 +398,10 @@ jobs:
           set +e
           # The image sets NODE_ENV=production for the runner; React's production build has no act(), so the web
           # component tests fail under it ("React.act is not a function"). Tests run as tests, as in the other jobs.
+          # GITHUB_ACTIONS is passed in too: the server's hot-path budget test gives GitHub's slow runners 300 ms, and
+          # without it the container (still on a GitHub runner) held the dev-machine 100 ms limit and failed.
           docker run --rm -v "$work/repo:/work" -w /work --entrypoint sh \
-            -e CI=1 -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
+            -e CI=1 -e GITHUB_ACTIONS=true -e NODE_ENV=test -e BOSSMAN_REQUIRE_BROWSER=1 -e CHECK_ALL_FORCE=1 -e HOME=/home/node boss-man-check-worker:ci -c '
               pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store &&
               pnpm typecheck && pnpm test' 2>&1 | tee "$RUNNER_TEMP/worker-check.log"
           rc=${PIPESTATUS[0]}
