@@ -71,6 +71,7 @@ const FILE_EXT = "[cm]?[jt]sx?|sh|ya?ml|json|py|rs|go|css|vue|svelte|sql|toml";
  * `index.ts` alone would match half the repo.
  */
 export function namedFiles(lines: string[]): string[] {
+  // not state: a per-call local that dedupes the names.
   const out = new Set<string>();
   const re = new RegExp(`(?:^|[\\s(>"'\`\\[])((?:[\\w@.-]+/)*[\\w@.-]+\\.(?:${FILE_EXT}))(?=$|[\\s:)"'\`\\],>])`, "g");
   for (const line of lines)
