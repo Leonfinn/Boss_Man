@@ -293,7 +293,7 @@ export function registerClearCheck(server: McpServer, { work }: Pick<Services, "
  * managers may: the owner asks them there to close or tidy work, and workers move their own
  * tickets from the ticket's run.
  */
-export function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback, hostFacts }: Pick<Services, "review" | "work" | "feedback" | "skillProposals"> & Partial<Pick<Services, "hostFacts">>, scope: Scope, hooks: McpHooks, chat: boolean) {
+export function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback, hostFacts, checkRequests }: Pick<Services, "review" | "work" | "feedback" | "skillProposals"> & Partial<Pick<Services, "hostFacts" | "checkRequests">>, scope: Scope, hooks: McpHooks, chat: boolean) {
   const isManager = () => managerIn(db, scope);
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -591,6 +591,11 @@ export function registerTicketMoves(server: McpServer, db: Db, { review, work, f
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
       if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
+      // BOS-1664: a branch that changes CI or image files needs GitHub's own jobs green (or marked not applicable) first.
+      if (state === "review" && !sameState && checkRequests) {
+        const ciHold = await checkRequests.reviewRefusal(scope.companyId, ticketId).catch(() => null);
+        if (ciHold) return fail(ciHold);
+      }
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
       if (state === "blocked" && !(await blockedHolds(db, ticketId, { blockedUntil: until ?? null })).length) {
         return fail(BLOCKED_REFUSAL);
