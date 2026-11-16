@@ -17,7 +17,7 @@ import type { NotifyInput } from "./notifications.js";
 import { leaveClosedNotice, liveNotice, newerNotice, replacedNotice, NOTICE_MS, type ClosedNotice } from "./closed-notice.js";
 import { sh, step, type HostFacts, type SelfDeployFacts } from "./steps.js";
 import { getHold, runnerCardHold } from "./maintenance.js";
-import { allMergeOrder, commitIsLive, liveServerCommit, serverContains } from "./go-live-wait.js";
+import { allMergeOrder, commitIsLive, liveServerRecord, serverContains } from "./go-live-wait.js";
 import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 import { runnerImageCommit, runnerOnlyTickets } from "./runner-image.js";
 import type { BlueGreen } from "./bluegreen.js";
@@ -481,10 +481,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       .where(and(eq(tickets.companyId, companyId), eq(tickets.touchesRunnerUpdate, true), isNotNull(tickets.mergeCommit)))
       .orderBy(asc(sql`coalesce(${tickets.mergedAt}, ${tickets.stateChangedAt})`));
     if (!rows.length) return null;
-    const live = await liveServerCommit(db, companyId);
+    const { live, contains } = await liveServerRecord(db, companyId);
     if (!live) return null;
     const order = await allMergeOrder(db, companyId);
-    const waiting = rows.find((r) => !serverContains(live, r.mergeCommit!, order) && order.includes(r.mergeCommit!.toLowerCase()));
+    const waiting = rows.find((r) => !serverContains(live, r.mergeCommit!, order, contains) && order.includes(r.mergeCommit!.toLowerCase()));
     if (!waiting) return null;
     const ref = ticketRef(waiting.prefix, waiting.number) ?? "A merged change";
     return `Waiting for ${ref} to go live: it fixes the runner update itself.`;
@@ -1361,8 +1361,12 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const deployedUnderUs = !!s && (s.result === "deployed" || s.result === "rolled_back") && Date.parse(s.ended) > startedAt;
       const live = deployedUnderUs ? reported : newestRunning(reported, build);
       if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
+      // BOS-1640: a server deploy by the host deployer is always a fast-forward of what ran (deploy.sh refuses anything
+      // else), so its from_commit is inside the live commit. Kept beside it, it places a live commit that is no ticket's
+      // recorded merge. Never for a rollback or a hand-apply: those say nothing about what the new commit contains.
+      const from = s && s.target === "server" && s.result === "deployed" && s.to_commit.toLowerCase() === live.toLowerCase() ? s.from_commit : undefined;
       const rows = await db.select({ id: companies.id }).from(companies);
-      for (const c of rows) await deps.releaseLog.note(c.id, live);
+      for (const c of rows) await deps.releaseLog.note(c.id, live, from);
       const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
       return deps.releaseLog.releaseManagerWakes(how);
     },
