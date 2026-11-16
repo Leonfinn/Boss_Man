@@ -6,6 +6,7 @@ import { agents, costEvents, decisions, fundingSources, notifications, runners a
 import { liveRuns, runOriginQuery } from "./runs.js";
 import { isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
+import { blockedSplit } from "./go-live-note.js";
 
 export const DAYS = 14;
 
@@ -120,6 +121,7 @@ export function dashboardService(
         .where(eq(tickets.companyId, companyId))
         .groupBy(tickets.systemState);
       const count = (s: string) => states.find((x) => x.state === s)?.n ?? 0;
+      const blockedCounts = await blockedSplit(db, companyId);
       // Of the tickets in review, those every reviewer has approved: only the merge (or the owner's sign-off) is left (BOS-667).
       const inReviewIds = count("review") ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "review")))).map((r) => r.id) : [];
       const approved = (await passedReviewTickets(db, inReviewIds)).size;
@@ -213,7 +215,9 @@ export function dashboardService(
           awaitingReview: count("review") - approved,
           approvedToMerge: approved,
           open: states.reduce((n, s) => n + (s.state === "done" ? 0 : s.n), 0),
-          blocked: count("blocked"),
+          // BOS-1636: only real blocks; merged work waiting for its live check is counted apart.
+          blocked: blockedCounts.blocked,
+          waitingLiveCheck: blockedCounts.liveCheck,
           decisionsWaiting,
           monthCostMicros: Number(spent?.micros ?? 0),
           monthSubscriptionTokens: { input: Number(tokens?.input ?? 0), output: Number(tokens?.output ?? 0) },

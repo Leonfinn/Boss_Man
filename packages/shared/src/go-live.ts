@@ -77,3 +77,11 @@ export const goLiveWaitWords = (w: GoLiveWait): string =>
 
 /** How long a ticket may wait before the watchdog looks at it again (nobody may have deployed). */
 export const GO_LIVE_WAIT_MAX_MS = 3 * 24 * 60 * 60 * 1000;
+
+/**
+ * BOS-1636: a merged ticket parked in Blocked only for its after-merge (live) check, whether it still waits for the
+ * server update or runner rebuild (goLiveWait) or the merge is already live and an agent or the owner's card has the
+ * check. It is not stuck, so the board shows it in its own lane and the "N blocked" counts leave it out. The one rule;
+ * the server's SQL twin is liveCheckWaitSql (services/go-live-note.ts).
+ */
+export const isLiveCheckWait = (t: { systemState: string; mergeCommit?: string | null }): boolean => t.systemState === "blocked" && !!t.mergeCommit;

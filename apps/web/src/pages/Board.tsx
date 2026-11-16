@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { FilterPanel, useIsPhone } from "../components/FilterPanel";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
-import { ticketRef, type Criterion } from "@boss-man/shared";
+import { isLiveCheckWait, ticketRef, type Criterion } from "@boss-man/shared";
 import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { OwnerMessageBox, tooLongToSend } from "../components/OwnerMessageBox";
 import { art } from "../brand";
@@ -658,6 +658,17 @@ function TicketCard({ t, mine, merging, who, name, prefix, tiers, numberOf, onRu
           {t.goLiveNote.cardId && <a href={`#/decisions/${t.goLiveNote.cardId}`}>Open the card</a>}
         </span>
       )}
+      {isLiveCheckWait(t) && !t.goLiveNote && (
+        <span className="note" data-testid="board-live-check-note">
+          {t.ownerQuestionId ? (
+            <>
+              Merged and live. Waiting for your answer on a card. <a href={`#/decisions/${t.ownerQuestionId}`}>Open the card</a>
+            </>
+          ) : (
+            "Merged and live. Waiting for the agent to report the after-merge check. Nothing for you to do."
+          )}
+        </span>
+      )}
       {!!t.working?.length && (
         <span className="working" role="status">
           <span className="pulse-dot" aria-hidden="true" />
@@ -770,8 +781,13 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   // to sit with the work awaiting review, so a long merge line read as a reviewer shortage.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Awaiting review" : c.name);
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
-  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean }> => {
+  const lanes = (board.data?.columns ?? []).flatMap((col): Array<{ col: typeof col; tickets: typeof col.tickets; mine: boolean; merging?: boolean; held?: boolean; liveCheck?: boolean }> => {
     const open = col.tickets.filter((t) => !t.waitingOnOwner);
+    // BOS-1636: merged work in Blocked that only waits for its after-merge check is not stuck: its own lane, shown only when there is some.
+    if (col.systemState === "blocked") {
+      const live = open.filter(isLiveCheckWait);
+      return [{ col, tickets: open.filter((t) => !isLiveCheckWait(t)), mine: false }, ...(live.length ? [{ col, tickets: live, mine: false, liveCheck: true }] : [])];
+    }
     if (col.systemState !== "review") return [{ col, tickets: open, mine: false }];
     // A reviewer's hold (BOS-808): passed, kept from merging on purpose. Its own lane, shown only when something is held.
     const held = open.filter((t) => t.reviewStage === "held");
@@ -1050,7 +1066,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {!board.data && current && !board.error && (
             <section className="lane" aria-label="Loading tasks"><Loader label="Loading tasks" /></section>
           )}
-          {lanes.map(({ col, tickets, mine, merging, held }) => {
+          {lanes.map(({ col, tickets, mine, merging, held, liveCheck }) => {
             // Tickets that can't move (waits-on, plan with owner, merged and waiting to go live) don't count towards the limit (BOS-1172).
             const counted = col.tickets.filter((t) => !t.wipExempt).length;
             const full = col.wipLimit != null && counted >= col.wipLimit;
@@ -1063,7 +1079,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : `lane-${col.id}`}>
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : merging ? "merging" : held ? "held" : liveCheck ? "live-check" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : merging ? "lane-merging" : held ? "lane-held" : liveCheck ? "lane-live-check" : `lane-${col.id}`}>
                 {mine ? (
                   <header className="lane-head">
                     <div className="lane-title">
@@ -1092,6 +1108,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         ? "Approved, but the merge waits on another ticket to be merged and live. Nothing is wrong: each one merges by itself afterwards."
                         : "A reviewer passed these but is holding the merge on purpose. Nothing is wrong, and nobody is woken until the hold ends."}
                     </span>
+                  </header>
+                ) : liveCheck ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-live-check">Merged, waiting for a live check</h2>
+                      <span className="mono">{shown.length}</span>
+                    </div>
+                    <span className="lane-hint">Already merged. Each card says what it waits for. Nothing is stuck and none of these count as blocked.</span>
                   </header>
                 ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
