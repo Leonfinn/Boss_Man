@@ -9,7 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, deploys, deployTargets, reviewRequests, runnerEvents, runners, runs, settings, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { HELD_AGENT } from "../src/services/fair-share.js";
 import type { Limits } from "../src/services/scheduler.js";
-import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
+import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, NOTHING_STARTABLE_REASON, URGENT_IDLE_REASON } from "../src/services/scheduler.js";
 import { WIP_REFUSED_REASON } from "../src/services/agent-wip.js";
 import type { SweepLimits } from "../src/services/sweeps.js";
 
@@ -360,6 +360,69 @@ describe("free run slots offer idle agents their next ticket (BOS-615)", () => {
     expect((await c.sweeps.run()).idleSlots).toMatchObject({ woken: 0, ready: 0, asked: 0 });
     expect(await c.wakesOf(IDLE_SLOT_REASON)).toEqual([]);
     expect(await c.wakesOf(IDLE_AGENTS_REASON)).toEqual([]);
+  });
+});
+
+describe("nothing can start: free slots and idle agents, but every open ticket waits on another (BOS-1662, R29)", () => {
+  it("tells the CEO once, after 30 minutes, what everything waits on, most work held first; not again for the same list; the clock resets once work can be offered", async () => {
+    const c = (ctx = await setup());
+    const ann = await c.hire("Ann");
+    const bob = await c.hire("Bob");
+    const [gandalf] = await c.db.select().from(agents).where(and(eq(agents.companyId, c.company.id), eq(agents.role, "ceo")));
+    // Ann's finished work is approved, but its merge waits on the open merge-check fix.
+    const annDone = await c.working("Ann's finished work", ann.id, 40 * MIN, { systemState: "review" });
+    await c.db.insert(reviewRequests).values({ ticketId: annDone, kind: "code", reviewerAgentId: bob.id, round: 1, status: "approved", decidedAt: new Date() });
+    await c.run(ann.id, annDone, { endedAgoMs: 40 * MIN, lastEventAgoMs: 40 * MIN, outcome: "end_turn" });
+    await c.working("The merge-check fix", bob.id, 0, { systemState: "review", assigneeAgentId: null, fixesMergeCheck: true });
+    // Bob is busy on the release; the only open tickets wait on it.
+    const release = await c.working("The release", bob.id, 0);
+    await c.run(bob.id, release, { lastEventAgoMs: MIN });
+    for (const title of ["Needs the release 1", "Needs the release 2"]) {
+      const t = await c.working(title, ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+      await c.db.insert(ticketDependencies).values({ blockedTicketId: t, blockerTicketId: release });
+    }
+    const key = `nothing_startable_since:${c.company.id}`;
+    const startedAgo = async (ms: number) => c.db.update(settings).set({ value: { since: new Date(Date.now() - ms).toISOString() } }).where(eq(settings.key, key));
+
+    // The first pass starts the clock and says nothing; before the old code went quiet here for good.
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    expect(await c.db.select().from(settings).where(eq(settings.key, key))).toHaveLength(1);
+    await startedAgo(29 * MIN);
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    expect(await c.wakesOf(NOTHING_STARTABLE_REASON)).toEqual([]);
+
+    await startedAgo(31 * MIN);
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 1 });
+    const asks = await c.wakesOf(NOTHING_STARTABLE_REASON);
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({ agentId: gandalf!.id, ticketId: null, priority: 1 });
+    const note = asks[0]!.note!;
+    expect(note).toMatch(/^Nothing can start: \d+ run slots are free and 1 agent is idle \(Ann\)/);
+    expect(note).toMatch(/"The release" \(in progress with Bob, since [\d-]+ [\d:]+ UTC\) holds 2 waiting tickets/);
+    expect(note).toMatch(/"The merge-check fix" \(in review, unassigned, since [\d-]+ [\d:]+ UTC\) holds 1 merge\n/);
+    expect(note.indexOf("The release")).toBeLessThan(note.indexOf("The merge-check fix"));
+    expect(await c.wakesOf(IDLE_AGENTS_REASON)).toEqual([]);
+
+    // Not again for the same list, within the half hour or after it.
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    await c.db.update(wakes).set({ status: "launched", createdAt: new Date(Date.now() - 31 * MIN) }).where(eq(wakes.reason, NOTHING_STARTABLE_REASON));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    expect(await c.wakesOf(NOTHING_STARTABLE_REASON)).toHaveLength(1);
+
+    // Work the CEO can hand out appears: the usual idle-agents ask goes out and the clock is reset.
+    await c.working("Free to start", ann.id, 0, { systemState: "backlog", assigneeAgentId: null });
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 1 });
+    expect(await c.wakesOf(IDLE_AGENTS_REASON)).toHaveLength(1);
+    expect(await c.db.select().from(settings).where(eq(settings.key, key))).toEqual([]);
+  });
+
+  it("an empty board (nothing open, nothing waiting) is no alarm", async () => {
+    const c = (ctx = await setup());
+    await c.hire("Ann");
+    await c.sweeps.run();
+    await c.db.update(settings).set({ value: { since: new Date(Date.now() - 60 * MIN).toISOString() } }).where(eq(settings.key, `nothing_startable_since:${c.company.id}`));
+    expect((await c.sweeps.run()).idleSlots).toMatchObject({ asked: 0 });
+    expect(await c.wakesOf(NOTHING_STARTABLE_REASON)).toEqual([]);
   });
 });
 
