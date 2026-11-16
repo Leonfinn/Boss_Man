@@ -25,6 +25,8 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "ceo reply": "waiting",
   // Priority watch (BOS-1514): the CEO is told an urgent ticket has no next step under way. Never dropped.
   "priority watch": "waiting",
+  // Merge stall (BOS-1515): the CEO is told the merge train has an empty seat or no landing while tickets wait. Never dropped.
+  "merge line stalled": "waiting",
   // A planned or urgent ticket was moved off its plan or backwards by someone else (BOS-1509). The CEO must hear it.
   "ticket moved off plan": "waiting",
   // Scheduled by Boss Man.
@@ -49,6 +51,10 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   "review hold ready": "scheduled",
   // The merge queue tells the CEO a card holding a merge looks stale (BOS-1078).
   "merge held by a stale card": "scheduled",
+  // The GitHub watcher filed new notes (BOS-1393): one wake per pass, never dropped, merged while it waits.
+  "github feedback": "scheduled",
+  // A GitHub post that looks like a security report goes to the CEO at once (BOS-1393).
+  "github security": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",

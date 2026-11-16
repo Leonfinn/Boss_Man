@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { RunnerCommand } from "@boss-man/shared";
 import { checkLimitsEnv } from "../src/check-jobs.js";
 import { workerHandles, workerUrl } from "../src/check-worker.js";
+import { describeConnectError } from "../src/connection.js";
 import { safeWorkerToken } from "../src/token.js";
 
 const JOB = "00000000-0000-4000-8000-000000000001";
@@ -65,5 +66,19 @@ describe("check worker role (BOS-1435)", () => {
     expect(guard).toBeGreaterThan(-1);
     // Nothing that fetches secrets, starts sessions or reads the runner token runs before the hand-over.
     for (const later of ["safeRunnerToken(env)", "new SessionManager(", "/api/runner/env", "new Journal("]) expect(main.indexOf(later)).toBeGreaterThan(guard);
+  });
+});
+
+describe("a worker that can't find the server's address (BOS-1601)", () => {
+  it("names the address and the Tailscale case instead of a bare ENOTFOUND", () => {
+    const out = describeConnectError("getaddrinfo ENOTFOUND boss-man.tailexample.ts.net", "wss://boss-man.tailexample.ts.net/api/check-worker/connect");
+    expect(out).toContain("Can't find the address boss-man.tailexample.ts.net from this machine");
+    expect(out).toContain("not on your tailnet");
+    expect(out).toContain("LAN address");
+  });
+
+  it("gives the 'if it is a Tailscale name' wording for any other name, and leaves other errors alone", () => {
+    expect(describeConnectError("getaddrinfo ENOTFOUND boss.example.com", "wss://boss.example.com/api/check-worker/connect")).toContain("If it is a Tailscale name");
+    expect(describeConnectError("connect ECONNREFUSED 192.168.1.50:3100", "ws://192.168.1.50:3100/api/check-worker/connect")).toBe("connect ECONNREFUSED 192.168.1.50:3100");
   });
 });

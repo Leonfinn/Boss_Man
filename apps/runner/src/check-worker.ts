@@ -12,6 +12,7 @@ import { bundleFetcher } from "./check-bundle-fetch.js";
 import { downloadCheckBundle } from "./check-bundle-http.js";
 import { CheckJobs } from "./check-jobs.js";
 import { RunnerConnection } from "./connection.js";
+import { readToolchain } from "./toolchain.js";
 import { applyCheckSlots, pnpmStoreDir, pruneStores, sandboxSelfTest } from "./fence.js";
 import { assertSeparateStore, gateStoreDir, storeEnv } from "./store.js";
 import { safeWorkerToken } from "./token.js";
@@ -86,6 +87,7 @@ export async function startCheckWorker(env: NodeJS.ProcessEnv = process.env) {
     runnerVersion: "0.0.0",
     imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
     imageCommit: /^[0-9a-f]{40}$/i.test(env.BOSSMAN_IMAGE_COMMIT ?? "") ? env.BOSSMAN_IMAGE_COMMIT : undefined,
+    toolchain: await readToolchain(),
     log,
     onCommand: (command) => {
       if (!workerHandles(command, checkJobs)) log(`ignored a ${command.type} command`);

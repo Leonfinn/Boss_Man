@@ -40,23 +40,21 @@ The host deployer refuses changes to files that control how Boss Man runs or dep
 
 If the health check fails, the script changes nothing by itself and prints the commands to roll back. `scripts/deploy.sh --rollback` puts the previous commit back. It never touches the database.
 
-## 3. Copy the deployer script if it changed
+## 3. The deployer script copies itself
 
 Skip this step if you do not use the host deployer.
 
-The host deployer runs from its own copy of `scripts/host-deployer.sh`, so an update to the checkout does not change it. This script changes often. Set `D` to your deployer folder, then compare the two copies:
+The host deployer runs from its own copy of `scripts/host-deployer.sh`. A change to that script is never deployed from the panel (it is what root runs), so you apply it by hand with `scripts/deploy.sh` as the card says. That deploy now refreshes the copy by itself with `scripts/install-deployer.sh`, so no separate copy command is needed: it writes the new file beside the old one, keeps the owner and mode, and renames it over, so the new version is used from the deployer's next run. You only need the hand copy below if the deploy output says "the deployer copy was not refreshed", or for the first update that brings this feature in. To check, set `D` to your deployer folder and compare the two copies:
 
 ```sh
 cmp scripts/host-deployer.sh $D/host-deployer.sh
 ```
 
-If `cmp` prints nothing, the copies are the same. If it prints a difference, read the new script, then copy it with one command, as root (it keeps the old copy as `host-deployer.sh.old`, sets the owner and mode, and says "already" when there is nothing to do):
+If `cmp` prints nothing, the copies are the same. If it prints a difference, read the new script, then copy it:
 
 ```sh
-scripts/install-deployer.sh --update-self
+cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
-
-It refuses a script with uncommitted edits in the checkout. The by-hand equivalent is `cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh`.
 
 Do not link to the checkout instead of copying. A link would let a merged change alter what root runs.
 
@@ -74,7 +72,7 @@ With the launcher, Boss Man drains first: nothing new starts and runs in progres
 
 A runner update takes no backup. Runners hold no database.
 
-**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/26](26-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
+**Check workers** on other hosts are not swapped by this update. A worker built from an older commit than the runner takes no checks (the Checks panel says "update this machine"), so update each one after the runners: see [docs/34](34-check-workers.md#update-a-worker). The "Runners updated" notification lists the workers and the steps.
 
 ## Backups
 

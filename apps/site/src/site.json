@@ -4,7 +4,7 @@
   "guidePath": "/blob/main/docs/00-first-time-install.md",
   "licencePath": "/blob/main/LICENSE",
   "issuesPath": "/issues",
-  "portalUrl": "",
+  "portalUrl": "https://roadmap.bossman.website",
   "installHref": "/guides/install-boss-man",
   "ogImage": "/img/og-v2.png",
   "ogAlt": "Boss Man: AI agents that plan, build and review your software, on your own server.",

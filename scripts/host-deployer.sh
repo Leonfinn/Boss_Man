@@ -63,7 +63,9 @@ if [[ -e $CONF ]]; then
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
-# docs/09-self-deploy.md lists the same files.
+# docs/09-self-deploy.md lists the same files. scripts/host-deployer.sh stays on the list (BOS-1588, security review): it is
+# what root runs, so a change to it is applied by the owner on the hand-apply card; that hand deploy then refreshes the copy
+# itself with scripts/install-deployer.sh (also on the list, as it runs as root).
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer|install-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/(penpot|ntfy|ntfy-bluegreen)\.yml$'
@@ -652,8 +654,17 @@ host_extra_facts() {
       # deployer reads main itself, so a failed main read is only a probe failure when HEAD fails too).
       local errf="$STATE/repo-probe.err" rc=0 ok=0
       : >"$errf" 2>/dev/null || true
-      if (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
-      if ((!ok)) && (GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" timeout 20 git -C "$REPO" -c credential.helper= ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
+      # BOS-1584: the probe must reach origin exactly as a deploy's `g fetch` does. Git ranks GIT_SSH_COMMAND above the
+      # checkout's `core.sshCommand` (where the docs put the deploy key, `-i key -o IdentitiesOnly=yes`), so setting
+      # GIT_SSH_COMMAND to a bare `ssh` dropped the key and said "Permission denied (publickey)" on a host whose
+      # deploys work. Start from the command a deploy would use (the environment's, else the checkout's setting, else
+      # `ssh`) and only add the no-prompt options; ssh keeps the first value of an option, so the key stays.
+      local sshbase="${GIT_SSH_COMMAND:-}"
+      [[ -n $sshbase ]] || sshbase="$(g config --get core.sshCommand 2>/dev/null || true)"
+      [[ -n $sshbase ]] || sshbase="ssh"
+      local probe_ssh="$sshbase -o BatchMode=yes -o ConnectTimeout=10"
+      if (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin refs/heads/main >/dev/null 2>"$errf"); then ok=1; else rc=$?; fi
+      if ((!ok)) && (GIT_SSH_COMMAND="$probe_ssh" timeout 20 git -C "$REPO" ls-remote origin HEAD >/dev/null 2>"$errf"); then ok=1; else ((ok)) || rc=$?; fi
       if ((ok)); then probe=ok; else probe=failed; fi
       probed="$(now)"
       # One short line saying which part failed, secret-free: drop anything that looks like a URL or a credential,
@@ -827,6 +838,13 @@ host_extra_facts() {
       local i
       for i in "${!idsarr[@]}"; do exit_code["${idsarr[i]}"]="${ecodes[i]:-}"; done
     fi
+    # Is the live colour's server container running? (BOS-1584: the standby filter below needs it.)
+    local live_up=false
+    if [[ -n $colour ]]; then
+      while IFS=$'\t' read -r _ _ cstate_str _ _ _ csvc; do
+        [[ $csvc == "server-$colour" && $cstate_str == running ]] && live_up=true
+      done <"$listing"
+    fi
     while IFS=$'\t' read -r cid cname cstate_str cstatus csince _ csvc; do
       [[ -n $cstate_str ]] || continue
       # One entry per container name: a stack run twice on one host (BOS-986's duplicate compose-file entry on
@@ -858,6 +876,10 @@ host_extra_facts() {
       # finished window, so a stopped colour is never counted as "not running" (a colour that crashed exits non-zero
       # and is counted below).
       if [[ $cexit == 0 && $csvc =~ ^server-(blue|green)$ ]]; then continue; fi
+      # BOS-1584: the standby after a swap is stopped with `docker stop`, which ends in exit 137 when the server does not
+      # quit within the grace time. So when the live colour is known and its container is up, the other colour is meant
+      # to be stopped whatever its exit code. A crashed live colour is never hidden: it is the one that is not up.
+      if [[ -n $colour && $csvc =~ ^server-(blue|green)$ && $csvc != "server-$colour" && $live_up == true ]]; then continue; fi
       notrun=$((notrun + 1))
       # `exit` is a string, never bare: if instead of a number inspect returns nothing (the container was removed
       # between ps and inspect, or inspect was denied), a bare value would leave `"exit": ,` and break the whole
@@ -882,10 +904,10 @@ host_extra_facts() {
 }
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
-do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
+do_deploy_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
 # A restart on a single server (BOS-647): --force rebuilds and recreates what is checked out; --commit pins it to the
 # commit the request named, which main() has already checked is HEAD, so nothing new can come in.
-do_restart_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
+do_restart_server() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/deploy.sh --yes --no-runner --force --commit "$COMMIT"); }
 # No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
 # so this lock is not held while runs finish. The swap itself is reported by the server.
 do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
@@ -1718,6 +1740,8 @@ main() {
   if [[ $TARGET != runner ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
     # A good swap keeps measuring through the standby window (soak_tick); anything else ends here.
+    # BOS-1588: a good swap also refreshes this deployer's own copy (it takes effect on the next run); a failure only warns.
+    if [[ $BG_RESULT == deployed && -x $REPO/scripts/install-deployer.sh ]]; then BOSSMAN_DEPLOYER="$D" "$REPO/scripts/install-deployer.sh" >>"$LOG" 2>&1 || log "Warning: the deployer copy was not refreshed."; fi
     [[ $BG_RESULT == deployed ]] || { mem_report; BG_MSG="${BG_MSG:-The blue/green ${TARGET/server/swap} stopped with an error (exit $rc).} See $LOG on the host."; }
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi

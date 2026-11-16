@@ -121,6 +121,167 @@ export function ToolServers({ company }: { company: Company }) {
   );
 }
 
+type SecretField = { set: boolean; hint: string | null; secretName: string | null };
+type PenpotView = {
+  configured: boolean;
+  url: string | null;
+  urlHint: string | null;
+  guardAddress: string | null;
+  guardTrustsPrivate: boolean;
+  token: SecretField;
+  email: SecretField;
+  password: SecretField;
+  agentIds: string[];
+  exportAgentIds: string[];
+};
+
+/** Ticks for the agents that get something; none ticked means every agent in the company. */
+function AgentTicks({ legend, agents, picked, onChange }: { legend: string; agents: Company["agents"]; picked: string[]; onChange: (ids: string[]) => void }) {
+  return (
+    <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+      <legend style={{ fontWeight: 600, fontSize: 14 }}>{legend}</legend>
+      <span className="muted" style={{ fontSize: 13 }}>
+        Leave all unticked to give it to every agent in this company.
+      </span>
+      {agents.map((a) => (
+        <label key={a.id} style={{ display: "block" }}>
+          <input type="checkbox" checked={picked.includes(a.id)} onChange={(e) => onChange(e.target.checked ? [...picked, a.id] : picked.filter((id) => id !== a.id))} /> {a.name}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
+ * Penpot (BOS-1582): one form for the address, access token and export login agents use for designs (docs/16). It saves
+ * the same PENPOT_* secrets the Secrets page shows, so a Penpot set up there by hand appears here as already set. The
+ * network guard opens the address by itself, so no .env line is needed. Token, email and password are never shown again.
+ */
+export function PenpotSettings({ company }: { company: Company }) {
+  const q = usePoll((signal) => api<PenpotView>(`/api/companies/${company.id}/penpot`, { signal }), 60_000, `penpot-${company.id}`);
+  const act = useAction();
+  const [edit, setEdit] = useState<{ url: string; token: string; email: string; password: string; agentIds: string[]; exportAgentIds: string[] } | null>(null);
+  const v = q.data;
+  if (!v) return null;
+  const start = () => setEdit({ url: v.url ?? "", token: "", email: "", password: "", agentIds: v.agentIds, exportAgentIds: v.exportAgentIds });
+  const f = edit;
+  const set = (k: "url" | "token" | "email" | "password") => (e: { target: { value: string } }) => f && setEdit({ ...f, [k]: e.target.value });
+  const names = (ids: string[]) => (ids.length ? company.agents.filter((a) => ids.includes(a.id)).map((a) => a.name).join(", ") : "every agent");
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    if (!f) return;
+    void act.run(async () => {
+      await api(`/api/companies/${company.id}/penpot`, { method: "PUT", body: { url: f.url, token: f.token, email: f.email, password: f.password, agentIds: f.agentIds, exportAgentIds: f.exportAgentIds } });
+      setEdit(null);
+      q.reload();
+      return "Saved. Agents get it from their next run, and the network guard opens Penpot's address for this company's runner.";
+    });
+  };
+  const removeExport = () =>
+    f &&
+    void act.run(async () => {
+      await api(`/api/companies/${company.id}/penpot`, { method: "PUT", body: { email: null, password: null, agentIds: f.agentIds, exportAgentIds: [] } });
+      setEdit(null);
+      q.reload();
+      return "Export login removed. Everything else in Penpot still works; export says what is missing.";
+    });
+  const remove = () =>
+    window.confirm(`Stop giving Penpot to ${company.name}'s agents? The network guard closes its address too. The saved values stay under Secrets.`) &&
+    void act.run(async () => {
+      await api(`/api/companies/${company.id}/penpot`, { method: "DELETE" });
+      setEdit(null);
+      q.reload();
+      return "Penpot removed for this company.";
+    });
+  const kept = (s: SecretField) => (s.set ? `Saved (${s.hint ?? "hidden"}). Leave blank to keep it.` : "");
+  return (
+    <Section id="penpot-h" title="Penpot">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Lets agents read and draw designs in your Penpot. Make the agent account and its access token in Penpot first (the Penpot agent setup guide). Boss Man opens Penpot's address in the network guard by itself: no .env line needed.
+      </p>
+      {v.configured ? (
+        <ul style={{ fontSize: 14 }} data-testid="penpot-summary">
+          <li>
+            Address: <span className="mono">{v.url ?? v.urlHint}</span>
+            {v.guardAddress ? (
+              <span className="muted">
+                {" "}
+                · the network guard opens <span className="mono">{v.guardAddress}</span>
+                {!v.guardTrustsPrivate && " (a public name: it stays closed if it ever points at a private address)"}
+              </span>
+            ) : (
+              <span className="error"> · the network guard can't open this address; save Penpot's address again here</span>
+            )}
+          </li>
+          <li>Access token: saved ({v.token.hint ?? "hidden"}), for {names(v.agentIds)}</li>
+          <li>{v.password.set ? `Export login: saved, for ${names(v.exportAgentIds)}` : "Export login: not set (PNG export says what is missing)"}</li>
+        </ul>
+      ) : (
+        <p data-testid="penpot-not-set">Penpot isn't set up for {company.name}.</p>
+      )}
+      {!f ? (
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" className="btn" onClick={start}>
+            {v.configured ? "Change Penpot" : "Set up Penpot"}
+          </button>
+          {v.configured && (
+            <button type="button" className="btn" disabled={act.busy} onClick={remove}>
+              Remove Penpot
+            </button>
+          )}
+        </div>
+      ) : (
+        <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "start" }}>
+          <div className="field">
+            <label htmlFor="penpot-url">Penpot address</label>
+            <input id="penpot-url" type="url" className="mono" required={!v.configured} placeholder="http://192.168.1.50:9001" value={f.url} onChange={set("url")} aria-describedby="penpot-url-hint" />
+            <span id="penpot-url-hint" className="muted" style={{ fontSize: 13 }}>
+              The address the runners reach Penpot on, with its port.
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="penpot-token">Access token</label>
+            <input id="penpot-token" type="password" autoComplete="off" className="mono" required={!v.token.set} value={f.token} onChange={set("token")} aria-describedby="penpot-token-hint" />
+            <span id="penpot-token-hint" className="muted" style={{ fontSize: 13 }}>
+              {kept(v.token) || "From Penpot: Your account → Access tokens, signed in as the agent account."}
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="penpot-email">Export email (optional)</label>
+            <input id="penpot-email" type="email" autoComplete="off" value={f.email} onChange={set("email")} aria-describedby="penpot-email-hint" />
+            <span id="penpot-email-hint" className="muted" style={{ fontSize: 13 }}>
+              {kept(v.email) || "Only for PNG export, which needs a login. The agent account's email."}
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="penpot-password">Export password (optional)</label>
+            <input id="penpot-password" type="password" autoComplete="new-password" value={f.password} onChange={set("password")} aria-describedby="penpot-password-hint" />
+            <span id="penpot-password-hint" className="muted" style={{ fontSize: 13 }}>
+              {kept(v.password) || "The agent account's password, used nowhere else."}
+            </span>
+          </div>
+          <AgentTicks legend="Agents who use Penpot" agents={company.agents} picked={f.agentIds} onChange={(ids) => setEdit({ ...f, agentIds: ids })} />
+          <AgentTicks legend="Agents who export PNGs" agents={company.agents} picked={f.exportAgentIds} onChange={(ids) => setEdit({ ...f, exportAgentIds: ids })} />
+          <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+            <button className="btn primary" type="submit" disabled={act.busy}>
+              Save Penpot
+            </button>
+            {v.password.set && (
+              <button type="button" className="btn" disabled={act.busy} onClick={removeExport}>
+                Remove export login
+              </button>
+            )}
+            <button type="button" className="btn" onClick={() => setEdit(null)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 type DeployTargetRow = {
   id: string;
   name: string;

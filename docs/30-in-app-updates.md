@@ -19,10 +19,10 @@ It is optional. Without it you update by hand, as [docs/23-updating.md](23-updat
 As root, in the checkout (`<install-dir>/src`), after step 1 below:
 
 ```sh
-scripts/install-deployer.sh
+scripts/setup-host-deployer.sh
 ```
 
-It does steps 2, 3, 6 (the `.env` lines) and 7 for you: the folders with the right owners and modes, the script copy, `BOSSMAN_DEPLOYER` and `COMPOSE_FILE` in `.env` (a dated backup of `.env` first), and a one-minute timer (systemd timer, or `/etc/cron.d`; on TrueNAS it prints the Cron Jobs form values). It ends with a trial run of the deployer and tells you the one command that restarts the server so it sees the folders (add `--recreate-server` to run it). A second run changes nothing, so it is safe to repeat. `--dry-run` shows what it would do, `--dir` names an install folder other than the one above the checkout, `--timer cron|systemd|none` picks the timer. Step 4 (the webhook) and step 5 (testing) stay as written, and nothing in the script writes a secret. Later, `scripts/install-deployer.sh --update-self` is the one command for the "deployer script is behind" card. The steps below are what the script does, for anyone who prefers to do them by hand or wants to check its work.
+It does steps 2, 3, 6 (the `.env` lines) and 7 for you: the folders with the right owners and modes, the script copy, `BOSSMAN_DEPLOYER` and `COMPOSE_FILE` in `.env` (a dated backup of `.env` first), and a one-minute timer (systemd timer, or `/etc/cron.d`; on TrueNAS it prints the Cron Jobs form values). It ends with a trial run of the deployer and tells you the one command that restarts the server so it sees the folders (add `--recreate-server` to run it). A second run changes nothing, so it is safe to repeat. `--dry-run` shows what it would do, `--dir` names an install folder other than the one above the checkout, `--timer cron|systemd|none` picks the timer. Step 4 (the webhook) and step 5 (testing) stay as written, and nothing in the script writes a secret. Later copies of a changed script are made by `scripts/install-deployer.sh` (the same step a hand deploy runs, and the "deployer script is behind" card shows it); this script hands the refresh to it. The steps below are what the script does, for anyone who prefers to do them by hand or wants to check its work.
 
 Set two shell variables first. Replace the install folder if yours differs. If you open a new shell, set them again.
 
@@ -84,7 +84,7 @@ Read it first (`less $B/src/scripts/host-deployer.sh`). Copy it. Do not link to 
 cp $B/src/scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
 
-When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it. Read the change, update by hand with `scripts/deploy.sh`, and copy the script over again. [docs/23-updating.md, step 3](23-updating.md#3-copy-the-deployer-script-if-it-changed) shows how to tell.
+A change to `scripts/host-deployer.sh` is refused by the panel (it is what root runs). Apply it by hand with `scripts/deploy.sh` as the card shows; that deploy runs `scripts/install-deployer.sh`, which replaces this copy by itself (atomically; the new version runs from the next minute), so no separate copy step is needed. [docs/23-updating.md, step 3](23-updating.md#3-the-deployer-script-copies-itself) says when a hand copy is still needed.
 
 ## 4. Add an alert webhook (optional)
 
@@ -186,7 +186,7 @@ The script must run as root once a minute. Every minute matters: an hourly job m
 
 Cron reads files in `/etc/cron.d` by itself. The file must belong to root and must not be writable by others (`chmod 644`). The user field (`root`) is part of this file format. Not tested by the project on every distribution: check after a few minutes, as below.
 
-**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). `scripts/install-deployer.sh --timer systemd` writes `boss-man-deployer.service` and `.timer` for you.
+**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). `scripts/setup-host-deployer.sh --timer systemd` writes `boss-man-deployer.service` and `.timer` for you.
 
 **On TrueNAS,** use its web page instead: see "TrueNAS SCALE" below.
 

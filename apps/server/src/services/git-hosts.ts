@@ -3,12 +3,31 @@
 // CreatePullRequestOption {title, head, base, body}; MergePullRequestOption {do, merge_title_field,
 // merge_message_field, head_commit_id}; merge answers 200, or 405 (not allowed yet: approvals,
 // status checks, permissions) and 409 (conflicts, head out of date) with a message.
+import { strFromU8, unzipSync } from "fflate";
 import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
 
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
 export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[]; total?: number; /** A page for the run: the first failing one, else the first reported (BOS-1418). */ url?: string };
+/** One GitHub Actions run on a branch (BOS-1072): enough to name the run and tell whether it failed. */
+export type WorkflowRun = {
+  id: number;
+  attempt: number;
+  name: string;
+  event: string;
+  status: string;
+  conclusion: string | null;
+  headSha: string;
+  headMessage: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type WorkflowStep = { number: number; name: string; status: string; conclusion: string | null };
+export type WorkflowJob = { id: number; name: string; status: string; conclusion: string | null; url: string; steps: WorkflowStep[] };
+/** The error annotations a failed check run published, grouped under the check's (the job's) name. */
+export type CommitAnnotations = { name: string; lines: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
@@ -23,15 +42,20 @@ export class GitHostError extends Error {
 }
 
 const TIMEOUT_MS = 15_000;
+/** BOS-1072: the most of a CI job log read (kept from the end), and the biggest download taken. */
+export const MAX_LOG_CHARS = 4_000_000;
+const MAX_LOG_DOWNLOAD = 32_000_000;
 
 export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
   const http = opts.fetch ?? fetch;
 
+  const authHeaders = (cfg: GitHostConfig, token: string): Record<string, string> =>
+    cfg.kind === "github"
+      ? { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }
+      : { authorization: `token ${token}`, accept: "application/json" };
+
   async function call(cfg: GitHostConfig, token: string, method: string, path: string, body?: unknown) {
-    const headers: Record<string, string> =
-      cfg.kind === "github"
-        ? { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }
-        : { authorization: `token ${token}`, accept: "application/json" };
+    const headers = authHeaders(cfg, token);
     if (body !== undefined) headers["content-type"] = "application/json";
     const res = await http(`${cfg.apiBase}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}${path}`, {
       method,
@@ -133,6 +157,118 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const waiting = rows.some((r) => (gh ? r.status !== "completed" : r.status === "pending"));
       const link = [...failingRows, ...rows].map((r) => (gh ? r.html_url : r.target_url)).find((u): u is string => typeof u === "string" && /^https?:\/\//.test(u));
       return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing, total: rows.length, ...(link ? { url: link } : {}) };
+    },
+
+    /**
+     * The most recent Actions runs on a branch (BOS-1072), newest first: pushes to main and the
+     * nightly schedule alike. GitHub only: returns [] elsewhere, so a watcher can say plainly that
+     * there is nothing to read.
+     */
+    async workflowRuns(cfg: GitHostConfig, token: string, branch: string, limit = 30): Promise<WorkflowRun[]> {
+      if (cfg.kind !== "github") return [];
+      const res = await call(cfg, token, "GET", `/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${Math.max(1, Math.min(100, limit))}`);
+      const body = res.json && !Array.isArray(res.json) ? res.json : null;
+      const rows = body?.workflow_runs as Array<Record<string, unknown>> | undefined;
+      if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the workflow runs on ${branch}: ${messageOf(res.json, res.status)}`);
+      return rows.map((r) => {
+        const head = (r.head_commit ?? {}) as Record<string, unknown>;
+        return {
+          id: Number(r.id),
+          attempt: Number(r.run_attempt ?? 1),
+          name: String(r.name ?? r.workflow_name ?? "CI"),
+          event: String(r.event ?? ""),
+          status: String(r.status ?? ""),
+          conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
+          headSha: String(r.head_sha ?? ""),
+          headMessage: typeof head.message === "string" ? head.message : "",
+          url: String(r.html_url ?? ""),
+          createdAt: String(r.created_at ?? ""),
+          updatedAt: String(r.updated_at ?? r.created_at ?? ""),
+        };
+      });
+    },
+
+    /** The jobs and their steps in one Actions run, so a failure can name the job and step. */
+    async runJobs(cfg: GitHostConfig, token: string, runId: number): Promise<WorkflowJob[]> {
+      if (cfg.kind !== "github") return [];
+      const res = await call(cfg, token, "GET", `/actions/runs/${runId}/jobs?per_page=100`);
+      const body = res.json && !Array.isArray(res.json) ? res.json : null;
+      const rows = body?.jobs as Array<Record<string, unknown>> | undefined;
+      if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the jobs of run ${runId}: ${messageOf(res.json, res.status)}`);
+      return rows.map((j) => ({
+        id: Number(j.id),
+        name: String(j.name ?? "job"),
+        status: String(j.status ?? ""),
+        conclusion: typeof j.conclusion === "string" ? j.conclusion : null,
+        url: String(j.html_url ?? ""),
+        steps: (Array.isArray(j.steps) ? (j.steps as Array<Record<string, unknown>>) : []).map((s) => ({
+          number: Number(s.number ?? 0),
+          name: String(s.name ?? "step"),
+          status: String(s.status ?? ""),
+          conclusion: typeof s.conclusion === "string" ? s.conclusion : null,
+        })),
+      }));
+    },
+
+    /**
+     * One job's log text (BOS-1072). GitHub answers with a zip of step logs; the chunks are joined
+     * oldest first. A plain body is returned as it is, so a proxy or a test can answer either way.
+     */
+    async jobLog(cfg: GitHostConfig, token: string, jobId: number): Promise<string> {
+      if (cfg.kind !== "github") return "";
+      const res = await http(`${cfg.apiBase}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/actions/jobs/${jobId}/logs`, {
+        headers: authHeaders(cfg, token),
+        redirect: "follow",
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) throw new GitHostError(res.status, `Couldn't read the log of job ${jobId}: HTTP ${res.status}`);
+      // A log can be huge: refuse a big download outright and keep only the end of the text, where the error is.
+      if (Number(res.headers.get("content-length") ?? 0) > MAX_LOG_DOWNLOAD) throw new GitHostError(413, `The log of job ${jobId} is too large to read`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.length > MAX_LOG_DOWNLOAD) throw new GitHostError(413, `The log of job ${jobId} is too large to read`);
+      let text: string;
+      if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+        // Skip any one step log that would unpack to more than the cap; the rest still say what failed.
+        const files = unzipSync(bytes, { filter: (f) => f.originalSize <= MAX_LOG_CHARS });
+        text = Object.keys(files)
+          .sort()
+          .map((name) => strFromU8(files[name]!))
+          .join("\n");
+      } else {
+        text = new TextDecoder().decode(bytes);
+      }
+      return text.length > MAX_LOG_CHARS ? text.slice(-MAX_LOG_CHARS) : text;
+    },
+
+    /**
+     * The failure annotations on a commit's check runs (BOS-1072), grouped by the check's name (the
+     * job's name in Actions). Used when the log is unreadable, so a ticket still carries error lines.
+     */
+    async commitAnnotations(cfg: GitHostConfig, token: string, sha: string): Promise<CommitAnnotations[]> {
+      if (cfg.kind !== "github") return [];
+      const res = await call(cfg, token, "GET", `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`);
+      const body = res.json && !Array.isArray(res.json) ? res.json : null;
+      const rows = body?.check_runs as Array<Record<string, unknown>> | undefined;
+      if (!res.ok || !Array.isArray(rows)) return [];
+      const out: CommitAnnotations[] = [];
+      for (const row of rows) {
+        if (!["failure", "timed_out", "cancelled", "startup_failure"].includes(String(row.conclusion))) continue;
+        const id = Number(row.id);
+        if (!id) continue;
+        const a = await call(cfg, token, "GET", `/check-runs/${id}/annotations?per_page=100`);
+        const list = Array.isArray(a.json) ? a.json : [];
+        const lines = list.flatMap((n) => {
+          if (!n || typeof n !== "object") return [];
+          const x = n as Record<string, unknown>;
+          const where = x.path ? `${String(x.path)}${x.start_line ? `:${String(x.start_line)}` : ""} ` : "";
+          const title = x.title ? `${String(x.title)}: ` : "";
+          const message = String(x.message ?? "").trim();
+          const raw = typeof x.raw_details === "string" ? x.raw_details.trim().split(/\r?\n/).slice(0, 5) : [];
+          return [`${where}${title}${message}`.trim(), ...raw].filter(Boolean);
+        });
+        if (lines.length) out.push({ name: String(row.name ?? "check"), lines });
+      }
+      return out;
     },
 
     /** The commit a branch points at: GitHub calls it commit.sha, Gitea commit.id. */

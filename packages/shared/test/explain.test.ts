@@ -14,6 +14,14 @@ describe("ownerWhy (BOS-793)", () => {
   });
 });
 
+describe("$BOSSMAN_SCRATCH script path (BOS-1454)", () => {
+  it("gives no owner reason for node $BOSSMAN_SCRATCH/x.mjs, and still gives one for node $S/x.mjs", () => {
+    const rule = "Destructive commands go to the owner";
+    expect(ownerWhy("node $BOSSMAN_SCRATCH/x.mjs", rule)).not.toMatch(/destructive-command guard caught/);
+    expect(ownerWhy("node $S/x.mjs", rule)).toMatch(/destructive-command guard caught/);
+  });
+});
+
 describe("agent-browser test commands (BOS-752)", () => {
   const S = "/home/node/workspaces/scratch/abc";
   const shapes = [
