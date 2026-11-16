@@ -1389,10 +1389,7 @@ export function reviewService(
         return `CI on branch head ${at}: passed${c.total ? ` (${c.total} check${c.total === 1 ? "" : "s"})` : ""}.`;
       } catch (err) {
         if (err instanceof GitHostError) {
-          const hint = err.status === 401 || err.status === 403 || err.status === 404
-            ? " The company's git token may lack read access to CI: on GitHub a fine-grained token needs Repository permissions → Actions: Read-only (and Metadata: Read-only)."
-            : "";
-          return `CI on branch head: not available (${err.message}).${hint}`;
+          return `CI on branch head: not available (${err.message}).`;
         }
         return null;
       }

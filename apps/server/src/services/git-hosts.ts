@@ -87,6 +87,29 @@ export function logExcerpt(log: string): { errors: string[]; tail: string[] } {
   return { errors, tail };
 }
 
+/**
+ * The one reader of a failed job's log, shared by the main-CI watcher and the merge gate's CI send-back (BOS-1667).
+ * `lines` is never empty: the error lines, then the end of the log (secrets redacted), or one line saying why the
+ * log can't be had. `readable` is true only when real log lines came back. `read` fetches the raw log.
+ */
+export async function readFailureLog(cfg: GitHostConfig, jobId: number, read: () => Promise<string>): Promise<{ lines: string[]; readable: boolean }> {
+  if (cfg.kind !== "github") return { lines: ["(The job log isn't available from this git host; Boss Man can only read job logs on GitHub.)"], readable: false };
+  if (!jobId) return { lines: ["(No job ran, so there is no job log.)"], readable: false };
+  try {
+    const { errors, tail } = logExcerpt(await read());
+    if (!errors.length && !tail.length) return { lines: ["(The job log was empty.)"], readable: false };
+    return { lines: [...errors, ...(tail.length ? ["… end of the log:", ...tail] : [])], readable: true };
+  } catch (e) {
+    const status = e instanceof GitHostError ? e.status : 0;
+    const why =
+      status === 401 || status === 403 ? "the git token isn't allowed to read job logs"
+      : status === 404 || status === 410 ? "GitHub no longer has it (logs expire, or the job was deleted)"
+      : status === 413 ? "it is too large to read"
+      : `GitHub's answer couldn't be read (${(e instanceof Error ? e.message : String(e)).slice(0, 150)})`;
+    return { lines: [`(The job log couldn't be read: ${why}. Open the job link above.)`], readable: false };
+  }
+}
+
 const TIMEOUT_MS = 15_000;
 /** BOS-1072: the most of a CI job log read (kept from the end), and the biggest download taken. */
 export const MAX_LOG_CHARS = 4_000_000;
@@ -382,21 +405,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
      * secrets redacted. Never empty and never throws: when the log can't be had the one line says why.
      */
     async jobLogBlock(cfg: GitHostConfig, token: string, jobId: number): Promise<string[]> {
-      if (cfg.kind !== "github") return ["(The job log isn't available from this git host; Boss Man can only read job logs on GitHub.)"];
-      if (!jobId) return ["(No job ran, so there is no job log.)"];
-      try {
-        const { errors, tail } = logExcerpt(await this.jobLog(cfg, token, jobId));
-        if (!errors.length && !tail.length) return ["(The job log was empty.)"];
-        return [...errors, ...(tail.length ? ["… end of the log:", ...tail] : [])];
-      } catch (e) {
-        const status = e instanceof GitHostError ? e.status : 0;
-        const why =
-          status === 401 || status === 403 ? "the git token isn't allowed to read job logs (it needs the Actions: Read permission)"
-          : status === 404 || status === 410 ? "GitHub no longer has it (logs expire, or the job was deleted)"
-          : status === 413 ? "it is too large to read"
-          : `GitHub's answer couldn't be read (${(e instanceof Error ? e.message : String(e)).slice(0, 150)})`;
-        return [`(The job log couldn't be read: ${why}. Open the job link above.)`];
-      }
+      return readFailureLog(cfg, jobId, () => this.jobLog(cfg, token, jobId)).then((r) => r.lines);
     },
 
     /**

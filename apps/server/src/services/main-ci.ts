@@ -10,7 +10,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 import { isBackgroundLaneTitle } from "./check-gate.js";
-import { errorLines, GitHostError, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
+import { errorLines, readFailureLog, MAX_LINE, MAX_LINES, type GitHostConfig, type WorkflowJob, type WorkflowRun, type gitHostService } from "./git-hosts.js";
 
 /** The owner's switch: absent means on. Server-wide, like the other background watchers. */
 export const MAIN_CI_SWITCH = "main_ci_watch";
@@ -86,12 +86,13 @@ export function mainCiService(
     for (const job of jobs) {
       if (!BAD.has(String(job.conclusion))) continue;
       const steps = job.steps.filter((s) => BAD.has(String(s.conclusion)));
-      let lines: string[] = [];
-      try {
-        lines = errorLines(await deps.gitHosts.jobLog(cfg, token, job.id));
-      } catch {
+      const log = await readFailureLog(cfg, job.id, () => deps.gitHosts.jobLog(cfg, token, job.id));
+      let lines = log.lines;
+      if (!log.readable) {
+        // The shared reader says why the log is out of reach; the check-run annotations may still carry error lines.
         annotations ??= await deps.gitHosts.commitAnnotations(cfg, token, run.headSha).catch(() => []);
-        lines = (annotations.find((a) => a.name === job.name)?.lines ?? []).slice(0, MAX_LINES).map((l) => redactForModel(l.slice(0, MAX_LINE)));
+        const fromAnnotations = (annotations.find((a) => a.name === job.name)?.lines ?? []).slice(0, MAX_LINES).map((l) => redactForModel(l.slice(0, MAX_LINE)));
+        if (fromAnnotations.length) lines = fromAnnotations;
       }
       // A job that failed without a failing step (cancelled setup, runner lost) is one failure of its own.
       for (const step of steps.length ? steps.map((s) => s.name) : ["(job failed before any step)"])
@@ -151,8 +152,7 @@ export function mainCiService(
     try {
       runs = (await deps.gitHosts.workflowRuns(cfg, token, p.defaultBranch)).filter((r) => EVENTS.has(r.event));
     } catch (err) {
-      const hint = err instanceof GitHostError && [401, 403, 404].includes(err.status) ? " On GitHub a fine-grained token needs Repository permissions → Actions: Read-only." : "";
-      setStatus({ state: "unreadable", detail: `The token can't read main's CI runs (${(err as Error).message}).${hint}` });
+      setStatus({ state: "unreadable", detail: `The token can't read main's CI runs (${(err as Error).message}).` });
       return writeState(p.id, state);
     }
     if (!runs.length) {
@@ -221,7 +221,7 @@ export function mainCiService(
           "",
           "Error lines (secrets redacted):",
           "```",
-          ...(f.lines.length ? f.lines : ["(Error lines weren't readable with this token: it can read the run, job and step, but not the job log or the check-run annotations. Open the run link above.)"]),
+          ...f.lines,
           "```",
           "",
           NEVER_WEAKEN,

@@ -8,7 +8,7 @@ const cfg = (kind: "github" | "gitea") => ({ kind, apiBase: "https://host/api", 
 describe("jobLogBlock: a failed job's log for a ticket message (BOS-1667)", () => {
   const withLog = (res: () => Response) => gitHostService({ fetch: (async () => res()) as unknown as typeof fetch });
   it("never throws and never gives an empty block: each failure says what is wrong", async () => {
-    expect((await withLog(() => json(403, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/isn't allowed to read job logs.*Actions: Read/);
+    expect((await withLog(() => json(403, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/isn't allowed to read job logs/);
     expect((await withLog(() => json(404, {})).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/no longer has it/);
     expect((await withLog(() => new Response("x", { headers: { "content-length": "99000000" } })).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/too large/);
     expect((await withLog(() => new Response("")).jobLogBlock(cfg("github"), "t", 7)).join(" ")).toMatch(/was empty/);
