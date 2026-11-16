@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type Where } from "@boss-man/shared";
+import { HARNESSES, harnessLabel, modelFitProblem, parseStep, providerLabel, splitStepSource, type StepPiece, type StepSource, type Where } from "@boss-man/shared";
 import { api, ApiError, type AdvisedDecision, type ClosedNoticeCard, type Company, type Decision, type DecisionTally, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { copyText, selectText } from "../clipboard";
@@ -307,16 +307,19 @@ function CommandBlock({ command, where }: { command: string; where?: Where }) {
  * The fences are read by the same parser as the server's card lint (BOS-550), so a step the lint accepts renders
  * its commands as blocks, labelled fence lines and indented list items included.
  */
-function StepText({ text, refs }: { text: string; refs?: Decision["refs"] }) {
-  // The R19 "seen:" / "not seen:" tag is for the card checker: the owner reads a small muted line instead (BOS-1665).
-  const { text: shown, source } = splitStepSource(text);
+function StepText({ text, refs, stored }: { text: string; refs?: Decision["refs"]; stored?: StepSource | null }) {
+  // BOS-1665: the server takes the R19 tag out once and keeps the step's source beside it (`stored`). A card raised
+  // before that still has the tag in its text, so it is split here too; either way the owner reads a muted line.
+  const split = splitStepSource(text);
+  const shown = split.text;
+  const source = stored ?? split.source;
   const parsed = parseStep(shown);
   const parts: StepPiece[] = parsed.length ? parsed : [{ type: "text", text: shown }];
   return (
     <>
       {parts.map((p, i) => (p.type === "command" ? <CommandBlock key={i} command={p.text} where={p.where} /> : <span key={i} style={{ display: "block", whiteSpace: "pre-wrap" }}><Linked text={p.text} refs={refs} /></span>))}
       {source?.kind === "seen" && (
-        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={`/api/ticket-images/${source.imageId}`} target="_blank" rel="noreferrer">your screenshot</a></span>
+        <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={`/api/ticket-images/${source.imageId}`} target="_blank" rel="noreferrer">your screenshot</a>{source.takenAt ? ` of ${source.takenAt}` : ""}</span>
       )}
       {source?.kind === "notSeen" && (
         <span className="muted" data-step-source style={{ display: "block", fontSize: 12 }}>Written from <a href={source.url} target="_blank" rel="noreferrer noopener">the vendor's docs</a>, {source.date}</span>
@@ -1070,7 +1073,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}><StepText text={s} refs={d.refs} /></li>
+                            <li key={i}><StepText text={s} refs={d.refs} stored={d.context?.stepSources?.[i]} /></li>
                           ))}
                         </ol>
                         {/* The lint's findings (BOS-417): small, under the steps, never the headline. */}

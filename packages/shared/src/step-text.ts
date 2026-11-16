@@ -85,10 +85,45 @@ export function strayFence(pieces: StepPiece[]): string | null {
 }
 
 /** Where a step's clicks came from (R19): the card checker's tag, kept in the stored step, never shown as written. */
-export type StepSource = { kind: "seen"; imageId: string } | { kind: "notSeen"; url: string; date: string };
+export type StepSource = { kind: "seen"; imageId: string; /** YYYY-MM-DD the screenshot was attached, when known. */ takenAt?: string } | { kind: "notSeen"; url: string; date: string };
 
 const SEEN_TAG = /(?<!not )\bseen:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[ \t]*[.,;]?/i;
 const NOT_SEEN_TAG = /\bnot seen:\s*(https?:\/\/[^\s,]+)\s*,\s*(\d{4}-\d{2}-\d{2})[ \t]*[.,;]?/i;
+
+/**
+ * Every checker tag that may sit inside a step's written text (BOS-1665): R19 "seen:" / "not seen:" and R18b
+ * "engagement:<id>". One list, so a rule that adds an in-step tag adds its pattern here, and the test that runs the
+ * card fixtures through the owner-text split fails while any of these still matches what the owner reads.
+ */
+export const CHECKER_TAG_PATTERNS: readonly RegExp[] = [
+  SEEN_TAG,
+  NOT_SEEN_TAG,
+  /\bengagement:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,
+];
+
+/** A checker tag left in text the owner reads, or undefined. */
+export function leftoverCheckerTag(text: string): string | undefined {
+  for (const p of CHECKER_TAG_PATTERNS) {
+    const m = p.exec(text);
+    if (m) return m[0];
+  }
+  return undefined;
+}
+
+/**
+ * The owner's steps and where each came from, split once (BOS-1665): `steps` has no checker tag, `stepSources[i]` is
+ * the R19 source of step i (or null). `stepSources` is left out when no step has one. `imageDates` maps a screenshot
+ * id to its ISO date so the muted line can say when it was taken.
+ */
+export function splitOwnerSteps(steps: readonly string[], imageDates?: Record<string, string>): { steps: string[]; stepSources?: Array<StepSource | null> } {
+  const split = steps.map((s) => splitStepSource(s));
+  const sources = split.map((x) => {
+    const src = x.source;
+    if (src?.kind === "seen" && imageDates?.[src.imageId]) return { ...src, takenAt: imageDates[src.imageId]!.slice(0, 10) };
+    return src ?? null;
+  });
+  return { steps: split.map((x) => x.text), ...(sources.some(Boolean) ? { stepSources: sources } : {}) };
+}
 
 /**
  * A step with its R19 "seen: <id>" / "not seen: <url>, <date>" tag taken out, and the tag read into `source`. The
