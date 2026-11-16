@@ -73,11 +73,21 @@ describe("check job folders", () => {
     const { root, commit } = setup();
     const ws = new Workspaces(root, process.env);
     const jobId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-    const running = ws.runCommitCheck({ projectId, jobId, commit }, "sleep 3", 60_000);
-    await new Promise((r) => setTimeout(r, 1000));
-    expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(true);
-    await ws.housekeeping();
-    expect(existsSync(path.join(root, "check-jobs", jobId))).toBe(true);
+    // The check runs until the test creates the release file, so it cannot end before housekeeping has run,
+    // however slow the machine is. (Outside the root's job folders so the sweep never touches it.)
+    const release = path.join(tmp("bm-cjc-release-"), "release");
+    const running = ws.runCommitCheck({ projectId, jobId, commit }, `while [ ! -e '${release}' ]; do sleep 0.1; done`, 120_000);
+    const jobDir = path.join(root, "check-jobs", jobId);
+    // Wait for the worktree to appear (event, with a deadline) instead of a fixed sleep.
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(jobDir) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    try {
+      expect(existsSync(jobDir)).toBe(true);
+      await ws.housekeeping();
+      expect(existsSync(jobDir)).toBe(true);
+    } finally {
+      writeFileSync(release, "go");
+    }
     expect((await running).ok).toBe(true);
-  });
+  }, 60_000);
 });
