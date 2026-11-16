@@ -80,12 +80,28 @@ beforeAll(async () => {
   const addr = server!.address();
   base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 });
+// A cold Chromium start plus three page loads took over the old 30 s test budget on GitHub's runners (BOS-1632),
+// and each test paid the start again. One browser is started once, in beforeAll, with its own deadline; every
+// test then only opens pages. LIMIT is for the slow machine: it still ends a hung page, and the layout
+// assertions are unchanged, so a tab row or a broken menu column still fails.
+const LIMIT = 120_000;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let sharedBrowser: any | null = null;
+const launch = async (): Promise<any | null> => sharedBrowser;
+beforeAll(async () => {
+  if (built) sharedBrowser = await launchChromium();
+}, LIMIT);
 afterAll(async () => {
+  await sharedBrowser?.close();
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
 });
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-async function launch(): Promise<any | null> {
+// Wait until the Settings menu has drawn all its links (the event the old fixed sleeps stood in for).
+async function menuReady(page: any, links = 14): Promise<void> {
+  await page.waitForFunction((n: number) => document.querySelectorAll("nav[aria-label='Settings'] a").length >= n, links, { timeout: 15_000 });
+}
+async function launchChromium(): Promise<any | null> {
   let chromium: any;
   try {
     chromium = createRequire(import.meta.url)("playwright").chromium;
@@ -129,8 +145,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         const errors: string[] = [];
         page.on("pageerror", (e: any) => errors.push(String(e)));
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
-        await new Promise((r) => setTimeout(r, 400));
+        await menuReady(page);
         expect(JSON.stringify(errors), `${vp.name} page errors`).toBe("[]");
         const navHtml = await page.locator("nav[aria-label='Settings']").evaluate((el: Element) => el.outerHTML.slice(0, 400));
         expect(await page.locator("nav[aria-label='Settings'] a").count(), `${vp.name}: 14 menu links ${navHtml}`).toBe(14);
@@ -157,9 +172,9 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         await page.close();
       }
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 
   it("has a 228 px menu column beside the page on a wide screen, and the menu alone on a phone", async () => {
     const browser = await launch();
@@ -168,8 +183,8 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       for (const vp of [sizes[0]!, sizes[1]!, sizes[2]!]) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: 1, hasTouch: vp.touch });
         await page.goto(`${base}/#/settings/c1/reviews`);
-        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
-        await new Promise((r) => setTimeout(r, 300));
+        await menuReady(page);
+        await page.waitForSelector(".set-page", { timeout: 15_000 });
         const nav = await page.locator("nav[aria-label='Settings']").boundingBox();
         const pageBox = await page.locator(".set-page").boundingBox();
         if (vp.width >= 900) {
@@ -185,8 +200,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
         }
         // The "All companies" tag stays on one line (Server and runner is a company-wide page).
         await page.goto(`${base}/#/settings/c1/updates`);
-        await page.waitForSelector(".set-scope", { timeout: 8000 });
-        await new Promise((r) => setTimeout(r, 300));
+        await page.waitForSelector(".set-scope", { timeout: 15_000 });
         const tag = await page.locator(".set-scope").boundingBox();
         expect(tag!.height, `${vp.name}: tag is one line`).toBeLessThan(30);
         await saveShot(`system-${vp.name}.png`, page);
@@ -195,8 +209,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       // The phone's opening screen is the menu itself, each row with its hint.
       const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
       await phone.goto(`${base}/#/settings`);
-      await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
-      await new Promise((r) => setTimeout(r, 300));
+      await menuReady(phone);
       expect(await phone.locator("nav[aria-label='Settings'] a").count(), "phone menu: 14 rows").toBe(14);
       expect(await phone.locator("nav[aria-label='Settings'] .set-item-hint").first().isVisible(), "phone menu: hints show").toBe(true);
       expect(await phone.getByText("Run the setup wizard").count(), "phone menu: the wizard button").toBeGreaterThanOrEqual(1);
@@ -204,9 +217,9 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       await saveShot("settings-phone-menu.png", phone);
       await phone.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 
   it("BOS-1126 Q8: the bare menu on a wide screen shows each hint under its name in three group columns, one column on a phone", async () => {
     const browser = await launch();
@@ -215,8 +228,7 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       for (const vp of [sizes[0]!, sizes[1]!]) {
         const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height }, deviceScaleFactor: 1, hasTouch: vp.touch });
         await page.goto(`${base}/#/settings`);
-        await page.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
-        await new Promise((r) => setTimeout(r, 300));
+        await menuReady(page);
         const hint = page.locator("nav[aria-label='Settings'] .set-item-hint").first();
         expect(await hint.isVisible(), `${vp.name}: hint shows`).toBe(true);
         // BOS-1492: from 1200 px the 14 pages are three groups side by side (one column each), so the first page
@@ -241,15 +253,14 @@ describe.skipIf(!built)("BOS-1019 Settings menu at the owner's sizes", () => {
       }
       const phone = await browser.newPage({ viewport: { width: 380, height: 800 }, deviceScaleFactor: 1, hasTouch: true });
       await phone.goto(`${base}/#/settings`);
-      await phone.waitForSelector("nav[aria-label='Settings']", { state: "attached", timeout: 8000 });
-      await new Promise((r) => setTimeout(r, 300));
+      await menuReady(phone);
       const l = phone.locator("nav[aria-label='Settings'] ul").first().locator("a");
       const p0 = await l.nth(0).boundingBox();
       const p1 = await l.nth(1).boundingBox();
       expect(p1!.y, "phone: one column, the second page is below the first").toBeGreaterThan(p0!.y + p0!.height - 1);
       await phone.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 });
