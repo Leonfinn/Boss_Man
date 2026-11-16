@@ -101,6 +101,7 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   }
 
   /** BOS-1628: how many times a job went back in line after a machine fault (the counter is lost on a server restart, which only allows a few more tries). */
+  // shortcut: lost on restart, harmless because a restart only allows a few more tries of a job that is capped at MACHINE_FAULT_RETRIES.
   const machineFaults = new Map<string, number>();
 
   /** A job ended, was cancelled or went back in line: its bundle and its fetch state go. */
