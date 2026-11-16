@@ -40,6 +40,7 @@ export function gitTokenActionsProbe(deps: {
   now?: () => Date;
   ttlMs?: number;
 }): GitTokenProbe {
+  // lost on restart, harmless because the next ask just runs one more probe (a cache only saves GitHub calls)
   const cache = new Map<string, { at: number; value: "yes" | "no" }>();
   const now = () => (deps.now ? deps.now().getTime() : Date.now());
   return async (companyId) => {
