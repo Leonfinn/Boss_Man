@@ -35,7 +35,7 @@ export type PreflightDeps = {
 const short = (s: string) => s.slice(0, 8);
 
 export function ciPreflightService(db: Db, deps: PreflightDeps) {
-  const running = new Map<string, string>(); // ticket → branch head being run
+  const running = new Map<string, string>(); // ticket → branch head being run; lost on restart, harmless because a re-request just starts the run again
   const timing = deps.timing ?? CI_TIMING;
 
   const latest = async (ticketId: string, kind: string, sha?: string) => {
@@ -125,6 +125,8 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
     async reviewRefusal(ticketId: string, diff: (t: typeof tickets.$inferSelect) => Promise<Pick<WorkspaceDiff, "head" | "files">>): Promise<string | null> {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return null;
+      // Cheap database checks first: a project that can't run GitHub jobs never costs a runner round trip.
+      if (!(await deps.context(t))) return null;
       let d: Pick<WorkspaceDiff, "head" | "files">;
       try {
         d = await diff(t);
@@ -132,7 +134,6 @@ export function ciPreflightService(db: Db, deps: PreflightDeps) {
         return null; // can't tell: carry on, the gate's own run at landing still stands
       }
       if (!touchesGithubOnlyJobs(d.files.map((f) => f.path))) return null;
-      if (!(await deps.context(t))) return null;
       if (await latest(t.id, PREFLIGHT_NA_KIND)) return null;
       const r = await latest(t.id, PREFLIGHT_KIND, d.head);
       if (r?.passed) return null;
