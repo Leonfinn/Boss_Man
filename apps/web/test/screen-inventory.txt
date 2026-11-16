@@ -34,7 +34,9 @@ sections:
   - Approved, merging
   - Costliest tasks
   - Filter tasks
+  - On your subscriptions
   - Passed, held
+  - Pay-as-you-go spend
   - Project brief
   - Spending limit
   - Tokens
@@ -115,6 +117,7 @@ reads:
   - /api/companies/:id/feedback-settings
   - /api/feedback/:id
   - /api/feedback/unprocessed
+  - /api/host-facts
 
 ## #/merge-queue
 sections: 
@@ -130,6 +133,7 @@ sections:
   - Notifications
   - Set up your phone
 reads: 
+  - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications
@@ -192,15 +196,19 @@ reads:
 
 ## #/settings/<company>/email
 sections: 
+  - Main's CI
   - Outgoing email
 reads: 
   - /api/settings/email
+  - /api/settings/main-ci
 
 ## #/settings/<company>/funding
 sections: 
   - Budgets
   - Costliest tasks
   - Funding sources
+  - On your subscriptions
+  - Pay-as-you-go spend
   - Spending limit
   - Spending limits
   - Tokens
@@ -220,6 +228,7 @@ sections:
   - Tickets in progress
 reads: 
   - /api/companies
+  - /api/host-facts
   - /api/run-limits
   - /api/settings/check-queue
   - /api/wip-limits
@@ -255,6 +264,7 @@ sections:
 reads: 
   - /api/companies/:id/runner
   - /api/companies/:id/runner/:id
+  - /api/self-deploy/runner-addons
 
 ## #/settings/<company>/secrets
 sections: 

@@ -6,7 +6,7 @@ import { usePoll } from "../hooks";
 import { away } from "../server-watch";
 import { Avatar } from "../components/Avatar";
 import { NeedsYou, RightNow, healthLines, type HealthData } from "../components/DashboardPanels";
-import { MergesStuckBanner, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
+import { MergesStuckBanner, slowSummary, stuckSummary, type MergeHealthView } from "../components/MergesStuckBanner";
 import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
@@ -127,7 +127,8 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
   const tokens = s.monthSubscriptionTokens.input + s.monthSubscriptionTokens.output;
   // While the company is paused nothing moves, so a stuck-merges banner would only be noise.
   const stuck = merges.data && !company.paused ? stuckSummary(merges.data) : null;
-  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, running: s.running, companyId: company.id });
+  const slow = merges.data && !company.paused ? slowSummary(merges.data) : null;
+  const lines = healthLines({ health: d.health ?? {}, merges: merges.data, stuck, slow, running: s.running, companyId: company.id });
   return (
     <>
       <header className="page-head">
@@ -137,7 +138,7 @@ export function Dashboard({ company, decisions = null, tally = null }: { company
         </div>
       </header>
 
-      <MergesStuckBanner stuck={stuck} companyId={company.id} />
+      <MergesStuckBanner stuck={stuck} slow={slow} companyId={company.id} />
 
       <div className="dash-lead">
         <RightNow lines={lines} paused={company.paused} companyId={company.id} />

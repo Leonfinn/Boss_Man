@@ -3,6 +3,7 @@
 // owner check and error handling are the same as for its other routes.
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { RUNNER_ADDONS } from "@boss-man/shared";
 import { DeployError, type deploysService } from "../services/deploys.js";
 import type { launcherService } from "../services/launcher.js";
 import type { maintenanceService } from "../services/maintenance.js";
@@ -71,6 +72,13 @@ export function serverAdminRoutes(
     await maintenance.start({ kind: "wrapup" }); // leader-only
     return maintenance.status();
   });
+  // "Stop the checks and update now" (BOS-1600): only when checks on a runner are all that is left; they restart afterwards.
+  owner.post("/api/maintenance/update-now", async (_req, reply) => {
+    const r = await maintenance.updateNow(); // leader-only
+    if (r.ok) return maintenance.status();
+    const message = r.reason === "agents_running" ? "Agents are still running; ask them to wrap up first." : r.reason === "no_checks" ? "No check is holding the update, so there is nothing to stop." : "No runner update is waiting.";
+    return reply.code(409).send({ error: r.reason, message });
+  });
   // "Cancel wrap-up" while an update waits (BOS-988): take back only the owner's ask; the update is untouched.
   owner.post("/api/maintenance/cancel-wrap", async () => ({ cancelled: await maintenance.cancelWrap() })); // leader-only
 
@@ -124,6 +132,15 @@ export function serverAdminRoutes(
 
   // BOS-1086: take back a queued runner update.
   owner.post("/api/self-deploy/cancel-runner-queue", async () => selfDeploy.cancelRunnerQueue());
+
+  // BOS-1583: the runner add-on tick boxes. GET says what the owner saved and what the last build held; PUT saves the
+  // ticked ids for the next "Build and update runners" (the host script reads the file; nothing is rebuilt now).
+  owner.get("/api/self-deploy/runner-addons", async () => selfDeploy.runnerAddons());
+  owner.put("/api/self-deploy/runner-addons", async (req, reply) => {
+    const body = z.object({ ids: z.array(z.string().max(40)).max(50) }).parse(req.body);
+    const r = await selfDeploy.setRunnerAddons(body.ids, RUNNER_ADDONS.map((a) => a.id));
+    return "error" in r ? reply.code(409).send({ error: "cannot_save_addons", message: r.error }) : r;
+  });
 
   // "Restart the server" (BOS-647): owner session only; it writes a request file the host deployer acts on. No MCP tool reaches it.
   owner.post("/api/self-deploy/restart", async (_req, reply) => {

@@ -102,6 +102,14 @@ describe("check workers: scheduling (BOS-1435)", () => {
     expect(await s.d.capacity(s.co.id)).toBe(1);
   });
 
+  it("a worker that never connected shows the can't-find-the-address hint, not only 'has not connected yet' (BOS-1601)", async () => {
+    const s = await setup({ runnerSlots: 1 });
+    const { worker: w } = await s.workers.register({ name: "never", companyIds: [s.co.id], slots: 1, checkThreads: null, checkMemoryMb: null, enabled: true });
+    const row = (await s.workers.list()).find((x) => x.id === w.id)!;
+    expect(row.reason).toMatch(/Has not connected yet/);
+    expect(row.reason).toMatch(/Can't find the address.*ENOTFOUND.*Tailscale name.*tailnet.*local network address/s);
+  });
+
   it("gives no job to a worker that can't fetch code yet, is built from another commit, is off or isn't set up for the company, and says why", async () => {
     const s = await setup({ runnerSlots: 1 });
     const other = await s.company("Other");
@@ -158,6 +166,19 @@ describe("check workers: scheduling (BOS-1435)", () => {
       // The commit is information only: a worker with no commit at all still matches.
       const bare = await withTools(s, tc(TOOLS), tc(TOOLS), { workerCommit: null });
       expect((await s.workers.eligible(s.co.id)).map((e) => e.id)).toContain(bare.id);
+    });
+
+    // BOS-1606: playwright is one-way. Same fingerprint either way; only a worker lacking what the runner has goes idle.
+    it("keeps a worker without playwright idle when the runner has it, but lets one with an extra playwright work", async () => {
+      const s = await setup({ runnerSlots: 1 });
+      const PW = { ...TOOLS, playwright: "1.64.1" };
+      const fp = tc(TOOLS).fingerprint;
+      const lacking = await withTools(s, tc(TOOLS, fp), tc(PW, fp));
+      expect(s.workers.readiness(lacking, s.co.id, COMMIT, tc(PW, fp))).toMatchObject({ ok: false, reason: expect.stringMatching(/playwright missing here, 1\.64\.1 on your runner/) });
+      const extra = await withTools(s, tc(PW, fp), tc(TOOLS, fp));
+      expect(s.workers.readiness(extra, s.co.id, COMMIT, tc(TOOLS, fp))).toEqual({ ok: true, limit: 1 });
+      expect(s.workers.readiness(extra, s.co.id, COMMIT, tc(PW, fp))).toEqual({ ok: true, limit: 1 });
+      expect(s.workers.readiness(lacking, s.co.id, COMMIT, tc(TOOLS, fp))).toEqual({ ok: true, limit: 1 });
     });
 
     it("goes idle when a tool differs, and the reason names the tool", async () => {

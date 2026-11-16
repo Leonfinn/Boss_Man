@@ -7,7 +7,7 @@ How Boss Man's ready-made images are built, published, signed and released (BOS-
 - **Every merge to `main` that passes CI** runs the *Publish images* workflow (`.github/workflows/publish.yml`). It builds the images natively on x86 and ARM, pushes them once to the first registry in your list, and copies the finished image to the others **by digest**. If any copy has a different digest the run fails, so one signed `release.json` covers every registry. The images get the tag `sha-<first 12 characters of the commit>` and nothing else.
 - **Each image is signed** without a key (Sigstore keyless signing, tied to the workflow run) and carries an **SBOM** and **provenance**, both attached for each architecture. Signatures and attachments are stored per registry, so the workflow checks all of them in **every** registry. It also checks that `/NOTICE` is inside each image.
 - **The owner's beta button** is the *Release* workflow (`.github/workflows/release.yml`): GitHub → Actions → Release → Run workflow → branch `main` → type a version such as `0.1.0-beta.1`. It rebuilds nothing. It checks the newest commit's images in every registry, gives them the version tag and the moving `beta` tag, and publishes a signed `release.json` as a GitHub pre-release. A version can be released once.
-- **`release.json`** lists each image's digest, and its digest per architecture, plus the registries and the commit. The updater trusts only this file (verify it with `cosign verify-blob`, identity `https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main`, issuer `https://token.actions.githubusercontent.com`).
+- **`release.json`** lists each image's digest, and its digest per architecture, plus the registries and the commit. Nothing in Boss Man reads it yet: installs still build their images on the host. A future updater is meant to trust only this file (verify it with `cosign verify-blob`, identity `https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main`, issuer `https://token.actions.githubusercontent.com`).
 
 The rules are in `scripts/publish-images.sh`, tested by `scripts/publish-images.test.sh` (a fake registry, no network).
 
@@ -22,7 +22,7 @@ Variables: repository Settings → Secrets and variables → Actions → Variabl
 | `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | secrets of the **`publish` environment** | Docker Hub account name and a read-and-write access token. Keep them in the `publish` environment (limited to `main`), never as ordinary repository secrets: agent branches run Actions too and could read a repository secret. |
 | `PUBLISH_IMAGES` | variable | Image names to publish. Default: `boss-man-server boss-man-launcher boss-man-netguard`. |
 
-The runner image (`boss-man-runner`) is **not** in the default set: until the Claude pack (BOS-972) merges, it contains Claude Code, which must not be redistributed. Once the pack has merged, add `boss-man-runner` to `PUBLISH_IMAGES`. The publish job then refuses the runner unless `scripts/image-tests.sh no-anthropic` passes on it (with the expected-fail marker off).
+The runner image (`boss-man-runner`) is **not** in the default set. Since the Claude pack (BOS-972) it holds no Claude Code (Claude is installed on first start), so to publish it, add `boss-man-runner` to `PUBLISH_IMAGES`. The publish job then refuses the runner unless `scripts/image-tests.sh no-anthropic` passes on it (with the expected-fail marker off).
 
 ## Setting it up (any host; the account steps are on the registries' own sites)
 
@@ -47,5 +47,5 @@ cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.
 ## If something goes wrong
 
 - **Undo a bad publish:** the `sha-` tags are harmless; nothing pulls them until a release. To stop publishing, set the `IMAGE_PREFIXES` variable to an unusable value or disable the *Publish images* workflow in the Actions tab. Reverting the commit that added the workflows has the same effect.
-- **A release you regret:** delete the GitHub release and its tag, then re-point `beta` by releasing a newer version. The updater trusts only the newest signed `release.json` it can verify, so a deleted release stops being offered.
-- **Docker Hub's download limit:** anonymous pulls from Docker Hub are rate-limited; GitHub's registry is not. Installers fall back to the `ghcr.io` copy (the digest is identical).
+- **A release you regret:** delete the GitHub release and its tag, then re-point `beta` by releasing a newer version.
+- **Docker Hub's download limit:** anonymous pulls from Docker Hub are rate-limited; GitHub's registry is not. Anyone pulling by hand can use the `ghcr.io` copy instead (the digest is identical).

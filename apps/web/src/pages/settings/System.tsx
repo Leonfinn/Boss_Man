@@ -154,7 +154,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     return (
       <Section id="deploy-h" title="Updates">
         <p className="muted" style={{ fontSize: 14 }}>
-          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/30-in-app-updates.md" target="_blank" rel="noreferrer">how to set it up</a>).
         </p>
         <button
           type="button"
@@ -204,8 +204,21 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       maint.reload();
       return `Stopped ${r.stopped}${r.skipped ? `; ${r.skipped} had already ended` : ""}. The update goes ahead once no run is left.`;
     });
+  const updateNow = () =>
+    act.run(async () => {
+      if (!window.confirm("Stop the running checks and update the runners now? Each check starts again from the beginning afterwards, so the time it has already spent is lost.")) return;
+      try {
+        await api("/api/maintenance/update-now", { method: "POST", body: {} });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) return err.message;
+        throw err;
+      }
+      maint.reload();
+      return "The runners are being swapped now. The checks start again afterwards.";
+    });
   const press = (id: NonNullable<UpdateStatus["primary"]>["id"]) => {
     if (id === "ask-wrapup") return wrapUp();
+    if (id === "update-now") return updateNow();
     if (id === "stop-stragglers") return stopThem(st.primary?.runIds ?? []);
     return deployLatest(); // Try again, Review and deploy, Check for updates now: all are deploy-latest.
   };
@@ -814,6 +827,47 @@ export function CheckQueueSetting() {
           Save
         </button>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type MainCiView = { on: boolean; projects: Array<{ projectId: string; project: string; status: { state: string; detail?: string } }> };
+
+/** Settings → Server and runner → Main's CI (BOS-1072): the switch for the watcher that opens a ticket when GitHub CI fails on main, and its plain line per project. */
+export function MainCiSetting() {  const view = usePoll((signal) => api<MainCiView>("/api/settings/main-ci", { signal }), 60_000, "main-ci");
+  const act = useAction();
+  const d = view.data;
+  if (!d) return null;
+  return (
+    <Section id="main-ci-h" title="Main's CI">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When GitHub's CI fails on a project's main branch (a push or the nightly run), Boss Man opens one ticket for each failing step, adds later failed runs to it instead of opening another, and says so on it when main is green again. It sends no cards and no alerts.
+      </p>
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={d.on}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api<MainCiView>("/api/settings/main-ci", { method: "PUT", body: { on: e.target.checked } });
+              view.reload();
+              return e.target.checked ? "Watching main's CI." : "Stopped watching main's CI.";
+            })
+          }
+        />
+        Watch main's CI and open tickets for failures
+      </label>
+      {d.on && d.projects.length > 0 && (
+        <ul style={{ fontSize: 14 }} data-testid="main-ci-status">
+          {d.projects.map((p) => (
+            <li key={p.projectId}>
+              <strong>{p.project}:</strong> {p.status.detail ?? "Not checked yet."}
+            </li>
+          ))}
+        </ul>
+      )}
       {act.view}
     </Section>
   );

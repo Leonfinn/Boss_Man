@@ -132,6 +132,31 @@ describe("Penpot in Settings (BOS-1582)", () => {
     expect((await c.secrets.resolveCompanyEnv(c.co.id, "check")).PENPOT_TOKEN).toBe(TOKEN);
   });
 
+  it("reads each pair's agent list from the secret's grant, so a hand-made narrower token or password stays narrow after a save (BOS-1592)", async () => {
+    const c = (ctx = await setup());
+    // By hand on the Secrets page: address and email for every agent, token and password for the Designer only.
+    for (const [name, value, only] of [
+      ["PENPOT_URL", "http://192.168.1.50:9001", false],
+      ["PENPOT_TOKEN", TOKEN, true],
+      ["PENPOT_EMAIL", "agent@example.com", false],
+      ["PENPOT_PASSWORD", PASSWORD, true],
+    ] as const) {
+      const s = (await c.req("POST", "/api/secrets", { name, kind: "generic", value })).json() as { secret: { id: string } };
+      const g = (await c.req("POST", `/api/secrets/${s.secret.id}/grants`, { companyId: c.co.id, envName: name })).json() as { id: string };
+      if (only) expect((await c.req("PUT", `/api/grants/${g.id}/agents`, { agentIds: [c.designer.id] })).statusCode).toBe(204);
+    }
+    const url = `/api/companies/${c.co.id}/penpot`;
+    const v = (await c.req("GET", url)).json() as View;
+    expect(v).toMatchObject({ agentIds: [c.designer.id], exportAgentIds: [c.designer.id] });
+
+    // The form sends back the lists it showed; a save that changes only the address keeps both secrets limited.
+    expect((await c.req("PUT", url, { url: "http://192.168.1.60:9001", agentIds: v.agentIds, exportAgentIds: v.exportAgentIds })).statusCode).toBe(200);
+    const grants = (await c.req("GET", `/api/companies/${c.co.id}/grants`)).json() as Array<{ envName: string; agentIds: string[] }>;
+    const who = Object.fromEntries(grants.map((g) => [g.envName, g.agentIds]));
+    expect(who).toEqual({ PENPOT_URL: [c.designer.id], PENPOT_TOKEN: [c.designer.id], PENPOT_EMAIL: [c.designer.id], PENPOT_PASSWORD: [c.designer.id] });
+    expect((await c.secrets.resolveCompanyEnv(c.co.id, "check")).PENPOT_URL).toBe("http://192.168.1.60:9001");
+  });
+
   it("follows the address when it changes on either page, and closes it when Penpot is removed", async () => {
     const c = (ctx = await setup());
     const url = `/api/companies/${c.co.id}/penpot`;

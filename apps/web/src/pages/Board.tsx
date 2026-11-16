@@ -957,6 +957,18 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           </ul>
         </section>
       )}
+      {!!board.data?.otherProjects?.length && (
+        <section className="unticketed" aria-label="Working on other projects">
+          <strong>Working on other projects</strong>
+          <ul>
+            {board.data.otherProjects.map((r) => (
+              <li key={r.id}>
+                <strong>{r.agent ?? "An agent"}</strong> on <a href={`#/tickets/${r.ticketId}`}>{r.ticketNumber ? `${ticketRef(company?.ticketPrefix, r.ticketNumber)} · ` : ""}{r.ticketTitle}</a> in <a href={`#/board/${r.projectId}`}>{r.projectName}</a> <span className="muted">· started {ago(r.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div className="board-bar">
         <div>
           {current && !adding && (

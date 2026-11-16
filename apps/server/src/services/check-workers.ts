@@ -11,13 +11,18 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { PROTOCOL_VERSION, toolchainDifferences, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
+import { PROTOCOL_VERSION, toolchainDifferences, toolchainMissing, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
 import { MACHINE_TAKES, MAX_CHECK_SLOTS, readPolicy, type MachineTakes, type SlotPolicy } from "./check-queue.js";
 
 type Tc = { fingerprint: string; tools: Record<string, string> };
+
+/** Ids of workers with an open socket on this process, for the owner's-setup record (BOS-1596); mirrors each service's `connected` map. */
+// shortcut: this process only (the leader holds the sockets); lost on restart, harmless because a worker redials.
+const liveWorkerIds = new Set<string>();
+export const onlineWorkerCount = () => liveWorkerIds.size;
 
 export type CheckWorker = typeof checkWorkers.$inferSelect;
 export type WorkerSender = (command: WorkerCommand) => boolean;
@@ -82,7 +87,7 @@ export function checkWorkersService(db: Db) {
     if (!connected.has(w.id) && bad && Date.now() - bad.at.getTime() < 10 * 60_000) {
       return `Out of date: worker code too old (it speaks protocol ${bad.protocol}, your server needs ${PROTOCOL_VERSION}). Redeploy this worker so it rebuilds from the current source; no file edit is needed.`;
     }
-    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet.";
+    if (!connected.has(w.id)) return w.lastSeenAt ? `Offline since ${w.lastSeenAt.toISOString()}.` : "Has not connected yet. If its log says \"Can't find the address\" (ENOTFOUND), that machine can't look up the address in its file: if it is a Tailscale name, the machine isn't on your tailnet, so put Boss Man's local network address in BOSSMAN_URL and redeploy it.";
     const feats = features.get(w.id) ?? [];
     if (!feats.includes("check-jobs")) return "Its image can't run queued checks: update this machine.";
     if (!feats.includes(BUNDLE_FEATURE)) return "Its image can't fetch the code to check yet (needs a newer image), so it gets no checks.";
@@ -100,8 +105,8 @@ export function checkWorkersService(db: Db) {
     if (why) return { ok: false, reason: why };
     if (!w.companyIds.includes(companyId)) return { ok: false, reason: "Not set up for this company." };
     if (w.toolchain && runnerToolchain) {
-      if (w.toolchain.fingerprint === runnerToolchain.fingerprint) return { ok: true, limit: workerLimit(w) };
-      const diff = toolchainDifferences(w.toolchain.tools, runnerToolchain.tools);
+      const diff = [...toolchainDifferences(w.toolchain.tools, runnerToolchain.tools), ...toolchainMissing(w.toolchain.tools, runnerToolchain.tools)];
+      if (w.toolchain.fingerprint === runnerToolchain.fingerprint && !diff.length) return { ok: true, limit: workerLimit(w) };
       return { ok: false, reason: `Out of date: its tools differ from your runner's (${diff.length ? diff.join("; ") : "see the tool list"}). Redeploy this worker so it rebuilds; no file edit is needed.` };
     }
     // One side can't report its tools: fall back to the commit.
@@ -178,11 +183,13 @@ export function checkWorkersService(db: Db) {
       // Its jobs are re-synced by the newer machine's hello; if it redials, each hello cancels the other's leftovers.
       const prev = connected.get(id);
       connected.set(id, entry);
+      liveWorkerIds.add(id);
       if (prev) prev.close(WORKER_REPLACED_CLOSE, "replaced by a newer connection");
       features.set(id, feats);
       return () => {
         if (connected.get(id) === entry) {
           connected.delete(id);
+          liveWorkerIds.delete(id);
           features.delete(id);
         }
       };

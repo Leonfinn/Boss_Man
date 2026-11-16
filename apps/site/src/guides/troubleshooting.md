@@ -70,13 +70,13 @@ From: [Guide 3](/guides/first-company-and-ticket).
 
 ### A runner add-on says Not installed or Not working.
 
-Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, add the add-on to `RUNNER_ADDONS` in `.env`, for example `RUNNER_ADDONS=agent-browser`, then run `scripts/update-runner.sh` as root. Skills that need an add-on are left out of agents' runs until it says Working.
+Check **Settings > Server and runner > Runner > Add-ons**. For Not installed, tick the add-on there, press **Save add-ons**, then press **Build and update runners** in Settings > Server and runner > Updates. Skills that need an add-on are left out of agents' runs until it says Working.
 
 From: [Guide 9](/guides/add-ons).
 
 ### The runner stops with "Set BOSSMAN_RUNNER_TOKEN_FILE...".
 
-This only happens if you run the runner without the launcher, which the guides do not do. The runner's token file is empty. Follow [`docs/06-install-truenas.md`](@repo/blob/main/docs/06-install-truenas.md), step 7, "The runner token". With the launcher (`BOSSMAN_LAUNCHER=1` in `.env`, as [Guide 2](/guides/install-boss-man) sets), Boss Man fills in the token for you.
+This only happens if you run the runner without the launcher, which the guides do not do. Turn the launcher on (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1` in `.env`, as [Guide 2](/guides/install-boss-man) sets), and Boss Man gives each runner its token.
 
 From: [`docs/29-tune-and-troubleshoot.md`](@repo/blob/main/docs/29-tune-and-troubleshoot.md), Troubleshooting.
 
@@ -193,9 +193,9 @@ Boss Man waits for the current runs to finish, then swaps each company's runner 
 
 From: [Guide 10](/guides/updates-and-backups).
 
-### Deploy latest on the web page does not apply a change.
+### An update from the web page does not apply a change.
 
-**Deploy latest** updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh` and `host-deployer.sh`). Apply those by hand with `cd $B/src && scripts/deploy.sh`. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop Deploy latest, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
+A server deploy updates the server only, never the runners. To update them, choose **Build and update runners**. The host deployer also will not apply changes to Compose files, `deploy/`, Dockerfiles, `.env` files, `.npmrc`, `.dockerignore` or the deploy scripts (`deploy.sh`, `rebuild-live.sh`, `update-runner.sh` and `host-deployer.sh`). Apply those by hand with `cd $B/src && scripts/deploy.sh`. The add-on files `deploy/penpot.yml`, `deploy/ntfy.yml` and `deploy/ntfy-bluegreen.yml` are the exception: a change to them does not stop a deploy, but Boss Man does not restart Penpot or ntfy either. To apply one, run that add-on's start command again ([Guide 8](/guides/phone-notifications) for ntfy, [Guide 9](/guides/add-ons) for Penpot).
 
 From: [Guide 10](/guides/updates-and-backups).
 

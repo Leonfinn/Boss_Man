@@ -17,6 +17,7 @@ import { Runs } from "./pages/Runs";
 import { MergeQueue } from "./pages/MergeQueue";
 import { Settings, settingsRedirect } from "./pages/Settings";
 import { ProjectsPage } from "./pages/settings/Projects";
+import { waitingFor, type RunnerCheckView } from "./pages/settings/updates";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
@@ -98,7 +99,7 @@ function rememberCollapsed(off: boolean, set: (off: boolean) => void) {
   }
 }
 
-type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
+type Maintenance = { on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; reason: string; since: string; deadline: string; runs: number; companies: number; /** BOS-1600: checks on a runner that the swap waits on. */ checks?: number; checksList?: RunnerCheckView[]; /** BOS-349: work runs are still going, so the owner may keep chatting. */ chatOpen: boolean; /** BOS-1414: false once the drain is past its deadline and waits on the owner, so nothing is held for it. */ blocking?: boolean };
 
 /** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
 function UpdateBanner({ m }: { m: Maintenance | null }) {
@@ -109,7 +110,7 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
         Agents were asked to wrap up{m.runs > 0 ? `; waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} to finish` : ""}. Nothing new starts until you cancel the wrap-up on Settings → Server and runner.
       </p>
     );
-  const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
+  const waiting = waitingFor(m);
   if (m.kind === "settings")
     return (
       <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
@@ -126,7 +127,12 @@ function UpdateBanner({ m }: { m: Maintenance | null }) {
     );
   return (
     <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
-      Update pending: {waiting}. Nothing new starts until it is done. To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.
+      Update pending: {waiting}. Nothing new starts until it is done.{" "}
+      {m.runs > 0
+        ? 'To end the runs sooner, use "Ask agents to wrap up" on Settings → Server and runner.'
+        : (m.checks ?? 0) > 0
+          ? "To go ahead without waiting, use \"Stop the checks and update now\" on Settings → Server and runner: they restart from the beginning afterwards."
+          : ""}
     </p>
   );
 }

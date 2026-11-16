@@ -6,7 +6,8 @@ import { api, type Company } from "../../api";
 import { copyMessage, copyText } from "../../clipboard";
 import { usePoll } from "../../hooks";
 import { when } from "../Runs";
-import { workerComposeFile, workerSocketUrl } from "./check-worker-compose";
+import type { HostFactsView } from "../../host-facts-display";
+import { workerAddressChoices, workerComposeFile, workerSocketUrl } from "./check-worker-compose";
 import { useAction } from "./shared";
 import { DEFAULT_POLICY, policyLine, policyValid, SlotSplitFields, type MachineTakes, type SlotPolicy } from "./SlotSplit";
 
@@ -86,6 +87,12 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
   const [adding, setAdding] = useState<Draft | null>(null);
   const [editing, setEditing] = useState<{ id: string; draft: Draft } | null>(null);
   const [added, setAdded] = useState<{ token: string; commit: string | null; slots: number } | null>(null);
+  // BOS-1601: the address the worker dials is the owner's pick from the addresses Boss Man knows, not just the page's own.
+  const hostFacts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 60_000, "host-facts-workers");
+  const choices = workerAddressChoices({ origin: window.location.origin, facts: hostFacts.data?.facts });
+  const [picked, setPicked] = useState<string | null>(null);
+  const choice = choices.find((c) => c.url === picked) ?? choices[0];
+  const workerUrl = choice?.url ?? workerSocketUrl(window.location.origin);
   const list = companies.data ?? [];
 
   return (
@@ -192,8 +199,26 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
           <p>
             <strong>Copy this file now; it holds the worker's token and isn't shown again.</strong> On the worker's machine, save it as <code>compose.yaml</code> in an empty folder (or paste it into a TrueNAS custom app, Portainer or Dockge) and run <code>docker compose up -d</code>. Nothing else to edit, now or after a runner update.
           </p>
+          <fieldset style={{ border: 0, padding: 0, margin: 0 }} data-testid="check-worker-address">
+            <legend>Address the worker uses to reach Boss Man (it must be able to look it up from the worker's machine)</legend>
+            {choices.map((c) => (
+              <label key={c.url} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                <input type="radio" name="cw-address" checked={c.url === workerUrl} onChange={() => setPicked(c.url)} />
+                <span>
+                  <strong>{c.label}</strong> <code>{c.url}</code>
+                  <br />
+                  Works from: {c.worksFrom}
+                  {c.warning && <><br />{c.warning}</>}
+                </span>
+              </label>
+            ))}
+            {!choices.some((c) => c.kind === "lan") && (
+              <p data-testid="check-worker-no-lan">Boss Man's host did not report a local network address, so none is offered. The address below is the one this page is open at; if it is a Tailscale name, only machines on your tailnet can use it. For any other machine, type Boss Man's LAN address into <code>BOSSMAN_URL</code> yourself: <code>ws://&lt;LAN address&gt;:3100/api/check-worker/connect</code>.</p>
+            )}
+            <p>If the worker's log says "Can't find the address", the worker's machine can't look that name up: pick the local network address, edit <code>BOSSMAN_URL</code> in the file and redeploy.</p>
+          </fieldset>
           <pre className="mono codebox" data-testid="check-worker-compose" style={{ maxHeight: 320, overflow: "auto" }}>
-            {workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })}
+            {workerComposeFile({ url: workerUrl, slots: added.slots, token: added.token })}
           </pre>
           <div style={{ display: "flex", gap: 8 }}>
             <button
@@ -201,7 +226,7 @@ export function CheckWorkers({ workers, maxSlots, reload }: { workers: CheckWork
               className="btn primary"
               onClick={() =>
                 void act.run(async () =>
-                  copyMessage(await copyText(workerComposeFile({ url: workerSocketUrl(window.location.origin), slots: added.slots, token: added.token })), "Compose file"),
+                  copyMessage(await copyText(workerComposeFile({ url: workerUrl, slots: added.slots, token: added.token })), "Compose file"),
                 )
               }
             >

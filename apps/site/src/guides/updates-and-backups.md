@@ -45,9 +45,9 @@ With the optional host deployer, you can update from Boss Man. The host deployer
 Once it is set up:
 
 - when the main branch moves, a card on Decisions asks whether to deploy, with **Deploy** and **Not now**
-- **Settings > Server and runner > Updates** has **Deploy latest**, **Build and update runners** and **Restart the server**
+- **Settings > Server and runner > Updates** shows the same offer (**Review and deploy**, or **Check for updates now** when there is none), and has **Build and update runners** and **Restart the server**
 
-**Deploy** and **Deploy latest** update the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. You can also choose **Build and update runners** yourself.
+A server deploy updates the server only, never the runners. When an update changes the runners' code, the Deploy card says so, and Boss Man raises a second card later to update the runners. You can also choose **Build and update runners** yourself.
 
 The host deployer will not apply changes to these files:
 

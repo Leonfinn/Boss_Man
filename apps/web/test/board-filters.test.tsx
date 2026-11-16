@@ -247,6 +247,21 @@ describe("board filters", () => {
     expect(screen.getByText("Only tasks an agent is working on (3)")).toBeTruthy();
   });
 
+  it("lists runs on another project's tickets as such, and keeps the 'other than a ticket' heading away", async () => {
+    stub({
+      workingAgents: 1,
+      withoutTicket: [],
+      otherProjects: [{ id: "r5", agent: "Dylan", purpose: null, startedAt: new Date().toISOString(), ticketId: "tx", ticketNumber: 12, ticketTitle: "Fix login", projectId: "p2", projectName: "Development" }],
+    });
+    open();
+    const strip = await screen.findByLabelText("Working on other projects");
+    expect(strip.textContent).toContain("Dylan");
+    expect(strip.textContent).toContain("Development");
+    expect(strip.querySelector("a[href=\"#/tickets/tx\"]")).not.toBeNull();
+    expect(strip.querySelector("a[href=\"#/board/p2\"]")).not.toBeNull();
+    expect(screen.queryByLabelText("Working on something other than a ticket")).toBeNull();
+  });
+
   it("shows no strip when every working agent is on a card", async () => {
     stub({ workingAgents: 1, withoutTicket: [] });
     open();

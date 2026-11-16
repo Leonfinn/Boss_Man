@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, asc, desc, eq, gt, inArray, isNotNull, ne, sql } from "drizzle-orm";
-import { goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
+import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough, REAL_USE_REFUSAL, touchesInstallSurface, touchesRunnerCode, touchesRunnerUpdate, usabilityGated } from "@boss-man/shared";
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -544,7 +544,7 @@ export function reviewService(
     await db
       .update(tickets)
       // mergedAt and touchesRunner (BOS-1021) place the merge and say whether the runners need a rebuild for it.
-      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true, touchesRunnerUpdate: files ? touchesRunnerUpdate(files) : null } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
+      .set({ mergeCommit: commit, pullRequestNote: null, ...(commit ? { mergedAt: new Date() } : {}), ...(commit ? { touchesRunner: files ? touchesRunnerCode(files) : true, touchesRunnerUpdate: files ? touchesRunnerUpdate(files) : null, deploysNothing: files ? deploysNothing(files) : null } : {}), ...(carry ? { acceptanceCriteria: carry.criteria, stateNote: carry.note, stateNoteAt: new Date() } : {}) })
       .where(eq(tickets.id, t.id));
     await announceMerged(t.id);
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
@@ -1626,10 +1626,12 @@ export function reviewService(
           else if (r.outcome === "lock_wait" && attempt >= LOCK_RETRY_ATTEMPTS) await failed("lock_timeout");
           if (r.outcome !== "lock_wait") return r;
           const { t } = await ticketWithRepo(ticketId);
-          const d = r.detail as { command: string; output: string };
+          // A main_moved lock wait carries only { status } (no command or output): BOS-1604 crashed here with "reading 'slice'".
+          const d = r.detail as { command?: string; output?: string; status?: string } | undefined;
           if (attempt >= LOCK_RETRY_ATTEMPTS) {
-            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
-            await raiseCheckStuck(db, t, d.command, "kept waiting for the shared lock, which other checks held", d.output);
+            const moved = d?.status === "main_moved";
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: moved ? `The merge gave up after ${attempt} tries: main kept moving before it could land; it's in your Decisions.` : `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
+            await raiseCheckStuck(db, t, d?.command ?? "the merge", moved ? "kept finding that main had moved before it could land" : "kept waiting for the shared lock, which other checks held", d?.output ?? "");
             return { outcome: "check_stuck", delivered: null, detail: r.detail };
           }
           const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);
@@ -2356,7 +2358,23 @@ export function reviewService(
             }
             // A stacked prepare that came back main_moved: its base isn't on main any more. Wait for a new base rather than spin.
             let badBase: string | null = null;
+            let again = false;
             for (;;) {
+              // BOS-1604: the owner turned the train off. A member about to prepare again holds no checked tree, so it leaves
+              // and lands the way it did before, like one still waiting for a seat. Before this, a seated member kept restacking
+              // until the cap (with the back-off, up to ~20 min). A member with a passed check never gets here, so it keeps its base.
+              if (again && !(await queue.train())) {
+                train.leave(ticketId);
+                return serverMerge();
+              }
+              again = true;
+              // BOS-1604: a member restacking again and again before any check could run backs off instead of re-preparing
+              // every poll (the train's thrash fact raises one alarm meanwhile). It still leaves at once if it leaves review.
+              for (const until = Date.now() + train.backoffMs(ticketId); Date.now() < until; ) {
+                await pause();
+                const stop = await gone();
+                if (stop) return stop;
+              }
               let b = train.baseFor(ticketId);
               while (b.wait || (badBase !== null && b.base === badBase)) {
                 await pause();
@@ -2381,7 +2399,10 @@ export function reviewService(
                   const alone = await prepare();
                   if (alone.status !== "prepared" && alone.status !== "main_moved") return alone;
                   // That was a try on main just now: the waiting trial starts from here.
-                  if (alone.status === "prepared") [triedGen, triedAt] = [mainGen(t.projectId), Date.now()];
+                  if (alone.status === "prepared") {
+                    [triedGen, triedAt] = [mainGen(t.projectId), Date.now()];
+                    train.onMain(alone.targetSha);
+                  }
                   // BOS-1515 (B1): say so on the merge line, naming the members ahead (the stacked base holds all of them) and
                   // the files. Not a passive event, so it closes the seat hold and the land-alone wait below is a hold of its own.
                   const ahead = train.place(ticketId)?.ahead ?? [];
@@ -2394,14 +2415,16 @@ export function reviewService(
                 }
                 return prep;
               }
-              train.prepared(ticketId, { base: prep.targetSha, commit: prep.commit, tree: prep.tree });
+              // onMain: prepared on main, so targetSha is main's tip and can never be a lost commit (BOS-1604).
+              train.prepared(ticketId, { base: prep.targetSha, commit: prep.commit, tree: prep.tree, onMain: !b.base });
               const ref = { prep };
               const round = () =>
                 runRound(ref, {
                   // Only the head refreshes on a moved main (BOS-1344): the others are built on the member ahead, not on main.
                   refresh: async () => train.isHead(ticketId) && (await retargetOn()),
                   stale: () => train.stale(ticketId),
-                  onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree }),
+                  // Only the head retargets, and its refresh prepares on main.
+                  onRetarget: (f) => train.retargeted(ticketId, { base: f.targetSha, commit: f.commit, tree: f.tree, onMain: true }),
                   train: seatOf,
                   leftReview: async () => !(await inReview()),
                 });

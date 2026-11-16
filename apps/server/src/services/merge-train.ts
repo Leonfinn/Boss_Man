@@ -32,6 +32,9 @@ export type TrainMember = {
   /** Restacks this landing has had (the cap stops a loop), and whether its failed check got its one flaky re-run. */
   restacks: number;
   rerun: boolean;
+  /** BOS-1604: when it last prepared, and how many restacks in a row came sooner than TRAIN_QUICK_RESTACK_MS after a prepare. */
+  preparedAt: number | null;
+  quick: number;
 };
 
 /** Why a member has to prepare again: the member ahead left or changed, or main moved outside the train. */
@@ -44,6 +47,15 @@ export type FailureVerdict = "wait" | "restack" | "stands";
 
 /** How many restacks one landing may have before it falls back to today's main_moved back-off (land() retries later). */
 export const TRAIN_RESTACK_CAP = 10;
+/**
+ * BOS-1604: a restack this soon after its prepare is "quick": no check could have run (the quickest merge check takes minutes).
+ * From the second quick restack in a row the member backs off before preparing again, doubling up to the max; at
+ * TRAIN_THRASH_QUICK in a row the train reports thrash and the stall alarm tells the CEO once.
+ */
+export const TRAIN_QUICK_RESTACK_MS = 60_000;
+export const TRAIN_RESTACK_BACKOFF_MS = 15_000;
+export const TRAIN_RESTACK_BACKOFF_MAX_MS = 2 * 60_000;
+export const TRAIN_THRASH_QUICK = 3;
 /** After a server start, how long admissions wait for the tickets that had live merge jobs to re-join in their old order. */
 export const TRAIN_SEED_WAIT_MS = 3 * 60_000;
 
@@ -67,6 +79,8 @@ export type TrainFacts = {
   noLandingSince: number | null;
   /** True during the restart seed wait (BOS-1289): empty seats are expected then. */
   seeding: boolean;
+  /** BOS-1604: since when members have restacked in a loop, faster than a check can run; null when not so. */
+  thrashSince: number | null;
 };
 
 export class MergeTrain {
@@ -154,7 +168,7 @@ export class MergeTrain {
     const empty = this.members.length < seats && blocked && !this.seeding();
     if (!empty) this.emptySince = null;
     else this.emptySince ??= t;
-    if (!this.size) this.busySince = null;
+    if (!this.size) this.busySince = this.thrashSince = null;
     else this.busySince ??= t;
   }
 
@@ -185,6 +199,7 @@ export class MergeTrain {
       lastLandingAt: this.lastLanding,
       noLandingSince,
       seeding: this.seeding(),
+      thrashSince: this.thrashSince,
     };
   }
 
@@ -219,7 +234,7 @@ export class MergeTrain {
       }
       const w = this.waiting.get(next)!;
       this.waiting.delete(next);
-      this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false });
+      this.members.push({ ticketId: next, priority: w.priority, place: w.place, base: null, commit: null, tree: null, status: "preparing", restacks: 0, rerun: false, preparedAt: null, quick: 0 });
       this.seenSince.add(next);
     }
   }
@@ -262,16 +277,39 @@ export class MergeTrain {
     return ahead.commit ? { wait: false, base: ahead.commit } : { wait: true };
   }
 
-  /** Prepare came back: `base` is the commit it was really built on (the runner's targetSha). */
-  prepared(ticketId: string, p: { base: string; commit: string; tree: string }) {
+  /**
+   * Prepare came back: `base` is the commit it was really built on (the runner's targetSha). `onMain`: it was prepared on main
+   * (no base asked for), so `base` is main's tip as the runner just fetched it.
+   */
+  prepared(ticketId: string, p: { base: string; commit: string; tree: string; onMain?: boolean }) {
+    if (p.onMain) this.onMain(p.base);
     const m = this.member(ticketId);
-    if (m.commit && m.commit !== p.commit) this.lost.add(m.commit);
-    Object.assign(m, { base: p.base, commit: p.commit, tree: p.tree, status: "checking" as const });
+    if (m.commit && m.commit !== p.commit) this.lose(m.commit);
+    Object.assign(m, { base: p.base, commit: p.commit, tree: p.tree, status: "checking" as const, preparedAt: this.now() });
   }
 
   /** The check job was moved to a new tree while queued (BOS-1344 retarget): same as a prepare. */
-  retargeted(ticketId: string, p: { base: string; commit: string; tree: string }) {
+  retargeted(ticketId: string, p: { base: string; commit: string; tree: string; onMain?: boolean }) {
     this.prepared(ticketId, p);
+  }
+
+  /**
+   * BOS-1604: `sha` is main's tip, so it landed, whatever the train thought. On 15 Nov BOS-1549's push reached main while the
+   * runner update cut off the answer: its landing ended as a failure, leave() put its commit in `lost`, and that commit was
+   * main's tip. Every head then prepared on main, was "stale" (ahead_left) at the first poll and restacked, for over an hour.
+   * A commit seen on main is never lost.
+   */
+  onMain(sha: string) {
+    if (!sha) return;
+    this.tip = sha;
+    this.lost.delete(sha);
+  }
+
+  /** Main's tip as last seen by a prepare on main; a commit equal to it is never marked lost. */
+  private tip: string | null = null;
+
+  private lose(commit: string) {
+    if (commit !== this.tip) this.lost.add(commit);
   }
 
   /** Why this member must prepare again, or null when its base still holds. */
@@ -290,11 +328,28 @@ export class MergeTrain {
   /** The member starts again on a new base: it drops what it prepared. False once the cap is reached (fall back to land()'s back-off). */
   restack(ticketId: string): boolean {
     const m = this.member(ticketId);
-    if (m.commit) this.lost.add(m.commit);
-    Object.assign(m, { base: null, commit: null, tree: null, status: "preparing" as const, rerun: false });
+    if (m.commit) this.lose(m.commit);
+    // BOS-1604: a restack sooner than a check could have run counts as quick; a run of them is a loop, not a busy train.
+    m.quick = m.preparedAt !== null && this.now() - m.preparedAt < TRAIN_QUICK_RESTACK_MS ? m.quick + 1 : 0;
+    if (m.quick >= TRAIN_THRASH_QUICK) this.thrashSince ??= this.now();
+    Object.assign(m, { base: null, commit: null, tree: null, status: "preparing" as const, rerun: false, preparedAt: null });
     m.restacks++;
     return m.restacks <= TRAIN_RESTACK_CAP;
   }
+
+  /**
+   * BOS-1604: how long this member waits before it prepares again. The first quick restack is free (the member ahead really
+   * did change); from the second in a row it doubles from TRAIN_RESTACK_BACKOFF_MS up to the max, so a train whose base keeps
+   * going stale costs a prepare every few minutes, not every 3 s, and the check queue isn't flooded meanwhile.
+   */
+  backoffMs(ticketId: string): number {
+    const m = this.members[this.index(ticketId)];
+    if (!m || m.quick < 2) return 0;
+    return Math.min(TRAIN_RESTACK_BACKOFF_MS * 2 ** (m.quick - 2), TRAIN_RESTACK_BACKOFF_MAX_MS);
+  }
+
+  /** BOS-1604: since when members have restacked in a loop (TRAIN_THRASH_QUICK quick restacks in a row); cleared by a landing. */
+  private thrashSince: number | null = null;
 
   passed(ticketId: string) {
     this.member(ticketId).status = "passed";
@@ -328,8 +383,10 @@ export class MergeTrain {
   landed(ticketId: string) {
     const i = this.index(ticketId);
     if (i < 0) return;
-    this.members.splice(i, 1);
+    const [m] = this.members.splice(i, 1);
+    if (m?.commit) this.onMain(m.commit);
     this.lastLanding = this.now();
+    this.thrashSince = null;
     this.track();
   }
 
@@ -343,7 +400,7 @@ export class MergeTrain {
     const i = this.index(ticketId);
     if (i >= 0) {
       const [m] = this.members.splice(i, 1);
-      if (m?.commit) this.lost.add(m.commit);
+      if (m?.commit) this.lose(m.commit);
     }
     this.track();
   }

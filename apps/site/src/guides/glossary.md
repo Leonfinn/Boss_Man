@@ -101,7 +101,7 @@ lead: Meet a Boss Man word you do not know? Find it here. Each term has a senten
 - **Rules judge**: The name agents use for Advice on permission cards. ([Guide 6](/guides/permissions#advice-on-permission-cards))
 - **Run**: One working session of an agent on a ticket. Runs are listed under **Runs** in the sidebar. ([Guide 3](/guides/first-company-and-ticket#8-a-first-task))
 - **Runner**: The container where a company's agents work, one for each company. It connects out to the Boss Man server and shows **Connected** under **Settings > Server and runner** when it is working. ([Guide 1](/guides/how-boss-man-works))
-- **Runner add-ons**: Extra tools built into the runner image, such as a browser agents can drive. Turn them on with `RUNNER_ADDONS` in `.env`. ([Guide 9](/guides/add-ons#runner-add-ons-extra-tools-for-agents))
+- **Runner add-ons**: Extra tools built into the runner image, such as a browser agents can drive. Turn them on with the tick boxes in Settings > Server and runner > Runner. ([Guide 9](/guides/add-ons#runner-add-ons-extra-tools-for-agents))
 - **Runner update**: Rebuilding the runner image with `scripts/update-runner.sh`, after which Boss Man swaps each company's runner when it is idle. Follow it under **Settings > Server and runner**, in **Updates**. ([Guide 10](/guides/updates-and-backups#update-the-runners))
 
 ## S

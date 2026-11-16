@@ -17,7 +17,7 @@ Tailscale gives Boss Man an address such as `https://boss-man.<tailnet>.ts.net` 
 3. In `.env`, add `:deploy/tailscale.yml` to the end of `COMPOSE_FILE`, and add `TS_AUTHKEY=` with the key.
 4. Run `docker compose up -d tailscale server`.
 5. Once it has logged in, remove the `TS_AUTHKEY` line from `.env`.
-6. In Boss Man, set **Notifications > Boss Man's address on your phone** to the new address.
+6. In Boss Man, open **Notifications**, type the new address into **Boss Man's address on your phone** and save. Boss Man does not fill in a ts.net address for you.
 
 Back up `$BOSSMAN_DATA/tailscale` with your other backups. The full steps are in [`docs/20-https-tailscale.md`](@repo/blob/main/docs/20-https-tailscale.md).
 
@@ -33,14 +33,16 @@ Penpot is an open-source design tool. Boss Man runs it as a separate Compose pro
 2. Start it with `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot up -d`.
 3. Sign-up is off. To make accounts, add `PENPOT_REGISTRATION=enable` to `.env`, start it again, make the accounts, then delete the line and start it again.
 
-To give agents access, open **Settings → Tools → Penpot** and save its address and the agent account's access token. Boss Man opens that address in the network guard by itself, so there is no `.env` line to add. Back it up with `scripts/backup-penpot.sh`. The full steps, including giving agents access, are in [`docs/15-penpot.md`](@repo/blob/main/docs/15-penpot.md) and [`docs/16-penpot-agent-setup.md`](@repo/blob/main/docs/16-penpot-agent-setup.md).
+To give agents access, open **Settings → Tools and deploys → Penpot** and save its address and the agent account's access token. Boss Man opens that address in the network guard by itself, so there is no `.env` line to add. Back it up with `scripts/backup-penpot.sh`. The full steps, including giving agents access, are in [`docs/15-penpot.md`](@repo/blob/main/docs/15-penpot.md) and [`docs/16-penpot-agent-setup.md`](@repo/blob/main/docs/16-penpot-agent-setup.md).
 
 ## Runner add-ons: extra tools for agents
 
 Runner add-ons are tools built into the runner image, such as a browser agents can drive. Two exist: `agent-browser` and `webkit`.
 
-1. Add `RUNNER_ADDONS=agent-browser` to `.env`. List several with commas, for example `RUNNER_ADDONS=agent-browser,webkit`.
-2. Run `scripts/update-runner.sh` as root.
-3. Check under **Settings > Server and runner > Runner > Add-ons**. Each add-on says Working, Not working or Not installed.
+1. Open **Settings > Server and runner > Runner > Add-ons**, tick the add-ons you want and press **Save add-ons**. Boss Man keeps your choice, so every later runner update builds the same set.
+2. Press **Build and update runners** (Settings > Server and runner > Updates).
+3. Check the same panel again. Each add-on says Working, Not working or Not installed.
+
+An install that listed add-ons in `.env` before this panel existed needs nothing: those add-ons start ticked, and the first save keeps them. Without self-deploy, the panel can't save, and `RUNNER_ADDONS` in `.env` still works with `scripts/update-runner.sh`.
 
 Skills that need an add-on are left out of agents' runs until it works. Details: [`docs/12-runner-add-ons.md`](@repo/blob/main/docs/12-runner-add-ons.md).

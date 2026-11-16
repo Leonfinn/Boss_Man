@@ -38,7 +38,7 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const { db, close } = await openPglite(undefined, logQuery);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, deployerDir: opts.deployer === false ? undefined : dir });
   const cookie = await signedInOwner(db);
-  const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   await req("POST", "/api/companies", { name: "App Co" });
   // The poller skips a pass when a file keeps its size and mtime (BOS-414), and a file system stamps mtime
   // to a coarse tick: two same-sized writes within one tick looked untouched (BOS-560). Each write gets
@@ -60,6 +60,27 @@ async function setup(opts: { deployer?: boolean } = {}) {
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
+  it("saves the ticked runner add-ons for the host script and keeps ids it carries (BOS-1583)", async () => {
+    const c = (ctx = await setup());
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toEqual({ enabled: true, saved: null, built: null });
+    // What update-runner.sh recorded after its last build: one add-on, plus one this catalogue does not list.
+    await writeFile(path.join(c.dir, "outbox", "runner-addons.built"), "agent-browser,future-thing\n");
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ saved: null, built: ["agent-browser", "future-thing"] });
+    const put = await c.req("PUT", "/api/self-deploy/runner-addons", { ids: ["webkit", "webkit", "nope"] });
+    // Unknown ids from the owner are dropped; the one already built and unknown here is carried, so nothing is lost.
+    expect(put.json()).toEqual({ saved: ["future-thing", "webkit"] });
+    expect(await readFile(path.join(c.dir, "inbox", "runner-addons"), "utf8")).toBe("future-thing,webkit\n");
+    expect((await readdir(path.join(c.dir, "inbox"))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    // Unticking everything saves an empty line: the plain image.
+    expect((await c.req("PUT", "/api/self-deploy/runner-addons", { ids: [] })).json()).toEqual({ saved: ["future-thing"] });
+  });
+
+  it("refuses to save add-ons when self-deploy is not set up (BOS-1583)", async () => {
+    const c = (ctx = await setup({ deployer: false }));
+    expect((await c.req("GET", "/api/self-deploy/runner-addons")).json()).toMatchObject({ enabled: false });
+    expect((await c.req("PUT", "/api/self-deploy/runner-addons", { ids: ["webkit"] })).statusCode).toBe(409);
+  });
+
   it("tells the owner a refused runner update is only a note, in plain words (BOS-364)", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), target: "runner", result: "rejected", message: "The runners were not updated. Nothing is broken and nothing needs doing now.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
@@ -1616,7 +1637,7 @@ describe("an approval when main moves on before the host runs it (BOS-753)", () 
       expect(await cards(c)).toHaveLength(1);
       expect(card!.question).toContain("Your host's deployer script is older than the running version");
       const steps = (card!.context as { steps: string[]; rollback: string }).steps.join("\n");
-      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && cp -v /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh");
+      expect(steps).toContain("cp -p /srv/bm/deployer/host-deployer.sh /srv/bm/deployer/host-deployer.sh.old && BOSSMAN_DEPLOYER=/srv/bm/deployer /srv/bm/src/scripts/install-deployer.sh");
       expect(steps).toContain('host="nas01" as="root"');
       expect((card!.context as { rollback: string }).rollback).toContain("cp -p /srv/bm/deployer/host-deployer.sh.old /srv/bm/deployer/host-deployer.sh");
     });

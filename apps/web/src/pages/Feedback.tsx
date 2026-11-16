@@ -8,6 +8,8 @@ import { NotFoundBlock } from "../components/NotFoundBlock";
 import { STATUS_TONE } from "./Features";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { clearDraft } from "../drafts";
+import { defaultLinkAddress } from "../link-address";
+import type { HostFactsView } from "../host-facts-display";
 import { DraftTextarea } from "../components/DraftTextarea";
 
 type State = "unprocessed" | "processed" | "archived";
@@ -316,6 +318,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
   const introKey = `portal-intro/${companyId}`;
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
+  const hostFacts = usePoll((signal) => api<HostFactsView>("/api/host-facts", { signal }), 60_000, "host-facts-portal");
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
   const [backBusy, setBackBusy] = useState(false);
@@ -336,7 +339,10 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
     r.onload = () => run(api(`${logoUrl}`, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }).then(() => setLogoV((v) => v + 1)), "Logo saved.");
     r.readAsDataURL(file);
   };
-  const link = d.portalToken ? `${d.portalUrl ?? window.location.origin}/portal.html#${d.portalToken}` : null;
+  // BOS-1603: with no portal address set, never fall back to the owner's own browser address: clients may not reach it.
+  const guess = d.portalUrl ? null : defaultLinkAddress({ origin: window.location.origin, facts: hostFacts.data?.facts, who: "clients" });
+  const base = d.portalUrl ?? guess?.url ?? "";
+  const link = d.portalToken && base ? `${base}/portal.html#${d.portalToken}` : null;
   return (
     <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <h2 id="portal-h" style={{ fontSize: 17, fontWeight: 600 }}>
@@ -363,9 +369,14 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           </button>
         </div>
       )}
-      {d.portalEnabled && (
-        <p className="muted" style={{ fontSize: 13 }}>
-          This link uses the address you're on now. If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
+      {d.portalEnabled && d.portalToken && !link && (
+        <p className="error" style={{ fontSize: 14 }} data-testid="portal-no-address">
+          {guess?.note} Set BOSSMAN_PORTAL_URL (see the install guide) to the address your clients open; the link appears here once it is set.
+        </p>
+      )}
+      {d.portalEnabled && link && (
+        <p className="muted" style={{ fontSize: 13 }} data-testid="portal-address-note">
+          {guess ? `${guess.note} ` : "This link uses the portal address set in BOSSMAN_PORTAL_URL. "}If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
         </p>
       )}
       <form

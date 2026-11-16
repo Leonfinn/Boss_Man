@@ -12,7 +12,9 @@ import { record } from "./activity.js";
 import { checkAsk, markDecisionNotificationRead } from "./decisions.js";
 import type { AddonFacts } from "./addons.js";
 import type { CardLint, HostFacts } from "./steps.js";
-import { answeredBefore, quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
+import { recentOwnerAnswer } from "./stale-requests.js";
+import { checkOwnerAsk } from "./owner-answers.js";
+import type { Embedder } from "./wiki-semantic.js";
 import { getHold, holdBlocksStarts } from "./maintenance.js";
 import { busyAgentIds } from "./agent-wip.js";
 import { heldTicketIds } from "./review-holds.js";
@@ -83,6 +85,8 @@ export type WatchdogDeps = {
   now?: () => Date;
   /** The host facts Boss Man recorded (BOS-427), for R6 when it raises an owner card. Absent: only the host/account check runs. */
   hosts?: () => Promise<HostFacts[]>;
+  /** The company's embedder for owner-answer meaning search in the re-ask check (BOS-1593). Absent or null: word search alone. */
+  ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
   /** The name the host deployer reports for the server itself (BOS-774), for the card lint's R6: a card that names
    * another host is refused. Absent: only the name the facts carry stands in. */
   serverHost?: () => Promise<string | null>;
@@ -1388,8 +1392,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       if (ask.error) throw new WatchdogError(422, ask.error);
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
-        const earlier = await answeredBefore(db, { companyId, ticketId: t.id, question: input.question });
-        if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
+        const asked = await checkOwnerAsk(db, { companyId, ticketId: t.id, question: input.question }, { embedder: deps.ownerAnswerEmbedder });
+        if (asked.refusal) throw new WatchdogError(409, `${asked.refusal}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);

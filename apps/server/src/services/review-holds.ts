@@ -131,14 +131,18 @@ export async function holdView(db: Db, ticketId: string, now: Date = new Date())
 /**
  * Whether a merge waiting on this ticket may go on (BOS-1173). A ticket marked as fixing the merge check must be in
  * force: closed without merging, or merged and running (on the server, and on the runners for runner code: a fix
- * the gate's runner doesn't run yet fixes nothing). Any other ticket is a plain ordering link: finished as the link
- * says (merged, or done; ticketBlockerFinished, BOS-989), with no wait for a deploy.
+ * the gate's runner doesn't run yet fixes nothing). A fix whose merge changed only tests, docs or CI (deploysNothing,
+ * BOS-1609) is in force once it is on main: the gate reads those from the tree it checks, and no deploy ever carries
+ * them, so waiting for one held every merge on it until the owner's next update. An unknown file list still waits.
+ * Any other ticket is a plain ordering link: finished as the link says (merged, or done; ticketBlockerFinished,
+ * BOS-989), with no wait for a deploy.
  */
 export async function ticketInForce(db: Db, ticketId: string, until: "merged" | "done" = "merged"): Promise<boolean> {
-  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck }).from(tickets).where(eq(tickets.id, ticketId));
+  const [b] = await db.select({ companyId: tickets.companyId, state: tickets.systemState, mergeCommit: tickets.mergeCommit, touchesRunner: tickets.touchesRunner, liveMarkedAt: tickets.liveMarkedAt, fixesMergeCheck: tickets.fixesMergeCheck, deploysNothing: tickets.deploysNothing }).from(tickets).where(eq(tickets.id, ticketId));
   if (!b) return true;
   if (!b.fixesMergeCheck) return ticketBlockerFinished({ ticketState: b.state, mergeCommit: b.mergeCommit, until });
   if (!b.mergeCommit) return b.state === "done";
+  if (b.deploysNothing === true) return true;
   return (await goLiveWaitOf(db, b)) === null;
 }
 

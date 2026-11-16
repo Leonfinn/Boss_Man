@@ -4,7 +4,31 @@ export type UpdateRow = { at: string; title: string; body: string; state: "ok" |
 export type LiveRow = { slug: string; name: string; registered: boolean; connected: boolean; at: string | null; imageVersion: string | null; fault: string | null; swap?: { retryAt: string | null; tries: number } | null; swapFailed?: string | null; guard?: { reason: string; since: string | null } | null };
 export type Report = { live: LiveRow[]; update: UpdateRow | null };
 export type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
-export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean }) & { last?: LastUpdate };
+/** BOS-1600: a check on a runner that a swap waits on. Absent (`checks` undefined) from an older server. */
+export type RunnerCheckView = { ticket: string | null; kind: string; scope: string; startedAt: string | null; runningForMinutes: number; usuallyMinutes: number | null };
+export type MaintenanceView = ({ on: false } | { on: true; kind?: "update" | "settings" | "wrapup"; deadline: string; runs: number; companies: number; blocking?: boolean; checks?: number; checksList?: RunnerCheckView[] }) & { last?: LastUpdate };
+
+/** "BOS-1525 merge check, started 19:41, usually about 15 min" (BOS-1600). */
+export function checkSentence(c: RunnerCheckView): string {
+  const what = c.kind === "merge" ? "merge check" : c.scope === "quick" ? "quick check" : "check";
+  return `${c.ticket ?? "A"} ${what}${c.startedAt ? `, started ${atTime(c.startedAt)}` : ""}${c.usuallyMinutes ? `, usually about ${c.usuallyMinutes} min` : ""}`;
+}
+
+/**
+ * What a runner update is waiting for, in plain words, from live state (BOS-1600). "swapping the runners now" only
+ * when nothing is left to wait for. Agent runs and checks are named separately.
+ */
+export function waitingFor(m: { runs: number; companies: number; checks?: number; checksList?: RunnerCheckView[] }): string {
+  const n = m.runs;
+  const k = m.checks ?? 0;
+  const agents = `${plural(n, "run", "runs")} in ${plural(m.companies, "company", "companies")} to finish`;
+  const list = (m.checksList ?? []).map(checkSentence).join("; ");
+  const checks = `${plural(k, "check", "checks")} to finish before swapping the runners${list ? `: ${list}` : ""}`;
+  if (n > 0 && k > 0) return `waiting for ${agents}, and for ${checks}`;
+  if (n > 0) return `waiting for ${agents}`;
+  if (k > 0) return `waiting for ${checks}`;
+  return "swapping the runners now";
+}
 /** `gotMessage` and `step` (BOS-1016) are absent from an older server. */
 export type WrapUpRun = { runId: string; agent: string | null; ticket: string | null; ticketTitle: string | null; runningForMinutes: number; sinceWrapUpMinutes: number; waitingOn: { question: string; tier: string | null } | null; gotMessage?: boolean; step?: { title: string; sinceMinutes: number } | null };
 /** The owner's wrap-up ask is on: its own hold, or asked while an update waits (BOS-988), which keeps the update's kind. */
@@ -103,7 +127,7 @@ export function plainReason(raw: string | null | undefined): string {
 export const isReplaced = (msg: string | null | undefined) => /is not on main any more/i.test(msg ?? "");
 
 export type StatusTone = "red" | "amber" | "blue" | "green" | "grey";
-export type StatusButton = { id: "ask-wrapup" | "try-again" | "review-deploy" | "check-now" | "stop-stragglers"; label: string; blue: boolean; disabled?: boolean; hint?: string; runIds?: string[] };
+export type StatusButton = { id: "ask-wrapup" | "try-again" | "review-deploy" | "check-now" | "stop-stragglers" | "update-now"; label: string; blue: boolean; disabled?: boolean; hint?: string; runIds?: string[] };
 export type UpdateStatus = {
   tone: StatusTone;
   /** One word. */
@@ -186,6 +210,20 @@ export function updateStatus(view: SelfDeployView | null, maint: MaintenanceView
 
   // 2. Waiting for agents (and a plain wrap-up, which holds new work the same way).
   if (maint && maint.on && maint.kind !== "wrapup") {
+    // BOS-1600: no agent is left but a check on a runner is. Say so, and give the plain choice: wait, or stop the checks.
+    if (maint.runs <= 0 && (maint.checks ?? 0) > 0) {
+      const what = maint.kind === "settings" ? "setting change" : "runner update";
+      const k = maint.checks ?? 0;
+      return {
+        tone: "amber",
+        tag: "Waiting for checks",
+        say: `The ${what} is ${waitingFor(maint)}.`,
+        more: `Nothing new starts until ${k === 1 ? "it is" : "they are"} done. Waiting is safe: ${k === 1 ? "it carries" : "they carry"} on and the swap follows by itself. Checks on a separate check worker are not waited for.`,
+        next: `Or stop ${k === 1 ? "it" : "them"} now: ${k === 1 ? "it starts" : "they start"} again from the beginning after the swap, so the time already spent is lost.`,
+        primary: { id: "update-now", label: `Stop the ${k === 1 ? "check" : "checks"} and update now`, blue: false },
+        normal: [{ id: "cancel-update", label: `Cancel the ${what}` }],
+      };
+    }
     if (maint.runs <= 0)
       return { tone: "blue", tag: "Updating", say: "The runner update is going in now. Pages keep working.", more: "Each runner is swapped as its company goes idle.", next: null, primary: null, normal: [] };
     const what = maint.kind === "settings" ? "setting change" : "runner update";

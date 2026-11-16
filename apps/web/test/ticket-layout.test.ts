@@ -24,7 +24,8 @@ describe("ticket page layout for a folded Work panel", () => {
   });
 
   it("returns to one column at the stacking width, so nothing squeezes the description", () => {
-    const start = css.indexOf("@media (max-width: 900px)");
+    // The brace stops this matching a longer query such as "(max-width: 900px), (max-height: 800px)".
+    const start = css.indexOf("@media (max-width: 900px) {");
     expect(start).toBeGreaterThan(-1);
     const block = css.slice(start, css.indexOf("\n}", start));
     expect(block).toContain(".ticket-layout.props-collapsed > .ticket-main, .ticket-layout.props-collapsed > .ticket-props { grid-column: 1; grid-row: auto; }");

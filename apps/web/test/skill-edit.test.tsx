@@ -107,13 +107,13 @@ describe("skills", () => {
     expect(await screen.findByText(/goes with runs only while the runner reports Browser \(agent-browser\) working/)).toBeTruthy();
   });
 
-  it("shows each runner add-on as working, not working, or not installed with how to add it", async () => {
+  it("shows each runner add-on as working, not working, or not installed, each with a tick box", async () => {
     let addons: unknown = null;
-    vi.stubGlobal("fetch", vi.fn(async () => json({ registered: true, runnerId: "r1", connected: true, lastSeenAt: null, imageVersion: null, diskUsedBytes: null, addons })));
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (url === "/api/self-deploy/runner-addons" ? json({ enabled: true, saved: null, built: null }) : json({ registered: true, runnerId: "r1", connected: true, lastSeenAt: null, imageVersion: null, diskUsedBytes: null, addons }))));
     const view = render(<Runner company={company} />);
     expect(await screen.findAllByText("Not installed")).toHaveLength(2);
-    expect(screen.getByText("RUNNER_ADDONS=agent-browser")).toBeTruthy();
-    expect(screen.getByText("RUNNER_ADDONS=webkit")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Browser (agent-browser)" })).toBeTruthy();
+    expect(screen.queryByText("RUNNER_ADDONS=agent-browser")).toBeNull();
     view.unmount();
     addons = [{ id: "agent-browser", version: "0.39.0", ok: false, detail: "spawn agent-browser ENOENT" }];
     render(<Runner company={company} />);

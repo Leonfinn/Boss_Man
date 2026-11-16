@@ -120,6 +120,16 @@ grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: r
 git reset -q --hard "$one"; : >"$FAKE_LOG"
 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
 ! grep -q -- "--force-recreate" "$FAKE_LOG" || { echo "FAIL: a normal deploy force-recreated"; exit 1; }
+# BOS-1588: a good deploy refreshes the host's copy of the deployer; a refresh that can't be done only warns.
+cp "$here/install-deployer.sh" scripts/; printf '#!/usr/bin/env bash\necho fresh\n' >scripts/host-deployer.sh
+mkdir -p "$t/deployer"; chmod 755 "$t/deployer"; printf 'stale\n' >"$t/deployer/host-deployer.sh"; chmod 750 "$t/deployer/host-deployer.sh"
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/refresh.out" 2>&1 || { echo "FAIL: deploy with a deployer copy"; cat "$t/refresh.out"; exit 1; }
+cmp -s scripts/host-deployer.sh "$t/deployer/host-deployer.sh" || { echo "FAIL: deploy did not refresh the deployer copy"; exit 1; }
+printf 'stale\n' >"$t/deployer/host-deployer.sh"; chmod 777 "$t/deployer"; git reset -q --hard "$one"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/refresh.out" 2>&1 || { echo "FAIL: a refresh failure failed the deploy"; cat "$t/refresh.out"; exit 1; }
+grep -q "deployer copy was not refreshed" "$t/refresh.out" || { echo "FAIL: no warning when the refresh failed"; exit 1; }
+chmod 755 "$t/deployer"
 # The readable-check is one text in the three scripts.
 for s in rebuild-live host-deployer; do
   [[ "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/$s.sh")" == "$(sed -n '/^# BEGIN readable-check/,/^# END readable-check/p' "$here/deploy.sh")" ]] || { echo "FAIL: readable-check in $s.sh differs from deploy.sh"; exit 1; }

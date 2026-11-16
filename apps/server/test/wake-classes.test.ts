@@ -95,7 +95,8 @@ describe("wake classes: the table", () => {
     }
     // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
     // stop-stragglers endpoint (BOS-1238). None is a wake.
-    for (const r of ["update pending", "no_wrapup", "too_early"]) found.delete(r); // the maintenance hold's label, not a wake
+    // no_update, agents_running and no_checks are the refusal codes of the update-now endpoint (BOS-1600).
+    for (const r of ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
     const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
     expect(unclassified).toEqual([]);
@@ -341,6 +342,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/engagements.ts": DROP_RECORDED,
     "services/progress.ts": NEVER_DROPPED + " (a status check steers into the live silent run)",
     "services/recovery.ts": NEVER_DROPPED,
+    "services/main-ci.ts": CHECKS_OUTCOME + " (a dropped wake is skipped: the ticket is already open and the assignee finds it in its list)",
     "services/retro.ts": NEVER_DROPPED,
     "services/github-watch.ts": NEVER_DROPPED + " (github feedback and github security are scheduled)",
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",

@@ -29,9 +29,32 @@
 # nothing is relayed anywhere (unless you set NTFY_UPSTREAM_BASE_URL for an iPhone). Messages are kept for NTFY_CACHE_DURATION, then dropped.
 
 services:
+  # BOS-1581: hands the data folder to ntfy's user before ntfy starts, so nobody runs chown by hand on any host. Docker
+  # makes a missing folder owned by root, which ntfy (uid 1000) cannot write to. Runs once, then exits; the same image and
+  # the same mount as ntfy, no network, only the one capability a chown needs.
+  ntfy-init:
+    profiles: ["ntfy"]
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    entrypoint: ["chown", "-R", "1000:1000", "/var/lib/ntfy"]
+    command: []
+    restart: "no"
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    network_mode: none
+    volumes:
+      - ${NTFY_DATA:-${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy}:/var/lib/ntfy
+    mem_limit: 64m
+    pids_limit: 16
+
   ntfy:
     profiles: ["ntfy"]
     image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.37.2@sha256:1875ddcf815c8a3c981d6d78c67a93452d0abba79b1ab9520b1f5f5238902bd7}
+    depends_on:
+      ntfy-init:
+        condition: service_completed_successfully
     command: ["serve"]
     restart: unless-stopped
     user: "1000:1000"
@@ -53,6 +76,10 @@ services:
       NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
       NTFY_CACHE_DURATION: ${NTFY_CACHE_DURATION:-1h}
       NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:-}
+      # BOS-1589: counters for the host deployer's "did a phone reconnect" fact. Served on a port that is NOT
+      # published and not in Serve's config; only `docker exec` inside the container reads it.
+      NTFY_ENABLE_METRICS: "true"
+      NTFY_METRICS_LISTEN_HTTP: ":9090"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
       interval: 30s

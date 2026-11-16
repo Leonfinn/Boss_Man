@@ -1,5 +1,5 @@
 {
-  "id": "1bd2881c-0478-4855-958f-e384775eb9cb",
+  "id": "c05f9733-90be-4f72-8d19-6aef0cad55c0",
   "prevId": "43f96aaf-5de1-41e5-bb3a-4f4cea7281a8",
   "version": "7",
   "dialect": "postgresql",
@@ -3574,13 +3574,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
-        },
-        "priority_one": {
-          "name": "priority_one",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "portal_visible": {
           "name": "portal_visible",
@@ -10043,6 +10036,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "deploys_nothing": {
+          "name": "deploys_nothing",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "go_live_wait": {
           "name": "go_live_wait",
           "type": "text",
@@ -10275,13 +10274,6 @@
         },
         "urgent": {
           "name": "urgent",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "urgent_by_owner": {
-          "name": "urgent_by_owner",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,

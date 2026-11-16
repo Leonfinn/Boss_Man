@@ -86,7 +86,9 @@ export function penpotRoutes(owner: FastifyInstance, deps: { db: Db; secretsSvc:
       token: field("token"),
       email: field("email"),
       password: field("password"),
-      agentIds: (g.url ?? g.token)?.agentIds ?? [],
+      // Each pair's list comes from the grant that holds the secret (token, password), not the address or email: a hand-made
+      // pair may differ, the form sends this one list back for both, and reading the wider one would widen the secret (BOS-1592).
+      agentIds: (g.token ?? g.url)?.agentIds ?? [],
       exportAgentIds: (g.password ?? g.email)?.agentIds ?? [],
     };
   }

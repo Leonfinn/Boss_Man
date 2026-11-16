@@ -306,9 +306,13 @@ if [[ $1 == ps && $2 == --filter ]]; then
   esac
   exit 0
 fi
+if [[ $1 == exec && $2 == ntfy-1 && $3 == wget ]]; then
+  printf '# TYPE ntfy_subscribers_total gauge\nntfy_subscribers_total %s\n' "${FAKE_NTFY_SUBS:-2}"
+  exit 0
+fi
 if [[ $1 == inspect && $2 == -f ]]; then
   case $4 in
-    ntfy-1) echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
+    ntfy-1) [[ $3 == *StartedAt* ]] && echo "2026-11-14T10:00:00.123456789Z" || echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
     sg1) echo "bm_front bm_internal " ;;
   esac
   exit 0
@@ -322,6 +326,10 @@ node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.container!=="ntfy-1"||n.
 hasnt "$D/outbox/host.json" 'bm_front'
 FAKE_NTFY_NETS="bm_edge bm_front " "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy on front) exited non-zero"; }
 node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.serverReach!==true)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on the front network must report serverReach true: $(cat "$D/outbox/host.json")"
+# BOS-1589: the report carries when ntfy last started and how many phones are connected now (0 = a silent phone).
+node -e 'const n=require(process.argv[1]).ntfy;if(n.startedAt!=="2026-11-14T10:00:00.123456789Z"||n.subscribers!==2)process.exit(1)' "$D/outbox/host.json" || fail "ntfy facts must carry startedAt and subscribers 2: $(cat "$D/outbox/host.json")"
+FAKE_NTFY_SUBS=0 "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy 0 subscribers) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(n.subscribers!==0)process.exit(1)' "$D/outbox/host.json" || fail "0 subscribers must be reported as 0: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"
@@ -412,7 +420,7 @@ has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
 infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
-for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
+for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh scripts/install-deployer.sh apps/server/Dockerfile .env.example; do
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
@@ -1211,10 +1219,12 @@ if [[ $1 == ps ]]; then printf '%s' "${PL_CIDS-abc123def456}" | tr ' ' '\n' | gr
 shift 3; cid=$1; shift; [[ $1 == ntfy ]] || exit 98; shift
 if [[ -n ${PL_FAIL:-} && $1 == "$PL_FAIL" ]]; then echo "boom: the password is ${NTFY_PASSWORD:-none}" >&2; exit 1; fi
 case "$1 $2" in
-  "user list") printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
+  "token list") grep -q . "$PLW/tokens.$3" 2>/dev/null && printf 'user %s (role: user, tier: none)\n- %s (no label), never expires\n' "$3" "$(cat "$PLW/tokens.$3")" || printf 'user %s (role: user, tier: none)\n' "$3" ;;
+  "token add") [[ $3 == bossman-publish ]] || exit 97; printf 'tk_%s' "$(printf 'a%.0s' $(seq 1 29))" >"$PLW/tokens.$3"; printf 'token %s created for user %s, never expires\n' "$(cat "$PLW/tokens.$3")" "$3" ;;
+  "user list") [[ -n ${PL_NOPUB:-} ]] || printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
   "user add") [[ $3 == --role=user && ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; echo "$4" >>"$PLW/users"; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$4" ;;
   "user change-pass") [[ ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$3" ;;
-  access*) [[ $3 == read-only || $4 == read-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
+  access*) [[ $3 == read-only || $4 == read-only || $4 == write-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
   *) echo "fake ntfy: unhandled: $*" >&2; exit 98 ;;
 esac
 FAKE
@@ -1229,7 +1239,7 @@ plreq() { # action user topic pubkey [id]: write a request the way the server do
   rm -f "$PD/state/last-phone-login"
 }
 plhost() { BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (phone login)"; }; }
-plx() { grep -c '^docker exec' "$PLLOG" || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect don't count)
+plx() { grep '^docker exec' "$PLLOG" | grep -vc ' wget -qO- http://localhost:9090/metrics' || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect and the ntfy metrics read don't count)
 plres() { jget "$PD/outbox/phone-login.json" "$1"; }
 unseal() { jget "$PD/outbox/phone-login.json" sealed | base64 -d | openssl pkeyutl -decrypt -inkey "$PL/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256; }
 no_plaintext() { # the password must be in nothing the deployer or the log wrote, nor on any command line
@@ -1286,9 +1296,9 @@ plreq reset phone-read alerts "$PUB"; plhost; plreq reset phone-read alerts "$PU
 if [[ $(plres result) == rejected ]] && has "$PD/outbox/phone-login.json" "30 seconds" && [[ $(plx) == 0 ]]; then :; else fail "PL6: $(cat "$PD/outbox/phone-login.json")"; fi
 # PL7. No ntfy container, or two: nothing is changed.
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="" plhost
-[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="abc123def456 fed654cba321" plhost
-[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 # PL8. A failing ntfy command is reported without the password, and a failed create leaves no sealed answer.
 : >"$PLW/users"
 plreq create phone-read alerts "$PUB"; PL_FAIL=user plhost
@@ -1300,6 +1310,30 @@ no_plaintext "$(cat "$PLW/pw.phone-read")"
 has "$PD/outbox/host.json" '"phoneLogin": {"openssl": true}'
 plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" --dry-run >"$T/out" 2>&1 || fail "PL9 dry run"
 [[ -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL9: a dry run handled the request"
+rm -f "$PD/inbox/phone-login.json"
+# PS (BOS-1581): action "setup" makes the publish user, write-only access and a token; the token comes back sealed only.
+export PL_NOPUB=1; : >"$PLW/users"; : >"$PLLOG"
+plreq setup bossman-publish alerts "$PUB"; plhost
+[[ $(plres result) == setup && $(plres id) == "$PLID" ]] || fail "PS1: $(cat "$PD/outbox/phone-login.json")"
+tok1="$(unseal)"; [[ $tok1 =~ ^tk_[a-z0-9]{29}$ && $tok1 == "$(cat "$PLW/tokens.bossman-publish")" ]] || fail "PS1: the sealed token is not the one ntfy made"
+has "$PLLOG" "ntfy user add --role=user bossman-publish"; has "$PLLOG" "ntfy access bossman-publish alerts write-only"; has "$PLLOG" "ntfy token add bossman-publish"
+no_plaintext "$tok1"; no_plaintext "$(cat "$PLW/pw.bossman-publish")"
+# PS2. Pressing it again finds all three: no user add, no token add, the same token comes back, and the answer says nothing changed.
+plreq setup bossman-publish alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == setup && $(unseal) == "$tok1" ]] || fail "PS2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "token add"; has "$PD/outbox/phone-login.json" "Nothing was changed"
+[[ $(grep -c . "$PLW/users") == 1 ]] || fail "PS2: a second user was made"
+# PS3. Only the publish user can be set up, and phone logins cannot be made for it.
+for bad in "setup phone-read alerts $PUB" "setup admin alerts $PUB" "create bossman-publish alerts $PUB" "reset bossman-publish alerts $PUB"; do
+  # shellcheck disable=SC2086
+  plreq ${bad%% "$PUB"} "$PUB"; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plx) == 0 ]] || fail "PS3 ($bad): $(cat "$PD/outbox/phone-login.json")"
+done
+# PS4. A failing ntfy step reports failed with no sealed token.
+rm -f "$PLW/tokens.bossman-publish"
+plreq setup bossman-publish alerts "$PUB"; PL_FAIL=token plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PS4: $(cat "$PD/outbox/phone-login.json")"
+unset PL_NOPUB
 rm -f "$PD/inbox/phone-login.json"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
