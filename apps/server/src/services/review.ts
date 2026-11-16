@@ -1582,7 +1582,12 @@ export function reviewService(
           url = (r.detail as { url?: string | null } | undefined)?.url ?? null;
           text = landingText(r, { branch: defaultBranch, assignee: a?.name ?? null });
         } catch (err) {
-          text = `Approved, but not merged: ${(err as Error).message}`;
+          // A hold found mid-merge (a merge-check fix or waits-on link marked while the check or CI ran, BOS-1173/1643)
+          // is a wait, not a failure: say "held" with its own message, as landApproved does for the visible merge.
+          if (err instanceof ReviewHeldError) {
+            outcome = "held";
+            text = (err as Error).message;
+          } else text = `Approved, but not merged: ${(err as Error).message}`;
         }
         landings.set(ticketId, { state: "finished", outcome, text, url, finishedAt: new Date().toISOString() });
       })();
@@ -2310,6 +2315,11 @@ export function reviewService(
             const body = listed.length
               ? listed.map((f) => `- ${f.run.name}${f.run.url ? ` (${f.run.url})` : ""}${f.lines.length ? `\n${f.lines.map((l) => `  - ${l}`).join("\n")}` : ""}`).join("\n")
               : "- the workflow failed before any job ran; open the commit's checks on GitHub";
+            // As for the gate's own check (checkFailed, BOS-1173): a merge-check fix marked, or a waits-on link added, while
+            // CI ran means the failure is main's until that fix is in force (BOS-1643). The throw ends the attempt held, the
+            // way checkFailed's does: ciVerdict is awaited inside alongsideCi / ciThenChecked, so it reaches the landing.
+            const waiting = await holdForWaits(ticketId);
+            if (waiting) throw waiting;
             await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: prep.commit, kind: "ci", passed: false, detail: (jobs.join(", ") || "workflow failed").slice(0, 500) });
             const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: body, what: "GitHub CI" });
             const delivered = await sendBack(
