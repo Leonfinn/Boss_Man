@@ -363,6 +363,8 @@ export const tickets = pgTable(
     touchesRunner: boolean("touches_runner"),
     /** Whether the merge changed the runner-update path (BOS-1467); null = not known (merged before this, or no file list). */
     touchesRunnerUpdate: boolean("touches_runner_update"),
+    /** Whether the merge changed only tests, docs and CI, so nothing has to go live (BOS-1609); null = not known (counts as needing a deploy). */
+    deploysNothing: boolean("deploys_nothing"),
     /** What its after-merge checks still wait for ("server" | "runner" | "both" | "own") and since when (BOS-1021): null = not waiting. */
     goLiveWait: text("go_live_wait"),
     goLiveWaitSince: timestamp("go_live_wait_since", { withTimezone: true }),

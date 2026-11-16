@@ -20,6 +20,17 @@ export const RUNNER_UPDATE_PATHS = /^scripts\/update-runner\.sh$/;
 export const touchesRunnerUpdate = (paths: readonly string[]): boolean => paths.some((p) => RUNNER_UPDATE_PATHS.test(p));
 
 /**
+ * Files that never go live through a server deploy or a runner rebuild (BOS-1609): tests, docs and CI workflows. They
+ * take effect the moment they are on main (the merge gate and CI read them from the tree they check). Deliberately
+ * narrow: scripts, configs and anything else count as needing a deploy. Markdown counts only at the repository root
+ * (README.md, CLAUDE.md, ...) and under docs/: a .md inside an app (apps/runner/claude-pack, skills) can ship in an image.
+ */
+export const NO_DEPLOY_PATHS = /(^|\/)(test|tests|__tests__)\/|\.test\.[a-z]+$|^docs\/|^[^/]+\.md$|^\.github\//;
+
+/** True when the file list is known, non-empty, and every file is a test, a doc or CI: the merge needs no deploy. */
+export const deploysNothing = (paths: readonly string[]): boolean => paths.length > 0 && paths.every((p) => NO_DEPLOY_PATHS.test(p));
+
+/**
  * Files the owner must approve before a change to them merges (BOS-1094, widened by BOS-1100). A diff that touches one is
  * held at high risk, so the owner's sign-off is needed whatever the card says.
  *
