@@ -17,6 +17,7 @@ import type { ErrorBuffer } from "./error-buffer.js";
 import type { MemorySampler } from "./memory-sampler.js";
 import type { NetguardAllowReport } from "./netguard-allow.js";
 import { lastRestart } from "./runner-restarts.js";
+import { ownerSetupFacts } from "./owner-record.js";
 import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
@@ -276,6 +277,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // Only "running" means the add-on is up; never tell the owner otherwise.
         addons: deps.addons ? await deps.addons() : null,
         hostFacts: deps.hostFacts ? await deps.hostFacts().catch(() => null) : null,
+        // What the owner has set up, from the record (BOS-1596): check workers added / ever connected / online. A worker is installed only once it has connected; never say otherwise.
+        ownerSetup: await ownerSetupFacts(db, companyId).catch(() => null),
       };
     },
   };

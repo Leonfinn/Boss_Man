@@ -11,6 +11,7 @@ import { activity, agents, decisions, deviceProfiles, engagements, paAnswers, ru
 import { runOriginQuery } from "./runs.js";
 import { MERGE_LINE_KIND } from "./merge-line.js";
 import { CHECK_REUSED_KIND } from "./check-request.js";
+import { ownerSetupFacts, ownerSetupLines } from "./owner-record.js";
 import { getStandingRules, standingRulesSection } from "./standing-rules.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
@@ -143,6 +144,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
       ...(companyRefused ? [`At company limit: ${companyRefused} Ready ticket${companyRefused === 1 ? "" : "s"} refused. Agents may sit idle until one in-progress ticket finishes or the owner raises the limit in Settings.`] : []),
       ...(queueHeld.length ? [`New starts held: ${queueHeld.length} Ready ticket${queueHeld.length === 1 ? "" : "s"} wait${queueHeld.length === 1 ? "s" : ""} while the merge line or check queue is long${queueWhy ? ` (${queueWhy.replace(/^Held: /, "")})` : ""}. Finish and merge work in flight; they start by themselves when it is shorter.`] : []),
+      ...section("Owner's setup (from the record: say nothing about it that this contradicts)", ownerSetupLines(await ownerSetupFacts(db, companyId))),
       ...section("Needs you", capped(needLines, 8)),
       ...section("Merge-line conflicts (warnings, nothing linked)", capped(conflictLines, 6)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),
