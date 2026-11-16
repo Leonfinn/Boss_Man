@@ -46,7 +46,7 @@ Base: `/mnt/tank/apps/boss-man/deployer` in the worked example of [docs/06](06-i
 | Path | Owner : mode | Written by | Purpose |
 |---|---|---|---|
 | `$D/` | root:root 755 | owner | Not writable by the server. |
-| `$D/host-deployer.sh` | root:root 750 | owner once; later refreshed by the owner's hand deploy (`scripts/install-deployer.sh`, BOS-1588: temp file, same owner and mode, `bash -n`, atomic rename; refused unless `$D` and the copy are root-owned and not writable by others) | A **copy** of `scripts/host-deployer.sh`. Never a link into the checkout, so a merged PR cannot change what root runs: a change to the script is refused by the panel and reaches the copy only when the owner applies it by hand. |
+| `$D/host-deployer.sh` | root:root 750 | owner once (`scripts/setup-host-deployer.sh` does the whole setup, docs/30); later refreshed by the owner's hand deploy (`scripts/install-deployer.sh`, BOS-1588: temp file, same owner and mode, `bash -n`, atomic rename; refused unless `$D` and the copy are root-owned and not writable by others) | A **copy** of `scripts/host-deployer.sh`. Never a link into the checkout, so a merged PR cannot change what root runs: a change to the script is refused by the panel and reaches the copy only when the owner applies it by hand. |
 | `$D/host.conf` | root:root 600 | owner, by hand | Optional. Webhook URL and options (below); without the file nothing is posted and the defaults apply. If the file exists, the script refuses to start unless it is private. |
 | `$D/inbox/` | 1000:1000 750 | server (uid 1000) | The only place the server writes. Bind-mounted read-write into the server. |
 | `$D/inbox/request.json` | 1000:1000 640 | server | One pending request. The host takes it by renaming it out of the folder. |
