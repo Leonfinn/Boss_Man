@@ -192,7 +192,14 @@ export type LiveFix = { ticketId: string; ref: string; symptom: string };
  * and the CEO's wake. `repeat`: every fix on it was already on an earlier card, so it isn't paged again
  * (the owner was paged once per fix, not once per commit main moves on by).
  */
-export type DeployUrgent = { heading: string; fixes: LiveFix[]; repeat?: boolean };
+export type DeployUrgent = {
+  heading: string;
+  /** BOS-1516: for "ready" these are the Priority 1 tickets that merged (`symptom` holds the ticket's title); same shape so repeat suppression is shared. */
+  fixes: LiveFix[];
+  repeat?: boolean;
+  /** "ready": the owner's Priority 1 work is merged and ready to put live (heading "Ready to put live"). Absent: a live fix. */
+  kind?: "ready";
+};
 
 /** Longest "fixes live" marker: one sentence, short enough to head a card and fit a phone push title. */
 export const FIXES_LIVE_MAX = 200;
@@ -213,13 +220,22 @@ export function fixesLiveHeading(fixes: Array<{ symptom: string; ref: string }>)
   return `Urgent: contains the fix for ${clean(first.symptom)} (${first.ref})${also}`;
 }
 
+/** BOS-1516: the heading of a deploy card that carries the owner's Priority 1 work: "Ready to put live: <title> (BOS-n)". */
+export function readyHeading(items: Array<{ symptom: string; ref: string }>): string {
+  const clean = (s: string) => s.trim().replace(/[.!\s]+$/, "");
+  const [first, ...rest] = items;
+  if (!first) return "";
+  const also = rest.length ? `; also ${rest.map((f) => `${clean(f.symptom)} (${f.ref})`).join("; ")}` : "";
+  return `Ready to put live: ${clean(first.symptom)} (${first.ref})${also}`;
+}
+
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** The agent that asked, so an "always" rule can be limited to it (BOS-294). */ alwaysAgent?: { id: string; name: string }; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** Why only the owner can take this card (BOS-1318). Counted by Moony; the CEO may never answer one. */ ownerOnly?: OwnerOnlyKind; ownerOnlyWhy?: string; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** The raiser marked it as holding the linked ticket's merge until it is answered (BOS-1078); without it the card never holds a merge. */ holdsMerge?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string; /** What the owner-step lint flagged, and a CEO override (BOS-417). */ lint?: CardLint; /** A plan put by submit_plan for a plan-first ticket that has no ExitPlanMode (BOS-531): approving it sets planApprovedAt. */ plan?: boolean; ticketId?: string; /** The after-merge criteria this card settles, as 0-based indexes into the ticket's list (BOS-963): the owner's answer records those, whatever its wording. Unset means the card's own words decide. */ criterionIndexes?: number[]; /** What each option means for those criteria, by option text: pass, fail or none (BOS-1155). The only thing that turns an answer into a verdict. */ optionVerdicts?: Record<string, "pass" | "fail" | "none">; /** Ordering against other owner cards (BOS-551): this one has to be done after these. */ doAfter?: OrderLink[]; /** Ordering against other owner cards: this one has to be done before these. */ doBefore?: OrderLink[]; /** A restart of the server would reset what this card measures, so a server update card lists it to do first (BOS-551). */ resetsOnRestart?: boolean }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
-  | { type: "deploy"; deployId: string }
+  | { type: "deploy"; deployId: string; /** BOS-1516: the owner's Priority 1 work is in this deploy: the card is marked urgent, headed "Ready to put live". */ urgent?: DeployUrgent }
   /** The follow-up after a feature ships: did it move its key result? */
   | { type: "goal_check"; featureId: string }
   /** A feature held off the portal (the security guess or a keep-off mark): the owner keeps it off or publishes it (BOS-1358). */

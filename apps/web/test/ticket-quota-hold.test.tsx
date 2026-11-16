@@ -98,7 +98,7 @@ describe("the quota hold on a ticket (BOS-253, BOS-471)", () => {
     render(<Ticket id="t1" companies={[company]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Run now" }));
     await waitFor(() => expect(ranNow).toHaveLength(1));
-    fireEvent.click(screen.getByRole("button", { name: "Mark urgent" }));
+    fireEvent.click(screen.getByRole("button", { name: "Make Priority 1" }));
     await waitFor(() => expect(patched).toEqual([{ urgent: true }]));
   });
 

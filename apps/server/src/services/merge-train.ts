@@ -132,6 +132,19 @@ export class MergeTrain {
     this.track();
   }
 
+  /**
+   * BOS-1516: a waiting ticket's tier changes after it joined (the owner set Priority 1, or "Move to front" on a ticket with no
+   * check job yet). Only a waiting member is touched: a seated one keeps its seat (members are never pushed out), and a lower
+   * tier number (0 = first) can only move a ticket up. Returns true when the order changed.
+   */
+  retier(ticketId: string, priority: number): boolean {
+    const w = this.waiting.get(ticketId);
+    if (!w || priority >= w.priority) return false;
+    w.priority = priority;
+    this.track();
+    return true;
+  }
+
   /** Seats waiting tickets while seats are free; true when this ticket has a seat. Members are never pushed out by a later arrival. */
   seated(ticketId: string): boolean {
     this.admit();
@@ -428,6 +441,15 @@ export function trainFor(projectId: string, seats: number): { train: MergeTrain;
   const train = new MergeTrain({ seats: () => seatCounts.get(projectId) ?? 1 });
   trains.set(projectId, train);
   return { train, created: true };
+}
+
+/**
+ * BOS-1516: raise a ticket waiting for a seat in this project's train to a higher tier (Priority 1 set, or "Move to front").
+ * False when this server has no train, or the ticket isn't waiting for a seat (not joined yet, already seated, or already that high).
+ * lost on restart, harmless because the landing's wait loop re-reads the ticket's urgent mark every poll and calls this again.
+ */
+export function retierWaiting(projectId: string, ticketId: string, priority: number): boolean {
+  return trains.get(projectId)?.retier(ticketId, priority) ?? false;
 }
 
 /**

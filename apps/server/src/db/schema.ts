@@ -431,6 +431,8 @@ export const tickets = pgTable(
     ownerSetupDecisionId: uuid("owner_setup_decision_id").references((): AnyPgColumn => decisions.id, { onDelete: "set null" }),
     /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
     urgent: boolean("urgent").notNull().default(false),
+    /** BOS-1516: the owner's "Priority 1" switch. It is the urgent mark plus this flag (set by the owner only); tiers read `urgent`, only the merge page reads this. */
+    urgentByOwner: boolean("urgent_by_owner").notNull().default(false),
     /**
      * "Fixes live" (BOS-639): one sentence naming the live symptom this ticket fixes, e.g. "server freezes
      * as memory climbs". Set by hand (CEO, author or reviewer), never guessed from priority or urgency.
@@ -1619,6 +1621,8 @@ export const features = pgTable(
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
+    /** BOS-1516: the owner's "Priority 1" switch on a feature: its open tickets (and new ones) carry the owner's urgent mark. */
+    priorityOne: boolean("priority_one").notNull().default(false),
     portalVisible: boolean("portal_visible").notNull().default(false),
     /** Marked "keep off the portal (sensitive)" by the owner, CEO or PM; the default never overrides it. */
     keepOffPortal: boolean("keep_off_portal").notNull().default(false),

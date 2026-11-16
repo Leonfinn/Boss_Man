@@ -6,7 +6,7 @@ import { deploysNothing, goLiveWaitWords, ownerApprovedFiles, realUseWalkthrough
 import { goLiveWaitOf, serverIsGoLive } from "./go-live-wait.js";
 import { checkFailureFacts, checkFailureSentence, fullLogPointer, criterionText, deepChecks, DEFAULT_GIT_TEMPLATES, formatDate, formatReviewComments, isAfterMerge, movableFailures, MERGE_MISSED_AFTER_MS, parseRepoUrl, carryFailedOver, readCriteria, readVerdicts, renderTemplate, ticketRef, REVIEW_KINDS, RISK_TIERS, riskOf, ruleFor, slotRef, unreportedAfterMerge, type CarriedTicket, type GitHostKind, type MergeLineConflictsResult, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type ReviewSlot, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
+import { agents, checkJobs, checkResults, checkWorkers, companies, decisions, deployTargets, projects, reviewRequests, runners, settings, ticketDependencies, ticketMessages, ticketReviews, tickets } from "../db/schema.js";
 import { addTicketDependency, openHoldingCard } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
@@ -25,6 +25,7 @@ import { record } from "./activity.js";
 import { lineEvent, TRAIN_CLASH_FILES, type CheckWay, type FailReason, type HoldReason } from "./merge-line.js";
 import { conflictNote, mergeLineApproved } from "./merge-line-conflicts.js";
 import { recordFailedAttempt } from "./merge-failures.js";
+import { priorityGroup } from "./priority-group.js";
 import { mainGen, mainMoved, trainFor, type RestackWhy, type TrainClash } from "./merge-train.js";
 import { closeHold, createHold, ensureSystemHold, mergeHolds, mergeWaits, openHold, releaseReadyHolds, type HoldWaitInput } from "./review-holds.js";
 import { CARRIED_NOTE_PREFIX, carriedTitles } from "./merge-queue.js";
@@ -602,6 +603,7 @@ export function reviewService(
     if (carry) t = { ...t, acceptanceCriteria: carry.criteria, stateNote: carry.note };
     await lineEvent(db, t, { event: "merged", commit });
     if (commit) await tellCeoLiveFix(t, commit).catch(() => undefined);
+    if (commit) await pagePriorityMerge(t).catch(() => undefined);
     const left = afterMergeLeft(t);
     // With a live check still to show, the ticket isn't finished: go straight to the assignee without a
     // brief done state in between, so done hooks (worktree release, notifications) never fire for it.
@@ -691,6 +693,34 @@ export function reviewService(
       "fixes live merged",
       `${heading}. It merged as ${commit.slice(0, 12)}. The live server still runs the old code until the owner approves the deploy card, which Boss Man raises headed with these words and sorted first in Decisions. Make sure the owner knows; Boss Man never deploys by itself.`,
     );
+  }
+
+  /**
+   * BOS-1516: the owner's Priority 1 work merged. A company with a card that puts work live pages through that card (Boss Man's
+   * own update card: "Ready to put live", see self-deploy urgentFor; a deploy target: the deploy card, see deploys.ts). A company
+   * with neither has no card, so it is paged here, once, when the last ticket of the group merges: "Priority 1 work merged" and
+   * the next step if the ticket names one.
+   */
+  async function pagePriorityMerge(t: { id: string; companyId: string; title: string; number: number | null; urgent: boolean; ownerSetup: string | null }) {
+    const [mark] = await db.select({ byOwner: tickets.urgentByOwner }).from(tickets).where(eq(tickets.id, t.id));
+    if (!t.urgent || !mark?.byOwner) return;
+    const [target] = await db.select({ id: deployTargets.id }).from(deployTargets).where(eq(deployTargets.companyId, t.companyId)).limit(1);
+    if (target) return;
+    const [card] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.companyId, t.companyId), sql`${decisions.context}->>'type' = 'self_deploy'`)).limit(1);
+    if (card) return;
+    if (!(await priorityGroup(db, t.id)).every((m) => m.finished)) return;
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, t.companyId));
+    const ref = ticketRef(c?.prefix ?? null, t.number);
+    const next = t.ownerSetup?.trim().split("\n")[0]?.slice(0, 200);
+    await deps.notes?.notify({
+      companyId: t.companyId,
+      agentId: null,
+      level: "page",
+      urgentReason: "Work you marked Priority 1 has merged",
+      title: `Priority 1 work merged: ${t.title}${ref ? ` (${ref})` : ""}`,
+      body: next ? `Next step: ${next}` : "Nothing more is needed from you for it to be in place.",
+      link: `#/tickets/${t.id}`,
+    });
   }
 
   /** Wakes the company's CEO about a ticket, with a note; nothing when the company has no CEO. */
@@ -2651,6 +2681,12 @@ export function reviewService(
                 const stop = await gone();
                 if (stop) return stop;
               }
+              // BOS-1516: Priority 1 set (or Move to front) after this ticket joined: the tier was fixed at join, so read it again.
+              // A copy that missed the owner's switch (another server copy, a restart) still picks it up here.
+              {
+                const [mark] = await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, ticketId));
+                if (mark?.urgent) train.retier(ticketId, 0);
+              }
               const onMain = await trialClash();
               if (onMain) {
                 await lineEvent(db, t, { event: "train_clash", on: "main", with: clash ? await namedTickets(clash.with) : [], files: onMain.slice(0, TRAIN_CLASH_FILES), fileCount: onMain.length, action: "sent_back" });
@@ -2927,6 +2963,7 @@ export function reviewService(
         // A fix riding along on this merge is just as live (BOS-639).
         const [rider] = await db.select().from(tickets).where(eq(tickets.id, c.ticketId));
         if (rider) await tellCeoLiveFix(rider, m.commit).catch(() => undefined);
+        if (rider) await pagePriorityMerge(rider).catch(() => undefined);
         if (rider) await lineEvent(db, rider, { event: "merged", commit: m.commit });
         await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
       }

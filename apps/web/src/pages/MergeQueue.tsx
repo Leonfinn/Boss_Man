@@ -276,7 +276,7 @@ export function Waiting({ rows, companyId, onMoved }: { rows: WaitingRow[]; comp
                   {r.statusLine ? null : `${upFirst(r.label)}.${r.next ? ` ${r.next}` : ""}`}
                   {r.actor && r.actor !== "system" ? ` (${actingText(r.actor)})` : ""}
                   {r.why ? <span className="tag grey" data-why="true"> next because: {r.why}</span> : null}
-                  {companyId && onMoved && r.place && r.place > 1 && (r.state === "waiting_for_slot" || r.state === "waiting_for_check_capacity") ? <> <MoveToFront companyId={companyId} row={r} onMoved={onMoved} /></> : null}
+                  {companyId && onMoved && ((r.place && r.place > 1 && (r.state === "waiting_for_slot" || r.state === "waiting_for_check_capacity")) || r.state === "waiting_for_seat") ? <> <MoveToFront companyId={companyId} row={r} onMoved={onMoved} /></> : null}
                 </p>
                 {r.statusLine ? <StatusLineView line={r.statusLine} /> : null}
                 {/* A carried-work hold (BOS-130, BOS-766, BOS-819): name the ticket it waits for, from the typed

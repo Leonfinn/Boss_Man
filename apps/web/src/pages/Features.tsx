@@ -1038,6 +1038,14 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           </div>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+          <input
+            type="checkbox"
+            checked={!!f.priorityOne}
+            onChange={(e) => void api(`/api/features/${id}/priority-one`, { method: "PUT", body: { on: e.target.checked } }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message))}
+          />
+          Priority 1: every open task of it goes first, and you get one page when all of it has merged
+        </label>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
           Show on the feedback portal, where visitors can vote on it
         </label>

@@ -188,6 +188,22 @@ describe("status line (BOS-1517)", () => {
     expect(lines[1]!.textContent).toMatch(/Next: It takes a seat as soon as one frees; its check then starts by itself\. In the way: Every merge-train seat is taken\.$/);
     expect(screen.queryByText(/check slot/)).toBeNull();
   });
+
+  it("shows Move to front on a row waiting for a train seat (BOS-1516, BOS-1510), a button with a real label for touch", async () => {
+    const server = {
+      ...data,
+      mode: "server",
+      waitingCount: 1,
+      running: [],
+      waiting: [{ ticketId: "t1", ref: "APP-12", title: "Behind the queue", minutes: 8, state: "waiting_for_seat", label: "waiting for a train seat", stuck: false, next: "x", actor: "system", decisionId: null, risk: "low", urgent: true, failedCheck: false, place: 1 }],
+      recent: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => json(server)));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Behind the queue")).toBeTruthy();
+    const button = screen.getByRole("button", { name: /Move to front/ });
+    expect(button.tagName).toBe("BUTTON");
+  });
 });
 
 // The Merge queue's attention layout (BOS-1239, design BOS-1207).
