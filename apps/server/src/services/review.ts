@@ -12,6 +12,7 @@ import type { runnersService } from "./runners.js";
 import { RunnerGone } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
+import { CI_TIMING, CiPublishError, ciStops, publishAndWait as ciPublishAndWait, type CiOutcome, type CiStop } from "./ci-publish.js";
 import { GitHostError, type CiStatus, type CommitChecks, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy, otherReviewers } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, recordReviewWait, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
@@ -126,17 +127,8 @@ const TRAIN_TRIAL_FALLBACK_MS = 10 * 60_000;
 const CHECK_MERGED_KEY = "check_merged_result";
 /** BOS-1070: the owner's switch for waiting on the git host's CI before a merge. Off until they turn it on. */
 const WAIT_FOR_CI_KEY = "wait_for_ci";
-/** BOS-1070: how the gate waits for CI. Tests pass shorter ones through deps.ciTiming. */
-export const CI_TIMING = {
-  /** How often the CI result is read. */
-  pollMs: 30_000,
-  /** No CI run at all this long after the push: the workflow doesn't run on bossman-ci/**, so the gate merges on its own check. */
-  graceMs: 10 * 60_000,
-  /** CI still running after this: a card, and the ticket stays in review. */
-  ceilingMs: 90 * 60_000,
-  /** First pause after a failed read of the CI result (5xx, timeout); it doubles, and the 4th failure stops with a card. */
-  retryMs: 15_000,
-};
+/** BOS-1070: how the gate waits for CI; moved to ci-publish.ts (BOS-1664) and kept exported here. */
+export { CI_TIMING };
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
 /** How long a merge waits for a runner that is away (a swap: image pull, slow start) before it counts as a failed try. */
@@ -199,20 +191,6 @@ type CarriedInfo = CarriedTicket & { title: string; risk: RiskTier | null };
 /** What one landing attempt ends with (landOnce). */
 type LandOnceResult = { outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown };
 
-/** BOS-1070: how a wait for the git host's CI ended. "stopped": the gate's own check failed first, so CI no longer mattered. */
-type CiOutcome =
-  | { kind: "passed"; reused?: boolean }
-  | { kind: "none" }
-  | { kind: "no_workflows" }
-  | { kind: "stopped" }
-  | { kind: "failed"; status: CiStatus }
-  | { kind: "refused"; message: string }
-  | { kind: "error"; message: string }
-  | { kind: "timeout"; waiting: string[] };
-/** Outcomes that end a merge attempt without merging: the other side (the gate's own check) need not finish. */
-const ciStops = (o: CiOutcome) => o.kind === "failed" || o.kind === "refused" || o.kind === "error" || o.kind === "timeout";
-/** Shared by the gate's own check and the CI wait running beside it: set by whichever ends the attempt first. */
-type CiStop = { stopped: boolean };
 
 /** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
 /** `adopt` (BOS-1371): a server that took charge picks up a merge whose check job is still live: skip "prepare" and wait on the job for this commit and tree; "finish" still pushes only if that exact tree is what the merge gives now. */
@@ -2192,51 +2170,26 @@ export function reviewService(
           });
         }
       }
-      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-      // One read of CI on a commit; a temporary failure (5xx, timeout) is asked again 3 times with a growing pause.
-      // A refusal (401/403/404) is never retried: the token lacks Actions: Read-only or can't see the repo.
-      const readCi = async (sha: string, stop: CiStop): Promise<CiStatus | CiOutcome> => {
-        for (let fails = 0; ; fails++) {
-          try {
-            return await deps.gitHosts!.ciStatus(ci!.cfg, ci!.token, sha);
-          } catch (err) {
-            if (err instanceof GitHostError && [401, 403, 404].includes(err.status)) return { kind: "refused", message: err.message };
-            if (fails >= 3) return { kind: "error", message: (err as Error).message };
-            await sleep(ciTiming.retryMs * 2 ** fails);
-            if (stop.stopped) return { kind: "stopped" };
-          }
-        }
-      };
-      const publishAndWait = async (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> => {
-        // The same tree on new parents keeps its pass (P11a), so nothing is pushed again.
-        if (ciPassedTrees.has(prep.tree)) return { kind: "passed", reused: true };
-        // Asked on the target's head before anything is pushed, so a token that can't read Actions runs costs no CI run.
-        const probe = await readCi(prep.targetSha, stop);
-        if ("kind" in probe) return probe;
-        const pub = await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit: prep.commit }), MERGE_WAIT_MS);
-        if (pub.status !== "published") throw new ReviewError(409, `The runner answered the CI publish with "${pub.status}"; nothing was merged.`);
-        if (!pub.hasWorkflows) return { kind: "no_workflows" };
-        await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${pub.branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
-        const since = Date.now();
-        ciWaits.set(ticketId, { since, waiting: [] });
-        try {
-          for (;;) {
-            if (stop.stopped) return { kind: "stopped" };
-            const s = await readCi(prep.commit, stop);
-            if ("kind" in s) return s;
-            if (s.state === "passed") return { kind: "passed" };
-            if (s.state === "failed") return { kind: "failed", status: s };
-            const waited = Date.now() - since;
-            if (s.state === "none" && waited >= ciTiming.graceMs) return { kind: "none" };
-            if (waited >= ciTiming.ceilingMs) return { kind: "timeout", waiting: s.waiting };
-            ciWaits.set(ticketId, { since, waiting: s.waiting });
-            await touch();
-            await sleep(ciTiming.pollMs);
-          }
-        } finally {
-          ciWaits.delete(ticketId);
-        }
-      };
+      // The push and the read live in ci-publish.ts (BOS-1664), where the pre-flight run reuses them.
+      const publishAndWait = (prep: { commit: string; tree: string; targetSha: string }, stop: CiStop): Promise<CiOutcome> =>
+        ciPublishAndWait(
+          {
+            hosts: deps.gitHosts!,
+            target: ci!,
+            timing: ciTiming,
+            passedTrees: ciPassedTrees,
+            publish: (commit) => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: "publish for CI", phase: "publish", commit }), MERGE_WAIT_MS),
+            announce: async (branch) => {
+              await record(db, { companyId: t.companyId, ticketId, kind: "merge_ci", summary: `Pushed the merge commit ${prep.commit.slice(0, 12)} to ${branch} for GitHub CI; Boss Man's own check runs at the same time. Nothing to do.` });
+            },
+            onWait: (s) => (s ? ciWaits.set(ticketId, s) : ciWaits.delete(ticketId)),
+            touch,
+          },
+          prep,
+          stop,
+        ).catch((err: Error) => {
+          throw err instanceof CiPublishError ? new ReviewError(409, err.message) : err;
+        });
       // Other tickets in this project that waited on an open CI card: CI can be read again, so start them.
       const startCiWaiters = () => {
         const held = ciCardWaiting.get(t.projectId);
