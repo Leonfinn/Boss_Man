@@ -22,5 +22,6 @@ for t in "${tests[@]}"; do
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG=C.UTF-8 "${extra[@]}" "$t" || rc=$?
   # BOSSMAN_SHELL_TIMES_FILE (set by check-all.sh): one "<script>\t<seconds>\t<exit>" line per test, for the result store (BOS-654).
   [ -z "${BOSSMAN_SHELL_TIMES_FILE:-}" ] || printf '%s\t%s\t%s\n' "$t" "$((SECONDS - began))" "$rc" >>"$BOSSMAN_SHELL_TIMES_FILE" 2>/dev/null || true
-  [ "$rc" -eq 0 ] || exit "$rc"
+  # Name the failing test: GitHub keeps only "exit code 1" for the step, so the log line is how a failure is found (BOS-1641).
+  [ "$rc" -eq 0 ] || { echo "test-shell: FAILED $t (exit $rc)" >&2; exit "$rc"; }
 done
