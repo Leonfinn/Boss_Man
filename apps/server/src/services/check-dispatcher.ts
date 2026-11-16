@@ -10,6 +10,9 @@ import { checkJobs, runners } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
 import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
+/** scripts/check-quick.sh prints this (and exits 75) when its install stopped on a machine error. */
+export const MACHINE_FAULT_MARKER = "check-quick: install stopped on a machine fault";
+export const MACHINE_FAULT_RETRIES = 3;
 import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
 export type CheckDispatcherDeps = {
@@ -96,6 +99,9 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
     const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, companyId));
     return runner && deps.isConnected(runner.id) && deps.bundles.canPack(runner.id) ? runner.id : null;
   }
+
+  /** BOS-1628: how many times a job went back in line after a machine fault (the counter is lost on a server restart, which only allows a few more tries). */
+  const machineFaults = new Map<string, number>();
 
   /** A job ended, was cancelled or went back in line: its bundle and its fetch state go. */
   function forgetCode(jobId: string, alsoExclusions: boolean) {
@@ -247,6 +253,23 @@ export function checkDispatcher(db: Db, deps: CheckDispatcherDeps) {
   }
 
   async function done(machine: string | { workerId: string }, msg: { jobId: string; commit: string; exitCode: number | null; timedOut: boolean; tail: string; fullLog?: string }) {
+    // BOS-1628: the install died of the machine (EAGAIN, ENOSPC, EMFILE), not the branch. Back in line, never a failed check for
+    // the agent, up to MACHINE_FAULT_RETRIES times for one job; after that it fails with the reason in the log, so it can't loop.
+    if (msg.exitCode === 75 && !msg.timedOut && msg.tail.includes(MACHINE_FAULT_MARKER)) {
+      const n = machineFaults.get(msg.jobId) ?? 0;
+      if (n < MACHINE_FAULT_RETRIES) {
+        const back = await queue.requeue(msg.jobId, `The check could not install its packages on this machine (a machine fault, not the code), so it went back in line (try ${n + 1} of ${MACHINE_FAULT_RETRIES}).`, machine);
+        if (back) {
+          machineFaults.set(msg.jobId, n + 1);
+          const ack = { type: "check.ack" as const, jobId: msg.jobId };
+          if (typeof machine === "string") deps.send(machine, ack);
+          else deps.workers?.send(machine.workerId, ack);
+          forgetCode(msg.jobId, false);
+          await pump();
+          return;
+        }
+      }
+    }
     const job = await queue.complete(msg.jobId, { runnerId: machine, commit: msg.commit, exitCode: msg.exitCode, logTail: msg.tail, timedOut: msg.timedOut, fullLog: msg.fullLog });
     // The machine may forget the result once the server has seen the job end, whether or not this answer counted.
     const ack = { type: "check.ack" as const, jobId: msg.jobId };

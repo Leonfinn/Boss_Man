@@ -85,6 +85,30 @@ step() { # step <label> <command...>
 }
 has() { grep -Eq "$1" <<<"$changed"; }
 
+# BOS-1628: pnpm's install on a fresh tree can die of the machine, not the branch: "EAGAIN ... copyfile" when the store and the
+# job folder sit on different filesystems (a check worker on a ZFS or overlay volume) and pnpm copies many files at once, or
+# a full disk (ENOSPC) or too many open files (EMFILE). Try again, gentler each time. Returns 75 (EX_TEMPFAIL) and prints the
+# marker line below if it still fails for that reason, so the server can put the check back in line instead of sending it to the
+# agent as a failed check. Any other failure (a bad lockfile, a missing package) returns the pnpm exit code at once.
+ENV_FAULT_MARKER="check-quick: install stopped on a machine fault"
+install_packages() {
+  local out rc=0 try
+  for try in 1 2 3; do
+    rc=0
+    if [ "$try" -eq 1 ]; then out="$(pnpm install --frozen-lockfile --prefer-offline 2>&1)" || rc=$?
+    else out="$(pnpm install --frozen-lockfile --prefer-offline --network-concurrency 2 --child-concurrency 1 2>&1)" || rc=$?; fi
+    [ "$rc" -ne 0 ] || break
+    printf '%s\n' "$out" | tail -n 20
+    if ! grep -Eq 'EAGAIN|ENOSPC|EMFILE|ENFILE|resource temporarily unavailable|no space left on device' <<<"$out"; then return "$rc"; fi
+    [ "$try" -lt 3 ] || { echo "$ENV_FAULT_MARKER (EAGAIN, ENOSPC or EMFILE after $try tries): the machine, not the branch; the check goes back in line"; return 75; }
+    echo "install failed on a machine error (try $try of 3); trying again with fewer files at once"
+    sleep "$((try * ${CHECK_QUICK_INSTALL_PAUSE:-5}))"
+  done
+  [ "$rc" -ne 0 ] || printf '%s\n' "$out" | tail -n 5
+  return "$rc"
+}
+env_fault=0
+
 # Tests that find their source files by path (readFileSync, readdirSync) instead of importing them: vitest related can't
 # see a change to those files, so only an entry here makes the test run for it (BOS-881). Add an entry when a test reads
 # files by path; one line per test, its package and the path prefixes it reads:
@@ -268,8 +292,14 @@ done
 # A tree that already has node_modules (an agent's checkout) is left as it is.
 web_build=0; ! has '^apps/web/|^packages/shared/' || web_build=1
 if { [ "$need_slot" -eq 1 ] || [ "$web_build" -eq 1 ]; } && [ ! -d node_modules ]; then
-  before=$failed failed=0
-  step "install packages (fresh tree, no node_modules)" pnpm install --frozen-lockfile --prefer-offline
+  before=$failed failed=0 irc=0
+  iout="$(install_packages 2>&1)" || irc=$?
+  if [ "$irc" -eq 0 ]; then echo "PASS  install packages (fresh tree, no node_modules)"
+  else
+    echo "FAIL  install packages (fresh tree, no node_modules) (exit $irc)"; printf '%s\n' "$iout" | tail -n 40 | sed 's/^/      /'; failed=1
+    # A machine fault with nothing else wrong so far: say so, so the check is retried, not blamed on the branch.
+    [ "$irc" -ne 75 ] || [ "$before" -ne 0 ] || env_fault=1
+  fi
   install_failed=$failed failed=$((before | failed))
   # Without packages every later pnpm step fails too: don't take a check slot just to say so again.
   if [ "$install_failed" -ne 0 ]; then
@@ -290,6 +320,7 @@ fi
 if has '\.sh$'; then step "ShellCheck" scripts/check-shell.sh; fi
 if [ "$web_build" -eq 1 ]; then step "build web" pnpm --filter @boss-man/web build; fi
 
+if [ "$failed" -ne 0 ] && [ "$env_fault" -eq 1 ]; then echo "$ENV_FAULT_MARKER: nothing of the branch was checked (exit 75)"; return 75; fi
 if [ "$failed" -ne 0 ]; then echo "check-quick: FAILED"; return 1; fi
 if [ "$skipped" -eq 1 ]; then echo "check-quick: nothing failed, but typecheck and related tests did not run (no check slot); run it again (exit 75)"; return 75; fi
 echo "check-quick: all steps passed (the merge gate still runs the full check)"
