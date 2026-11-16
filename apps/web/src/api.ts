@@ -131,7 +131,8 @@ export type AdvisedDecision = {
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 /** A card Boss Man closed by itself in the last couple of hours (BOS-739): the notice, and the steps it showed. */
 export type ClosedNotice = {
-  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn";
+  /** "closed": Boss Man closed it by its own check (its ticket finished, a plan approved elsewhere; BOS-1691). */
+  why: "live" | "newer" | "switched-back" | "replaced" | "withdrawn" | "closed";
   text: string;
   at: string;
   until: string;
@@ -180,7 +181,8 @@ export type Decision = {
   staleAt?: string | null;
   staleReason?: string | null;
   /** BOS-1193: set while the card is being re-checked but still shown (urgent, a live run, a merge card): who is checking it. */
-  rechecking?: { by: string; stage: "author" | "ceo" } | null;
+  /** BOS-1691: `hidden` when it is off the main list for the re-check (a line shows in its place); `backBy` is the latest it returns. */
+  rechecking?: { by: string; stage: "author" | "ceo"; backBy?: string; hidden?: boolean } | null;
   /** BOS-1193: set when nobody re-checked the card in an hour; says plainly who failed to. */
   notRechecked?: string | null;
   companyName: string;

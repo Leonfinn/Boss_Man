@@ -3,7 +3,7 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
+import { leaveClosedNotice, leaveWithdrawnNotice, parseReplacedBy, recheckBackBy as backByAt, recheckLine, switchedBackNotice, withdrawnNotice, type ClosedNotice, type ReplacedBy } from "./closed-notice.js";
 import type { NotifyInput } from "./notifications.js";
 import { applyFenceAnswer, applyFenceUnavailableAnswer, applyGuardAnswer, checkFenceAnswer } from "./fence-default.js";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
@@ -85,7 +85,7 @@ import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer, similar
 import { openReviewProposal } from "./skill-proposals.js";
 import { lineEvent } from "./merge-line.js";
 import { mergeContext } from "./decision-context.js";
-import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun } from "./card-validity.js";
+import { cardInvalidReason, closeCardBySystem, isCheckableCard, hiddenWhileRechecked, holdsLiveRun, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
 import { runFolder } from "./run-folder.js";
 import { runCapabilities } from "./run-capabilities.js";
 
@@ -519,7 +519,7 @@ export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Wi
  * A plan card whose run is still alive stays: that run is waiting on its answer, and closing it would leave the run hanging.
  * Both shapes count: the plan an agent submits (a question card with plan) and ExitPlanMode's (a permission card with plan).
  */
-export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown>; /** Who wrote the new plan, named in the closed card's note (BOS-1219). */ author?: string | null; /** Called for each closed card the owner had asked the CEO about (BOS-1219): moves that request to the new card. */ carryAdvice?: (from: { id: string; advice: Advice }) => Promise<unknown> }) {
+export async function supersedePlanCards(db: Db, input: { companyId: string; ticketId: string; newCardId: string; now?: Date; release?: (ticketId: string) => Promise<unknown>; /** Who wrote the new plan, named in the closed card's note (BOS-1219). */ author?: string | null; /** The owner's feed, told when they had the old card open (BOS-1691). */ notify?: (n: NotifyInput) => Promise<unknown>; /** Called for each closed card the owner had asked the CEO about (BOS-1219): moves that request to the new card. */ carryAdvice?: (from: { id: string; advice: Advice }) => Promise<unknown> }) {
   const at = input.now ?? new Date();
   const rows = await db
     .select({ id: decisions.id, question: decisions.question, companyId: decisions.companyId, context: decisions.context })
@@ -531,7 +531,7 @@ export async function supersedePlanCards(db: Db, input: { companyId: string; tic
   for (const r of rows) {
     // BOS-1193: the shared close path, so the old card's approve links are revoked and its ticket is released too.
     if (await holdsLiveRun(db, r.context)) continue;
-    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at, newer: { id: input.newCardId, author: input.author ?? null, at: at.toISOString() } })) {
+    if (await closeCardBySystem(db, r, note, { markRead: (id, when) => markDecisionNotificationRead(db, id, when), release: input.release, now: () => at, newer: { id: input.newCardId, author: input.author ?? null, at: at.toISOString() }, ...(input.notify ? { notify: input.notify } : {}) })) {
       cleared++;
       // BOS-1219: the owner's open "Ask the CEO" request moves to the new card. Only a request that was still open is moved.
       const advice = adviceOf(r.context);
@@ -1271,6 +1271,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let wake: WakeHook | null = null;
   // DR-058: the feed note a withdrawn owner card sends; wired in app.ts. Without it the card still gets its notice.
   let notifyFeed: ((n: NotifyInput) => Promise<unknown>) | null = null;
+  /** BOS-1691: the same feed for a card Boss Man closes by itself, read at call time so a hook wired later still counts. */
+  const feed = (n: NotifyInput) => (notifyFeed ? notifyFeed(n) : Promise.resolve(undefined));
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let secondOpinion: SecondOpinionHook | null = null;
@@ -1579,6 +1581,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const [author] = authorId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, authorId)) : [];
     return {
       author: author?.name ?? null,
+      notify: feed,
       carryAdvice: async (from: { id: string; advice: Advice }) => {
         const [moved] = await db
           .update(decisions)
@@ -2158,7 +2161,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // BOS-1193: the older card closes as superseded. Explicitly (replaces), or when the same agent asks the same thing
       // again on the same ticket (similarQuestion). Two different questions from one agent both stay open.
       if (!input.plan) {
-        const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now };
+        const closeDeps = { markRead: (id: string, when: Date) => markDecisionNotificationRead(db, id, when), release: (id: string) => releaseIfFree(id, false), now, notify: feed };
         const note = `superseded by ${raised.id}`;
         if (replaced) await closeCardBySystem(db, replaced, note, closeDeps).catch((err) => log(`closing the replaced card ${replaced!.id} failed: ${(err as Error).message}`));
         else if (input.agentId) {
@@ -2405,6 +2408,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * One card by id, settled or not (BOS-951): after an answer it drops off the open list, and the owner
      * and the CEO still need to read the question, the full answer and note. Null when the company doesn't hold it.
      */
+    /**
+     * BOS-1691: a card's full id from a full id or a prefix of at least 8 hex characters (the short form in logs and
+     * notes). "ambiguous" lists the matches so the caller can say which to pick; null when nothing matches.
+     */
+    async resolveCardId(given: string, companyId: string): Promise<{ id: string } | { ambiguous: string[] } | null> {
+      const raw = given.trim().toLowerCase();
+      if (UUID.test(raw)) return { id: raw };
+      if (!/^[0-9a-f-]{8,35}$/.test(raw)) return null;
+      const rows = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.companyId, companyId), sql`${decisions.id}::text like ${`${raw}%`}`))
+        .limit(6);
+      if (rows.length === 1) return { id: rows[0]!.id };
+      return rows.length ? { ambiguous: rows.map((r) => r.id) } : null;
+    },
+
     async cardById(id: string, companyId: string) {
       const [row] = await db
         .select({ d: decisions, raisedBy: agents.name })
@@ -2728,6 +2748,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // (BOS-1193) Cards in a live re-check, and which of them the owner must still see.
       const isRechecking = (r: (typeof sorted)[number]) => !!r.staleAt && (r.recheckStage === "author" || r.recheckStage === "ceo");
       const hiddenRechecks = await hiddenWhileRechecked(db, sorted);
+      const recheckBackBy = (r: (typeof sorted)[number]) => backByAt(r, RECHECK_AUTHOR_MS, RECHECK_CEO_MS);
       const waitingOf = (r: (typeof sorted)[number]): { reason: string } | null => {
         // (BOS-1159) A flagged card that still holds up a live ticket stays in the main list with its
         // answer buttons: the Board shows that ticket as waiting on the owner, and the raising agent may
@@ -2736,7 +2757,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // (BOS-1193, DR-054) A card being re-checked is folded away whatever it blocks: the Board agrees (it shows "card being
         // re-checked", not "Answer in Decisions"), and the card is back here, flagged as lapsed, if nobody settles it in an hour.
         // Urgent cards, a request holding a live run and merge/review-loop cards stay in the main list, marked.
-        if (hiddenRechecks.has(r.id)) return { reason: `Being re-checked by ${r.agentName ?? "the agent"} (${r.staleReason ?? "something it depends on changed"}). It comes back here if it is not confirmed or closed within the hour.` };
+        // BOS-1691: the line says who is checking it, after which of the owner's actions, and when it is back at the latest.
+        if (hiddenRechecks.has(r.id)) return { reason: recheckLine({ by: r.agentName ?? "the agent", reason: r.staleReason, backBy: recheckBackBy(r) }) };
         const c = contextOf(r);
         const t = cardTicket.get(r.id);
         if (aboutTicket(c) && t && t.state && AGENT_BACK_STATES.has(t.state)) {
@@ -2780,7 +2802,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         finalRows.map(async (r) => {
           // (BOS-1193) A card kept in the main list while it is re-checked says who is checking it; one that nobody re-checked in
           // time says plainly who failed to, not "may be out of date".
-          const rechecking = isRechecking(r) ? { by: r.agentName ?? "the agent", stage: r.recheckStage as "author" | "ceo" } : null;
+          const backBy = isRechecking(r) ? recheckBackBy(r) : null;
+          const rechecking = isRechecking(r) ? { by: r.agentName ?? "the agent", stage: r.recheckStage as "author" | "ceo", ...(backBy ? { backBy: backBy.toISOString() } : {}), hidden: hiddenRechecks.has(r.id) } : null;
           const notRechecked = r.staleAt && r.recheckStage === "lapsed" ? `Not re-checked: ${r.agentName ?? "the agent that raised it"} and the CEO didn't confirm this within an hour. Flagged because ${r.staleReason ?? "something it depends on changed"}.` : null;
           const withRefs = { ...r, refs: refs.get(r.id) ?? {}, rechecking, notRechecked };
           const w = waitingOf(r);
@@ -3199,7 +3222,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (isCheckableCard(d)) {
         const dead = await cardInvalidReason(db, d);
         if (dead) {
-          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now });
+          await closeCardBySystem(db, d, dead, { markRead: (cid, when) => markDecisionNotificationRead(db, cid, when), release: (tid) => releaseIfFree(tid, false), now, notify: feed });
           throw new AnswerError(`This card is no longer valid (${dead}), so Boss Man closed it instead of taking the answer.`);
         }
       }
@@ -3335,7 +3358,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type !== "permission") {
         try {
           const about = await decisionTicketIds(db, d);
-          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId], notify: feed });
         } catch (err) {
           log(`answering decision ${id} was saved, but marking related cards out of date failed: ${(err as Error).message}`);
         }
