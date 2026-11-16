@@ -77,11 +77,14 @@ if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && r
   rm -f "$keep"
   # The kept name already holds a file the run can't write (another user's, or read-only): the run still passes and its log is kept under another name.
   : >"$keep"; chmod 444 "$keep"
-  if [ ! -w "$keep" ]; then
+  # -w can say "not writable" for a read-only file that a bypassing runner (root, or a fenced /tmp) still writes, so probe with a real (empty) append.
+  if ! : 2>/dev/null >>"$keep"; then
     scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
     # shellcheck disable=SC2144
     grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log || fail "scratch: no fallback log beside a taken name: $(cat "$t/out")"
     rm -f /tmp/bossman-scratch-"$tid".*.log
+  else
+    echo "SKIP scratch: kept /tmp name not writable (this runner writes through a read-only file, so no fallback name is needed)"
   fi
   rm -f "$keep"
 fi
