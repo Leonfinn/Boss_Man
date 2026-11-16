@@ -91,7 +91,8 @@ describe("Settings → Runner during a planned swap (BOS-382 slice D)", () => {
     render(<SelfDeploy go={() => {}} />);
     expect(await screen.findByText(/this install doesn't have one/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Update runners (finish runs first)" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "how to set it up" }).getAttribute("href")).toMatch(/self-deploy\.md$/);
+    // The setup steps are in docs/30 (BOS-1572); docs/09 is how the deployer works, not how to install it.
+    expect(screen.getByRole("link", { name: "how to set it up" }).getAttribute("href")).toMatch(/30-in-app-updates\.md$/);
   });
 
   it("the fleet list tags a swapping runner Updating and a frozen one Paused", async () => {

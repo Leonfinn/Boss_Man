@@ -51,8 +51,9 @@ describe("merge queue screen (BOS-587)", () => {
     expect(row).toMatchObject({ title: "Fix the login", stuck: true, state: "check_failed_retrying", failedCheck: true });
     expect(row.label).toMatch(/check failed: retrying \(error TS1: bad\)/);
     expect(data.waitingCount).toBe(1);
-    // The side menu's warning badge counts stuck items (BOS-767).
-    expect(data.stuckCount).toBe(1);
+    // The side menu's warning badge follows the line's verdict (BOS-1594): one ticket's own failed check is flagged on its row, not a stuck line.
+    expect(data.stuckCount).toBe(0);
+    expect(data.line.state).not.toBe("stuck");
   });
 
   it("shows a stuck-check card as needs you, linking to the decision", async () => {
@@ -441,6 +442,35 @@ describe("merge queue screen in server mode (BOS-597)", () => {
     const d2 = await first.get(c.company.id);
     expect(d2.waiting.find((w) => w.ticketId === ids[0])!.label).toMatch(/^waiting for a check slot \(next up\)/);
     expect(d2.waiting.find((w) => w.ticketId === ids[1])!.label).toMatch(/^waiting for a check slot \(1 ahead\)/);
+  });
+
+  it("BOS-1594: tickets queued over an hour for a busy check slot are over capacity, so the side-menu stuck badge stays 0", async () => {
+    const c = (ctx = await setup());
+    await serverMode(c);
+    const old = new Date(Date.now() - 90 * 60_000);
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Long wait" })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review", lastActivityAt: old, stateChangedAt: old }).where(eq(tickets.id, t.id));
+    await c.db.insert(reviewRequests).values({ ticketId: t.id, kind: "code", round: 1, status: "approved" });
+    await job(c, t.id, "queued", "c".repeat(40));
+    // The line is landing: two merges 20 and 40 minutes ago.
+    for (const [i, ago] of [20, 40].entries()) {
+      const m = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: `Landed ${i}` })).json() as { id: string };
+      const at = new Date(Date.now() - ago * 60_000);
+      await c.db.update(tickets).set({ systemState: "done", mergeCommit: `abcdef${i}234567890`, stateChangedAt: at }).where(eq(tickets.id, m.id));
+    }
+    const service = mergeQueueService(c.db, {
+      runningMerges: () => [],
+      limit: async () => 2,
+      queueStatus: async () => ({ mode: "server", slots: 2, running: 2, waiting: 3 }),
+      runnerConnected: async () => true,
+      queueDetail: async () => ({ slots: 2, busy: [{ ref: "APP-1", title: "A", kind: "merge check" }, { ref: "APP-2", title: "B", kind: "merge check" }], mainRed: false, fixRef: null }),
+    });
+    const data = await service.get(c.company.id);
+    const row = data.waiting.find((w) => w.ticketId === t.id)!;
+    // The row itself still reads as an hour-old wait, but it is the line's own capacity at work, not a fault.
+    expect(row).toMatchObject({ state: "waiting_for_check_capacity", stuck: true });
+    expect(data.line.state).toBe("over_capacity");
+    expect(data.stuckCount).toBe(0);
   });
 
   it("keeps a plain wait with an empty queue, and counts only this company's jobs", async () => {

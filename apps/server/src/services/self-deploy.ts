@@ -1198,7 +1198,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const missing = !src || !deployer ? "Boss Man can't tell where the install or deployer folder is, so no command is shown here. Ask us on this ticket for the exact commands." : !host ? NO_HOST : null;
     const file = `${deployer}/host-deployer.sh`;
     const steps = [
-      missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && cp -v ${src}/scripts/host-deployer.sh ${file} && chown root:root ${file} && chmod 750 ${file}`)),
+      missing ?? step("Keep a copy of the current script, then copy the new one into the deployer folder. Run this on the machine that runs Boss Man. It prints the one file it copied:", cmd(`cp -p ${file} ${file}.old && BOSSMAN_DEPLOYER=${deployer} ${src}/scripts/install-deployer.sh`)),
       missing ?? step("Check it. Run this on the same machine; it prints two lines, and the long code at the start of both should be the same:", cmd(`sha256sum ${src}/scripts/host-deployer.sh ${file}`)),
     ];
     const check = "Within a couple of minutes this card closes by itself, once the host reports it runs the live script. Settings → Server and runner → This host then says \"Deployer script: current\".";

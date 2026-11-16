@@ -32,7 +32,7 @@ the backend and the databases are internal.
 ## Roll back
 
 `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot down` (keeps the
-data volumes), then delete `deploy/penpot.yml` and the `PENPOT_*` lines in `.env`. To also
+data volumes), then delete the `PENPOT_*` lines in `.env`. Leave `deploy/penpot.yml` in place: it is part of the checkout, and deleting it makes `scripts/deploy.sh` refuse to run because of the uncommitted change. To also
 delete Penpot's data (irreversible): add `-v` to `down`, only after a backup. This only touches
 the `boss-man-penpot` project's containers and volumes; Boss Man is not affected.
 

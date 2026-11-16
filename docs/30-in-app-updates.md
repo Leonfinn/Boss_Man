@@ -2,7 +2,7 @@
 
 This page is for owners who want to update Boss Man from its own web page, rather than by typing `scripts/deploy.sh` on the host. It works on any Linux host that runs Docker. A short section at the end covers TrueNAS SCALE.
 
-Once it is set up, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves. You approve it, and a root script on the host (the **host deployer**) runs `scripts/deploy.sh` for you. **Settings → Server and runner → Updates** gains **Deploy latest**, **Build and update runners** and **Restart the server**.
+Once it is set up, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves. You approve it, and a root script on the host (the **host deployer**) runs `scripts/deploy.sh` for you. **Settings → Server and runner → Updates** shows the same offer (**Review and deploy**, or **Check for updates now** when there is none), and gains **Build and update runners** and **Restart the server**.
 
 It is optional. Without it you update by hand, as [docs/23-updating.md](23-updating.md) says. How it works and what it refuses is in [docs/09-self-deploy.md](09-self-deploy.md). Nothing here gives a container the Docker socket: the server only drops request files in a folder, and the host script decides.
 
@@ -13,6 +13,16 @@ It is optional. Without it you update by hand, as [docs/23-updating.md](23-updat
 - On the host: `bash`, `git`, `docker`, `flock` and `curl`, and a way to run a command every minute (cron or a systemd timer).
 - **`main` protected on your git host,** so agents can only land reviewed pull requests. On GitHub: the repo's Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
 - The `src` checkout on `main`, clean, and able to read the remote (https for a public repo, the deploy key for a private one).
+
+## The short way: one script
+
+As root, in the checkout (`<install-dir>/src`), after step 1 below:
+
+```sh
+scripts/setup-host-deployer.sh
+```
+
+It does steps 2, 3, 6 (the `.env` lines) and 7 for you: the folders with the right owners and modes, the script copy, `BOSSMAN_DEPLOYER` and `COMPOSE_FILE` in `.env` (a dated backup of `.env` first), and a one-minute timer (systemd timer, or `/etc/cron.d`; on TrueNAS it prints the Cron Jobs form values). It ends with a trial run of the deployer and tells you the one command that restarts the server so it sees the folders (add `--recreate-server` to run it). A second run changes nothing, so it is safe to repeat. `--dry-run` shows what it would do, `--dir` names an install folder other than the one above the checkout, `--timer cron|systemd|none` picks the timer. Step 4 (the webhook) and step 5 (testing) stay as written, and nothing in the script writes a secret. Later copies of a changed script are made by `scripts/install-deployer.sh` (the same step a hand deploy runs, and the "deployer script is behind" card shows it); this script hands the refresh to it. The steps below are what the script does, for anyone who prefers to do them by hand or wants to check its work.
 
 Set two shell variables first. Replace the install folder if yours differs. If you open a new shell, set them again.
 
@@ -115,7 +125,7 @@ $D/host-deployer.sh && cat $D/outbox/available.json
 
 You should see a short block of JSON.
 
-Then rehearse a request without running anything. `--dry-run` runs every check and changes nothing:
+Optional: rehearse a request without running anything. `--dry-run` runs every check and changes nothing. Skip to step 6 if you would rather see the first real update in step 8:
 
 ```sh
 TIP=$(git -C $B/src ls-remote origin refs/heads/main | cut -f1)
@@ -176,7 +186,7 @@ The script must run as root once a minute. Every minute matters: an hourly job m
 
 Cron reads files in `/etc/cron.d` by itself. The file must belong to root and must not be writable by others (`chmod 644`). The user field (`root`) is part of this file format. Not tested by the project on every distribution: check after a few minutes, as below.
 
-**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). The project does not give a timer file.
+**On a host without cron,** use a systemd timer that runs the same command every minute (check with `systemctl --version`). `scripts/setup-host-deployer.sh --timer systemd` writes `boss-man-deployer.service` and `.timer` for you.
 
 **On TrueNAS,** use its web page instead: see "TrueNAS SCALE" below.
 
@@ -190,15 +200,15 @@ The log is `$D/deployer.log`.
 
 ## 8. Try it
 
-When `main` is ahead, a "Deploy abc1234?" decision appears, with a notification. **Settings → Server and runner → Updates → Deploy latest** raises it on demand. Approve it. Within a minute the host starts the update, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the host with `tail -f $D/deployer.log`.
+When `main` is ahead, a "Deploy abc1234?" decision appears, with a notification. **Settings → Server and runner → Updates → Check for updates now** asks the host to look at once. Approve it (on Decisions, or **Review and deploy** on Updates). Within a minute the host starts the update, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the host with `tail -f $D/deployer.log`.
 
-**Deploy** and **Deploy latest** update the server only. When an update changes the runners' code, a second decision "Update the runners?" appears after the server is deployed. Approving it builds the new runner image, then drains: runs in progress finish and each runner is swapped when its company is idle. Anything under `packages/shared/` counts as runner code, even text the runner never reads; when the change is only that, **Not now** is fine.
+A server deploy updates the server only. When an update changes the runners' code, a second decision "Update the runners?" appears after the server is deployed. Approving it builds the new runner image, then drains: runs in progress finish and each runner is swapped when its company is idle. Anything under `packages/shared/` counts as runner code, even text the runner never reads; when the change is only that, **Not now** is fine.
 
 ## What you may see instead of a deploy
 
 - **"Rejected: this change touches deployment files"**: run `scripts/deploy.sh` yourself in `$B/src`. The deployer refuses changes to files such as `scripts/`, `deploy/`, compose files and Dockerfiles.
-- **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Deploy latest**.
-- **"is not the tip of main"**: `main` moved after you approved. Approve the new one. The host looks at `main` at most every 5 minutes, so after two merges close together Boss Man can briefly offer the older one. To refresh at once: `rm -f $D/outbox/available.json` (the next minute writes a new one).
+- **"Rejected: only one server deploy every 10 minutes"**: wait, then press **Try again** on Updates.
+- **`main` moved after you approved:** nothing to do. The approval deploys the newest checked commit on `main`. Only if `main` was rewritten so the approved commit is gone do you see "is not on main any more"; a new question for `main` follows within a few minutes.
 - **An alert about deployment files you have already applied by hand**: the note was written before you did. Press **Got it**; it refreshes within about 6 minutes.
 - **Updates stuck behind an infra change.** The deployer offers only the tip of `main`. While an unapplied infra change is in that range, every later update waits behind it until you apply it by hand. Merge infra changes on their own, after the app changes before them are deployed.
 - **The update waits for free memory.** The deployer holds a request while the host is short of memory and tries again each minute. [docs/09-self-deploy.md](09-self-deploy.md#the-hosts-memory-floor-scriptshost-deployersh) explains the numbers.
