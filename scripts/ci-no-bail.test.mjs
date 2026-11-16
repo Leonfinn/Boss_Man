@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 
 test("every pnpm typecheck/test run in ci.yml is recursive with --no-bail", () => {
-  const lines = ci.split("\n").filter((l) => !/^\s*#/.test(l) && /pnpm\b.*\b(typecheck|test)\b/.test(l) && !/--filter|exec vitest/.test(l));
+  const lines = ci.split("\n").filter((l) => !/^\s*#/.test(l) && /pnpm (-r |--filter \S+ )?(--no-bail )?(typecheck|test)\b/.test(l) && !/--filter/.test(l));
   assert.ok(lines.length >= 3, "expected the check job's two steps and the worker-image run");
   for (const l of lines) assert.match(l, /pnpm -r --no-bail (typecheck|test)/, `missing --no-bail: ${l.trim()}`);
 });
