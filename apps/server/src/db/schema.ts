@@ -1791,7 +1791,33 @@ export const wikiSemanticSettings = pgTable("wiki_semantic_settings", {
   model: text("model").notNull().default("google/gemini-embedding-001"),
   dims: integer("dims").notNull().default(768),
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /**
+   * Also use the same provider and key for meaning search over the owner's past answers (BOS-1593). Off by
+   * default and ticked apart from the wiki, because it sends the owner's chat and ticket messages to the provider.
+   */
+  ownerAnswers: boolean("owner_answers").notNull().default(false),
 });
+
+/**
+ * One embedding per owner answer (BOS-1593): an answered card, an owner ticket message, an owner chat
+ * message or a lasting note, named by kind and source id. Only written while the company has meaning
+ * search for owner answers on; a copy of nothing but numbers, so the sources stay the record.
+ */
+export const ownerAnswerEmbeddings = pgTable(
+  "owner_answer_embeddings",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** card, ticket_reply, chat or note (services/owner-answers.ts). */
+    kind: text("kind").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    model: text("model").notNull(),
+    dims: integer("dims").notNull(),
+    embedding: vector("embedding", { dimensions: 768 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("owner_answer_embeddings_source").on(t.kind, t.sourceId), index("owner_answer_embeddings_company").on(t.companyId)],
+);
 
 /** One embedding per wiki section. Searched exactly (no index); add an HNSW index on embedding with vector_cosine_ops when sections number in the hundreds of thousands. */
 export const wikiSectionEmbeddings = pgTable(

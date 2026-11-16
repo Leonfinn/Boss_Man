@@ -237,7 +237,8 @@ export const OWNER_FIELDS = {
   ],
   Roadmap: ["Milestone", "Target date", "New milestone", "Company", "New objective", "Priority", "Where", "Show done work"],
   Wiki: [
-    "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words", "Provider address",
+    "Title", "Folder", "Page text, in Markdown", "Search the wiki", "Search by meaning as well as words",
+    "Also search your past answers by meaning", "Provider address",
     "Model (768 dimensions)", "API key", "Search",
   ],
   Features: [

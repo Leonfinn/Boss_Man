@@ -3,8 +3,9 @@
 // and the agent that wrote them is woken once to confirm or withdraw. A request the owner
 // has already answered is refused, quoting the earlier answer.
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
+import { agents, companies, decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
 import { closeInvalidCards, RECHECK_AUTHOR_MS, RECHECK_CEO_MS } from "./card-validity.js";
 
 type DecisionRow = typeof decisions.$inferSelect;
@@ -322,7 +323,17 @@ export async function recheckDeadlines(db: Db, input: { wake?: WakeFn | null; no
   return { lapsed: lapsed.map((l) => l.id), movedToCeo: toCeo.map((c) => c.id) };
 }
 
-export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date; /** The answered card, for a decision (BOS-1591). */ cardId?: string; /** The ticket the card was about, like "BOS-976" (BOS-1591). */ ticketRef?: string | null };
+export type OwnerAnswer ={ kind: "decision" | "message"; question: string | null; answer: string; at: Date; /** The answered card, for a decision (BOS-1591). */ cardId?: string; /** The ticket the card was about, like "BOS-976" (BOS-1591). */ ticketRef?: string | null; /** The owner's note on the card answer (BOS-1593). */ note?: string };
+
+/**
+ * Whether an answered card's answer stays true, so the same question asked again is a repeat (BOS-1591):
+ * not one the CEO settled (not the owner's word), and not a plan or a job for the owner's hands ("Done"),
+ * which can be asked again. Shared with the owner-answer search's refusal (BOS-1593).
+ */
+export function answerHoldsAsFact(ctx: { settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null | undefined): boolean {
+  if (!ctx) return true;
+  return !ctx.settled && !ctx.plan && !ctx.ownerMustDo && !ctx.steps?.length;
+}
 
 /** How far back a company-wide look for an answered question goes (BOS-1591). */
 export const ANSWERED_LOOKBACK_MS = 30 * 86_400_000;
@@ -410,17 +421,18 @@ export async function recentOwnerAnswer(db: Db, input: {
       if (!d.answer || !d.answeredAt) continue;
       const ctx = (d.context as { type?: string; ticketId?: string; settled?: unknown; plan?: boolean; ownerMustDo?: boolean; steps?: unknown[] } | null) ?? {};
       if (input.decisionTypes && !input.decisionTypes.includes(ctx.type ?? "")) continue;
-      if (ctx.settled) continue; // the CEO settled it: not the owner's answer
-      // A plan or a job for the owner's hands ("Done") records no fact that stays true, and can be asked again.
-      if (ctx.plan || ctx.ownerMustDo || ctx.steps?.length) continue;
+      if (!answerHoldsAsFact(ctx)) continue;
       if (!similarQuestion(input.question!, d.question)) continue;
       let ticketId = ctx.ticketId ?? null;
       if (!ticketId) {
         const [dep] = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id)).limit(1);
         ticketId = dep?.id ?? null;
       }
-      const [tk] = ticketId ? await db.select({ number: tickets.number }).from(tickets).where(eq(tickets.id, ticketId)) : [];
-      found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt, cardId: d.id, ticketRef: tk ? `BOS-${tk.number}` : null });
+      // The company's own prefix (BOS-1593: it was always "BOS-", wrong for every other company).
+      const [tk] = ticketId ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId)) : [];
+      const note = (d.context as { answerNote?: unknown } | null)?.answerNote;
+      // The owner's note is often the real answer ("Yes" + "Done, I've made it public."), so it is quoted too (BOS-1593).
+      found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt, cardId: d.id, ticketRef: tk ? ticketRef(tk.prefix, tk.number) : null, ...(typeof note === "string" && note.trim() ? { note: note.trim() } : {}) });
       break; // newest first: the latest match is the one quoted
     }
   } else if (ids.length) {
@@ -475,5 +487,5 @@ export async function answeredBefore(db: Db, input: { companyId: string; ticketI
 export function quotedAnswer(a: OwnerAnswer, at = (d: Date) => d.toISOString().slice(0, 16).replace("T", " ")): string {
   const what = a.kind === "decision" && a.question ? `your question "${a.question}"` : "this ticket";
   const where = a.cardId ? ` (card ${a.cardId}${a.ticketRef ? ` on ${a.ticketRef}` : ""})` : "";
-  return `The owner already answered ${what}${where} on ${at(a.at)} UTC: "${a.answer}"`;
+  return `The owner already answered ${what}${where} on ${at(a.at)} UTC: "${a.answer}"${a.note ? `; their note: "${a.note.length > 300 ? `${a.note.slice(0, 299)}…` : a.note}"` : ""}`;
 }
