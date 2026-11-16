@@ -306,9 +306,13 @@ if [[ $1 == ps && $2 == --filter ]]; then
   esac
   exit 0
 fi
+if [[ $1 == exec && $2 == ntfy-1 && $3 == wget ]]; then
+  printf '# TYPE ntfy_subscribers_total gauge\nntfy_subscribers_total %s\n' "${FAKE_NTFY_SUBS:-2}"
+  exit 0
+fi
 if [[ $1 == inspect && $2 == -f ]]; then
   case $4 in
-    ntfy-1) echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
+    ntfy-1) [[ $3 == *StartedAt* ]] && echo "2026-11-14T10:00:00.123456789Z" || echo "${FAKE_NTFY_NETS:-bm_edge }" ;;
     sg1) echo "bm_front bm_internal " ;;
   esac
   exit 0
@@ -322,6 +326,10 @@ node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.container!=="ntfy-1"||n.
 hasnt "$D/outbox/host.json" 'bm_front'
 FAKE_NTFY_NETS="bm_edge bm_front " "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy on front) exited non-zero"; }
 node -e 'const n=require(process.argv[1]).ntfy;if(!n||n.serverReach!==true)process.exit(1)' "$D/outbox/host.json" || fail "ntfy on the front network must report serverReach true: $(cat "$D/outbox/host.json")"
+# BOS-1589: the report carries when ntfy last started and how many phones are connected now (0 = a silent phone).
+node -e 'const n=require(process.argv[1]).ntfy;if(n.startedAt!=="2026-11-14T10:00:00.123456789Z"||n.subscribers!==2)process.exit(1)' "$D/outbox/host.json" || fail "ntfy facts must carry startedAt and subscribers 2: $(cat "$D/outbox/host.json")"
+FAKE_NTFY_SUBS=0 "$T/nt/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (ntfy 0 subscribers) exited non-zero"; }
+node -e 'const n=require(process.argv[1]).ntfy;if(n.subscribers!==0)process.exit(1)' "$D/outbox/host.json" || fail "0 subscribers must be reported as 0: $(cat "$D/outbox/host.json")"
 # --facts writes the report on demand, with no request and no deploy run (BOS-986), so a fix can be checked at once.
 printf '{"id":"x"\n' >"$D/inbox/request.json"
 rm -f "$D/outbox/host.json"; : >"$STUB_LOG"
@@ -1231,7 +1239,7 @@ plreq() { # action user topic pubkey [id]: write a request the way the server do
   rm -f "$PD/state/last-phone-login"
 }
 plhost() { BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero (phone login)"; }; }
-plx() { grep -c '^docker exec' "$PLLOG" || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect don't count)
+plx() { grep '^docker exec' "$PLLOG" | grep -vc ' wget -qO- http://localhost:9090/metrics' || true; } # how many commands ran inside a container (the tick's own read-only ps/inspect and the ntfy metrics read don't count)
 plres() { jget "$PD/outbox/phone-login.json" "$1"; }
 unseal() { jget "$PD/outbox/phone-login.json" sealed | base64 -d | openssl pkeyutl -decrypt -inkey "$PL/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256; }
 no_plaintext() { # the password must be in nothing the deployer or the log wrote, nor on any command line
@@ -1288,9 +1296,9 @@ plreq reset phone-read alerts "$PUB"; plhost; plreq reset phone-read alerts "$PU
 if [[ $(plres result) == rejected ]] && has "$PD/outbox/phone-login.json" "30 seconds" && [[ $(plx) == 0 ]]; then :; else fail "PL6: $(cat "$PD/outbox/phone-login.json")"; fi
 # PL7. No ntfy container, or two: nothing is changed.
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="" plhost
-[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == unavailable ]] || fail "PL7a: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 plreq create phone-read alerts "$PUB"; : >"$PLLOG"; PL_CIDS="abc123def456 fed654cba321" plhost
-[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec"
+[[ $(plres result) == failed ]] || fail "PL7b: $(cat "$PD/outbox/phone-login.json")"; hasnt "$PLLOG" "exec -e"
 # PL8. A failing ntfy command is reported without the password, and a failed create leaves no sealed answer.
 : >"$PLW/users"
 plreq create phone-read alerts "$PUB"; PL_FAIL=user plhost
