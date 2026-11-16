@@ -6,7 +6,8 @@ import { away } from "../server-watch";
 import { Loader } from "../components/Loader";
 
 type Tokens = { input: number; output: number };
-type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; topTickets: { id: string; title: string; micros: number }[] };
+type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; plan?: { provider: string; monthRuns: number; totalRuns: number; monthMicros: number; totalMicros: number }[]; topTickets: { id: string; title: string; micros: number; planMicros: number }[] };
+const PROVIDER_NAMES: Record<string, string> = { anthropic: "Claude", openai: "Codex", synthetic: "Synthetic" };
 
 const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
 
@@ -46,15 +47,41 @@ export function ProjectLimitForm({ project }: { project: Project }) {
 export function ProjectBudget({ project }: { project: Project }) {
   const spend = usePoll((signal) => api<Spend>(`/api/projects/${project.id}/spend`, { signal }), 30_000, `spend-${project.id}`);
   const s = spend.data;
+  const plan = s?.plan ?? [];
   if (spend.error && !away(spend.error)) return <p className="error" role="alert">{spend.error.message}</p>;
   if (!s) return <Loader label="Loading the budget" />;
   return (
     <>
-      <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
-        <div><dt className="muted">API and credit runs, this month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
-        <div><dt className="muted">API and credit runs, all time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
-        <div><dt className="muted">Cap per task</dt><dd style={{ fontSize: 24, margin: 0 }}>{s.ticketCostCapMicros ? usd(s.ticketCostCapMicros) : "None"}</dd></div>
-      </dl>
+      <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+        <section aria-label="Pay-as-you-go spend" style={{ flex: "1 1 280px" }}>
+          <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>Pay-as-you-go spend</h2>
+          <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
+            <div><dt className="muted">This month</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.monthMicros)}</dd></div>
+            <div><dt className="muted">All time</dt><dd style={{ fontSize: 24, margin: 0 }}>{usd(s.totalMicros)}</dd></div>
+          </dl>
+          <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Estimates at list prices, from the accounts you pay per use (such as OpenRouter or Ollama credit).</p>
+        </section>
+        <section aria-label="On your subscriptions" style={{ flex: "1 1 280px" }}>
+          <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>On your subscriptions</h2>
+          {plan.length ? (
+            <dl style={{ margin: 0 }}>
+              {plan.map((p) => (
+                <div key={p.provider} style={{ marginBottom: 6 }}>
+                  <dt className="muted">{PROVIDER_NAMES[p.provider] ?? p.provider}, this month</dt>
+                  <dd style={{ margin: 0 }}>
+                    {p.monthRuns} {p.monthRuns === 1 ? "run" : "runs"}
+                    {p.totalMicros > 0 ? <> · <span className="muted">about </span><span className="mono">{usd(p.monthMicros)}</span> <span className="muted">at list prices</span></> : p.totalRuns > 0 ? <span className="muted"> · no price reported by this agent tool, so no estimate</span> : null}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className="muted" style={{ margin: 0 }}>No runs on a subscription yet.</p>
+          )}
+          <p className="muted" style={{ fontSize: 13, margin: "4px 0 0" }}>Plan fees aren't shown. The estimate is what the runs would have cost at list prices, not a bill. See each plan's allowance on the <a href={`#/settings/${project.companyId}/funding`}>Funding cards</a>.</p>
+        </section>
+      </div>
+      <p style={{ margin: "8px 0 0" }}><span className="muted">Cap per task (pay-as-you-go and subscription runs together): </span><strong>{s.ticketCostCapMicros ? usd(s.ticketCostCapMicros) : "None"}</strong></p>
       {s.monthlyCapMicros ? (
         <div>
           <label htmlFor="month-cap">{usd(s.monthMicros)} of the {usd(s.monthlyCapMicros)} monthly cap (API and credit runs only)</label>
@@ -76,17 +103,18 @@ export function ProjectBudget({ project }: { project: Project }) {
         </>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Costliest tasks</h2>
-      <p className="muted" style={{ fontSize: 13, margin: 0 }}>API and credit runs only; subscription runs aren't counted.</p>
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>Pay-as-you-go spend, and on subscriptions what the runs would have cost at list prices (about). Ranked by the two together.</p>
       {s.topTickets.length ? (
         <ol>
           {s.topTickets.map((t) => (
             <li key={t.id}>
               <a href={`#/tickets/${t.id}`}>{t.title}</a> <span className="mono">{usd(t.micros)}</span>
+              {t.planMicros > 0 && <span className="muted"> + about <span className="mono">{usd(t.planMicros)}</span> on subscriptions</span>}
             </li>
           ))}
         </ol>
       ) : (
-        <p>No API or credit spend on this project's tasks yet. Subscription runs don't show here.</p>
+        <p>No spend or priced plan runs on this project's tasks yet.</p>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24 }}>Spending limit</h2>
       <ProjectLimitForm project={project} />

@@ -34,7 +34,9 @@ sections:
   - Approved, merging
   - Costliest tasks
   - Filter tasks
+  - On your subscriptions
   - Passed, held
+  - Pay-as-you-go spend
   - Project brief
   - Spending limit
   - Tokens
@@ -203,6 +205,8 @@ sections:
   - Budgets
   - Costliest tasks
   - Funding sources
+  - On your subscriptions
+  - Pay-as-you-go spend
   - Spending limit
   - Spending limits
   - Tokens
