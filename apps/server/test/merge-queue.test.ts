@@ -40,6 +40,23 @@ describe("merge queue screen (BOS-587)", () => {
     expect(failingStep("error: something broke")).toBe("error: something broke");
   });
 
+  // R28: approved tickets held by mergeWaits on a fix marked fixesMergeCheck: one line from the function that holds, not "healthy".
+  it("reads held_behind_fix for approved tickets waiting on a marked fix, and stuck fix_stalled when the fix is parked", async () => {
+    const c = (ctx = await setup());
+    const mk = async (title: string) => (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+    const fix = await mk("Fix main CI");
+    await c.db.update(tickets).set({ systemState: "in_progress", fixesMergeCheck: true }).where(eq(tickets.id, fix.id));
+    for (const title of ["Held one", "Held two"]) {
+      const t = await mk(title);
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+      await approve(c, t.id);
+    }
+    const data = await queue(c);
+    expect(data.line).toMatchObject({ state: "held_behind_fix", held: 2, fixes: [{ ticketId: fix.id, stateText: "being fixed", ownerUpdate: false }] });
+    await c.db.update(tickets).set({ systemState: "ready" }).where(eq(tickets.id, fix.id));
+    expect((await queue(c)).line).toMatchObject({ state: "stuck", cause: "fix_stalled", others: 2 });
+  });
+
   it("lists a ticket in review with a failed check, and flags it as stuck", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the login" })).json() as { id: string; number: number };

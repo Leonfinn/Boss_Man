@@ -10,6 +10,7 @@ import { api } from "../api";
 import { usePoll, useRoute } from "../hooks";
 import { ago } from "./Dashboard";
 import { Loader } from "../components/Loader";
+import { HeldBehindFixLine, heldSummary, type MergeLine } from "../components/MergesStuckBanner";
 
 type Phase = "queued" | "checking" | "merging" | "waiting_to_retry";
 type RunningNow = { ticketId: string; ref: string | null; title: string; phase: Phase; startedAt: string; startedBy: string; minutes: number; what: "merge_check" | "agent_check"; slot: number; overLimit: boolean; ci?: { minutes: number; waiting: string[] }; statusLine?: StatusLine };
@@ -20,7 +21,7 @@ type CarriedHold = { ticketId: string | null; ref: string | null; title: string 
 type HoldingCard = { id: string; kind: "sign_off" | "hold" | "merge"; question: string; raisedBy: string | null; raisedAt: string; staleHint: string | null };
 type WaitingRow = { ticketId: string; ref: string | null; title: string; minutes: number; state: WaitingState; label: string; stuck: boolean; next: string | null; actor: "agent" | "ceo" | "owner" | "system" | null; decisionId: string | null; risk: string; urgent: boolean; failedCheck: boolean; carried?: CarriedHold[]; card?: HoldingCard | null; signedOffAt?: string | null; place?: number | null; why?: string | null; statusLine?: StatusLine };
 type RecentRow = { ticketId: string; ref: string | null; title: string; result: "merged" | "check_failed"; detail: string; at: string };
-type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number };
+type MergeQueueData = { companyId: string; mode: "legacy" | "server"; slots: number; running: RunningNow[]; waiting: WaitingRow[]; recent: RecentRow[]; waitingCount: number; line?: MergeLine };
 
 const PHASE: Record<Phase, string> = { queued: "about to start the check", checking: "running the check", merging: "merging", waiting_to_retry: "trying again after the runner restarted" };
 const ACTOR: Record<NonNullable<WaitingRow["actor"]>, string> = { agent: "the agent", ceo: "the CEO", owner: "you", system: "Boss Man" };
@@ -428,6 +429,7 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const failed = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state === "check_failed_retrying").length : 0;
   const stuck = data ? data.waiting.filter((r) => r.actor !== "owner" && r.state !== "check_failed_retrying" && r.stuck).length : 0;
   const heldChecks = cq ? cq.rows.filter((r) => r.heldByMain).length : 0;
+  const heldBehind = heldSummary(data);
   const base = `#/merge-queue/${companyId}`;
 
   const pick = (t: Tab) => go(t === "checks" ? `merge-queue/${companyId}/checks` : `merge-queue/${companyId}`);
@@ -450,6 +452,8 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
   const pills = [
     needsYou.length > 0 && { key: "needs", tone: "amber", text: `${needsYou.length} need you`, href: tab === "merges" ? undefined : base, onClick: jump("mq-needs", "merges") },
     heldChecks > 0 && { key: "red", tone: "red", text: `Main is red: ${heldChecks} ${heldChecks === 1 ? "check" : "checks"} held`, href: `${base}/checks`, onClick: undefined },
+    // R28: the other "main is red": approved tickets held behind a marked fix, before any check was queued. One pill per red.
+    heldBehind && heldChecks === 0 && { key: "red-fix", tone: "amber", text: `Main is red: ${heldBehind.held} ${heldBehind.held === 1 ? "ticket" : "tickets"} held behind ${heldBehind.fixes.map((f) => f.ref ?? f.title).join(" and ")}`, href: tab === "merges" ? undefined : base, onClick: jump("mq-held-fix", "merges") },
     failed > 0 && { key: "failed", tone: "red", text: `${failed} check failed`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-failed", "merges") },
     stuck > 0 && { key: "stuck", tone: "red", text: `${stuck} stuck over an hour`, href: tab === "merges" ? undefined : base, onClick: jump("mq-first-stuck", "merges") },
   ].filter(Boolean) as { key: string; tone: string; text: string; href: string | undefined; onClick: ((e: MouseEvent<HTMLAnchorElement>) => void) | undefined }[];
@@ -498,6 +502,11 @@ export function MergeQueue({ companies, companyId }: { companies: Company[]; com
             <Loader label="Loading the merge queue" />
           ) : data ? (
             <>
+              {heldBehind && (
+                <div id="mq-held-fix" tabIndex={-1}>
+                  <HeldBehindFixLine held={heldBehind} />
+                </div>
+              )}
               <NeedsYou rows={needsYou} />
               <Running rows={data.running} slots={data.slots} />
               <Waiting rows={data.waiting} companyId={companyId} onMoved={() => { mq.reload(); cqPoll.reload(); }} />
