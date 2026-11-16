@@ -27,7 +27,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_BUNDLE_MAX_HAVES, CHECK_TOOLS, ciBranchFor, DEPLOY_REF, type CheckBundleInfo, prepareFullLog, FULL_LOG_MAX, FULL_LOG_HEAD, deployTagNameProblem, detectChecks, type ResolveResult, type TagResult, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MergeLineConflict, type MergeLineConflictsResult, type MigrationsResult, type PushResult, type Uncommitted, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, RELEASED_SCRATCH_KEEP_MS, SCRATCH_KEEP_MS, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
 import { GitConfigGuard } from "./git-config-guard.js";
 import { withoutCoreDumps } from "./no-core.js";
@@ -105,10 +105,11 @@ function runGroup(bin: string, args: string[], cwd: string, env: NodeJS.ProcessE
   });
 }
 
+/** A split merge's step (BOS-316; `base` / `expectBase` are the merge train's, BOS-1366), and the git host's CI publish around it (BOS-1070). */
+export type MergeStep = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
+export type MergePhase = MergeStep | { phase: "publish"; commit: string } | { phase: "unpublish" };
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
-/** A server-queued merge's phase (BOS-316); `base` / `expectBase` are the merge train's (BOS-1366). */
-export type MergePhase = { phase: "prepare"; base?: string } | { phase: "finish"; commit: string; tree: string; expectBase?: string };
 
 /**
  * Git credentials from the run's granted secrets, passed through the environment only.
@@ -1882,9 +1883,10 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null, phase: MergePhase | null = null, pin?: string, expectTree?: string): Promise<MergeResult> {
+    if (phase?.phase === "publish" || phase?.phase === "unpublish") return this.ciPublish(spec, secrets, phase);
     if (phase) return this.mergePhase(spec, target, message, secrets, phase, pin);
-    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, pin);
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS, expectTree, pin);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -1901,6 +1903,8 @@ export class Workspaces {
         const moved = pinMoved(tried.branchSha, pin);
         if (moved) return moved;
         const { tree, targetSha, branchSha } = tried;
+        // The git host's CI passed this tree (BOS-1070): anything else would land untested by it.
+        if (expectTree && tree !== expectTree) return { status: "main_moved" };
         // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
         const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
         const problems = journalProblems(await journalAt(gitIn, targetSha), await journalAt(gitIn, tree), Date.now(), target);
@@ -1920,7 +1924,7 @@ export class Workspaces {
    * ref so the queued check can open exactly that commit; nothing is pushed. "finish" pushes the checked commit only if the merge
    * of the branch and the target's current tip still has the checked tree; otherwise main_moved, and the server prepares again.
    */
-  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergePhase, pin?: string): Promise<MergeResult> {
+  private async mergePhase(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, phase: MergeStep, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     // Merge train (BOS-1366): prepare stacks on a given base; finish refuses unless main's tip is exactly the expected base.
     const base = phase.phase === "prepare" ? phase.base : phase.expectBase;
@@ -1969,6 +1973,38 @@ export class Workspaces {
   }
 
   /**
+   * The merge gate's CI publish (BOS-1070). "publish" force-pushes a commit "prepare" built (kept under refs/bossman/merge/<id>)
+   * to origin's bossman-ci/<id>, so the git host's CI runs on exactly what would land; a commit with no .github/workflows has
+   * no CI to run, so nothing is pushed and the server is told. "unpublish" deletes that branch once the merge is done.
+   * Neither records a refs/remotes/origin ref (unlike pushOrigin): the branch is the host's, not a ticket's.
+   */
+  private async ciPublish(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, secrets: Record<string, string | undefined>, phase: { phase: "publish"; commit: string } | { phase: "unpublish" }): Promise<MergeResult> {
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(spec.projectId);
+    const branch = ciBranchFor(spec.ticketId);
+    return this.withRepoLock(spec.projectId, async (): Promise<MergeResult> => {
+      const url = await this.remoteUrl(repo);
+      if (phase.phase === "unpublish") {
+        const r = await this.gitCode(["push", "--quiet", url, `:refs/heads/${branch}`], { cwd: repo, env: auth });
+        // Never published, or already deleted: nothing to do.
+        if (r.code !== 0 && !/remote ref does not exist|unable to delete/i.test(r.stderr)) throw new Error(`Couldn't delete ${branch} on origin: ${r.stderr.slice(0, 500)}`);
+        // A fetch since publishing copied it into the agents' view; it goes from there too.
+        await this.git(["update-ref", "-d", `refs/remotes/origin/${branch}`], { cwd: repo }).catch(() => undefined);
+        return { status: "unpublished", branch };
+      }
+      // Only the commit this ticket's prepare built: never an arbitrary sha from the request.
+      const kept = await this.git(["rev-parse", "--verify", "--quiet", `refs/bossman/merge/${spec.ticketId}^{commit}`], { cwd: repo }).catch(() => "");
+      if (kept !== phase.commit) throw new Error(`The commit to publish (${phase.commit.slice(0, 12)}) isn't the one this ticket's merge prepared; prepare it again.`);
+      const workflows = await this.gitCode(["ls-tree", "--name-only", phase.commit, ".github/workflows/"], { cwd: repo });
+      const hasWorkflows = workflows.code === 0 && /\.ya?ml$/m.test(workflows.stdout);
+      if (!hasWorkflows) return { status: "published", branch, commit: phase.commit, hasWorkflows: false };
+      const r = await this.gitCode(["push", "--quiet", "--force", url, `${phase.commit}:refs/heads/${branch}`], { cwd: repo, env: auth });
+      if (r.code !== 0) throw new Error(`Couldn't push the merge commit to ${branch} for the git host's CI: ${r.stderr.slice(0, 500)}`);
+      return { status: "published", branch, commit: phase.commit, hasWorkflows: true };
+    });
+  }
+
+  /**
    * Merges like merge(), but checks the merge commit itself before pushing it (BOS-313, F6).
    * Two branches that each pass alone can break the target together, so the check runs on a
    * temporary detached worktree of the commit that will be pushed, and exactly that commit is
@@ -1976,7 +2012,7 @@ export class Workspaces {
    * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
    * a changed one is checked again (three checks at most, then main_moved so the caller retries).
    */
-  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, pin?: string): Promise<MergeResult> {
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number, expectTree?: string, pin?: string): Promise<MergeResult> {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
@@ -2008,6 +2044,8 @@ export class Workspaces {
         const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
         if (problems.length) return { status: "migration_journal" as const, problems };
         if (refused && refused.targetSha === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${refused.stderr.slice(0, 500)}`);
+        // Only the tree the git host's CI passed may land (BOS-1070); a different one goes back to be published again.
+        if (expectTree && tried.tree !== expectTree) return { status: "main_moved" as const };
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         if (!checked || tried.tree !== checked.tree) {
           dir = path.join(base, `${round}-${Date.now().toString(36)}`);

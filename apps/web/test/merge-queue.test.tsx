@@ -98,6 +98,17 @@ describe("merge queue screen (BOS-587)", () => {
     expect(screen.queryByRole("link", { name: "Needs you: open the card" })).toBeNull();
   });
 
+  it("says a running merge is also waiting for GitHub CI, with the jobs left and the minutes so far (BOS-1070)", async () => {
+    const running = [{ ...data.running[0], ci: { minutes: 12, waiting: ["images (arm64)", "check"] } }];
+    vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, running })));
+    render(<MergeQueue companies={[company]} companyId="c1" />);
+    expect(await screen.findByText("Merging now")).toBeTruthy();
+    const row = screen.getAllByRole("article")[0]!;
+    expect(row.querySelector("[data-ci-wait]")?.textContent).toBe("Waiting for GitHub CI: images (arm64), check, 12 min so far. It merges only once CI passes.");
+    // The check line beside it still says the check is running: both go on at once.
+    expect(row.textContent).toContain("running the check");
+  });
+
   it("says plainly when nothing is waiting or running", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ ...data, waitingCount: 0, running: [], waiting: [], recent: [] })));
     render(<MergeQueue companies={[company]} companyId="c1" />);

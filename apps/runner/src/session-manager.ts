@@ -17,9 +17,28 @@ import { withoutCoreDumps } from "./no-core.js";
 import { checkBossManTools, mcpPreflight } from "./mcp-preflight.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, shortTmpName, type FenceLevel } from "./fence.js";
-import { gitAuthorEnv, isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
+import { gitAuthorEnv, isClone, RepoLockTimeout, type MergePhase, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
+
+/**
+ * A merge request's step. A step named without what it needs is "invalid" and refused: before BOS-1070 a "finish" with
+ * no commit fell through to a plain merge, which pushes to the target unchecked.
+ */
+export function mergePhaseOf(c: Extract<RunnerCommand, { type: "workspace.merge" }>): MergePhase | null | "invalid" {
+  switch (c.phase) {
+    case undefined:
+      return null;
+    case "prepare":
+      return { phase: "prepare", ...(c.base ? { base: c.base } : {}) };
+    case "unpublish":
+      return { phase: "unpublish" };
+    case "publish":
+      return c.commit ? { phase: "publish", commit: c.commit } : "invalid";
+    case "finish":
+      return c.commit && c.tree ? { phase: "finish", commit: c.commit, tree: c.tree, ...(c.expectBase ? { expectBase: c.expectBase } : {}) } : "invalid";
+  }
+}
 
 /** How long one preflight attempt may take before it counts as failed, and how many attempts a run makes. */
 const MCP_PREFLIGHT_TIMEOUT_MS = 10_000;
@@ -720,7 +739,9 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets, command.pin)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, command.phase === "prepare" ? { phase: "prepare", ...(command.base ? { base: command.base } : {}) } : command.phase === "finish" && command.commit && command.tree ? { phase: "finish", commit: command.commit, tree: command.tree, ...(command.expectBase ? { expectBase: command.expectBase } : {}) } : null, command.pin),
+                      : mergePhaseOf(command) === "invalid"
+                        ? Promise.reject(new Error(`The "${command.phase}" merge step needs its commit${command.phase === "finish" ? " and tree" : ""}; nothing was merged.`))
+                        : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null, mergePhaseOf(command) as MergePhase | null, command.pin, command.expectTree),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),

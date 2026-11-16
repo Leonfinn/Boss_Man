@@ -280,6 +280,8 @@ export const OWNER_FIELDS = {
     "Hold new starts while this many quick checks are queued (leave empty for off)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
+    // Settings → Checks: hold each merge until GitHub CI passes on it (BOS-1070).
+    "Wait for GitHub CI before merging",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Merge approved work in the order it was approved",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.

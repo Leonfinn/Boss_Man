@@ -828,7 +828,42 @@ export function CheckQueueSetting() {
         </button>
       </div>
       {act.view}
+      <WaitForCiSetting />
     </Section>
+  );
+}
+
+/** BOS-1070: the owner's switch for the merge gate waiting on GitHub CI. Off by default. */
+export function WaitForCiSetting() {
+  const view = usePoll((signal) => api<{ on: boolean }>("/api/settings/wait-for-ci", { signal }), 60_000, "wait-for-ci");
+  const act = useAction();
+  const on = view.data?.on;
+  if (on === undefined) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }} data-testid="wait-for-ci">
+      <label style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={act.busy}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void act.run(async () => {
+              await api("/api/settings/wait-for-ci", { method: "PUT", body: { on: next } });
+              view.reload();
+              return next ? "Saved. Merges now wait for GitHub CI." : "Saved. Merges no longer wait for GitHub CI.";
+            });
+          }}
+        />
+        <span>
+          <strong>Wait for GitHub CI before merging</strong> <span className="tag">GitHub only</span>{" "}
+          <span className="muted">
+            Before each merge Boss Man pushes the exact merged result to a bossman-ci/ branch on GitHub and merges only once GitHub CI passes on it, while its own check runs at the same time. A CI failure goes back to the agent with the failing jobs and tests. Each merge uses GitHub Actions minutes, which a private repo pays for. Projects on other git hosts, or whose CI doesn't run on bossman-ci/ branches, merge on Boss Man's own check as before.
+          </span>
+        </span>
+      </label>
+      {act.view}
+    </div>
   );
 }
 

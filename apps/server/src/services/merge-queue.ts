@@ -40,6 +40,8 @@ export type RunningNow = {
   slot: number;
   /** True past the limit, so the screen says what happens next. */
   overLimit: boolean;
+  /** BOS-1070: waiting for GitHub CI on the merge commit (beside the check): minutes so far, and the jobs still running. */
+  ci?: { minutes: number; waiting: string[] };
   /** BOS-1517: the same facts as one line. */
   statusLine: StatusLine;
 };
@@ -266,7 +268,7 @@ export function mergeQueueService(
   db: Db,
   deps: {
     /** This process's running merges, from the review service's own markers. */
-    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase }>;
+    runningMerges: () => Array<{ ticketId: string; startedAt: string; startedBy: string; phase?: MergePhase; ci?: { since: string; waiting: string[] } }>;
     /** The check slot limit: how many merge checks run at once. */
     limit: () => Promise<number>;
     /** The check queue's own slot setting and mode (BOS-316); null when it is not running. */
@@ -486,6 +488,7 @@ export function mergeQueueService(
           what: "merge_check",
           slot,
           overLimit: over,
+          ...(l.ci ? { ci: { minutes: mins(t.getTime() - new Date(l.ci.since).getTime()), waiting: l.ci.waiting } } : {}),
         };
       });
 

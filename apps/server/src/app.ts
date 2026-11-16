@@ -60,7 +60,7 @@ import { deploysService } from "./services/deploys.js";
 import { runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { holdView } from "./services/review-holds.js";
-import { isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
+import { type CI_TIMING, isSignoffPending, ReviewError, ReviewHeldError, reviewService } from "./services/review.js";
 import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { openSignoffCard, signoffState } from "./services/signoff.js";
@@ -191,6 +191,8 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
+  /** BOS-1070: shorter waits for GitHub CI at the merge gate; tests only. */
+  ciTiming?: Partial<typeof CI_TIMING>;
   /** The portal's own address for share links, e.g. http://192.0.2.10:3111; without it links use the owner's address. */
   portalUrl?: string;
   /** Rate limits on the public feedback portal; tests lower them. */
@@ -1014,6 +1016,7 @@ export async function buildApp(opts: AppOptions) {
     scanList: () => privateDetails.forRunner(),
     scanListWarning,
     isLeader: () => leader.isLeader(),
+    ciTiming: opts.ciTiming,
     cancelCheck: (jobId, reason) => checks.cancel(jobId, reason),
     // BOS-1602: train seats count only slots that can run a merge check.
     checkCapacity: (companyId) => checks.mergeCapacity(companyId),
