@@ -17,6 +17,7 @@ Only what you set up yourself:
 | Synthetic | A check of your remaining credit | Only if you use a Synthetic account |
 | The service you name under **Semantic search** on the Wiki page | Wiki text and search words | Only if you tick **Search by meaning as well as words** |
 | GitHub | A request for the skill's files | Only when you add a skill from a GitHub link |
+| The model service you name under **Second opinion from a model** (Settings, Permissions) | What a permission card asks about, with secrets taken out | Only if you turn the second opinion on (off by default) |
 
 ## Things to know
 

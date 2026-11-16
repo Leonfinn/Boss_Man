@@ -22,7 +22,7 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | Tailscale state (`$BOSSMAN_DATA/tailscale`, `deploy/tailscale.yml`; skip if you do not run Tailscale) | Copy the folder so the machine keeps its name; see `docs/20-https-tailscale.md` | Login over the `ts.net` address; certificate valid |
 | ntfy data and tokens (`$NTFY_DATA`, default `$BOSSMAN_DATA/ntfy`, `deploy/ntfy.yml`; skip if you do not run ntfy) | Part of `$BOSSMAN_DATA` | The test push reaches the phone |
 | Penpot (only if you use it) | `scripts/backup-penpot.sh`, restore its database and assets | Open Penpot, see the project list |
-| Network-guard allow list (`BOSSMAN_NETGUARD_ALLOW` in `.env`) and tool-server entries | Carry the `.env` line over; change any address in it that moved with the host, and drop stopgap entries for tool servers or project git hosts (Boss Man opens those itself). Tool servers (Settings) and project repo addresses move with the database, but check any that point at the old host's address | An agent reaches each LAN add-on it uses, for example `penpot.sh check` connects (stage 5); Penpot's address is set in Settings → Tools → Penpot and needs no entry |
+| Network-guard allow list (`BOSSMAN_NETGUARD_ALLOW` in `.env`) and tool-server entries | Carry the `.env` line over; change any address in it that moved with the host, and drop stopgap entries for tool servers or project git hosts (Boss Man opens those itself). Tool servers (Settings) and project repo addresses move with the database, but check any that point at the old host's address | An agent reaches each LAN add-on it uses, for example `penpot.sh check` connects (stage 5); Penpot's address is set in Settings → Tools and deploys → Penpot and needs no entry |
 | GitHub deploy access | The new host gets its **own new** deploy key; remove the old one at the end | `git ls-remote` works from the new host |
 
 **Two more checks for the new host:** (1) the live commit can be behind main, so check out the commit shown by Boss Man's server status, not just the main tip; (2) runners now filter network access per container (`docs/27-netguard.md`, which relies on nftables), so confirm the new host's kernel supports what that page needs before you rely on it. The guard refuses every home-network address the runner has not been told about, so a LAN add-on such as Penpot is unreachable for agents until its host:port is in the allow list (section 1). On a Proxmox VM this is the guest kernel; how to check is on that page, and I have not verified it on your hardware.
@@ -40,7 +40,7 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | The old host's LAN address | `.env` values `BOSSMAN_BIND` and `BOSSMAN_PORTAL_URL`, and the restore runbook in the private wiki | `.env` values **must be changed** to the new host's address |
 | `BOSSMAN_DOCKER_GID` | `.env` | Differs per host. Find it on the new host with `stat -c %g /var/run/docker.sock` |
 | `PENPOT_BIND`, `PENPOT_PUBLIC_URI` | `.env`, `deploy/penpot.yml` | Host addresses; must be changed if Penpot moves |
-| `BOSSMAN_NETGUARD_ALLOW` (host:port entries, space separated, in double quotes) | `.env`, passed to the launcher | Carry it over as one line: if `.env` has it twice, compose uses only the last one, so merge the entries you still need into that line (`BOSSMAN_NETGUARD_ALLOW="host:port host:port"`). Drop entries that were only stopgaps for addresses Boss Man now opens by itself: each company's runner already reaches its tool servers, its projects' git hosts and its Penpot (the address in Settings → Tools → Penpot), so those never need an entry here. If Penpot changed address, change it in Settings → Tools → Penpot; the guard follows it. The launcher reads it only when it is recreated, and each runner's guard only when the runner is recreated |
+| `BOSSMAN_NETGUARD_ALLOW` (host:port entries, space separated, in double quotes) | `.env`, passed to the launcher | Carry it over as one line: if `.env` has it twice, compose uses only the last one, so merge the entries you still need into that line (`BOSSMAN_NETGUARD_ALLOW="host:port host:port"`). Drop entries that were only stopgaps for addresses Boss Man now opens by itself: each company's runner already reaches its tool servers, its projects' git hosts and its Penpot (the address in Settings → Tools and deploys → Penpot), so those never need an entry here. If Penpot changed address, change it in Settings → Tools and deploys → Penpot; the guard follows it. The launcher reads it only when it is recreated, and each runner's guard only when the runner is recreated |
 | Edge network `172.30.0.0/29`, Tailscale `172.30.0.2`, server or proxy `172.30.0.3` | `deploy/tailscale.yml` (BOS-242), `deploy/tailscale-bluegreen.yml` | Fixed. Overridable with `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP`, `BOSSMAN_EDGE_SERVER_IP` and `BOSSMAN_EDGE_PROXY_IP`. Check the range is free on the new host (step 3 in `docs/20-https-tailscale.md`) |
 | `front` network `172.30.0.16/28` (range `172.30.0.24/29`, proxy `172.30.0.18`) | `deploy/truenas-bluegreen.yml` (BOS-278) | Fixed, and used by every blue/green stack, so the most likely to give "Pool overlaps" on a new LAN or VPN. Overridable with `BOSSMAN_FRONT_SUBNET`, `BOSSMAN_FRONT_RANGE` and `BOSSMAN_FRONT_PROXY_IP`; keep the three consistent |
 | ntfy on the edge network, `172.30.0.6` | `deploy/ntfy.yml` | Fixed. Overridable with `NTFY_EDGE_IP`; it must sit inside the edge subnet |
@@ -90,27 +90,7 @@ git --version && flock --version | head -1 && curl --version | head -1
 
 **Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. Merges may still change it before stage 3, so the stage 3 card names the final commit and stage 4 moves the checkout to it (`git -C "$BOSSMAN_HOME/src" reset --hard <commit>`) before building.
 
-The repository is private, so the new host needs its own read-only deploy key (never copy the old host's). Make the key:
-
-```sh
-ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$BOSSMAN_HOME/deploy_key"
-```
-
-Print the public half and add it on GitHub: the repository's Settings > Deploy keys > Add deploy key, paste it, leave "Allow write access" unticked:
-
-```sh
-cat "$BOSSMAN_HOME/deploy_key.pub"
-```
-
-Clone with that key, and save the key in the checkout so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too (replace `OWNER/REPO` with your repository):
-
-```sh
-GIT_SSH_COMMAND="ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git "$BOSSMAN_HOME/src"
-```
-
-```sh
-git -C "$BOSSMAN_HOME/src" config core.sshCommand "ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes"
-```
+Get the code into `$BOSSMAN_HOME/src` as in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host), with `B` set to `$BOSSMAN_HOME`. For a private repository that means a new read-only deploy key for this host: never copy the old host's.
 
 Check it reads the repository (prints commit ids, no password prompt):
 
@@ -124,7 +104,7 @@ Check the Docker socket group, for `BOSSMAN_DOCKER_GID` in `.env`:
 stat -c %g /var/run/docker.sock
 ```
 
-Make the folders and give the data to uid 1000 (compare `docs/06` step 3 and 7b):
+Make the folders and give the data to uid 1000 (as in [docs/00, step 3](00-first-time-install.md#3-make-the-folders-the-master-key-and-the-token-file), plus the database folder for the TrueNAS overlay):
 
 ```sh
 mkdir -p "$BOSSMAN_HOME/data/postgres" "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secrets"
@@ -267,7 +247,7 @@ It must show `"role":"leader"`. Ticket and migration counts must equal the numbe
 
 ### Stage 5: switch over
 
-**The old host's Tailscale must already be stopped (stage 3, step 2) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Do not name the plain `server` service: under blue/green it is parked behind a profile, and naming it would start a second server on the same database. If you run ntfy, start it on the new host with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it); it was stopped on the old host in stage 3. Update the addresses you use. Turn on the deployer's scheduled job on the new host (the scheduler you chose in stage 1; **Unconfirmed per host**). Then the checks listed in item 5 of the order in section 3 run from Boss Man. Also check that agents can still reach LAN add-ons such as Penpot: ask an agent that holds the Penpot secrets to run `penpot.sh check`. If it fails with "No route to host" at once, the network guard is refusing the address. For Penpot, open Settings → Tools → Penpot: the address there must be the one the runners reach now, and the card must say the network guard opens it (Settings → Server and runner → Network guard lists it too); fix the address there and save. For any other LAN address, put its host:port in `BOSSMAN_NETGUARD_ALLOW` (check with `grep -n NETGUARD_ALLOW .env` in the folder you run compose from; it must print one line only, because a later line replaces an earlier one), recreate the launcher (`docker compose --profile launcher up -d --force-recreate launcher`; its output must say Recreated, and `docker compose ps launcher` must show it created just now: "Running" means compose saw no change and the launcher still has the old list), then recreate the runners (Settings → Server and runner → Updates → Build and update runners).
+**The old host's Tailscale must already be stopped (stage 3, step 2) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Do not name the plain `server` service: under blue/green it is parked behind a profile, and naming it would start a second server on the same database. If you run ntfy, start it on the new host with its own flags (`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d`; under blue/green add `-f deploy/ntfy-bluegreen.yml` after the first `-f`, so the servers can reach it); it was stopped on the old host in stage 3. Update the addresses you use. Turn on the deployer's scheduled job on the new host (the scheduler you chose in stage 1; **Unconfirmed per host**). Then the checks listed in item 5 of the order in section 3 run from Boss Man. Also check that agents can still reach LAN add-ons such as Penpot: ask an agent that holds the Penpot secrets to run `penpot.sh check`. If it fails with "No route to host" at once, the network guard is refusing the address. For Penpot, open Settings → Tools and deploys → Penpot: the address there must be the one the runners reach now, and the card must say the network guard opens it (Settings → Server and runner → This server → Network guard lists it too); fix the address there and save. For any other LAN address, put its host:port in `BOSSMAN_NETGUARD_ALLOW` (check with `grep -n NETGUARD_ALLOW .env` in the folder you run compose from; it must print one line only, because a later line replaces an earlier one), recreate the launcher (`docker compose --profile launcher up -d --force-recreate launcher`; its output must say Recreated, and `docker compose ps launcher` must show it created just now: "Running" means compose saw no change and the launcher still has the old list), then recreate the runners (Settings → Server and runner → Updates → Build and update runners).
 
 ### Stage 6: retire the old host
 

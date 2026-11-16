@@ -30,7 +30,7 @@ It is not supported, and runners will most likely run without the network guard.
 - nesting turned on in the container's options (and usually keyctl), so Docker runs: `docker run --rm hello-world` must work inside it;
 - a working Docker storage driver on the backing store;
 - user ID mapping that lets bind mounts owned by user ID 1000 work;
-- what the network guard reports: Settings → Server and runner → **Network guard**. If it says unavailable, runners can reach your home network.
+- what the network guard reports: Settings → Server and runner → This server → **Network guard**. If it says unavailable, runners can reach your home network.
 
 Tailscale (for HTTPS and phone notifications) needs nothing extra in either a VM or an LXC: Boss Man runs it in userspace mode, so no `/dev/net/tun` is needed.
 

@@ -33,11 +33,7 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    Nothing else is needed. ntfy finds the `edge` network by its default name (`boss-man_edge`). Only if you changed the Compose project name, or want a different data folder, set `NTFY_EDGE_NETWORK` (the network's name, which `docker network ls` lists; it ends in `_edge`) or `NTFY_DATA`.
 
-3. **Start it.** First check that Tailscale Serve publishes port 8443. This must print `1`:
-   ```sh
-   grep -c ':8443' deploy/tailscale/serve.json
-   ```
-   Then start ntfy:
+3. **Start it.** Tailscale Serve already publishes port 8443 (it is in `deploy/tailscale/serve.json`). Start ntfy:
    ```sh
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
    ```
@@ -117,7 +113,7 @@ ntfy rides on the Tailscale container, which runs in Tailscale's userspace mode 
 docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down
 ```
 
-Port 8443 then answers with an error until you start it again. To remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
+Port 8443 then answers with an error until you start it again. That is harmless. Do not edit `deploy/tailscale/serve.json` to remove it: it is part of the checkout, and a changed file makes `scripts/deploy.sh` refuse to run. Messages are only kept for an hour and are not worth restoring. The users and tokens live in `user.db` in the ntfy data folder; copy that file first if you want to keep them.
 
 ## Related pages
 

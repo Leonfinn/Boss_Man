@@ -23,7 +23,7 @@ docker logs --tail 50 boss-man-runner-<slug>
 - If **Settings** shows an error under the runner (the launcher couldn't start it), check `BOSSMAN_DOCKER_GID` in `.env` matches `stat -c %g /var/run/docker.sock`, then `docker compose up -d`.
 - Choose **Reconnect runner** to give it a fresh token and container.
 - A log line `getaddrinfo ENOTFOUND server` means the server wasn't reachable. The runner keeps retrying by itself, waiting longer each time, up to 30 seconds between tries.
-- Running without the launcher? An empty token file makes the runner stop with "Set BOSSMAN_RUNNER_TOKEN_FILE...". Follow [docs/06, step 7](06-install-truenas.md#7-the-runner-token).
+- A runner that stops with "Set BOSSMAN_RUNNER_TOKEN_FILE..." was started without the launcher. Turn the launcher on as in [docs/00, step 4](00-first-time-install.md#4-write-the-settings-file) (`COMPOSE_PROFILES=launcher` and `BOSSMAN_LAUNCHER=1`): it gives each runner its token.
 
 ### The port is already in use
 
@@ -138,7 +138,7 @@ Every container Boss Man starts has a memory limit and a kill priority, so one r
 | `BOSSMAN_RUNNER_CPU_SHARES` | CPU priority of each runner against the server, database and proxy (1024 each, proxy 2048). Not a cap: only matters when the host is busy, and an idle host still lets runners use every core | `512` |
 | `BOSSMAN_RUNNER_CPUS` | optional hard CPU cap per runner (e.g. `4`). Leave empty unless the host is shared with other workloads: one runner hosts all of a company's agents and the merge check, so a low cap slows them all even when the host is idle | none |
 | `BOSSMAN_RESERVED_THREADS` | threads kept back for the server, database and proxy: runners are confined to all the other threads. Off unless you turn it on (see "Reserved threads" below). `auto` reserves 2 (one core, hyperthread siblings together) when the host has 6 or more threads, and stays off below that; `off` or `0` switches it off; a number keeps that many back (refused if it would leave the runners fewer than 2). The launcher works the threads out at start from what the host lets containers use. Server status (`cpuReserve`) shows whether it is on and which threads | `off` |
-| `BOSSMAN_CHECK_SLOTS` | optional upper bound on how many full checks a runner may run at once. Leave it empty: set "Checks at once" in Settings → Server and runner → Checks instead. Saving a new number recreates the runners with that many slots and the memory to match, each as its company goes idle; no `.env` edit and no host step | empty (no cap) |
+| `BOSSMAN_CHECK_SLOTS` | optional upper bound on how many full checks a runner may run at once. Leave it empty: set "Checks at once" in Settings → Server and runner → Limits and checks instead. Saving a new number recreates the runners with that many slots and the memory to match, each as its company goes idle; no `.env` edit and no host step | empty (no cap) |
 | `BOSSMAN_OPENCODE_SESSION_DAYS` | disk, not memory: how many days an OpenCode session may sit untouched before the runner's hourly clean-up deletes it from OpenCode's session database. OpenCode never deletes sessions itself, and its database grows by about 1 GB a day on a busy runner. `0` turns the clean-up off. Before its first delete in each database the runner makes and checks a backup copy in its data folder (kept 7 days), and it needs that file's size plus 1 GB free. Once per database it then compacts the file while no OpenCode run is live; new OpenCode runs wait meanwhile, at most 30 minutes. Read at runner start | `14` |
 | `PNPM_STORE_DIR` | where agents' package installs share one pnpm store. Must be a folder under `/home/node/workspaces` (the runner's only writable volume), not its root; anything else is refused at start-up | `/home/node/workspaces/.pnpm-store` |
 | `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`); measure your server's use before you set one | `0` / `512m` |
@@ -151,13 +151,13 @@ Every container Boss Man starts has a memory limit and a kill priority, so one r
 - **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
 - **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
 - **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).
-- **Applying a change.** `docker compose up -d` recreates the containers whose limits changed (the server and database restart for a few seconds). Runners started by the launcher pick up a new `BOSSMAN_RUNNER_MEMORY` when the launcher is recreated and the runner is next restarted.
+- **Applying a change.** `docker compose up -d` recreates the containers whose limits changed (the server and database restart for a few seconds). Runners started by the launcher pick up a new `BOSSMAN_RUNNER_MEMORY` after `scripts/update-runner.sh --settings`, which restarts the launcher and swaps each runner when its company is idle.
 - **A test keeps this in place:** `apps/server/test/compose-memory-limits.test.ts` fails if a service loses its `mem_limit`.
 
 Per host:
 - **Plain Linux or a VM:** nothing extra. If `docker info` warns "No swap limit support", the swap setting is ignored but the memory limit still works; to enable it, add `cgroup_enable=memory swapaccount=1` to the kernel command line and reboot.
 - **Proxmox:** see [docs/32-proxmox.md](32-proxmox.md).
-- **TrueNAS SCALE:** nothing extra; the same settings go in the `.env` from docs/06 step 4.
+- **TrueNAS SCALE:** nothing extra; the same settings go in the `.env` from docs/00 step 4.
 
 ### Reserved threads
 
@@ -166,12 +166,11 @@ This keeps a core free of agent work so the server, database and proxy never wai
 Turn it on only if you measure this: the page is fine when the host is idle and slow only when every thread is busy (`top` shows little idle time and a load average above the thread count). Nothing else is pinned: the server, database and proxy may use any thread, runners just never use the reserved ones. Tool servers are not confined either.
 
 1. Set `BOSSMAN_RESERVED_THREADS=auto` (or a number) in `.env`.
-2. Run `docker compose up -d launcher` (only the launcher restarts).
-3. Choose **Settings → Server and runner → Updates → Build and update runners**. Runs in progress finish first; each runner is swapped when it is idle.
+2. Run `scripts/update-runner.sh --settings` from the checkout. It restarts the launcher so it reads `.env`, then swaps each runner when its company is idle. Runs in progress finish first.
 
 Check it: ask for server status and read `cpuReserve`, or run `docker inspect --format '{{.HostConfig.CpusetCpus}}' boss-man-runner-<company>`.
 
-Undo: set `BOSSMAN_RESERVED_THREADS=off` in `.env`, recreate the launcher and the runners.
+Undo: set `BOSSMAN_RESERVED_THREADS=off` in `.env`, then run `scripts/update-runner.sh --settings` again.
 
 A host with fewer than 6 threads stays off with `auto`. On a VM, give the guest more threads rather than lowering the limit.
 

@@ -154,7 +154,7 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
     return (
       <Section id="deploy-h" title="Updates">
         <p className="muted" style={{ fontSize: 14 }}>
-          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/09-self-deploy.md" target="_blank" rel="noreferrer">how to set it up</a>).
+          Building the image from here needs the host deployer, and this install doesn't have one, so there is no Build and update runners button. Build the image on the host with scripts/update-runner.sh, then use the button below. To get in-app updates, set up the host deployer (<a href="https://github.com/Leonfinn/Boss_Man/blob/main/docs/30-in-app-updates.md" target="_blank" rel="noreferrer">how to set it up</a>).
         </p>
         <button
           type="button"

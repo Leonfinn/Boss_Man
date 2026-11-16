@@ -1,13 +1,15 @@
 # Installing Boss Man on TrueNAS SCALE
 
-This guide puts the whole stack on a TrueNAS SCALE box: Postgres, the server with the web UI, and one runner per company. Every image is built on the NAS itself. The runner image contains Claude Code, which must not be redistributed (see the licence note in `apps/runner/Dockerfile`). Building natively also avoids the arm64-to-x86_64 cross-build you'd need from an Apple Silicon Mac.
+The install itself is the same as on any Linux host: follow [docs/00-first-time-install.md](00-first-time-install.md). This page holds only what is different on TrueNAS SCALE: the dataset, the extra settings, backups and restore, and the optional extras (host deployer, blue/green, phone notifications, HTTPS and the feedback portal).
+
+The section numbers (9, 9a, 9d, 10, 10b, 11) are kept from older versions of this page, because Boss Man's own messages link to them.
 
 Checked against TrueNAS SCALE 25.10 "Goldeye" on 16 Oct 2026. Where TrueNAS doesn't document something, the guide says so.
 
 ## How it runs, and why not "Install via YAML"
 
-TrueNAS has run apps on Docker since 24.10 "Electric Eel". Its own apps are Compose projects named `ix-<app>`. The supported way to add your own is Apps > Discover > Install via YAML ([docs](https://www.truenas.com/docs/scale/25.10/scaleuireference/apps/installcustomappscreens/)). That route doesn't suit Boss Man:
-- **It starts no runners.** It runs `docker compose up` without `--profile`, so the profile-gated runner services never start.
+TrueNAS has run apps on Docker since 24.10 "Electric Eel". Its own apps are Compose projects named `ix-<app>`. The supported way to add your own is Apps > Discover > Install via YAML ([docs](https://www.truenas.com/docs/scale/25.10/scaleuireference/apps/installcustomappscreens/)). That route doesn't suit the Boss Man server:
+- **It turns on no profiles.** It runs `docker compose up` without `--profile`, so the launcher, which starts the runners, never starts.
 - **Relative paths break.** It rewrites the file into `/mnt/.ix-apps/app_configs/...`, so relative paths such as `./secrets/master.key` stop pointing at your files.
 - **Its Update button fails.** The button pulls images, and Boss Man's images are built locally, so there's nothing to pull.
 
@@ -21,8 +23,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
-- A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and read access to the Boss Man repo from the NAS: a read-only deploy key if the repo is private, nothing if it is public (see [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host)).
+- Everything in [docs/00, "What you need first"](00-first-time-install.md#what-you-need-first): an AI provider, a git token and read access to the Boss Man repo.
 
 The commands below are a worked example. They put Boss Man in `/mnt/tank/apps/boss-man`, where `tank` is the pool and `apps` is a dataset you already keep container apps in. Use your own pool and dataset names, and change that path everywhere it appears. The examples use `192.168.1.50` as the NAS's LAN address; replace it, and `<nas-ip>`, with yours. You can find it in the TrueNAS UI under Network.
 
@@ -48,243 +49,30 @@ mkdir -p /mnt/tank/apps/boss-man
 
 Everything Boss Man keeps goes in this folder.
 
-## 2. Get the code
+## 2. Install Boss Man
 
-Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip>` from your computer and then `su -`). Go to the dataset:
+Follow [docs/00-first-time-install.md](00-first-time-install.md) from step 1 to the end, in a root shell on the NAS, with these differences:
 
-```sh
-cd /mnt/tank/apps/boss-man
-```
-
-How the NAS reads the repo (a deploy key if it is private, https if it is public) is in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host). Use `$B` as `/mnt/tank/apps/boss-man` there. For a public repo the clone is:
-
-```sh
-git clone <repo-https-url> src
-```
-
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read the same remote, so there is nothing more to set up. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
-
-If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
-
-If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host).
-
-
-
-## 3. Folders and ownership
-
-The server and runners run as uid 1000. Postgres runs as its own user and sets the ownership of its own data folder on first start, so you only create that folder. These commands use full paths, so they work from any folder.
-
-```sh
-mkdir -p /mnt/tank/apps/boss-man/data/postgres /mnt/tank/apps/boss-man/data/app-co/workspaces /mnt/tank/apps/boss-man/data/app-co/runner-data /mnt/tank/apps/boss-man/data/app-co/claude /mnt/tank/apps/boss-man/src/secrets
-```
-
-```sh
-chown -R 1000:1000 /mnt/tank/apps/boss-man/data/app-co /mnt/tank/apps/boss-man/src/secrets && chmod 700 /mnt/tank/apps/boss-man/src/secrets
-```
-
-## 4. Settings and the master key
-
-Go to the repo folder. The `docker compose` commands from here on must run from `/mnt/tank/apps/boss-man/src`.
-
-```sh
-cd /mnt/tank/apps/boss-man/src
-```
-
-The master key encrypts every stored secret. Back it up somewhere safe outside the NAS. Without it, stored secrets can't be read.
-
-```sh
-openssl rand -base64 32 > /mnt/tank/apps/boss-man/src/secrets/master.key && chown 1000:1000 /mnt/tank/apps/boss-man/src/secrets/master.key && chmod 600 /mnt/tank/apps/boss-man/src/secrets/master.key
-```
-
-Compose won't start anything while a secret file is missing, so create the runner's token file now, empty. You fill it in at step 7.
-
-```sh
-touch /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token && chown 1000:1000 /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token && chmod 600 /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token
-```
-
-Create `.env`. Compose reads it automatically. Its first two lines add the TrueNAS file and start the runners, so plain `docker compose` commands and the update script both use them.
-
-```sh
-cat > /mnt/tank/apps/boss-man/src/.env <<EOF
-COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
-COMPOSE_PROFILES=runners
-BOSSMAN_DATA=/mnt/tank/apps/boss-man/data
-POSTGRES_PASSWORD=$(openssl rand -hex 24)
-BOSSMAN_BIND=<nas-ip>
-BOSSMAN_HOST_PORT=3101
-BOSSMAN_PORTAL_HOST_PORT=3102
-BOSSMAN_INSECURE_COOKIES=1
-EOF
-```
-
-```sh
-chmod 600 /mnt/tank/apps/boss-man/src/.env
-```
-
-- `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only. The TrueNAS UI keeps 80 and 443.
-- `BOSSMAN_HOST_PORT` is the NAS port for the web UI. Paperclip already uses 3100 on your NAS, so this guide uses 3101. `BOSSMAN_PORTAL_HOST_PORT` (3102) is the feedback portal's port (step 11). Inside the containers they stay 3100 and 3101, so nothing else changes. Don't forward either port on the router.
-- Check both ports are free before you start. This prints nothing if they are:
+- **Step 1:** use the dataset folder from step 1 above: `B=/mnt/tank/apps/boss-man`.
+- **Step 2:** check `git --version` works first. This guide does not cover a NAS without git.
+- **Steps 3 and 4:** do the "On TrueNAS only" parts. They make `$B/data/postgres` and add the `deploy/truenas.yml` overlay to `.env`, which keeps the database in your dataset, where snapshots cover it.
+- **Step 4, the port:** check nothing on the NAS already uses 3100. This prints nothing if the port is free:
 
   ```sh
-  ss -tlnp | grep -E ':(3101|3102)\b'
+  ss -tlnp | grep -E ':3100\b'
   ```
 
-  If either is taken, pick other free ports and use them in `.env` and in the addresses below.
-- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
-- Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
-  - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+  If it prints a line, set `BOSSMAN_HOST_PORT` in `.env` to a free port, such as 3101, and use that port in the browser. The TrueNAS web page keeps ports 80 and 443. The examples on this page use 3101.
 
-Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits). Nothing to add on TrueNAS; the defaults apply.
+You end up as docs/00 describes: Boss Man on `http://<nas-ip>:<port>`, a company with a CEO, a project and a first ticket. Moving this install to another host later: see [docs/21](21-move-to-new-host.md).
 
-## 5. Build the images and start the server
+The rest of this page is for after the install.
 
-Build the server image, which includes the web UI, and start Postgres and the server. For now, start them without the runner, which has no token yet.
-
-```sh
-docker compose build server
-```
-
-```sh
-docker compose up -d db server
-```
-
-Build the runner image with the canary check. The script builds a candidate image and runs a real Claude Code session in it, with networking off and no credentials. It tags the image `boss-man-runner:current` only if that passes.
-
-```sh
-scripts/update-runner.sh
-```
-
-With no launcher yet, the script also runs `docker compose up -d` at the end (a runner update later drains first, step 7b). Until its token file holds a token (step 7), the runner stops at start-up with "Set BOSSMAN_RUNNER_TOKEN_FILE..." and Docker keeps restarting it. That's expected.
-
-## 6. First login and the setup wizard
-
-Open `http://<nas-ip>:3101` in a browser on your computer and create the owner account. The **setup wizard** opens. It has eight steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Run the setup wizard**, at the top of Settings, brings it back.
-
-1. **Your company:** a name, for example "Boss Man Co", and what it's for. The CEO plans from this.
-2. **A project:** a name, for example "Boss Man", and its **Git repo**:
-   - GitHub: `https://github.com/<owner>/<repo>.git`
-   - your Gitea: `http://192.168.1.50:3003/<owner>/<repo>.git` (plain http is allowed for private LAN addresses)
-3. **The runner:** set it up with step 7b (the launcher, recommended) or step 7, then come back. It shows **Connected** when it's up.
-4. **Claude:** a setup-token or API key (step 8).
-5. **A git token** (step 8). **Check the token against <project>** reads the repo once and says whether the token can push. It changes nothing.
-6. **Checks before merging:** **Before merging, Boss Man will** proposes a check from the repo through the runner. For Boss Man itself that's **Run the tests (detected)**: `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test`. Until a runner is connected it offers the standard list; choose **Re-detect** once it is.
-7. **What pays for the CEO:** add a funding source and pick it for the CEO (step 8).
-8. **A first task:** optional.
-
-If you'd rather use the screens directly, **"I know what I'm doing, let me get on with it"** on the first step closes the wizard. Everything it does is also in **Settings**, **Projects** and **Agents**.
-
-## 7. The runner token
-
-In **Settings > Server and runner > Runner**, choose **Register a runner**. The token is shown once. Write it into the token file without it landing in your shell history: run the command, paste the token, press Return, then Ctrl-D.
-
-```sh
-cat > /mnt/tank/apps/boss-man/src/secrets/runner-app-co.token
-```
-
-The token file must hold only the token. A trailing newline is fine, because the runner trims it.
-
-```sh
-docker compose up -d
-```
-
-Settings > Server and runner > Runner should show **Connected** within a minute.
-
-The example service is called `runner-app-co`. For a second company:
-1. Copy its block in `docker-compose.yml` and its volumes in `deploy/truenas.yml` under a new name.
-2. Give the copy its own token file and its own `data/<company>/` folders.
-
-## 7b. Let the launcher run the runners (recommended)
-
-With the launcher (R55), each company's runner starts by itself when you create the company, and **Settings > Server and runner > Runner** gets **Start**, **Reconnect**, **Restart** and **Stop** buttons. There are no token files to copy and no compose blocks to duplicate per company.
-- **How it stays safe.** The launcher is the only container that can reach Docker. It joins the socket's group (`docker`, group 999 on your NAS, from `stat -c '%U:%G %g %a %n' /var/run/docker.sock`) instead of running as root.
-- **What it accepts.** It publishes no ports, and only the server can reach it, over an internal network with a key. It accepts only "start, stop or restart company X's runner".
-- **What it builds.** It builds the container itself: uid 1000, all capabilities dropped, `no-new-privileges`, not privileged, a memory limit sized from **Agents at once** and **Checks at once** (see [docs/29, "Memory limits"](29-tune-and-troubleshoot.md#memory-limits)), and only that company's folders under `data/companies/<slug>`.
-
-These steps move an existing install, including the compose runner from step 7, over to the launcher. Run them from the repo folder.
-
-```sh
-cd /mnt/tank/apps/boss-man/src && git pull
-```
-
-The launcher keeps company data under `data/companies`, owned by uid 1000:
-
-```sh
-mkdir -p /mnt/tank/apps/boss-man/data/companies && chown 1000:1000 /mnt/tank/apps/boss-man/data/companies
-```
-
-In `.env`, replace `COMPOSE_PROFILES=runners` with the launcher profile and turn it on. The first command shows the file so you can check it before changing it.
-
-```sh
-cat /mnt/tank/apps/boss-man/src/.env
-```
-
-```sh
-sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/tank/apps/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' >> /mnt/tank/apps/boss-man/src/.env
-```
-
-Stop and remove the old compose runner. Its folders in `data/app-co` stay where they are.
-
-```sh
-docker compose --profile runners rm -sf runner-app-co
-```
-
-Build the launcher and the server, then start everything:
-
-```sh
-docker compose build server launcher && docker compose up -d
-```
-
-Open **Settings > Server and runner > Runner** and choose **Start runner**. It shows **Starting…**, then **Connected** within a minute. A new company's runner starts by itself.
-
-- **The old runner's work.** The new runner starts with empty folders under `data/companies/<slug>`, where `<slug>` comes from the company's name (e.g. `boss-man-co`) and is shown in Settings > Server and runner > Runner. To bring over unfinished work and Claude sessions, choose **Stop**, then copy the old folders, then choose **Start runner** again:
-
-  ```sh
-  cp -a /mnt/tank/apps/boss-man/data/app-co/. /mnt/tank/apps/boss-man/data/companies/boss-man-co/
-  ```
-
-- **Updates.** `scripts/update-runner.sh` builds and checks the new image, then Boss Man drains (nothing new starts, runs finish) and the launcher recreates each company's runner as soon as that company is idle; `--rollback` does the same onto the previous image, and `--now` recreates everything at once (see the runner update section below).
-- **Going back.** Choose **Stop** in Settings > Server and runner > Runner, put `COMPOSE_PROFILES=runners` back in `.env`, remove the two lines you added, and follow step 7.
-
-## 8. Credentials and funding
-
-Make both credentials on your own computer, then paste them into **Settings > Secrets**. Values are encrypted on the server and never shown again.
-
-**Claude setup-token.** If Claude Code isn't on your computer yet, install it ([docs](https://code.claude.com/docs/en/setup)):
-
-```sh
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-Then create the token. It prints a long-lived token for your subscription and doesn't save it ([docs](https://code.claude.com/docs/en/cli-reference)):
-
-```sh
-claude setup-token
-```
-
-On the Secrets page, choose **Claude setup-token** and paste the token. Agents get it as `CLAUDE_CODE_OAUTH_TOKEN`. Boss Man refuses a token with stray spaces or quotes and says why.
-
-**Git token, for GitHub.** Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token):
-- **Repository access:** only the repos the company works on.
-- **Permissions:** Contents, Pull requests and Workflows, all read and write. Without Workflows, any change to `.github/workflows/` can't be pushed.
-
-**Git token, for Gitea.** In Gitea 28, open your avatar menu > **Settings > Applications**, then under **Manage Access Tokens > Generate New Token**:
-- **Token Name:** for example "boss-man".
-- **Repository and Organization Access:** **All (public, private, and limited)**.
-- **repository:** **Read and Write** (the `write:repository` scope, which the pull-request routes need). Leave the rest at **No Access**.
-
-Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
-
-On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Boss Man's runner holds it as `GIT_TOKEN` (agents' sessions never see it, so an agent can't push by itself), and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
-
-**When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
-
-**Funding.** Under **Settings > Funding**, add one:
-- "Subscription (setup-token)" for a Claude subscription;
-- "API credit" with your monthly grant for an API key.
-
-Then, on the **Agents** page, set each agent's **Paid from** to that source, so cost and quota are tracked. The same page sets each agent's **Model** from what the runner and your API keys offer.
+<!-- Steps 3 to 8 used to repeat docs/00 with a hand-made runner; they are gone (BOS-1572). Keep the numbers below: Boss Man's messages link to 9a and 9d. -->
 
 ## 9. Updates and checks
+
+Updating works as on any host: read [docs/23-updating.md](23-updating.md) first, then run `scripts/deploy.sh` from the `src` folder (or approve the update on Decisions, once the host deployer in 9a is set up). Backups go to the folder above the checkout, here `/mnt/tank/apps/boss-man`.
 
 **See what's running:**
 
@@ -298,121 +86,9 @@ docker compose ps
 docker compose logs --tail 100 server
 ```
 
-**Update to the latest code** with the deploy script. It backs up the database, pulls, rebuilds, restarts, waits until the server reports healthy, and updates the runners only when their code changed. Run it from the `src` folder:
-
-```sh
-scripts/deploy.sh
-```
-
-It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to the folder above the checkout, here `/mnt/tank/apps/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
-
-- `--dry-run` shows the steps without running anything.
-- `--runner` / `--no-runner` force or skip the runner update. Updating runners builds the image and asks Boss Man to drain first (runs in progress finish); without the launcher it restarts them at once and cuts runs off. The script asks first (`--yes` skips the question).
-- `--commit <40-character hash>` deploys exactly that commit (it must be a fast-forward of what runs). The host deployer (step 9a) uses it.
-- `--rollback` puts the previous commit back and rebuilds. It never touches the database. If a deploy fails the health check, the script prints the exact rollback and restore commands and changes nothing by itself.
-
-Database changes apply by themselves when the server starts.
-
-**The manual steps** (the same thing, by hand, if the script is ever unavailable):
-
-```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F-%H%M).sql.gz
-```
-
-```sh
-git pull && docker compose build server launcher && docker compose up -d
-```
-
-Leave `launcher` out of the build if you don't use it (step 7b).
-
-`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. With the host deployer set up (step 9), you can skip the shell: **Settings → Server and runner → Updates → Build and update runners** asks you once, then does the same thing. Run it after any update that changes `apps/runner`, `apps/launcher`, `packages/shared` or `pnpm-lock.yaml`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary and keeps the old one for rollback. It then asks Boss Man to **drain** (`docs/09-self-deploy.md`, phase 2): a banner appears on every page, nothing new starts in any company, runs in progress finish, and each company's runner is swapped as soon as it is idle. When every runner is on the new image the banner goes, and you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env` changes that) you get one decision: stop them and update now, keep waiting another 30 minutes, or cancel the update. Companies you paused stay paused.
-
-```sh
-scripts/update-runner.sh
-```
-
-The script returns as soon as it has asked; follow the swap in the banner or in the status box at the top of **Settings > Server and runner > Updates**, which also has **Cancel the runner update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners (finish runs first)** in Settings > Server and runner > Updates.
-
-**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
-
-```sh
-RUNNER_ADDONS=agent-browser
-```
-
-**Emergency: restart every runner now,** cutting off runs in progress (crash recovery restarts them):
-
-```sh
-scripts/update-runner.sh --now
-```
-
-**Undo a runner update** (drains onto the previous image; add `--now` to do it at once):
-
-```sh
-scripts/update-runner.sh --rollback
-```
-
 **After a TrueNAS update,** check `docker compose ps`. Images and containers live on the apps pool and survive OS updates. TrueNAS doesn't document how its own app actions treat containers started from the shell. Running Boss Man as its own `boss-man` project is what keeps it out of their way.
 
-**Backups.** Snapshot the `boss-man` dataset (or the one that holds it) and keep a copy of `src/secrets/master.key` off the NAS. A Postgres data folder copied while the database is running may not restore cleanly. For a consistent backup, also dump it:
-
-```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F).sql.gz
-```
-
-**Prove the backup restores.** A backup nobody has restored is a hope. This loads the newest backup into a throwaway database beside the live one (the live database is never written to), counts accounts, projects and tickets, prints how long it took and how much would be lost, and drops the throwaway:
-
-```sh
-cd /mnt/tank/apps/boss-man/src && scripts/restore-test.sh --fresh-backup
-```
-
-**Restore the live database from a backup (last resort).** Only when a deploy has damaged the data itself. If the code is the problem, use `scripts/deploy.sh --rollback` (or `host-deployer.sh --rollback`) instead: they never touch the data. A restore **replaces the live data** and loses everything written after the backup was taken. Do it at a quiet time, and ask for help if anything below does not look as described. Run every command as root from the checkout, `cd /mnt/tank/apps/boss-man/src`. The backups are in the folder above it.
-
-1. Pick the backup and rehearse it on the throwaway database first (the live database is not written to). It must end with a line starting `OK:`. If it does not, stop and choose another file:
-```sh
-ls -lt ../bossman-*.sql.gz | head -5
-```
-```sh
-scripts/restore-test.sh ../bossman-YYYY-MM-DD-HHMM.sql.gz
-```
-2. Note the data you will lose: the "live minus restored" column of that output, and the age on its `Backup:` line.
-3. Stop the app so nothing writes. With the single server install:
-```sh
-docker compose stop server
-```
-   With blue/green (step 9d), stop both colours:
-```sh
-docker compose stop server-blue server-green
-```
-4. Keep a copy of the current, damaged data in case the restore was the wrong call (this file is a full copy of your data; delete it when you are sure):
-```sh
-docker compose exec -T db pg_dump -U bossman bossman | gzip > ../before-restore-$(date +%F-%H%M).sql.gz && ls -l ../before-restore-*.sql.gz
-```
-5. Replace the live database. The first command fails with "being accessed by other users" if something is still connected: go back to step 3 and do not continue.
-```sh
-docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'
-```
-```sh
-gunzip -c ../bossman-YYYY-MM-DD-HHMM.sql.gz | docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U bossman -d bossman
-```
-6. Start the app. Single server:
-```sh
-docker compose up -d
-```
-   Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep reverse_proxy $D/proxy/active.caddy`, where `$D` is the deployer folder from step 9), then start only that colour:
-```sh
-BOSSMAN_MIGRATE_TAG=blue docker compose run --rm --no-deps migrate
-```
-```sh
-docker compose up -d --no-deps server-blue
-```
-   If the live colour is green, also run `docker compose kill -s SIGUSR2 server-green`; green starts as a standby and nothing is in charge until it gets that signal.
-7. Check: `curl -s http://<nas-ip>:3101/api/ready` shows `"role":"leader"`; sign in and open Tickets; and compare the counts with the rehearsal output:
-```sh
-docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FROM tickets' -c 'SELECT count(*) FROM drizzle.__drizzle_migrations'
-```
-8. To undo the restore (step 4's copy holds the damaged state): repeat steps 3, 5 and 6 with `../before-restore-….sql.gz`.
-
-If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
+**Backups.** Every update writes a database backup to `/mnt/tank/apps/boss-man` (see [docs/23, "Backups"](23-updating.md#backups), which also shows how to check one restores and how to restore). On TrueNAS, also snapshot the `boss-man` dataset (or the one that holds it), and keep a copy of `src/secrets/master.key` off the NAS. A snapshot taken while the database runs may not restore cleanly on its own, so keep the backup files too.
 
 **Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps nothing git-related to redo: the repo is cloned fresh (a deploy key, if you use one, stays in place). Check what's there first:
 
@@ -438,45 +114,6 @@ With blue/green (9d), `host.conf` can also set `SOAK_SECONDS=900`. The host publ
 
 Later in this guide, `$D` means the deployer folder, here `/mnt/tank/apps/boss-man/deployer`.
 
-## 9b. Upgrading to v1.2
-
-v1.2 adds the launcher, the setup wizard, merge check presets, Gitea and pull requests, the Agents page, the model picker and ticket watchers. The server applies any database changes when it starts. Run these in a root shell (no `sudo`), from the repo folder:
-
-```sh
-cd /mnt/tank/apps/boss-man/src
-```
-
-1. **Back up the database** first:
-
-   ```sh
-   docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/tank/apps/boss-man/bossman-$(date +%F).sql.gz
-   ```
-
-2. **Update the code and the server:**
-
-   ```sh
-   git pull && docker compose build server && docker compose up -d db server
-   ```
-
-3. **Rebuild the runner.** The v1.2 server asks runners for things v1.1 runners don't know (detecting checks, pushing branches for pull requests, listing models), so the runner image has to match:
-
-   ```sh
-   scripts/update-runner.sh
-   ```
-
-4. **Move to the launcher** (recommended): step 7b. If you stay on the compose runner, step 3 is enough.
-
-5. **Check in the UI:**
-   - **Projects page:** your existing check command shows as the preset it matches (Boss Man's own matches **Run the tests (detected)** once the runner is connected), otherwise as **Custom command…**. Either is fine.
-   - **Agents:** model and funding for each agent now live here.
-   - The setup wizard doesn't open by itself on an install that already has a company. Open it with **Run the setup wizard** at the top of Settings if you want its checklist.
-
-Keep the dump from step 1 until you're happy with v1.2. Going back means restoring it and checking out the older code, which hasn't been tried here, so ask before doing it.
-
-## 9c. Upgrading to semantic wiki search
-
-The `db` image changed from `postgres:17-alpine` to `pgvector/pgvector:0.8.7-pg17-bookworm`, Postgres 17 with the pgvector extension. The two images use different base systems, so start with a **fresh database volume**: there is no dump and restore path (this alpha has one user). Stop the stack, delete the database folder (`$BOSSMAN_DATA/postgres` on TrueNAS, or the `db-data` volume with plain compose), then `docker compose up -d`. Semantic search itself is off until you turn it on in **Wiki > Semantic search**.
-
 ## 9d. Switch to blue/green (optional)
 
 With this, a server update has no "Boss Man is down for a minute" gap: the new version starts next to the old one, is checked, and takes over; the old one stays up for 15 minutes so the deployer can switch back by itself if checks fail. How it works, what it checks and what it cannot: `docs/09-self-deploy.md`, "Phase 3, part 2". It needs the host deployer (9a) already working. These steps were first run on a real TrueNAS SCALE NAS on 22 and 23 Oct 2026. Two bugs found then are fixed in the repo (see "If something goes wrong" below), so use a checkout at commit `5d983a16` or later. Do them with the stack quiet (no important agent runs), because step 6 is one planned stop of 1 to 2 minutes.
@@ -496,7 +133,7 @@ cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deplo
 ls deploy/truenas-bluegreen.yml deploy/caddy/Caddyfile
 ```
 
-(Read the new `host-deployer.sh` first, as in 9a step 3.) Docker Compose must be 2.24 or newer for the compose file: `docker compose version`.
+(Read the new `host-deployer.sh` first, as in [docs/30, step 3](30-in-app-updates.md#3-install-the-script-as-a-copy).) Docker Compose must be 2.24 or newer for the compose file: `docker compose version`.
 
 **2. Back up `.env` and the database.**
 
@@ -565,9 +202,9 @@ grep 'Live colour' $D/proxy/active.caddy
 docker compose logs server-blue | grep 'LEADER: \*\*\*'
 ```
 
-The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Server and runner > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server and runner > Server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
+The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Server and runner > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server and runner > This server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
 
-**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in [docs/30, step 5](30-in-app-updates.md#5-test-the-script)) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server and runner > Server** then shows green Live and blue Standby, and **Settings > Server and runner > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
+**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in [docs/30, step 5](30-in-app-updates.md#5-test-the-script)) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server and runner > This server** then shows green Live and blue Standby, and **Settings > Server and runner > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
 
 **Which colour is live?**
 
@@ -578,18 +215,18 @@ curl -s http://192.168.1.50:3101/api/health; echo     # "role":"leader"; the com
 ```
 
 **What the deployer will not do for you**
-- It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, the deploy scripts (`scripts/deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh`; build-only scripts do not count, see docs/09 step 6) and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own (see 9a step 3):
+- It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, the deploy scripts (`scripts/deploy.sh`, `rebuild-live.sh`, `update-runner.sh`, `host-deployer.sh`; build-only scripts do not count, see docs/09 step 6) and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own:
   - **Everything starts the same way:** bring the checkout up to `main` with `git fetch origin main && git merge --ff-only origin/main`.
   - **A `Dockerfile` or other server-image change:** rebuild the live colour in place, as in "Rebuild the live colour in place" below.
   - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`. The Caddyfile now has `encode zstd gzip` on both sites, so the proxy compresses API JSON on the way out. The runner websocket (`/api/runner/connect`) and other streaming responses are never compressed: Caddy leaves an upgrade or streaming response alone. Confirming on staging: `curl -sI -H 'Accept-Encoding: gzip' http://<host>:3100/api/ready` should answer `content-encoding: gzip` once a response is big enough to be worth compressing (Caddy leaves very small ones alone).
   - **The proxy's compose settings:** `docker compose up -d --no-deps proxy`, which leaves the UI down for a few seconds.
   - **The launcher** (`apps/launcher/` or its compose settings): it runs its own image built from this checkout, so rebuild it first, or the old code keeps running: `docker compose build launcher && docker compose up -d --no-deps launcher`. The UI stays up. Runners keep their old limits until they are recreated: at the next runner update, or now with `scripts/update-runner.sh --settings`, which waits for runs to finish, recreates each runner and wakes the agents again.
-  - **`scripts/host-deployer.sh`:** copy it to `$D` as in 9a step 3.
+  - **`scripts/host-deployer.sh`:** Boss Man raises a card with the copy commands when the host's copy is behind; follow it.
 - **Compression is not the Caddyfile's job alone.** The web build now writes a brotli and a gzip copy next to every built asset, and the server serves those straight from disk, so **every** install (including the plain `docker-compose.yml` one with no proxy) sends compressed JavaScript, CSS and fonts with no CPU cost per page. What the proxy adds is compression of the **API JSON** (the polled dashboard data); a plain install sends that JSON uncompressed. If you want the JSON compressed without the proxy too, that is a separate change (it spends CPU on the server's event loop) and not part of this install.
 - After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.
 
-**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Server and runner → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
+**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes, approve the update on Decisions (or **Review and deploy** in Settings → Server and runner → Updates) instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
 
 **Before you run anything here that updates the checkout (`git merge`, `git checkout`, `git pull`), type `umask 022` in your root shell.** A root shell with `umask 077` writes every file git changes as mode 600. The server runs as user `node` in its container and the image copies file permissions as they are on disk, so it crashes at start with `EACCES: permission denied, open '/app/...'`, and a rollback with the same umask fails the same way (6 Nov outage, BOS-562). `scripts/rebuild-live.sh`, `scripts/deploy.sh` and the host deployer now check this before the backup and build: if any git-tracked file is unreadable by others, or its folder can't be read and searched, they stop, change nothing, list up to 10 paths and print the fix (`git ls-files -z | xargs -0 chmod go+r`, then `chmod go+rx` on the folders). Only tracked files are touched: `.env`, `secrets/` and the data folder stay private. If the new colour never answers, the STOPPED message ends with the last 20 lines of its container log.
 
@@ -697,7 +334,7 @@ The steps are in [docs/20-https-tailscale.md](20-https-tailscale.md), which work
 
 - `COMPOSE_FILE` becomes `docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, and the state folder is `/mnt/tank/apps/boss-man/data/tailscale` (so create it there). Keep it in a dataset your snapshots cover.
 - Use the sidecar, not the TrueNAS Tailscale app: the app cannot show that LAN traffic is kept apart from the trusted address.
-- Blue/green (9d) is not covered yet.
+- With blue/green (9d), follow "Blue/green installs" in [docs/20](20-https-tailscale.md#bluegreen-installs).
 
 ## 11. Feedback portal (optional)
 

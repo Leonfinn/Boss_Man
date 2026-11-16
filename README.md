@@ -23,8 +23,8 @@ You need a Linux host with Docker (a plain Linux box, a Proxmox VM, or TrueNAS S
 
 > **On Proxmox, use a VM, not an LXC container.** In most LXC containers the network guard cannot load, so agents' runners could reach your home network. See [docs/32-proxmox.md](docs/32-proxmox.md).
 
-1. Follow [docs/00-first-time-install.md](docs/00-first-time-install.md). It takes you from an empty host to a company with an agent working its first ticket.
-2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example, with backups.
+1. Follow [docs/00-first-time-install.md](docs/00-first-time-install.md) on any host, TrueNAS SCALE included. It takes you from an empty host to a company with an agent working its first ticket.
+2. On TrueNAS SCALE, [docs/06-install-truenas.md](docs/06-install-truenas.md) adds the dataset, snapshots and the optional extras.
 3. Before you update, read [docs/23-updating.md](docs/23-updating.md).
 4. If something goes wrong, or you want to tune memory limits, see [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md).
 
@@ -88,7 +88,7 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | Doc | What's in it |
 |---|---|
 | [docs/00-first-time-install.md](docs/00-first-time-install.md) | Start here to install: from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
-| [docs/06-install-truenas.md](docs/06-install-truenas.md) | Installing on TrueNAS SCALE: datasets, building the images on the NAS, credentials, updates and backups |
+| [docs/06-install-truenas.md](docs/06-install-truenas.md) | TrueNAS SCALE: the dataset, snapshots, blue/green, and the TrueNAS steps for the host deployer, HTTPS and the feedback portal |
 | [docs/32-proxmox.md](docs/32-proxmox.md) | Running Boss Man on Proxmox: use a VM, not an LXC container, and why |
 | [docs/23-updating.md](docs/23-updating.md) | Read before you update: the update steps, backups and how to check one restores, breaking changes that need a hand step, and where release notes are |
 | [docs/29-tune-and-troubleshoot.md](docs/29-tune-and-troubleshoot.md) | Fixes for common problems, where backups are saved, memory limits, reserved threads and Synthetic |

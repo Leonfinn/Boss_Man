@@ -1,5 +1,14 @@
 # 12 — Runner add-ons
 
+**For owners, in short.** An add-on is an optional tool built into the runner image, such as a browser for agents (`agent-browser`) or Safari's engine (`webkit`). Settings → Server and runner → Runner → **Add-ons** lists them and shows which are working. To add one:
+
+1. In the server's `.env`, put its id on the `RUNNER_ADDONS=` line. Separate several with commas and keep the ones already there, for example `RUNNER_ADDONS=agent-browser,webkit`.
+2. Choose Settings → Server and runner → Updates → **Build and update runners** (with the host deployer), or run `scripts/update-runner.sh` as root from the checkout.
+
+The add-on shows as Working once the runners are on the new image. To remove one, take its id out of the line and update again.
+
+The rest of this page is the design.
+
 Status: built (steps 1 to 4 below). The owner chose this over a browser running as a separate tool server, because browser checks are central to their projects (24 Oct 2026).
 
 ## Rule
@@ -18,7 +27,7 @@ The runner runs as the non-root `node` user. A browser needs system libraries th
 3. **Canary**: for each add-on the image holds (listed in `/etc/bossman-addons`), run its canary commands. For agent-browser that means opening `about:blank` headless, then closing it. A failure fails the canary, so the build isn't promoted.
 4. **Runner reports**: at connect, the runner tells the server which add-ons it has, their versions, and whether their checks pass. A periodic check catches an add-on that breaks later.
 5. **Skills declare needs**: a new nullable column, `skills.requires_addons`. The owner sets it in the skill's settings. The importer sets it for skills it recognises (`dogfood`, `agent-browser`). A run only receives a skill when its runner reports every add-on that skill requires as healthy. Otherwise the skill is left out of that run and the owner gets one notification ("dogfood is off because agent-browser isn't working on App Co's runner").
-6. **UI**: Settings → Server and runner → Runner → **Add-ons** lists the catalogue, what's installed with its version and health, and for anything not installed, how to add it: put `RUNNER_ADDONS=<id>` in `.env` and run `scripts/update-runner.sh`. A skill's settings (Skills page) have a tick box for each add-on it needs.
+6. **UI**: Settings → Server and runner → Runner → **Add-ons** lists the catalogue, what's installed with its version and health, and for anything not installed, how to add it (as at the top of this page). A skill's settings (Skills page) have a tick box for each add-on it needs.
 
 ## Not in scope
 
