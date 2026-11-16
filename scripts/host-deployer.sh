@@ -269,11 +269,14 @@ compose_project() {
 # commit, so relative bind mounts render the same and don't look like a change), with the checkout's own .env, and
 # rendered under the live project's name and a pinned BOSSMAN_COMMIT, so nothing differs but the settings themselves.
 # Nothing in the checkout is touched. Returns non-zero (and logs why) when it can't render.
+unpack_commit() { (set -o pipefail; g archive "$1" | tar -x -C "$RENDER_DIR"); } # commit: into $RENDER_DIR
 render_hashes() { # commit project
   local commit=$1 project=$2 out="" rc=0
   [[ -n $project ]] || { log "Service compare: could not tell the compose project name."; return 1; }
   rm -rf "$RENDER_DIR"; mkdir -p "$RENDER_DIR"
-  if ! (set -o pipefail; g archive "$commit" | tar -x -C "$RENDER_DIR") 2>>"$LOG"; then
+  # A function and not `if ! ( … ) 2>>"$LOG"`: bash does not apply the `!` when a group's or subshell's own redirect
+  # fails, so that form would carry on unpacked (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
+  if ! unpack_commit "$commit" 2>>"$LOG"; then
     log "Service compare: could not unpack ${commit:0:8}."; rm -rf "$RENDER_DIR"; return 1
   fi
   # The commit may carry its own .env or secrets (even a link to another file): remove them first, so the copy below
