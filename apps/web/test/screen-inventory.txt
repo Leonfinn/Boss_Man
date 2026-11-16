@@ -66,6 +66,7 @@ sections:
   - Dashboard
   - Decisions
   - Finish setting up
+  - Left your list recently
   - Needs you Checking…
   - Needs you …
   - Recent tasks
