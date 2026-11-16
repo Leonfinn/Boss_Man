@@ -20,6 +20,7 @@ type LoginPoll =
   | { status: "pending" }
   | { status: "timeout"; message: string }
   | { status: "done"; result: "created" | "reset"; password: string; user: string }
+  | { status: "done"; result: "setup"; message: string }
   | { status: "done"; result: "exists" | "missing" | "failed" | "rejected" | "unavailable"; message: string };
 type LoginView =
   | { kind: "idle" }
@@ -109,6 +110,61 @@ export function PhoneLoginButton({ available, why, pollMs = 3000 }: { available:
               </button>
             </>
           )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Set up ntfy for me" (BOS-1581): the host makes (or finds) the publish user, its write-only access and a token. The
+ * server keeps the token in the encrypted secrets store; it never comes to this page, so there is nothing to copy.
+ */
+export function NtfySetupButton({ available, why, onDone, pollMs = 3000 }: { available: boolean; why?: string; onDone: () => void; pollMs?: number }) {
+  const [view, setView] = useState<{ kind: "idle" | "working" } | { kind: "msg"; ok: boolean; text: string }>({ kind: "idle" });
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const run = async () => {
+    setView({ kind: "working" });
+    try {
+      const { id } = await apiOnce<{ id: string }>("/api/notification-settings/phone-login", { method: "POST", body: { action: "setup" } });
+      for (let i = 0; i < 130 && alive.current; i++) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        if (!alive.current) return;
+        const r = await apiOnce<LoginPoll>(`/api/notification-settings/phone-login/${id}`);
+        if (r.status === "pending") continue;
+        if (r.status === "timeout") return setView({ kind: "msg", ok: false, text: r.message });
+        if (!("message" in r)) return setView({ kind: "msg", ok: false, text: "The host sent an unexpected answer. Press the button again." });
+        if (r.result === "setup") {
+          setView({ kind: "msg", ok: true, text: `${r.message} Press "Send a test to my phone" to check it.` });
+          return onDone();
+        }
+        return setView({ kind: "msg", ok: false, text: r.message });
+      }
+      if (alive.current) setView({ kind: "msg", ok: false, text: "No answer from the host. Check the host deployer is running, then try again." });
+    } catch (err) {
+      if (alive.current) setView({ kind: "msg", ok: false, text: (err as Error).message });
+    }
+  };
+  if (!available) return <p className="muted" style={{ fontSize: 14 }}>Boss Man can't set ntfy up for you here: {why ?? "the host has not reported yet."}</p>;
+  return (
+    <div data-testid="ntfy-setup" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div>
+        <button className="btn" type="button" disabled={view.kind === "working"} onClick={() => void run()}>
+          {view.kind === "working" ? "Waiting for the host…" : "Set up ntfy for me"}
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+        Makes the publish user and access token and picks a topic if you have none. Safe to press again: it changes nothing that is already there.
+      </p>
+      {view.kind === "msg" && (
+        <p className={view.ok ? "muted" : "error"} role="status" style={{ fontSize: 14, margin: 0 }}>
+          {view.text}
         </p>
       )}
     </div>
@@ -374,6 +430,17 @@ function SettingsForm() {
           <input type="checkbox" checked={form.phone} onChange={(e) => set({ phone: e.target.checked })} />
           Send to my phone through my own ntfy server
         </label>
+        {(saved?.phoneLogin?.available === true || form.phone) && <NtfySetupButton
+          available={saved?.phoneLogin?.available === true}
+          why={saved?.phoneLogin && !saved.phoneLogin.available ? saved.phoneLogin.why : undefined}
+          onDone={() => {
+            // The server has saved the address, topic and token. Take them in, and keep whatever else is being edited.
+            void apiOnce<NotifySettings>("/api/notification-settings").then((s) => {
+              setSaved(s);
+              setForm((f) => (f ? { ...f, phone: !!s.ntfy, url: s.ntfy?.url ?? f.url, topic: s.ntfy?.topic ?? f.topic, token: "", clearToken: false } : f));
+            }, () => {});
+          }}
+        />}
         {form.phone && (
           <>
             <div style={row}>

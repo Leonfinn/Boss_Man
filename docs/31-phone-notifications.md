@@ -24,10 +24,7 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
 
 ## Steps
 
-1. **Make the data folder** and give it to user ID 1000. It goes in your Boss Man data folder (`BOSSMAN_DATA` in `.env`; `<install-dir>/data` if you followed the install guide), so your usual backup and move steps already cover it. Replace the path with yours:
-   ```sh
-   mkdir -p /opt/boss-man/data/ntfy && chown 1000:1000 /opt/boss-man/data/ntfy
-   ```
+1. **Nothing to make by hand: the data folder.** It goes in your Boss Man data folder (`BOSSMAN_DATA` in `.env`; `<install-dir>/data` if you followed the install guide), so your usual backup and move steps already cover it. A one-off `ntfy-init` step in `deploy/ntfy.yml` creates it and hands it to ntfy's user (ID 1000) each time ntfy starts, on any Docker host, so there is no `mkdir` or `chown` to run. (Only if you set `NTFY_DATA` to a folder on a share that refuses ownership changes, make that folder writable by user ID 1000 yourself.)
    It holds the users, tokens and cache. Keep it in your backup: restoring it on a new host keeps the tokens and the phone subscription working.
 
 2. **Add one line to `.env`.** Back up `.env` first. The address is the same ts.net name as your Tailscale Serve address, with port 8443:
@@ -46,35 +43,16 @@ Treat the topic name and the passwords as secrets: notifications carry Approve l
    ```
    It should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it mentions Funnel, stop and run the rollback below.
 
-4. **Pick a topic and make the publish user.** Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make the user Boss Man publishes as. `ntfy user add` asks for a password, so type a long one:
-   ```sh
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
-   ```
-   The last command prints the **publish token** (it starts with `tk_`). Copy it now.
+4. **Set ntfy up from Boss Man.** Open **Notifications** in the side menu and choose **Set up ntfy for me** under **How you're told** (it needs `openssl` on the host, and the page says if that or the add-on is missing). Within a minute it makes the `bossman-publish` user, gives it write-only access to your topic, makes its **publish token**, and saves the token encrypted as "ntfy access token". If you have not chosen a topic it picks 20 random letters and digits (the topic is a password, so keep it out of tickets and chat) and fills in **ntfy server** as `http://ntfy:80` (Boss Man and ntfy share the private `edge` network, so no tailnet name is needed). The token is never shown, so there is nothing to copy. Pressing the button again finds all three and changes nothing, so it is safe after an update or a move to a new host.
 
-   The phone's read-only user comes in step 6. With the host deployer set up, a button makes it for you. Without the host deployer, make it now:
-   ```sh
-   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
-   ```
-   ```sh
-   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
-   ```
-
-5. **Tell Boss Man.** Open **Notifications** in the side menu. In the **How you're told** box below the feed:
-   - Tick **Send to my phone through my own ntfy server**.
-   - **ntfy server:** `http://ntfy:80`. Boss Man and ntfy share the private `edge` network, so Boss Man needs no tailnet name.
-   - **Topic:** your topic.
-   - **Access token:** the publish token from step 4. Boss Man stores it encrypted as "ntfy access token", so you do not add it under **Settings > Secrets** yourself.
-   - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address. If you opened this page through that address, it is already filled in.
+5. **Check and save the rest.** In the same **How you're told** box:
+   - **Boss Man's address on your phone, so a tap opens the evidence:** Boss Man's https Tailscale address.
    - Choose **Save**.
+   - Prefer a topic or server address of your own? Type them before you press the button (and Save): the button keeps what you chose.
 
-6. **Set up the phone.** With the host deployer, choose **Create phone login** under **Set up your phone** on the **Notifications** page. It makes the `phone-read` user with read-only access to your topic and shows its password once (it needs `openssl` on the host; the page says if it is missing). If the user already exists, it offers **Reset password**. Then, in the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
+   Then the **Create phone login** button under **Set up your phone** makes the `phone-read` user and its read-only access for you and shows the password once (it needs `openssl` on the host; the page says if it is missing). If you try the button after making the user by hand, it says the user exists and offers **Reset password**.
+
+6. **Set up the phone.** In the ntfy app, choose **Use another server** and enter exactly the `NTFY_BASE_URL` value from step 2, with its port. Log in as `phone-read` with its password and subscribe to your topic. **Do not use Boss Man's own address** (the same name without `:8443`): it opens Boss Man, not ntfy, and the app cannot subscribe there. The **Notifications** page shows the right address under **Set up your phone**, with a link to check from the phone's browser: `<ntfy address>/v1/health` should show `{"healthy":true}`. If it does not load, the phone is not on your tailnet.
 
 7. **Send a test.** On the **Notifications** page, choose **Send a test to my phone** (it only appears after you Save). It should arrive within seconds. A test that says "accepted" only proves Boss Man reached ntfy, not that the phone is subscribed at the right address.
 
