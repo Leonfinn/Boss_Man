@@ -69,6 +69,8 @@ export function settingsLimitsRoutes(
       company: v?.company ?? scheduler.limits.company,
       background: v?.background ?? scheduler.limits.background,
       defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
+      // BOS-1634: the all-companies number the scheduler really uses; differs from `instance` only with a reason (a server update's hold).
+      inForce: await scheduler.allCompaniesInForce(),
     };
   };
   owner.get("/api/run-limits", async () => runLimits());

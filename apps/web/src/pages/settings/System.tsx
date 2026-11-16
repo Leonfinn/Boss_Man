@@ -477,7 +477,19 @@ function RecentUpdates({ rows, progress }: { rows: HistoryRow[] | null; progress
  * Infinite-mode agents (BOS-279); the per-agent limit is fixed at one.
  */
 export function RunLimits() {
-  const view = usePoll((signal) => api<{ instance: number; company: number; background: number; defaults: { instance: number; company: number; background: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+  const view = usePoll(
+    (signal) =>
+      api<{
+        instance: number;
+        company: number;
+        background: number;
+        defaults: { instance: number; company: number; background: number };
+        // BOS-1634: absent from an older server.
+        inForce?: { limit: number; saved: number; because: string | null; until: string | null };
+      }>("/api/run-limits", { signal }),
+    30_000,
+    "run-limits",
+  );
   const act = useAction();
   const [edit, setEdit] = useState<{ instance: string; company: string; background: string } | null>(null);
   const d = view.data;
@@ -490,6 +502,17 @@ export function RunLimits() {
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
         <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
+        {d.inForce?.because ? (
+          // BOS-1634: never a silent difference between the saved number and the one in force.
+          <p role="status" data-testid="run-limits-in-force" style={{ fontSize: 14 }}>
+            <strong>
+              Saved {d.inForce.saved}, in force {d.inForce.limit}
+            </strong>{" "}
+            because {d.inForce.because}.{" "}
+            {d.inForce.until ? `Back to ${d.inForce.saved} by ${new Date(d.inForce.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} at the latest. ` : ""}
+            Nothing to change: runs already going carry on, and your number comes back by itself.
+          </p>
+        ) : null}
         <p className="muted" style={{ fontSize: 14 }}>
           Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer (you'll see "at a concurrency limit: all companies"). When a slot frees, a company with nothing running gets it first, so one busy company can't keep the others waiting.
         </p>

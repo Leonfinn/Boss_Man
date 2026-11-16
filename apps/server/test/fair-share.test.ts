@@ -52,7 +52,7 @@ async function setup(limits: { instance: number; company: number }) {
   const live = async (companyId: string) => (await db.select().from(runs).where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)))).length;
   // Only the wakes each test queues: company setup's own wakes would compete for the same slots.
   const clearWakes = () => db.delete(wakes);
-  return { ...built, db, close, A, B, hire, running, queued, end, wake, live, clearWakes };
+  return { ...built, db, close, cookie, A, B, hire, running, queued, end, wake, live, clearWakes };
 }
 
 describe("a server update waiting for a quiet machine caps runs (BOS-420)", () => {
@@ -69,6 +69,30 @@ describe("a server update waiting for a quiet machine caps runs (BOS-420)", () =
     await c.db.delete(settings).where(eq(settings.key, "deploy_wait"));
     expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({ allCompanies: { limit: 8 } });
     expect(await c.scheduler.tickOnce()).toMatchObject({ launched: 1 });
+  });
+
+  // BOS-1634: the owner saw 16 in Settings while 3 were enforced, with nothing saying why.
+  it("saved 16: in force 16 with no hold; during a hold server_status and Settings show 3, the saved 16 and the reason", async () => {
+    const c = (ctx = await setup({ instance: 16, company: 12 }));
+    const settingsView = async () => (await c.app.inject({ method: "GET", url: "/api/run-limits", headers: { cookie: c.cookie } })).json();
+
+    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({ allCompanies: { limit: 16, running: 0, saved: 16 }, company: { limit: 12, running: 0 } });
+    expect(await settingsView()).toMatchObject({ instance: 16, inForce: { limit: 16, saved: 16, because: null, until: null } });
+
+    const approvedAt = new Date();
+    await c.db.insert(settings).values({ key: "deploy_wait", value: { phase: "waiting", approvedAt: approvedAt.toISOString() } });
+    const until = new Date(approvedAt.getTime() + 3 * 60 * MIN).toISOString();
+    expect((await c.serverStatus.status(c.A)).runLimits).toMatchObject({
+      allCompanies: { limit: 3, saved: 16, cappedBecause: expect.stringContaining("a server update is waiting for a quiet machine"), cappedUntil: until },
+      company: { limit: 12 },
+    });
+    expect(await settingsView()).toMatchObject({ instance: 16, inForce: { limit: 3, saved: 16, because: expect.stringContaining("at most 3 runs"), until } });
+  });
+
+  it("a hold that would not lower the saved number reports no cap", async () => {
+    const c = (ctx = await setup({ instance: 2, company: 2 }));
+    await c.db.insert(settings).values({ key: "deploy_wait", value: { phase: "window", approvedAt: new Date().toISOString() } });
+    expect((await c.serverStatus.status(c.A)).runLimits).toEqual({ allCompanies: { limit: 2, running: 0, saved: 2 }, company: { limit: 2, running: 0 } });
   });
 });
 
@@ -90,7 +114,7 @@ describe("fair share at the all-companies run limit (BOS-582)", () => {
     // server_status shows it to Idle Co's CEO, with the limits and counts (no other company's names).
     const status = await c.serverStatus.status(c.B);
     expect(status.wakes.waiting.find((w) => w.id === msg.id)?.held).toBe("at a concurrency limit: all companies");
-    expect(status.runLimits).toEqual({ allCompanies: { limit: 4, running: 4 }, company: { limit: 4, running: 0 } });
+    expect(status.runLimits).toEqual({ allCompanies: { limit: 4, running: 4, saved: 4 }, company: { limit: 4, running: 0 } });
 
     // One slot frees (the one kept for cards): Idle Co gets it.
     await c.end(aRuns[0]!);

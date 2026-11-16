@@ -19,6 +19,20 @@ export function quietRuns(env: NodeJS.ProcessEnv = process.env): number {
 
 export type SoftHold = { on: false } | { on: true; phase: string; maxRuns: number; approvedAt: string };
 
+/**
+ * BOS-1634: why the hold caps the all-companies limit, in the owner's words, and the latest time it lifts (the
+ * 3-hour cap; it usually ends sooner, when the update is live and its standby window is over).
+ */
+export function softHoldReason(h: Extract<SoftHold, { on: true }>): { reason: string; until: string } {
+  const why =
+    h.phase === "waiting"
+      ? "a server update is waiting for a quiet machine"
+      : h.phase === "sent"
+        ? "a server update is being applied"
+        : "a server update has just gone live and the old server is still on standby";
+  return { reason: `${why}, so Boss Man starts at most ${h.maxRuns} runs at once until it is done`, until: new Date(Date.parse(h.approvedAt) + SOFT_HOLD_MAX_MS).toISOString() };
+}
+
 export async function softHold(db: Db, now: Date = new Date(), maxRuns: number = quietRuns()): Promise<SoftHold> {
   const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, DEPLOY_WAIT_KEY));
   const w = row?.value as { phase?: string; approvedAt?: string } | undefined;

@@ -25,7 +25,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
-import { softHold } from "./deploy-wait-hold.js";
+import { softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -1193,12 +1193,20 @@ export function schedulerService(
     const maxTotal = stored?.instance ?? limits.instance;
     const maxBackground = stored?.background ?? limits.background;
     const soft = await softHold(db, now());
-    return { maxTotal: soft.on ? Math.min(maxTotal, soft.maxRuns) : maxTotal, maxCompany: stored?.company ?? limits.company, maxBackground: soft.on ? 0 : maxBackground };
+    // BOS-1634: the saved number and, when the hold really lowers it, why, so server_status and Settings never show a silent difference.
+    const capped = soft.on && soft.maxRuns < maxTotal ? softHoldReason(soft) : null;
+    return { maxTotal: soft.on ? Math.min(maxTotal, soft.maxRuns) : maxTotal, savedTotal: maxTotal, capped, maxCompany: stored?.company ?? limits.company, maxBackground: soft.on ? 0 : maxBackground };
   }
 
   const self = {
     limits,
     hasRoom,
+
+    /** BOS-1634: the all-companies limit in force and, when lower than the saved one, why and until when (Settings → Agents at once). */
+    async allCompaniesInForce(): Promise<{ limit: number; saved: number; because: string | null; until: string | null }> {
+      const { maxTotal, savedTotal, capped } = await limitsNow();
+      return { limit: maxTotal, saved: savedTotal, because: capped?.reason ?? null, until: capped?.until ?? null };
+    },
 
     /**
      * How many more work runs the company could start now (BOS-574): the instance and company limits
@@ -1258,11 +1266,12 @@ export function schedulerService(
      * company's agents or tickets.
      */
     async runLimits(companyId: string) {
-      const { maxTotal, maxCompany } = await limitsNow();
+      const { maxTotal, savedTotal, capped, maxCompany } = await limitsNow();
       const live = await db.select({ companyId: runs.companyId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
       // Infinite-mode runs (BOS-279) sit in the background slots, so they don't count against the normal limits.
       const work = live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && !isInfiniteModel(r.model));
-      return { allCompanies: { limit: maxTotal, running: work.length }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
+      // saved: the owner's Settings number; with a cap in force (BOS-1634) cappedBecause and cappedUntil say why and the latest it lifts.
+      return { allCompanies: { limit: maxTotal, running: work.length, saved: savedTotal, ...(capped ? { cappedBecause: capped.reason, cappedUntil: capped.until } : {}) }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
     },
 
     /**
