@@ -226,7 +226,7 @@ export function mainCiService(
           "",
           "Error lines (secrets redacted):",
           "```",
-          ...(f.lines.length ? f.lines : ["(the log and annotations gave no error lines: open the run)"]),
+          ...(f.lines.length ? f.lines : ["(Error lines weren't readable with this token: it can read the run, job and step, but not the job log or the check-run annotations. Open the run link above.)"]),
           "```",
           "",
           NEVER_WEAKEN,
