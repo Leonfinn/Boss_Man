@@ -69,7 +69,8 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     mkdirSync(path.join(coord, "queue"), { recursive: true });
     // A hand-run check holding slot 1 (same lock the job uses).
     const hold = spawn("flock", [path.join(coord, "queue", "check-all.slot.1"), "sleep", "4"], { stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the lock to really be held (not a fixed sleep: a slow machine started flock late and the job took the slot first).
+    expect(await until(() => !slotFree(coord))).toBe(true);
     const ws = new Workspaces(root, env, coord);
     let seen = "";
     const started = Date.now();
