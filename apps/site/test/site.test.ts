@@ -198,12 +198,23 @@ describe("What's new page", () => {
     expect(html).toContain('href="/guides/updates-and-backups"');
   });
 
-  it("is linked from the footer of every page and from the updating guide", () => {
+  it("is linked from the main menu and the footer of every page, marked current on its own page, and from the updating guide", () => {
     for (const f of htmlFiles()) {
-      const footer = read(f).slice(read(f).indexOf('<nav aria-label="Footer">'));
+      const html = read(f);
+      const menu = html.slice(html.indexOf('<nav aria-label="Main"'), html.indexOf("</nav>"));
+      const footer = html.slice(html.indexOf('<nav aria-label="Footer">'));
+      expect(menu, f).toMatch(/<a href="\/whats-new"( aria-current="page")?>What's new<\/a>/);
       expect(footer, f).toContain('<a href="/whats-new">What\'s new</a>');
     }
+    expect(read("whats-new.html")).toContain('<a href="/whats-new" aria-current="page">What\'s new</a>');
+    expect(read("index.html")).not.toContain('href="/whats-new" aria-current');
     expect(read("guides/updates-and-backups.html")).toContain('href="/whats-new"');
+  });
+
+  it("carries no ticket number, host address or home path on the built page", () => {
+    const html = read("whats-new.html");
+    expect(html).not.toMatch(/\bBOS-\d+/i);
+    expect(html).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\.ts\.net|\/mnt\/|\/home\//);
   });
 
   it("stops the build on an entry that is not a date, dates out of order or repeated, a ticket number, or no entries", () => {
