@@ -39,6 +39,36 @@ function visitor(app: TestApp["app"], token: string) {
 }
 
 describe("feedback portal", () => {
+  it("BOS-1680: with the owner's switch on, the bare address (no link secret) shows that company's roadmap; a wrong secret still 404s", async () => {
+    const c = await setup();
+    const on = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true, title: "What's next for App Co" })).json();
+    const bare = (headers: Record<string, string> = {}) => t!.app.inject({ method: "GET", url: "/api/portal", headers });
+    // Off by default: nothing is shown at the bare address, even though the portal itself is on.
+    expect((await bare()).statusCode).toBe(404);
+    expect((await bare({ "x-portal-token": "" })).statusCode).toBe(404);
+    const set = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { portalAtBareAddress: true })).json();
+    expect(set.portalAtBareAddress).toBe(true);
+    for (const headers of [{} as Record<string, string>, { "x-portal-token": "" }]) {
+      const res = await bare(headers);
+      expect(res.statusCode).toBe(200);
+      // The content a visitor sees, not just the status: the title and the shown features.
+      expect(res.json().title).toBe("What's next for App Co");
+      expect(res.json().features.map((f: { title: string }) => f.title)).toContain("A dark theme.");
+    }
+    // The full link still works, and a wrong secret never falls back to the shared portal.
+    expect((await bare({ "x-portal-token": on.portalToken })).statusCode).toBe(200);
+    expect((await bare({ "x-portal-token": "x".repeat(32) })).statusCode).toBe(404);
+    // Turning the portal off closes the bare address too; a second company taking the switch moves it.
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: false });
+    expect((await bare()).statusCode).toBe(404);
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true });
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json().company;
+    await c.req("PATCH", `/api/companies/${other.id}/portal`, { enabled: true, title: "Other roadmap", portalAtBareAddress: true });
+    expect((await bare()).json().title).toBe("Other roadmap");
+    const settings = (await c.req("GET", `/api/companies/${c.company.id}/feedback-settings`)).json();
+    expect(settings.portalAtBareAddress).toBe(false);
+  });
+
   it("is off until the owner turns it on, and answers wrong or old links the same way", async () => {
     const c = await setup();
     expect((await t!.app.inject({ method: "GET", url: "/api/portal" })).statusCode).toBe(404);
