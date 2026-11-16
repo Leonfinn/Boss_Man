@@ -1048,6 +1048,14 @@ at "$sD"; FAKE_NO_HASH=1 svc_check; has "$D/outbox/available.json" '"changedServ
 FAKE_NO_RENDER=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/outbox/available.json" '"changedServices": []'
 has "$D/outbox/available.json" "\"tip\": \"$sH\""; has "$D/deployer.log" "could not be rendered"
 [[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failure"
+# it can't unpack the commit: reported as not checked, the reason is logged, and docker is never asked to render the
+# empty folder (BOS-1690: the unpack's failure check is a plain function call now, not a negated subshell with a redirect)
+# shellcheck disable=SC2016  # the fake's own script text: it expands when the fake runs
+printf '#!/usr/bin/env bash\n[[ -z ${FAKE_NO_UNPACK:-} ]] || { echo "tar: fake unpack failure" >&2; exit 2; }\nexec "%s" "$@"\n' "$(command -v tar)" >"$T/bin/tar"; chmod +x "$T/bin/tar"
+FAKE_NO_UNPACK=1 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; has "$D/deployer.log" "could not unpack"
+has "$D/deployer.log" "tar: fake unpack failure"; hasnt "$DL" "config"
+[[ ! -e $D/state/render ]] || fail "the render folder was left behind after a failed unpack"
+rm -f "$T/bin/tar"
 # switched off in host.conf: not compared, and docker is not asked to render anything
 printf 'REPO=%s\nAVAILABLE_REFRESH_SECONDS=0\nSERVICE_COMPARE=0\n' "$T/src" >"$D/host.conf"; chmod 600 "$D/host.conf"
 svc_check; has "$D/outbox/available.json" '"servicesChecked": false'; hasnt "$DL" "config"; has "$D/deployer.log" "Service compare is off"

@@ -39,6 +39,9 @@ STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
 # that can't write a log still checks. scripts/sweep-tmp.sh never touches it, unlike /tmp.
 SCRATCH=${BOSSMAN_SCRATCH:-}
 SCRATCH_LOG="$SCRATCH/check-all.log"
+# Where a fenced run's log waits for the runner to move it in. Always /tmp in real use (the runner only looks there);
+# check-all.test.sh points it at a folder of its own, so its "taken name" case runs on every machine (BOS-1690).
+SCRATCH_TMP_DIR=${BOSSMAN_SCRATCH_TMP_DIR:-/tmp}
 # scratch_log <file> <exit code>: put this run's completed log in the ticket's kept scratch, so it can be read after a
 # restart wiped /tmp. Written as .next then moved into place, so a half-written log is never read, and the previous
 # run is kept as .previous. Best effort: a check that can't keep a log still checks. A fenced agent may not write the
@@ -53,15 +56,16 @@ scratch_log() {
     { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } >"$out" 2>/dev/null || out=""
   fi
   if [ -z "$out" ]; then
-    [ -n "${BOSSMAN_TICKET:-}" ] && [ -d /tmp ] && [ -w /tmp ] || return 0
-    tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
-    # `||` and not `if ! { …; } >file`: bash does not apply the `!` when the group's own redirect fails to open the file.
+    [ -n "${BOSSMAN_TICKET:-}" ] && [ -d "$SCRATCH_TMP_DIR" ] && [ -w "$SCRATCH_TMP_DIR" ] || return 0
+    tmp="$SCRATCH_TMP_DIR/bossman-scratch-$BOSSMAN_TICKET.log"; out=$tmp
+    # `then :; else` and not `if ! { …; } >file`: bash does not apply the `!` when the group's own redirect fails to
+    # open the file, so the fallback below never ran (BOS-1689). scripts/negated-redirect.test.sh guards the pattern.
     if { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp"; then
       :
     else
       # The kept name is taken by a file this run may not write (another user's, in sticky /tmp): keep the log under a
       # name of its own so it is not lost. The runner only moves the exact name in; this one is for a person to read.
-      tmp="/tmp/bossman-scratch-$BOSSMAN_TICKET.$$.log"
+      tmp="$SCRATCH_TMP_DIR/bossman-scratch-$BOSSMAN_TICKET.$$.log"
       { printf 'check-all: finished %s (exit %s)\n' "$(date -u +%FT%TZ)" "$rc"; cat "$1" 2>/dev/null; } 2>/dev/null >"$tmp" || return 0
       echo "check-all: $SCRATCH_LOG not writable and the kept /tmp name is taken; log kept at $tmp" >&2
     fi
