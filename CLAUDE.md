@@ -8,7 +8,17 @@ Compose files and CI workflows are checked too, so do not write "no Docker here,
 
 When the server-owned check queue is on (the owner's switch in Settings → Server and runner → Checks, DR-003), `request_check` is the way to run your quick check: commit, then call the `request_check` tool (`scope: quick` by default; `full` only in the cases above). The runner runs it outside your session, so it survives the end of your run and no agent can stop it, a pass on the same code is reused, and you are woken with the result. Do not poll, start your own background loop, or also run `scripts/check-quick.sh` by hand: a hand run takes runner memory beside the queue's checks. The tool tells you if the queue is off; only then run `scripts/check-quick.sh` yourself as above. The merge gate runs the one full check per merge attempt.
 
-In an agent session a whole-package or whole-suite vitest run (`pnpm test`, `pnpm --filter X test`, `vitest run` with no file, `vitest related` over app.ts, main.ts or mcp.ts) is refused by `scripts/vitest-guard.mjs`; `CHECK_ALL_FORCE=1` overrides. A run that names test files is queued behind the same check lock (`BOSSMAN_VITEST_NO_SLOT=1` skips the queue).
+In an agent session a whole-package or whole-suite vitest run (`pnpm test`, `pnpm --filter X test`, `vitest run` with no file, `vitest related` over app.ts, main.ts or mcp.ts) is refused by `scripts/vitest-guard.mjs`; `CHECK_ALL_FORCE=1` overrides.
+
+### Running one test file (authors and reviewers)
+
+Run the test files a change adds or touches, by path, from their package folder:
+
+```
+cd apps/server && npx vitest run test/foo.test.ts test/bar.test.ts
+```
+
+Up to 3 test files named by path run at once, with one worker, without waiting for the merge gate (the "quick lane"). They wait instead only when the runner is short of memory (under 6.5 GB free) or two other quick runs are going; then the run prints `vitest-guard: this run waits in the merge gate's check line because …`, followed by its place in line every 30 s. Anything else that names tests (more than 3 files, a bare word like `vitest run foo`, which is a filter, `vitest related`, `--changed`, `--maxWorkers`) waits in that line from the start, behind merge checks of 30 to 50 minutes each. So name the files; don't wrap the command in `timeout` (it kills the run without a word) or run it in the background. Do not use `BOSSMAN_VITEST_NO_SLOT=1`: it drops every memory limit and is only for when the CEO asks. If the tests still did not run, say so in your verdict.
 
 The full check, `scripts/check-all.sh`, takes 30 to 50 minutes and runs everything CI's `check` job does that works without Docker: the script tests and lints, `pnpm typecheck`, `pnpm test`, `pnpm build`, ShellCheck (`scripts/check-shell.sh`, where info-level findings fail too) and the shell scripts' tests (`scripts/test-shell.sh`).
 
