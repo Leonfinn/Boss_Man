@@ -35,7 +35,14 @@ export type MainCiStatus =
   | { state: "green"; detail: string }
   | { state: "failing"; detail: string };
 
-type OpenFailure = { ticketId: string; workflow: string; runs: string[] };
+/** A commit since the last green run that changed a file the failing job names (BOS-1688): the only revert target worth offering. */
+export type Suspect = { sha: string; message: string; reason: string };
+/**
+ * mainAt/lastGreen/suspects (BOS-1688): where main was, the last green commit of this workflow and the ranked
+ * suspects between them. Absent on failures opened before them. R40's quarantine-or-revert wake reads suspects
+ * through suspectsFor: an empty list means "no commit to revert".
+ */
+type OpenFailure = { ticketId: string; workflow: string; runs: string[]; mainAt?: string; lastGreen?: string | null; suspects?: Suspect[] };
 type ProjectState = { status: MainCiStatus & { at: string }; seen: Record<string, string>; open: Record<string, OpenFailure> };
 
 /** One failing step, found in one run. */
@@ -53,6 +60,30 @@ export function errorLines(log: string, max = MAX_LINES): string[] {
   // The last ones are nearest the failure.
   return (hits.length ? hits : clean).slice(-max).map((l) => redactForModel(l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}…` : l));
 }
+
+/** The most commits since the last green run whose files are read one by one (one compare call each). */
+const MAX_RANGE = 20;
+const FILE_EXT = "[cm]?[jt]sx?|sh|ya?ml|json|py|rs|go|css|vue|svelte|sql|toml";
+
+/**
+ * The files a failure's error lines name (BOS-1688), as logged: often relative to a package (`test/a.test.ts`),
+ * so they are matched against a commit's repo paths by suffix. A bare name counts only for a test file:
+ * `index.ts` alone would match half the repo.
+ */
+export function namedFiles(lines: string[]): string[] {
+  const out = new Set<string>();
+  const re = new RegExp(`(?:^|[\\s(>"'\`\\[])((?:[\\w@.-]+/)*[\\w@.-]+\\.(?:${FILE_EXT}))(?=$|[\\s:)"'\`\\],>])`, "g");
+  for (const line of lines)
+    for (const m of line.matchAll(re)) {
+      const p = m[1]!.replace(/^(\.\/)+/, "");
+      if (p.includes("node_modules/") || p.startsWith("../")) continue;
+      if (p.includes("/") || /\.(test|spec)\./.test(p)) out.add(p);
+    }
+  return [...out];
+}
+
+/** Whether a repo path is the file a log named (by path suffix, so `test/a.test.ts` finds `apps/server/test/a.test.ts`). */
+const sameFile = (repoPath: string, named: string) => repoPath === named || repoPath.endsWith(`/${named}`);
 
 export function mainCiService(
   db: Db,
@@ -124,17 +155,90 @@ export function mainCiService(
     return { agentId: ceo?.id ?? null, ticketTitle: t?.title ?? null, byCeo: true, lead };
   }
 
-  /** The first run of the current streak of failures in one workflow: the change that broke it. */
-  const firstBad = (runs: WorkflowRun[], from: WorkflowRun) => {
+  /**
+   * The current streak of failures in one workflow: its first failed run (where main was when it started failing,
+   * not necessarily what broke it, BOS-1688) and the last green run before it, if one is in reach. A cancelled or
+   * skipped run says nothing either way and is stepped over.
+   */
+  const streak = (runs: WorkflowRun[], from: WorkflowRun) => {
     let first = from;
+    let green: WorkflowRun | null = null;
     for (const r of runs.slice(runs.indexOf(from) + 1, runs.indexOf(from) + 1 + LOOK_BACK)) {
       if (r.name !== from.name) continue;
       if (r.status !== "completed") continue;
       if (BAD.has(String(r.conclusion))) first = r;
-      else break;
+      else if (r.conclusion === "success") {
+        green = r;
+        break;
+      }
     }
-    return first;
+    return { first, green };
   };
+
+  /**
+   * The commits on main from the last green run to the first failed one, ranked by whether they changed a file the
+   * failing job names or the workflow's own file (BOS-1688). `note` says why there are none, or what limited the search.
+   */
+  async function suspectsOf(
+    cfg: GitHostConfig,
+    token: string,
+    f: Failure,
+    first: WorkflowRun,
+    green: WorkflowRun | null,
+  ): Promise<{ suspects: Suspect[]; others: Array<{ sha: string; message: string }>; note: string | null }> {
+    const none = (note: string) => ({ suspects: [], others: [], note });
+    if (!green) return none(`No green run of "${f.workflow}" was found in the last ${LOOK_BACK} runs, so there is no range of commits to search.`);
+    if (green.headSha === first.headSha)
+      return none(`Main didn't change between the last green run and the first failure (both at ${first.headSha.slice(0, 8)}): no commit broke it. Look at the test itself: flaky, a date or time, or something outside the repo.`);
+    let range: Awaited<ReturnType<typeof deps.gitHosts.compareDetail>>;
+    try {
+      range = await deps.gitHosts.compareDetail(cfg, token, green.headSha, first.headSha);
+    } catch (err) {
+      return none(`Boss Man couldn't read the commits between them (${(err as Error).message}); on GitHub the token needs Repository permissions → Contents: Read-only for this.`);
+    }
+    // Main's own commits (each merge), newest first: the first-parent chain back to the green one. A branch's
+    // inner commits are part of their merge and are never listed apart.
+    const bySha = new Map(range.commits.map((c) => [c.sha, c]));
+    const chain: Array<{ sha: string; message: string; parents: string[] }> = [];
+    for (let c = bySha.get(first.headSha); c && c.sha !== green.headSha; c = bySha.get(c.parents[0] ?? "")) chain.push(c);
+    if (!chain.length) return none(`Boss Man couldn't trace main from ${green.headSha.slice(0, 8)} to ${first.headSha.slice(0, 8)} (was main rewritten?).`);
+    const looked = chain.slice(0, MAX_RANGE);
+    const named = namedFiles(f.lines);
+    const workflowFile = first.path ?? null;
+    const scored: Array<Suspect & { score: number }> = [];
+    const others: Array<{ sha: string; message: string }> = [];
+    for (const c of looked) {
+      let files: string[] = [];
+      try {
+        files = chain.length === 1 ? range.files : c.parents[0] ? (await deps.gitHosts.compareDetail(cfg, token, c.parents[0], c.sha)).files : [];
+      } catch {
+        // Not readable: listed as checked-and-clear would be wrong, so it stays among the others with a mark.
+        others.push({ sha: c.sha, message: `${c.message} (its files couldn't be read)` });
+        continue;
+      }
+      const hits = named.filter((n) => files.some((p) => sameFile(p, n)));
+      const touchesWorkflow = !!workflowFile && files.includes(workflowFile);
+      if (!hits.length && !touchesWorkflow) {
+        others.push({ sha: c.sha, message: c.message });
+        continue;
+      }
+      const reason = [hits.length ? `changed ${hits.slice(0, 3).join(", ")}${hits.length > 3 ? ` and ${hits.length - 3} more named in the error lines` : ""}` : "", touchesWorkflow ? `changed the workflow file ${workflowFile}` : ""].filter(Boolean).join("; ");
+      // A file the error names outweighs the workflow file; more named files rank higher; ties keep main's order (newest first).
+      scored.push({ sha: c.sha, message: c.message, reason, score: hits.length * 10 + (touchesWorkflow ? 1 : 0) });
+    }
+    const suspects = scored.sort((a, b) => b.score - a.score).map(({ sha, message, reason }) => ({ sha, message, reason }));
+    const notes = [
+      chain.length > looked.length ? `Only the newest ${looked.length} of ${chain.length} commits since the last green run were checked.` : "",
+      !named.length ? `The error lines name no file${workflowFile ? ", so only the workflow file was looked for" : ""}: a commit that changed the failing code itself can't be told apart here.` : "",
+    ].filter(Boolean);
+    return { suspects, others, note: notes.join(" ") || null };
+  }
+
+  const ticketOfCommit = async (projectId: string, sha: string) => {
+    const [t] = await db.select({ title: tickets.title }).from(tickets).where(and(eq(tickets.projectId, projectId), eq(tickets.mergeCommit, sha)));
+    return t?.title ?? null;
+  };
+  const short = (sha: string, message?: string) => `${sha.slice(0, 8)}${message ? ` "${message.split("\n")[0]!.slice(0, 120)}"` : ""}`;
 
   const ticketOpen = async (ticketId: string) => {
     const [t] = await db.select({ s: tickets.systemState }).from(tickets).where(and(eq(tickets.id, ticketId), ne(tickets.systemState, "done")));
@@ -215,8 +319,18 @@ export function mainCiService(
           }
           continue;
         }
-        const first = firstBad(runs, run);
-        const who = await breaker(p.id, p.companyId, first.headSha);
+        // BOS-1688: where main was is not what broke it (a scheduled run fails wherever main happens to be). The
+        // ticket names both ends of the range and only calls a commit a suspect if it changed the failing job's files.
+        const { first, green } = streak(runs, run);
+        const blame = await suspectsOf(cfg, token, f, first, green);
+        const top = blame.suspects[0];
+        const who = await breaker(p.id, p.companyId, top?.sha ?? first.headSha);
+        const suspectLines = await Promise.all(
+          blame.suspects.map(async (s, i) => {
+            const from = await ticketOfCommit(p.id, s.sha);
+            return `  ${i + 1}. ${short(s.sha, s.message)}: ${s.reason}${from ? ` (ticket "${from}")` : ""}`;
+          }),
+        );
         const title = `Main's CI is failing: ${f.workflow} / ${f.job} / ${f.step}`.slice(0, 200);
         const body = [
           `GitHub CI is failing on ${p.defaultBranch} in ${p.name}.`,
@@ -225,8 +339,19 @@ export function mainCiService(
           `- Workflow: ${f.workflow}`,
           `- Job: ${f.job}${f.jobUrl ? ` (${f.jobUrl})` : ""}`,
           `- Step: ${f.step}`,
-          `- First failing commit: ${first.headSha.slice(0, 8)}${first.headMessage ? ` — ${first.headMessage.split("\n")[0]!.slice(0, 120)}` : ""} (${first.url})`,
-          who.ticketTitle ? `- That commit came from the ticket "${who.ticketTitle}".` : "- Boss Man couldn't tell which ticket that commit came from.",
+          `- Main was at ${short(run.headSha, run.headMessage)} when this run failed. That is where main was, not what broke it.`,
+          ...(first.id !== run.id ? [`- It has failed since main was at ${short(first.headSha, first.headMessage)} (${first.url}).`] : []),
+          green ? `- Last green run of "${f.workflow}": main at ${short(green.headSha, green.headMessage)} (${green.url}).` : `- Last green run: none in reach.`,
+          ...(top
+            ? [`- Suspects (commits since the last green run that changed the failing job's files), most likely first:`, ...suspectLines]
+            : [`- No suspect: no commit since the last green run changed a file the error lines name${first.path ? " or the workflow file" : ""}. Don't undo a commit for this.`]),
+          ...(blame.others.length ? [`- Also since the last green run (didn't touch those files): ${blame.others.slice(0, 10).map((o) => short(o.sha, o.message)).join("; ")}${blame.others.length > 10 ? ` and ${blame.others.length - 10} more` : ""}.`] : []),
+          ...(blame.note ? [`- ${blame.note}`] : []),
+          who.ticketTitle
+            ? top
+              ? `- The top suspect came from the ticket "${who.ticketTitle}".`
+              : `- Main's commit at the first failure came from the ticket "${who.ticketTitle}" (that alone doesn't make it the cause).`
+            : "- Boss Man couldn't tell which ticket that commit came from.",
           ...(who.lead ? [`- Lead: ${who.lead} merged that ticket (background lane, so this went to the CEO to give to a foreground agent).`] : []),
           "",
           "Error lines (secrets redacted):",
@@ -239,7 +364,7 @@ export function mainCiService(
           "Boss Man opens one ticket for each failing step and adds later failed runs here. It says here when main is green again.",
         ].join("\n");
         const t = await deps.createTicket(p.id, { title, body, assigneeAgentId: who.agentId, urgent: true, risk: "medium", state: "ready" });
-        state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url] };
+        state.open[f.key] = { ticketId: t.id, workflow, runs: [run.url], mainAt: run.headSha, lastGreen: green?.headSha ?? null, suspects: blame.suspects };
         // Saved at once: if a later ticket in this pass fails, the next pass must not open this one again.
         await writeState(p.id, state);
         await record(db, { companyId: p.companyId, ticketId: t.id, kind: "main_ci_failure", summary: `Opened for a failing step on ${p.defaultBranch}`, at: now() });
@@ -256,6 +381,15 @@ export function mainCiService(
     async setOn(on: boolean) {
       await db.insert(settings).values({ key: MAIN_CI_SWITCH, value: on ? "on" : "off" }).onConflictDoUpdate({ target: settings.key, set: { value: on ? "on" : "off" } });
       return on;
+    },
+    /**
+     * The ranked suspects on an open main-CI ticket (BOS-1688), for R40's quarantine-or-revert wake: offer a revert
+     * only when this is non-empty. Null when the ticket isn't an open main-CI failure or predates the suspect list.
+     */
+    async suspectsFor(projectId: string, ticketId: string): Promise<Suspect[] | null> {
+      const s = await readState(projectId);
+      const o = Object.values(s?.open ?? {}).find((x) => x.ticketId === ticketId);
+      return o?.suspects ?? null;
     },
     /** Every project's current line, for Settings: the one plain statement per project. */
     async statuses(): Promise<Array<{ projectId: string; project: string; status: (MainCiStatus & { at?: string }) }>> {
