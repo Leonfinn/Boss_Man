@@ -349,6 +349,8 @@ jobs:
         run: |
           docker run --rm --entrypoint sh boss-man-check-worker:ci -c '
             git --version && pnpm --version && test "$(id -u)" = 1000
+            # BOS-1606: the web tests need the playwright module; a worker image without it fails full checks on good code.
+            playwright --version && node -e "require(\"playwright\")"
             if command -v claude || command -v opencode; then echo "an agent binary is in the worker image"; exit 1; fi'
       - name: A worker refuses to start without a token file
         run: |

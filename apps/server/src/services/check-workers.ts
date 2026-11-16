@@ -11,7 +11,7 @@
 //    company it serves.
 import { randomBytes } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
-import { PROTOCOL_VERSION, toolchainDifferences, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
+import { PROTOCOL_VERSION, toolchainDifferences, toolchainMissing, type CheckLimits, type WorkerCommand } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { checkWorkers, companies, runners } from "../db/schema.js";
@@ -105,8 +105,8 @@ export function checkWorkersService(db: Db) {
     if (why) return { ok: false, reason: why };
     if (!w.companyIds.includes(companyId)) return { ok: false, reason: "Not set up for this company." };
     if (w.toolchain && runnerToolchain) {
-      if (w.toolchain.fingerprint === runnerToolchain.fingerprint) return { ok: true, limit: workerLimit(w) };
-      const diff = toolchainDifferences(w.toolchain.tools, runnerToolchain.tools);
+      const diff = [...toolchainDifferences(w.toolchain.tools, runnerToolchain.tools), ...toolchainMissing(w.toolchain.tools, runnerToolchain.tools)];
+      if (w.toolchain.fingerprint === runnerToolchain.fingerprint && !diff.length) return { ok: true, limit: workerLimit(w) };
       return { ok: false, reason: `Out of date: its tools differ from your runner's (${diff.length ? diff.join("; ") : "see the tool list"}). Redeploy this worker so it rebuilds; no file edit is needed.` };
     }
     // One side can't report its tools: fall back to the commit.

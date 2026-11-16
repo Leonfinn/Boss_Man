@@ -342,11 +342,24 @@ export type Toolchain = z.infer<typeof Toolchain>;
 /** Tools left out of the fingerprint: shown to the owner, never compared (a runner may lack the browser add-on a worker has). */
 export const TOOLCHAIN_NOT_COMPARED = ["chromium"] as const;
 
+/**
+ * BOS-1606: tools compared one way. The worker must have each one the runner has (the web tests need playwright), but an
+ * extra one on the worker is fine, so a runner built without the optional add-on still works with a worker that has it.
+ * Not part of the fingerprint.
+ */
+export const TOOLCHAIN_ONE_WAY = ["playwright"] as const;
+
+/** One-way tools the runner has and the worker lacks, in the owner's words. Empty when the worker has all it needs. */
+export function toolchainMissing(worker: Record<string, string>, runner: Record<string, string>): string[] {
+  return TOOLCHAIN_ONE_WAY.filter((n) => runner[n] && !worker[n]).map((n) => `${n} missing here, ${runner[n]} on your runner`);
+}
+
 /** In the owner's words, which compared tools differ between a worker and the runner ("Node 22.11 here, 22.12 on your runner"). Empty when none. */
 export function toolchainDifferences(worker: Record<string, string>, runner: Record<string, string>): string[] {
   const out: string[] = [];
   for (const name of [...new Set([...Object.keys(worker), ...Object.keys(runner)])].sort()) {
     if ((TOOLCHAIN_NOT_COMPARED as readonly string[]).includes(name)) continue;
+    if ((TOOLCHAIN_ONE_WAY as readonly string[]).includes(name)) continue;
     if (worker[name] !== runner[name]) out.push(`${name} ${worker[name] ?? "missing"} here, ${runner[name] ?? "missing"} on your runner`);
   }
   return out;

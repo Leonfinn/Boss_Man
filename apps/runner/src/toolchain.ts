@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { TOOLCHAIN_NOT_COMPARED, type Toolchain } from "@boss-man/shared";
+import { TOOLCHAIN_NOT_COMPARED, TOOLCHAIN_ONE_WAY, type Toolchain } from "@boss-man/shared";
 
 type Exec = (cmd: string, args: string[]) => Promise<string>;
 const exec: Exec = (cmd, args) => new Promise((resolve, reject) => execFile(cmd, args, { timeout: 15_000 }, (err, stdout, stderr) => (err ? reject(err) : resolve(`${stdout}\n${stderr}`))));
@@ -26,6 +26,10 @@ const ASKS: Array<[name: string, cmd: string, args: string[]]> = [
   ["docker-compose", "docker", ["compose", "version"]],
   ["actionlint", "actionlint", ["-version"]],
   ["chromium", "chromium", ["--version"]],
+  // BOS-1606: the web tests load the playwright module; a worker without it failed full checks on good code. Compared one
+  // way (not in the fingerprint): the server keeps a worker without it idle when the runner has it, says "playwright
+  // missing here", and lets a worker with an extra one work.
+  ["playwright", "playwright", ["--version"]],
 ];
 
 export function osRelease(read: () => string = () => readFileSync("/etc/os-release", "utf8")): string | null {
@@ -41,7 +45,7 @@ export function osRelease(read: () => string = () => readFileSync("/etc/os-relea
 /** Hash of the compared tools, order-independent: "name=version" lines sorted, then sha256. */
 export function fingerprintOf(tools: Record<string, string>): string {
   const lines = Object.entries(tools)
-    .filter(([name]) => !(TOOLCHAIN_NOT_COMPARED as readonly string[]).includes(name))
+    .filter(([name]) => !(TOOLCHAIN_NOT_COMPARED as readonly string[]).includes(name) && !(TOOLCHAIN_ONE_WAY as readonly string[]).includes(name))
     .map(([name, v]) => `${name}=${v}`)
     .sort();
   return createHash("sha256").update(lines.join("\n")).digest("hex");
