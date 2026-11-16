@@ -233,6 +233,61 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
   });
 
+  it("a check on a separate check worker doesn't hold the swap (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    const [w] = await c.db.insert(checkWorkers).values({ name: "worker-1", tokenHash: "x" } as never).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", workerId: w!.id, startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    expect(await c.maint()).toMatchObject({ on: true, runs: 0, checks: 0 });
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status names the runner check it waits on, and update-now ends the wait (BOS-1600)", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+    const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+    await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+    await c.req("POST", "/api/maintenance/start", {});
+    const st = (await c.maint()) as { checks: number; checksList: { kind: string }[] };
+    expect(st.checks).toBe(1);
+    expect(st.checksList[0]!.kind).toBe("merge");
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(false);
+    expect((await c.maintenance.updateNow()).ok).toBe(true);
+    await c.maintenance.step();
+    expect(c.fake.runnersBySlug.get("app-co")!.current).toBe(true);
+  });
+
+  it("the status counts match what the swap waits on: agents only, checks only, both, nothing (BOS-1600 A, B)", async () => {
+    // For each kind of wait, the banner's numbers must agree with the swap's own decision: it swaps exactly when the
+    // status says nothing is left (runs 0 and checks 0), and the text says "swapping the runners now" only then.
+    for (const [agents, check] of [[true, false], [false, true], [true, true], [false, false]] as const) {
+      if (ctx) {
+        await ctx.app.close();
+        await ctx.close();
+        await rm(ctx.dir, { recursive: true, force: true });
+      }
+      const c = (ctx = await setup());
+      const a = await c.company("App Co", "app-co");
+      const [proj] = await c.db.insert(projects).values({ companyId: a.id, name: "Dev" }).returning();
+      const [t] = await c.db.insert(tickets).values({ companyId: a.id, projectId: proj!.id, title: "T", number: 1 }).returning();
+      if (agents) await c.db.insert(runs).values({ id: randomUUID(), companyId: a.id, agentId: a.ceo, purpose: null, model: "m", startedAt: new Date() });
+      if (check) await c.db.insert(checkJobs).values({ companyId: a.id, projectId: proj!.id, ticketId: t!.id, kind: "merge", scope: "full", commit: "c1", tree: "t1", state: "running", startedAt: new Date(), lastOutputAt: new Date() });
+      await c.req("POST", "/api/maintenance/start", {});
+      const st = (await c.maint()) as { runs: number; checks: number };
+      expect(st.runs > 0).toBe(agents);
+      expect(st.checks > 0).toBe(check);
+      await c.maintenance.step();
+      const swapped = c.fake.runnersBySlug.get("app-co")!.current === true;
+      expect(swapped).toBe(st.runs === 0 && st.checks === 0);
+    }
+  });
+
   it("a live chat run doesn't stop a busy company's runner swapping", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");

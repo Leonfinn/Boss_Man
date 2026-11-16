@@ -204,8 +204,21 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
       maint.reload();
       return `Stopped ${r.stopped}${r.skipped ? `; ${r.skipped} had already ended` : ""}. The update goes ahead once no run is left.`;
     });
+  const updateNow = () =>
+    act.run(async () => {
+      if (!window.confirm("Stop the running checks and update the runners now? Each check starts again from the beginning afterwards, so the time it has already spent is lost.")) return;
+      try {
+        await api("/api/maintenance/update-now", { method: "POST", body: {} });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) return err.message;
+        throw err;
+      }
+      maint.reload();
+      return "The runners are being swapped now. The checks start again afterwards.";
+    });
   const press = (id: NonNullable<UpdateStatus["primary"]>["id"]) => {
     if (id === "ask-wrapup") return wrapUp();
+    if (id === "update-now") return updateNow();
     if (id === "stop-stragglers") return stopThem(st.primary?.runIds ?? []);
     return deployLatest(); // Try again, Review and deploy, Check for updates now: all are deploy-latest.
   };

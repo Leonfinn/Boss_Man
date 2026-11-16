@@ -95,7 +95,8 @@ describe("wake classes: the table", () => {
     }
     // "update pending" is the maintenance hold's label; no_wrapup and too_early are the refusal codes of the
     // stop-stragglers endpoint (BOS-1238). None is a wake.
-    for (const r of ["update pending", "no_wrapup", "too_early"]) found.delete(r); // the maintenance hold's label, not a wake
+    // no_update, agents_running and no_checks are the refusal codes of the update-now endpoint (BOS-1600).
+    for (const r of ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
     const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
     expect(unclassified).toEqual([]);
