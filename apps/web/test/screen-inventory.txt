@@ -117,6 +117,7 @@ reads:
   - /api/companies/:id/feedback-settings
   - /api/feedback/:id
   - /api/feedback/unprocessed
+  - /api/host-facts
 
 ## #/merge-queue
 sections: 
@@ -132,6 +133,7 @@ sections:
   - Notifications
   - Set up your phone
 reads: 
+  - /api/host-facts
   - /api/notification-settings
   - /api/notification-settings/phone-login/:id
   - /api/notifications
