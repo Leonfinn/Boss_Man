@@ -681,8 +681,13 @@ describe("runner-update asks close themselves when the live runner image already
       const o = await c.selfDeploy.overview();
       expect(o.runnerUpdate!.state).toBe("unknown");
       expect(o.runnerUpdate!.words).toContain("isn't a merge Boss Man recorded");
-      await c.selfDeploy.overview();
-      expect((await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === RUNNER_NEED_UNKNOWN_REASON)).toHaveLength(1);
+      // Reading the panel never queues a run (a read with a side effect broke the run caps in fair-share.test.ts);
+      // the background sync wakes the CEO, once however often it runs.
+      const ceoWakes = async () => (await c.db.select().from(wakes)).filter((w) => w.agentId === ceo!.id && w.reason === RUNNER_NEED_UNKNOWN_REASON);
+      expect(await ceoWakes()).toHaveLength(0);
+      await c.selfDeploy.sync();
+      await c.selfDeploy.sync();
+      expect(await ceoWakes()).toHaveLength(1);
       const r = await c.selfDeploy.updateRunners();
       expect("decisionId" in r).toBe(true);
       const [card] = await c.db.select().from(decisions).where(eq(decisions.id, (r as { decisionId: string }).decisionId));

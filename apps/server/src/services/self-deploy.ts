@@ -855,13 +855,14 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
 
   /**
    * BOS-1648: the one answer to "is a runner update needed?" for Boss Man's own runners (runner-update-need.ts), which
-   * the Settings line, the button's card and the automatic card all read. A "can't tell" wakes the CEO once per cause.
+   * the Settings line, the button's card and the automatic card all read. A "can't tell" wakes the CEO once per cause,
+   * but only from the background pass (`wake: true`): reading the status page must not queue a run as a side effect.
    */
-  async function runnerNeed(a: Available | null): Promise<RunnerNeed | null> {
+  async function runnerNeed(a: Available | null, opts: { wake?: boolean } = {}): Promise<RunnerNeed | null> {
     const companyId = await homeCompany();
     if (!companyId) return null;
     const need = await runnerUpdateNeed(db, companyId, { liveFallback: a?.deployed ?? null });
-    await wakeCeoIfRunnerNeedUnknown(db, companyId, need, deps.wake).catch((err: Error) => deps.log?.(`self-deploy: waking the CEO about the runner answer failed: ${err.message}`));
+    if (opts.wake) await wakeCeoIfRunnerNeedUnknown(db, companyId, need, deps.wake).catch((err: Error) => deps.log?.(`self-deploy: waking the CEO about the runner answer failed: ${err.message}`));
     return need;
   }
 
@@ -1344,7 +1345,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (a) await this.clearDoneOwnerTodos(a, s).catch((err) => deps.log?.(`self-deploy: clearing done to-dos failed: ${(err as Error).message}`));
       await syncDeployerScript().catch((err) => deps.log?.(`self-deploy: deployer script check failed: ${(err as Error).message}`));
       // Close any runner card, and drop any held offer, that the live image already has the change for (BOS-764).
-      const need = await runnerNeed(a).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
+      const need = await runnerNeed(a, { wake: true }).catch((err: Error) => (deps.log?.(`self-deploy: the runner answer failed: ${err.message}`), null));
       await closeBuiltRunnerCards(need).catch((err) => deps.log?.(`self-deploy: closing built runner cards failed: ${(err as Error).message}`));
       // BOS-1010 rule 7: never more than one open runner card; clears any duplicate a release left on the queue.
       await dedupeRunnerCards(a).catch((err) => deps.log?.(`self-deploy: de-duplicating runner cards failed: ${(err as Error).message}`));
