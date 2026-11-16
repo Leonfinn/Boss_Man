@@ -10,10 +10,11 @@ import { checkJobs, runners } from "../db/schema.js";
 import type { CheckBundleStore } from "./check-bundles.js";
 import { checkQueue, DEFAULT_SLOT_POLICY, isDefaultPolicy, type CheckJob, type MachineView } from "./check-queue.js";
 import type { Eligible } from "./check-workers.js";
-/** scripts/check-quick.sh prints this (and exits 75) when its install stopped on a machine error. */
+import { scanListReader, type ScanListWarning } from "./scan-list.js";
+
+/** scripts/install-packages.sh (used by check-quick.sh and check-all.sh) prints this and exits 75 when the install stopped on a machine error. */
 export const MACHINE_FAULT_MARKER = "check-quick: install stopped on a machine fault";
 export const MACHINE_FAULT_RETRIES = 3;
-import { scanListReader, type ScanListWarning } from "./scan-list.js";
 
 export type CheckDispatcherDeps = {
   send: (runnerId: string, command: RunnerCommand) => boolean;

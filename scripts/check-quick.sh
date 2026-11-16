@@ -85,28 +85,9 @@ step() { # step <label> <command...>
 }
 has() { grep -Eq "$1" <<<"$changed"; }
 
-# BOS-1628: pnpm's install on a fresh tree can die of the machine, not the branch: "EAGAIN ... copyfile" when the store and the
-# job folder sit on different filesystems (a check worker on a ZFS or overlay volume) and pnpm copies many files at once, or
-# a full disk (ENOSPC) or too many open files (EMFILE). Try again, gentler each time. Returns 75 (EX_TEMPFAIL) and prints the
-# marker line below if it still fails for that reason, so the server can put the check back in line instead of sending it to the
-# agent as a failed check. Any other failure (a bad lockfile, a missing package) returns the pnpm exit code at once.
-ENV_FAULT_MARKER="check-quick: install stopped on a machine fault"
-install_packages() {
-  local out rc=0 try
-  for try in 1 2 3; do
-    rc=0
-    if [ "$try" -eq 1 ]; then out="$(pnpm install --frozen-lockfile --prefer-offline 2>&1)" || rc=$?
-    else out="$(pnpm install --frozen-lockfile --prefer-offline --network-concurrency 2 --child-concurrency 1 2>&1)" || rc=$?; fi
-    [ "$rc" -ne 0 ] || break
-    printf '%s\n' "$out" | tail -n 20
-    if ! grep -Eq 'EAGAIN|ENOSPC|EMFILE|ENFILE|resource temporarily unavailable|no space left on device' <<<"$out"; then return "$rc"; fi
-    [ "$try" -lt 3 ] || { echo "$ENV_FAULT_MARKER (EAGAIN, ENOSPC or EMFILE after $try tries): the machine, not the branch; the check goes back in line"; return 75; }
-    echo "install failed on a machine error (try $try of 3); trying again with fewer files at once"
-    sleep "$((try * ${CHECK_QUICK_INSTALL_PAUSE:-5}))"
-  done
-  [ "$rc" -ne 0 ] || printf '%s\n' "$out" | tail -n 5
-  return "$rc"
-}
+# BOS-1628: install_packages (retry on a machine fault, exit 75 plus the marker) is shared with check-all.sh.
+# shellcheck source=scripts/install-packages.sh
+. "$(dirname "${BASH_SOURCE[0]}")/install-packages.sh"
 env_fault=0
 
 # Tests that find their source files by path (readFileSync, readdirSync) instead of importing them: vitest related can't

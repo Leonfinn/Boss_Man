@@ -157,7 +157,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
     took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
     if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
-    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && ! grep -q 'install stopped on a machine fault' "$log" && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry|The run ended with an error: .*(EAGAIN|pthread_create|ENOMEM|Cannot allocate memory|exited \(code (null|137)\))' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       # Run the pause in the background and wait for it, so a signal reaches on_signal at once, not up to ${pause}s later.
       sleep "$pause" & pause_pid=$!; wait "$pause_pid" 2>/dev/null || true
@@ -187,7 +187,10 @@ if [ -z "$pre_done" ]; then
   # CHECK_ALL_SLOT_COMMAND (used by check-quick.sh, with BOSSMAN_CHECK_CHILD=1): wait for a slot exactly like a hand-run check,
   # run that one command while holding it, and exit with its status. None of the full checks run.
   if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
-    pnpm install --frozen-lockfile --prefer-offline >/dev/null
+    # BOS-1628: retried on a machine fault; exit 75 plus the marker line lets the server requeue a merge check run on a worker.
+    # shellcheck source=scripts/install-packages.sh
+    . "$(dirname "$self")/install-packages.sh"
+    install_packages
     node --test scripts/*.test.mjs
     node scripts/lint-migrations.mjs
     node scripts/check-doc-numbers.mjs
