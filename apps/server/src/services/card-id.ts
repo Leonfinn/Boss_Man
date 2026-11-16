@@ -31,7 +31,7 @@ export async function resolveCardId(db: Db, companyId: string, given: string): P
     const shown = rows.slice(0, MAX_LISTED).map((r) => `${r.id} (${r.status}): ${r.question.replace(/\s+/g, " ").slice(0, 60)}`);
     return { ok: false, error: `${s} matches more than one card; use the full id of the one you mean:\n${shown.join("\n")}${rows.length > MAX_LISTED ? "\n…and more." : ""}` };
   }
-  return { ok: true, id: rows[0].id };
+  return { ok: true, id: rows[0]!.id };
 }
 
 /** replacedBy "card:<short id>" becomes "card:<full id>"; other forms pass through for the usual checks. */
