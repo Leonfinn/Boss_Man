@@ -1211,10 +1211,12 @@ if [[ $1 == ps ]]; then printf '%s' "${PL_CIDS-abc123def456}" | tr ' ' '\n' | gr
 shift 3; cid=$1; shift; [[ $1 == ntfy ]] || exit 98; shift
 if [[ -n ${PL_FAIL:-} && $1 == "$PL_FAIL" ]]; then echo "boom: the password is ${NTFY_PASSWORD:-none}" >&2; exit 1; fi
 case "$1 $2" in
-  "user list") printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
+  "token list") grep -q . "$PLW/tokens.$3" 2>/dev/null && printf 'user %s (role: user, tier: none)\n- %s (no label), never expires\n' "$3" "$(cat "$PLW/tokens.$3")" || printf 'user %s (role: user, tier: none)\n' "$3" ;;
+  "token add") [[ $3 == bossman-publish ]] || exit 97; printf 'tk_%s' "$(printf 'a%.0s' $(seq 1 29))" >"$PLW/tokens.$3"; printf 'token %s created for user %s, never expires\n' "$(cat "$PLW/tokens.$3")" "$3" ;;
+  "user list") [[ -n ${PL_NOPUB:-} ]] || printf 'user bossman-publish (role: user, tier: none)\n- write-only access to topic x\n'; sed 's/.*/user & (role: user, tier: none)/' "$PLW/users" ;;
   "user add") [[ $3 == --role=user && ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; echo "$4" >>"$PLW/users"; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$4" ;;
   "user change-pass") [[ ${NTFY_PASSWORD:-} =~ ^[A-Za-z0-9]{24}$ ]] || exit 97; printf '%s' "$NTFY_PASSWORD" >"$PLW/pw.$3" ;;
-  access*) [[ $3 == read-only || $4 == read-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
+  access*) [[ $3 == read-only || $4 == read-only || $4 == write-only ]] || exit 97; echo "$*" >>"$PLW/acl" ;;
   *) echo "fake ntfy: unhandled: $*" >&2; exit 98 ;;
 esac
 FAKE
@@ -1300,6 +1302,30 @@ no_plaintext "$(cat "$PLW/pw.phone-read")"
 has "$PD/outbox/host.json" '"phoneLogin": {"openssl": true}'
 plreq reset phone-read alerts "$PUB"; : >"$PLLOG"; BOSSMAN_DEPLOYER="$PD" "$PL/hd.sh" --dry-run >"$T/out" 2>&1 || fail "PL9 dry run"
 [[ -e $PD/inbox/phone-login.json && $(plx) == 0 ]] || fail "PL9: a dry run handled the request"
+rm -f "$PD/inbox/phone-login.json"
+# PS (BOS-1581): action "setup" makes the publish user, write-only access and a token; the token comes back sealed only.
+export PL_NOPUB=1; : >"$PLW/users"; : >"$PLLOG"
+plreq setup bossman-publish alerts "$PUB"; plhost
+[[ $(plres result) == setup && $(plres id) == "$PLID" ]] || fail "PS1: $(cat "$PD/outbox/phone-login.json")"
+tok1="$(unseal)"; [[ $tok1 =~ ^tk_[a-z0-9]{29}$ && $tok1 == "$(cat "$PLW/tokens.bossman-publish")" ]] || fail "PS1: the sealed token is not the one ntfy made"
+has "$PLLOG" "ntfy user add --role=user bossman-publish"; has "$PLLOG" "ntfy access bossman-publish alerts write-only"; has "$PLLOG" "ntfy token add bossman-publish"
+no_plaintext "$tok1"; no_plaintext "$(cat "$PLW/pw.bossman-publish")"
+# PS2. Pressing it again finds all three: no user add, no token add, the same token comes back, and the answer says nothing changed.
+plreq setup bossman-publish alerts "$PUB"; : >"$PLLOG"; plhost
+[[ $(plres result) == setup && $(unseal) == "$tok1" ]] || fail "PS2: $(cat "$PD/outbox/phone-login.json")"
+hasnt "$PLLOG" "user add"; hasnt "$PLLOG" "token add"; has "$PD/outbox/phone-login.json" "Nothing was changed"
+[[ $(grep -c . "$PLW/users") == 1 ]] || fail "PS2: a second user was made"
+# PS3. Only the publish user can be set up, and phone logins cannot be made for it.
+for bad in "setup phone-read alerts $PUB" "setup admin alerts $PUB" "create bossman-publish alerts $PUB" "reset bossman-publish alerts $PUB"; do
+  # shellcheck disable=SC2086
+  plreq ${bad%% "$PUB"} "$PUB"; : >"$PLLOG"; plhost
+  [[ $(plres result) == rejected && $(plx) == 0 ]] || fail "PS3 ($bad): $(cat "$PD/outbox/phone-login.json")"
+done
+# PS4. A failing ntfy step reports failed with no sealed token.
+rm -f "$PLW/tokens.bossman-publish"
+plreq setup bossman-publish alerts "$PUB"; PL_FAIL=token plhost
+[[ $(plres result) == failed && -z $(plres sealed) ]] || fail "PS4: $(cat "$PD/outbox/phone-login.json")"
+unset PL_NOPUB
 rm -f "$PD/inbox/phone-login.json"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.

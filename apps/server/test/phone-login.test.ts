@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PHONE_LOGIN_TTL_MS, PHONE_USER, phoneLoginService } from "../src/services/phone-login.js";
+import { PHONE_LOGIN_TTL_MS, PHONE_USER, PUBLISH_USER, phoneLoginService } from "../src/services/phone-login.js";
 
 // "Create phone login" (BOS-1004): the password comes back sealed to a key only this process holds, once.
 
@@ -26,11 +26,19 @@ async function setup(facts: Record<string, string> = FACTS) {
   return { dir, clock, svc };
 }
 
+async function setupWithSaver(saveSetup: (r: { token: string; topic: string }) => Promise<void>) {
+  const dir = await mkdtemp(path.join(tmpdir(), "bm-phonelogin-"));
+  dirs.push(dir);
+  await mkdir(path.join(dir, "inbox"));
+  await mkdir(path.join(dir, "outbox"));
+  return { dir, svc: phoneLoginService({ dir, fact: async (k) => FACTS[k] ?? null, saveSetup }) };
+}
+
 /** Plays the host: reads the request and answers the way scripts/host-deployer.sh does (RSA-OAEP, SHA-256). */
 async function hostAnswers(dir: string, result: string, opts: { message?: string; password?: string; id?: string } = {}) {
   const req = JSON.parse(await readFile(path.join(dir, "inbox", "phone-login.json"), "utf8")) as { id: string; pubkey: string };
   const key = createPublicKey({ key: Buffer.from(req.pubkey, "base64"), format: "der", type: "spki" });
-  const sealed = opts.password === undefined && !["created", "reset"].includes(result) ? "" : publicEncrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(opts.password ?? PASSWORD)).toString("base64");
+  const sealed = opts.password === undefined && !["created", "reset", "setup"].includes(result) ? "" : publicEncrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(opts.password ?? PASSWORD)).toString("base64");
   await writeFile(path.join(dir, "outbox", "phone-login.json"), JSON.stringify({ id: opts.id ?? req.id, result, message: opts.message ?? "", sealed, at: "x" }));
   return req;
 }
@@ -60,6 +68,40 @@ describe("phoneLoginService", () => {
     expect(await svc.poll(id)).toEqual({ status: "gone" });
     for (const f of await allFiles(dir)) expect(await readFile(f, "utf8")).not.toContain(PASSWORD);
     expect(await allFiles(path.join(dir, "outbox"))).toEqual([]);
+  });
+
+  // BOS-1581: the setup action hands the publish token to the server's saver; no caller ever gets it back.
+  describe("setup", () => {
+    const TOKEN = "tk_" + "a".repeat(29);
+    it("asks for the fixed publish user and gives the token only to saveSetup", async () => {
+      const saved: { token: string; topic: string }[] = [];
+      const { dir, svc } = await setupWithSaver(async (r) => void saved.push(r));
+      const r = (await svc.begin("setup", "alerts")) as { id: string };
+      const asked = await hostAnswers(dir, "setup", { password: TOKEN, message: "Made it." });
+      expect(asked).toMatchObject({ action: "setup", user: PUBLISH_USER, topic: "alerts" });
+      const done = await svc.poll(r.id);
+      expect(done).toEqual({ status: "done", result: "setup", message: "Made it." });
+      expect(JSON.stringify(done)).not.toContain(TOKEN);
+      expect(saved).toEqual([{ token: TOKEN, topic: "alerts" }]);
+      expect(await svc.poll(r.id)).toEqual({ status: "gone" });
+      for (const f of await allFiles(dir)) expect(await readFile(f, "utf8")).not.toContain(TOKEN);
+    });
+    it("refuses an answer that is not a token and saves nothing", async () => {
+      const saved: unknown[] = [];
+      const { dir, svc } = await setupWithSaver(async (r) => void saved.push(r));
+      const r = (await svc.begin("setup", "alerts")) as { id: string };
+      await hostAnswers(dir, "setup", { password: "not a token" });
+      expect(await svc.poll(r.id)).toMatchObject({ status: "done", result: "failed" });
+      expect(saved).toEqual([]);
+    });
+    it("a phone-login entry never takes a setup answer as a password", async () => {
+      const saved: unknown[] = [];
+      const { dir, svc } = await setupWithSaver(async (r) => void saved.push(r));
+      const r = (await svc.begin("create", "alerts")) as { id: string };
+      await hostAnswers(dir, "setup", { password: TOKEN });
+      expect(await svc.poll(r.id)).toMatchObject({ status: "done", result: "failed" });
+      expect(saved).toEqual([]);
+    });
   });
 
   it("gives nothing to a wrong request id, and a stranger's answer id is not taken", async () => {
