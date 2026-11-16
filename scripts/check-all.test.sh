@@ -66,7 +66,7 @@ grep -q "a step of output" "$t/scratch.own/check-all.log.previous" || fail "scra
 # A fenced run can't write the scratch, but can write /tmp: the log waits there under a kept name, for the runner to move in.
 mkdir -p "$t/scratch.denied"; chmod 555 "$t/scratch.denied"
 # A ticket id of its own for this run, so no leftover or parallel run shares the /tmp file name.
-tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$$" "$RANDOM" "$RANDOM" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
+tid="$(printf '%08x-%04x-4%03x-8%03x-%012x' "$RANDOM$RANDOM" "$(( $$ & 65535 ))" "$(( RANDOM % 4096 ))" "$(( RANDOM % 4096 ))" "$RANDOM$RANDOM$RANDOM" | cut -c1-36)"
 keep="/tmp/bossman-scratch-$tid.log"
 # -w says yes for a fenced /tmp that still refuses a write, so probe with a real write.
 if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && rm -f "/tmp/bossman-probe-$tid"; then
@@ -81,7 +81,8 @@ if [ ! -w "$t/scratch.denied" ] && : 2>/dev/null >"/tmp/bossman-probe-$tid" && r
   if ! : 2>/dev/null >>"$keep"; then
     scratch_case "scratch: kept /tmp name not writable" "$t/scratch.denied" 'echo beside the taken name' 0
     # shellcheck disable=SC2144
-    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log || fail "scratch: no fallback log beside a taken name: $(cat "$t/out")"
+    # The failure names what GitHub's step log hides: this user, what sits in /tmp under the name, and the script's own output.
+    grep -lq "beside the taken name" /tmp/bossman-scratch-"$tid".*.log 2>/dev/null || fail "scratch: no fallback log beside a taken name (uid $(id -u), kept name: $(ls -l "$keep" 2>&1 | tr '\n' ' '), siblings: $(ls /tmp 2>&1 | grep -F "bossman-scratch-$tid" | tr '\n' ' '), protected_regular: $(cat /proc/sys/fs/protected_regular 2>&1)): $(tr '\n' ' ' <"$t/out")"
     rm -f /tmp/bossman-scratch-"$tid".*.log
   else
     echo "SKIP scratch: kept /tmp name not writable (this runner writes through a read-only file, so no fallback name is needed)"
