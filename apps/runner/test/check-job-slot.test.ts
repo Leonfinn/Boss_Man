@@ -61,7 +61,7 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     });
     expect(r.ok).toBe(true);
     expect(r.output).toContain("check-all: slot taken, running the checks");
-    expect(slotFree(coord)).toBe(true);
+    expect(await until(() => slotFree(coord))).toBe(true);
   });
 
   it("waits while another check holds the only slot, then runs", async () => {
@@ -93,7 +93,8 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     expect(await until(() => slotFree(coord))).toBe(true);
     const failed = await ws.runCommitCheck({ projectId, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit }, "exit 3", 60_000);
     expect(failed.exitCode).toBe(3);
-    expect(slotFree(coord)).toBe(true);
+    // The slot's lock is dropped when the holder process exits, a moment after the job's own result: wait for it, with a deadline.
+    expect(await until(() => slotFree(coord))).toBe(true);
     expect(existsSync(path.join(coord, "queue"))).toBe(true);
   });
 

@@ -17,4 +17,14 @@ else
   done < <(git ls-files '*.sh')
 fi
 [ "${#files[@]}" -gt 0 ] || { echo "check-shell: no shell scripts found" >&2; exit 1; }
-shellcheck "${files[@]}"
+rc=0
+out=$(mktemp)
+shellcheck "${files[@]}" >"$out" 2>&1 || rc=$?
+cat "$out"
+if [ "$rc" -ne 0 ] && [ -n "${GITHUB_ACTIONS:-}" ]; then
+  # The GitHub step log needs a sign-in; an annotation shows on the public job page (BOS-1641).
+  text=$(head -n 15 "$out" | cut -c1-300 | sed -e 's/%/%25/g' -e ':a;N;$!ba;s/\n/%0A/g' -e 's/\r//g')
+  echo "::error title=ShellCheck failed (exit $rc)::$text"
+fi
+rm -f "$out"
+exit "$rc"
