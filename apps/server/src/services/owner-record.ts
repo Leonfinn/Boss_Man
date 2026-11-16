@@ -5,8 +5,10 @@
 // Nothing is stored: every figure is read from existing tables and the live socket count.
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { checkWorkers, runners } from "../db/schema.js";
+import { parseRepoUrl } from "@boss-man/shared";
+import { checkWorkers, projects, runners } from "../db/schema.js";
 import { onlineWorkerCount } from "./check-workers.js";
+import type { GitHostConfig } from "./git-hosts.js";
 
 export type OwnerRecordFacts = {
   checkWorkers: {
@@ -19,7 +21,46 @@ export type OwnerRecordFacts = {
   };
   /** This company's runner: whether one is registered and whether it has ever connected. */
   runner: { registered: boolean; everConnected: boolean };
+  /** Whether the git token can read GitHub Actions (R34, BOS-1670): a live probe, filled only when text claims something about it. */
+  gitTokenActionsRead?: "yes" | "no" | "unknown";
 };
+
+/** Answers whether a company's git token can read GitHub Actions runs right now; "unknown" when it can't tell. */
+export type GitTokenProbe = (companyId: string) => Promise<"yes" | "no" | "unknown">;
+
+/**
+ * The live probe behind the git-token fact (R34): one checkAccess read of the company's first GitHub project, cached
+ * for ten minutes so a run of cards doesn't hit GitHub each time. Only a clear answer is cached; no GitHub project, no
+ * token, or a failed read gives "unknown", which never holds any text.
+ */
+export function gitTokenActionsProbe(deps: {
+  db: Db;
+  gitHosts: { checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canReadChecks?: boolean }> };
+  gitToken: (companyId: string) => Promise<string | undefined>;
+  now?: () => Date;
+  ttlMs?: number;
+}): GitTokenProbe {
+  const cache = new Map<string, { at: number; value: "yes" | "no" }>();
+  const now = () => (deps.now ? deps.now().getTime() : Date.now());
+  return async (companyId) => {
+    const hit = cache.get(companyId);
+    if (hit && now() - hit.at < (deps.ttlMs ?? 600_000)) return hit.value;
+    try {
+      const rows = await deps.db.select({ repoUrl: projects.repoUrl, gitHost: projects.gitHost, gitApiBase: projects.gitApiBase }).from(projects).where(eq(projects.companyId, companyId));
+      const p = rows.find((r) => r.gitHost === "github" && r.repoUrl && r.gitApiBase);
+      const addr = p?.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+      const token = await deps.gitToken(companyId);
+      if (!p || !addr || !token) return "unknown";
+      const r = await deps.gitHosts.checkAccess({ kind: "github", apiBase: p.gitApiBase!, owner: addr.owner, repo: addr.repo }, token);
+      if (!r.ok) return "unknown"; // refused or unreachable: the token itself may be the fault, so don't claim anything
+      const value = r.canReadChecks ? "yes" : "no";
+      cache.set(companyId, { at: now(), value });
+      return value;
+    } catch {
+      return "unknown";
+    }
+  };
+}
 
 export async function ownerSetupFacts(db: Db, companyId: string): Promise<OwnerRecordFacts> {
   // Only workers granted to this company count as its setup; a worker with no companies runs nobody's checks.
@@ -63,7 +104,7 @@ export const usesOwnerSetupToken = (steps: readonly string[]) => steps.some((s) 
 // One row per fact: the phrases that claim it and when the record contradicts the claim. A claim in an instruction
 // ("add your worker", "install the worker") is not a claim about what exists, so those verbs before it are skipped.
 const NOT_AN_INSTRUCTION = String.raw`(?<!\b(?:add|create|install|start|connect|register|build|download|set up|setting up|new|first|another|a)\s)`;
-type FactRow = { key: string; claims: RegExp[]; contradicted: (f: OwnerRecordFacts) => boolean; live: (f: OwnerRecordFacts) => string };
+type FactRow = { key: string; claims: RegExp[]; contradicted: (f: OwnerRecordFacts) => boolean; live: (f: OwnerRecordFacts) => string; hold: (live: string) => string };
 const FACT_TABLE: FactRow[] = [
   {
     key: "checkWorkers.installed",
@@ -74,6 +115,19 @@ const FACT_TABLE: FactRow[] = [
     ],
     contradicted: (f) => f.checkWorkers.everConnected === 0,
     live: (f) => workersLine(f),
+    hold: (live) => `This text says the owner has a check worker installed, existing, set up or idle (or a second machine), but the record says: ${live}. A worker counts as installed only once it has connected, and none ever has. Say what the record says. If the record itself is wrong (for example a worker that connected but was never recorded), fix the record first. Source: server_status ownerSetup.`,
+  },
+  {
+    // R34 (BOS-1670): offers to change the git token's Actions access, or says it has none, while a live read says it has.
+    key: "gitToken.actionsRead",
+    claims: [
+      /\b(?:give|grant|add|enable|allow|change|update|edit|regenerate|replace|widen|extend)\b[^.\n]{0,60}\btokens?\b[^.\n]{0,80}\b(?:actions?|ci (?:logs?|results?|runs?)|(?:test|workflow|build|ci) logs?)\b/i,
+      /\b(?:give|grant|add|enable)\b[^.\n]{0,40}\bactions?\b[^.\n]{0,20}\b(?:read|permission|access)\b[^.\n]{0,60}\btokens?\b/i,
+      /\btokens?\b[^.\n]{0,40}\b(?:has no|lacks?|doesn'?t have|does not have|can'?t read|cannot read|isn'?t able to read|without)\b[^.\n]{0,30}\b(?:actions?|ci (?:logs?|results?)|(?:test|workflow|build) logs?)\b/i,
+    ],
+    contradicted: (f) => f.gitTokenActionsRead === "yes",
+    live: () => "the git token can read GitHub Actions runs (a live check just now)",
+    hold: (live) => `This text offers to change the git token, or says it can't read CI, but a live check says: ${live}. Don't ask the owner to change the token. Agents can't read CI logs because they never hold the token (BOS-322); Boss Man reads them for you (main's CI watcher and the merge gate's bounce). Say what the live check says. If a read really fails, the check would say so.`,
   },
 ];
 
@@ -83,12 +137,18 @@ const FACT_TABLE: FactRow[] = [
  * is never held; this is not a fact-checker for prose.
  */
 export async function ownerFactHeld(db: Db, companyId: string, ...texts: Array<string | null | undefined>): Promise<string | null> {
+  return ownerFactHeldLive(db, companyId, undefined, texts);
+}
+
+/** As ownerFactHeld, with the live git-token probe (R34): the probe runs only when the text claims something about the token. */
+export async function ownerFactHeldLive(db: Db, companyId: string, probe: GitTokenProbe | undefined, texts: Array<string | null | undefined>): Promise<string | null> {
   const text = texts.filter(Boolean).join("\n");
   if (!text) return null;
   const hits = FACT_TABLE.filter((r) => r.claims.some((c) => c.test(text)));
   if (!hits.length) return null;
   const facts = await ownerSetupFacts(db, companyId);
+  if (probe && hits.some((r) => r.key === "gitToken.actionsRead")) facts.gitTokenActionsRead = await probe(companyId).catch(() => "unknown" as const);
   const bad = hits.filter((r) => r.contradicted(facts));
   if (!bad.length) return null;
-  return `Not sent. This text says the owner has a check worker installed, existing, set up or idle (or a second machine), but the record says: ${bad.map((r) => r.live(facts)).join("; ")}. A worker counts as installed only once it has connected, and none ever has. Say what the record says. If the record itself is wrong (for example a worker that connected but was never recorded), fix the record first. Source: server_status ownerSetup.`;
+  return `Not sent. ${bad.map((r) => r.hold(r.live(facts))).join(" ")}`;
 }

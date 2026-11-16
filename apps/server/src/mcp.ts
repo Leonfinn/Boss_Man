@@ -57,7 +57,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import type { retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
-import { ownerFactHeld, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
+import { ownerFactHeldLive, type GitTokenProbe, ownerSetupFacts, usesOwnerSetupToken } from "./services/owner-record.js";
 import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
@@ -184,6 +184,8 @@ export type Services = {
   selfDeployCards?: () => Promise<SelfDeployFacts>;
   /** The company's embedder for owner-answer meaning search (BOS-1593); absent or null: word search alone. */
   ownerAnswerEmbedder?: (companyId: string) => Promise<Embedder | null>;
+  /** Live read of whether the git token can read GitHub Actions (R34); absent where there is no git host. */
+  gitTokenProbe?: GitTokenProbe;
 };
 
 /**
@@ -232,7 +234,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
  * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus, hostFacts, deviceProfiles, addons, selfDeployCards, checkRequests, ownerAnswerEmbedder, gitTokenProbe }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -314,7 +316,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     async ({ ticketId, text: body, notAnAsk, quotesUrgent }) => {
       const urgentHold = quotesUrgent === true ? null : await ceoUrgentHold(db, scope, body, ticketId);
       if (urgentHold) return fail(urgentHold);
-      const factHold = await ownerFactHeld(db, scope.companyId, body); // BOS-1596
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
       // Any agent's owner-ask is held, not posted, until a card covers it (BOS-901 for the CEO, BOS-1576 for everyone):
       // a hint after posting reaches only the writer, so the ask never got to the owner. notAnAsk lets a status reply through.
@@ -424,7 +426,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       // BOS-1596: owner-facing text the record contradicts (an installed check worker when none ever connected) is held with the live value.
-      const factHold = await ownerFactHeld(db, scope.companyId, question, ...options, ...(steps ?? []));
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [question, ...options, ...(steps ?? [])]);
       if (factHold) return fail(factHold);
       if (holdsMerge && !blocksTicketId) return fail("holdsMerge holds a ticket's merge, so it goes with blocksTicketId set to that ticket.");
       // A card that records an after-merge check can only be answered once the merge is live: holding that merge would never end.
@@ -821,7 +823,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       },
     },
     async (input) => {
-      const factHold = await ownerFactHeld(db, scope.companyId, input.title, input.body); // BOS-1596
+      const factHold = await ownerFactHeldLive(db, scope.companyId, gitTokenProbe, [input.title, input.body]); // BOS-1596, R34
       if (factHold) return fail(factHold);
       if (input.ticketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
