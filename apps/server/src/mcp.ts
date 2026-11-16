@@ -36,6 +36,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { openReviewLines } from "./services/review-kinds.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
@@ -370,7 +371,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
         // BOS-1193: the open question card this one corrects. Created and the old one closed as superseded in one call.
-        replaces: z.string().uuid().optional(),
+        replaces: cardIdInput().optional(),
         // BOS-1318: the only reasons a card stays on the owner's queue without steps. Without one (and without ownerMustDo or steps) the CEO takes it first.
         ownerOnly: z.enum(OWNER_ONLY_KINDS).optional().describe("Only for a card that really needs the owner: secret, money, host (a host step or runner rebuild), signoff, owner_choice (product direction or scope the owner kept for themselves; needs ownerOnlyWhy) or owner_setup. Without it, and without ownerMustDo or steps, your CEO answers the card first."),
         ownerOnlyWhy: z.string().max(200).optional().describe("One line on why this choice is the owner's; required with ownerOnly owner_choice."),
@@ -414,7 +415,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+      let replaces: string | undefined;
+      if (givenReplaces) {
+        const r = await resolveCardId(db, scope.companyId, givenReplaces);
+        if (!r.ok) return fail(`replaces: ${r.error}`);
+        replaces = r.id;
+      }
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -551,10 +558,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "withdraw_decision",
     {
       description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason (at least 10 characters) and what replaces the card in replacedBy, both required: card:<id> (a newer open card), ticket:<ref> with when (what brings the card back), or none (then the reason must say why, 30+ characters). If the card had reached the owner, Boss Man tells them with a note on Decisions and a quiet feed note. A question card or a plan card (once its run has ended) can be withdrawn. When a card is being re-checked (you were woken to confirm or withdraw it), use action confirm with checked, one line on what you checked against the live state, if it still holds: the flag clears and nothing is written on the card. Boss Man refuses a confirm for a card it can see is dead.",
-      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
+      inputSchema: { decisionId: cardIdInput(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
     },
-    async ({ decisionId, reason, action, checked, replacedBy, when }) => {
+    async ({ decisionId: givenId, reason, action, checked, replacedBy: givenReplacedBy, when }) => {
       if (!scope.agentId) return fail("Only an agent's run can withdraw a decision.");
+      // BOS-1695: the short id agents are shown (a unique prefix in this company) works as well as the full one.
+      const resolved = await resolveCardId(db, scope.companyId, givenId);
+      if (!resolved.ok) return fail(resolved.error);
+      const decisionId = resolved.id;
+      const rb = await resolveReplacedBy(db, scope.companyId, givenReplacedBy);
+      if (!rb.ok) return fail(rb.error);
+      const replacedBy = rb.value;
       if (action === "confirm") {
         try {
           const r = await decisions.confirmRecheck(decisionId, { agentId: scope.agentId }, checked ?? "");
