@@ -25,7 +25,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { endedNormally, handOverReviews, requeueUnansweredReviews, REVIEW_REASON, requestReviews, reviewTicketsOf, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON, HOLD_RELEASED_REASON, holdBlocksStarts } from "./maintenance.js";
-import { softHold } from "./deploy-wait-hold.js";
+import { limitUnderHold, softHold, softHoldReason } from "./deploy-wait-hold.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -1193,12 +1193,24 @@ export function schedulerService(
     const maxTotal = stored?.instance ?? limits.instance;
     const maxBackground = stored?.background ?? limits.background;
     const soft = await softHold(db, now());
-    return { maxTotal: soft.on ? Math.min(maxTotal, soft.maxRuns) : maxTotal, maxCompany: stored?.company ?? limits.company, maxBackground: soft.on ? 0 : maxBackground };
+    // BOS-1634: each capped limit as saved, in force and why, from this one place, so server_status, Settings and the
+    // dashboard show the scheduler's own numbers and never a silent difference.
+    const allCompanies = limitUnderHold(maxTotal, soft, soft.on ? soft.maxRuns : maxTotal);
+    const background = limitUnderHold(maxBackground, soft, 0);
+    const why = soft.on ? softHoldReason(soft) : null;
+    // The same hold parks new merge checks (check-gate.ts, check-queue.ts, merge-queue.ts read softHold themselves).
+    const mergeChecks = { paused: soft.on, because: why?.because ?? null, since: why?.since ?? null, until: why?.until ?? null };
+    return { maxTotal: allCompanies.inForce, maxCompany: stored?.company ?? limits.company, maxBackground: background.inForce, inForce: { allCompanies, background, mergeChecks } };
   }
 
   const self = {
     limits,
     hasRoom,
+
+    /** BOS-1634: the all-companies and background limits as saved and in force, and whether new merge checks are paused, each with why and until when. */
+    async limitsInForce() {
+      return (await limitsNow()).inForce;
+    },
 
     /**
      * How many more work runs the company could start now (BOS-574): the instance and company limits
@@ -1253,16 +1265,24 @@ export function schedulerService(
     },
 
     /**
-     * The run limits in force (the owner's Settings over the defaults) and how many work runs are
-     * going, across all companies and in this one, for server_status (BOS-582). Counts only: no other
-     * company's agents or tickets.
+     * The run limits the scheduler enforces and how many runs are going, across all companies and in this one, for
+     * server_status (BOS-582). `limit` is the number in force; `saved` is the owner's Settings number (else the default).
+     * While a server update's soft hold is on (BOS-420) the all-companies and background limits can be lower than saved,
+     * and then `because`, `since` and `until` say why, since when and the latest it lifts (BOS-1634); `mergeChecks` says
+     * whether new merge checks are paused by the same hold. Counts only: no other company's agents or tickets.
      */
     async runLimits(companyId: string) {
-      const { maxTotal, maxCompany } = await limitsNow();
+      const { maxCompany, inForce } = await limitsNow();
       const live = await db.select({ companyId: runs.companyId, purpose: runs.purpose, model: runs.model }).from(runs).where(isNull(runs.endedAt));
       // Infinite-mode runs (BOS-279) sit in the background slots, so they don't count against the normal limits.
       const work = live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && !isInfiniteModel(r.model));
-      return { allCompanies: { limit: maxTotal, running: work.length }, company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length } };
+      const { allCompanies: a, background: b, mergeChecks } = inForce;
+      return {
+        allCompanies: { limit: a.inForce, running: work.length, saved: a.saved, because: a.because, since: a.since, until: a.until },
+        company: { limit: maxCompany, running: work.filter((r) => r.companyId === companyId).length },
+        background: { limit: b.inForce, running: live.filter((r) => r.purpose !== "chat" && r.purpose !== REPLY_PURPOSE && isInfiniteModel(r.model)).length, saved: b.saved, because: b.because, since: b.since, until: b.until },
+        mergeChecks,
+      };
     },
 
     /**

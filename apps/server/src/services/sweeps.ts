@@ -30,6 +30,7 @@ import { progressSweep } from "./progress.js";
 import { noProgressSweep } from "./no-progress.js";
 import { runTimeLimitSweep } from "./run-time-limit.js";
 import { fenceDefaultSweep, guardHoldSweep } from "./fence-default.js";
+import { HELD_AGENT } from "./fair-share.js";
 import { CARRY_ON_NOTE, IDLE_AGENTS_REASON, IDLE_SLOT_REASON, MISSED_REASON, REVIEW_REASON, URGENT_IDLE_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -1376,8 +1377,18 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .from(tickets)
         .innerJoin(companies, eq(companies.id, tickets.companyId))
         .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNotNull(tickets.wipHeldAt), lte(tickets.wipHeldAt, new Date(t.getTime() - HELD_LISTED_AFTER_MS))))
-        .orderBy(asc(tickets.wipHeldAt))
+        .where(
+          and(
+            eq(tickets.companyId, companyId),
+            eq(tickets.systemState, "ready"),
+            // Held by a WIP refusal, or by a wake that has waited on "this agent is busy": the wake's own age counts, as wipHeldAt is never set for that (BOS-1635).
+            or(
+              and(isNotNull(tickets.wipHeldAt), lte(tickets.wipHeldAt, new Date(t.getTime() - HELD_LISTED_AFTER_MS))),
+              sql`exists (select 1 from wakes hw where hw.ticket_id = ${tickets.id} and hw.status = 'queued' and hw.status_reason = ${HELD_AGENT} and hw.created_at <= ${new Date(t.getTime() - HELD_LISTED_AFTER_MS)})`,
+            ),
+          ),
+        )
+        .orderBy(asc(sql`coalesce(${tickets.wipHeldAt}, ${tickets.lastActivityAt})`))
         .limit(IDLE_ASK_TICKETS);
       if (!open.length && !heldRows.length) continue;
       // While the merge line is long, work that needs no check slot (no-code: research, wiki, docs) goes first.
@@ -1403,7 +1414,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const heldLines: string[] = [];
       for (const { ticket, prefix, owner } of heldRows) {
         const scope = (await agentWipHold(db, ticket)).hold?.scope;
-        const why = scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
+        const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.ticketId, ticket.id), eq(wakes.status, "queued"), eq(wakes.statusReason, HELD_AGENT))).limit(1);
+        const why = busyWake && !scope ? `its wake waits behind ${owner}'s live run` : scope === "queue" ? "held while the merge line or check queue is long" : scope === "company" ? "held by the company limit" : scope === "agent" ? `held behind ${owner}'s own limit` : "held by a WIP limit";
         heldLines.push(`- ${ticketRef(prefix, ticket.number) ?? ticket.id} "${ticket.title}" (assigned to ${owner}, ${why}${ticket.urgent ? ", urgent" : ""}${ticket.risk ? `, ${ticket.risk} risk` : ""})`);
       }
       // The lists, without the slot count that changes every pass: the same lists already asked about aren't asked again.

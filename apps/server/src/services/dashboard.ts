@@ -7,6 +7,7 @@ import { liveRuns, runOriginQuery } from "./runs.js";
 import { isWorkingRun } from "./agent-wip.js";
 import { passedReviewTickets } from "./review-kinds.js";
 import { blockedSplit } from "./go-live-note.js";
+import type { LimitInForce } from "./deploy-wait-hold.js";
 
 export const DAYS = 14;
 
@@ -26,6 +27,8 @@ export type DashboardHealth = {
   usage: { agents: number; accounts: string[]; firstResetAt: string | null } | null;
   /** A server update waiting for a quiet machine, or null when none is. `undefined` from an older server never happens here. */
   update: { waiting: boolean; phase: string | null; deadline: string | null } | null;
+  /** BOS-1634: agents at once across all companies, as saved and in force, with why when lower (scheduler.limitsInForce). */
+  runLimit?: LimitInForce | null;
 };
 
 export function dashboardService(
@@ -37,6 +40,8 @@ export function dashboardService(
     runnerConnected?: (runnerId: string) => boolean;
     /** The server update waiting for a quiet machine (BOS-420), if any. */
     updateWait?: () => Promise<{ on: boolean; phase?: string; deadline?: string }>;
+    /** BOS-1634: the all-companies run limit as saved and in force (scheduler.limitsInForce). */
+    runLimit?: () => Promise<LimitInForce>;
   } = {},
 ) {
   const now = deps.now ?? (() => new Date());
@@ -74,7 +79,8 @@ export function dashboardService(
           return { waiting: w.on, phase: w.phase ?? null, deadline: w.deadline ?? null };
         })
       : null;
-    return { runner, usage, update };
+    const runLimit = deps.runLimit ? await attempt(deps.runLimit) : null;
+    return { runner, usage, update, runLimit };
   };
   /**
    * Each agent's latest run, and why it started (BOS-407). The latest run is picked first, on the

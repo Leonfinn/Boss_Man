@@ -644,7 +644,7 @@ export async function buildApp(opts: AppOptions) {
   app.addHook("onClose", async () => (ownerAnswerEmbeds.stop(), await ownerAnswerEmbeds.drain()));
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
-  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status() });
+  const dashboard = dashboardService(db, { now: opts.now, decisions: decisionsSvc, runnerConnected: (id) => runners.isConnected(id), updateWait: () => deployWait.status(), runLimit: async () => (await scheduler.limitsInForce()).allCompanies });
   const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
