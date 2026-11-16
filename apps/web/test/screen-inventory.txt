@@ -264,6 +264,7 @@ sections:
 reads: 
   - /api/companies/:id/runner
   - /api/companies/:id/runner/:id
+  - /api/self-deploy/runner-addons
 
 ## #/settings/<company>/secrets
 sections: 

@@ -86,6 +86,8 @@ docker compose ps
 docker compose logs --tail 100 server
 ```
 
+**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. Tick them under Settings → Server and runner → Runner → Add-ons, press **Save add-ons**, then press **Build and update runners** (see [docs/23](23-updating.md)). A `RUNNER_ADDONS=` line in `.env` still works until the first save, and when running `scripts/update-runner.sh` by hand without self-deploy.
+
 **After a TrueNAS update,** check `docker compose ps`. Images and containers live on the apps pool and survive OS updates. TrueNAS doesn't document how its own app actions treat containers started from the shell. Running Boss Man as its own `boss-man` project is what keeps it out of their way.
 
 **Backups.** Every update writes a database backup to `/mnt/tank/apps/boss-man` (see [docs/23, "Backups"](23-updating.md#backups), which also shows how to check one restores and how to restore). On TrueNAS, also snapshot the `boss-man` dataset (or the one that holds it), and keep a copy of `src/secrets/master.key` off the NAS. A snapshot taken while the database runs may not restore cleanly on its own, so keep the backup files too.

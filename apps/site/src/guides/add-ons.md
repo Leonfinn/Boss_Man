@@ -39,8 +39,10 @@ To give agents access, open **Settings → Tools and deploys → Penpot** and sa
 
 Runner add-ons are tools built into the runner image, such as a browser agents can drive. Two exist: `agent-browser` and `webkit`.
 
-1. Add `RUNNER_ADDONS=agent-browser` to `.env`. List several with commas, for example `RUNNER_ADDONS=agent-browser,webkit`.
-2. Choose **Settings > Server and runner > Updates > Build and update runners** (with the host deployer), or run `scripts/update-runner.sh` as root.
-3. Check under **Settings > Server and runner > Runner > Add-ons**. Each add-on says Working, Not working or Not installed.
+1. Open **Settings > Server and runner > Runner > Add-ons**, tick the add-ons you want and press **Save add-ons**. Boss Man keeps your choice, so every later runner update builds the same set.
+2. Press **Build and update runners** (Settings > Server and runner > Updates).
+3. Check the same panel again. Each add-on says Working, Not working or Not installed.
+
+An install that listed add-ons in `.env` before this panel existed needs nothing: those add-ons start ticked, and the first save keeps them. Without self-deploy, the panel can't save, and `RUNNER_ADDONS` in `.env` still works with `scripts/update-runner.sh`.
 
 Skills that need an add-on are left out of agents' runs until it works. Details: [`docs/12-runner-add-ons.md`](@repo/blob/main/docs/12-runner-add-ons.md).

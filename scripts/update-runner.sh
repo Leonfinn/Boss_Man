@@ -60,6 +60,21 @@ profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cu
 BOSSMAN_DEPLOYER="${BOSSMAN_DEPLOYER:-$(grep -s '^BOSSMAN_DEPLOYER=' .env | tail -1 | cut -d= -f2- || true)}"
 # Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser,webkit in .env; empty builds the plain image.
 addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f2- || true)}"
+# BOS-1583: the owner's tick boxes (Settings > Runner > Add-ons) are saved by the server as inbox/runner-addons in the deployer
+# folder, one line of comma-separated ids. Once saved, it wins over .env (the boxes started ticked from what was built, so
+# nothing is lost); until then .env keeps working as before. The server can write inbox, so the file is only trusted when it is
+# a plain file (never a symlink) holding nothing but ids, and anything else is ignored with a warning.
+addons_file=""
+[[ -z $BOSSMAN_DEPLOYER ]] || addons_file="$BOSSMAN_DEPLOYER/inbox/runner-addons"
+if [[ -n $addons_file && -f $addons_file && ! -L $addons_file ]]; then
+  saved_addons="$(head -c 400 "$addons_file" | tr -d '\r\n ')"
+  if [[ $saved_addons =~ ^([a-z0-9-]+(,[a-z0-9-]+)*)?$ ]]; then
+    addons="$saved_addons"
+  else
+    echo "WARNING: $addons_file is not a plain list of add-on ids; ignoring it and using RUNNER_ADDONS from .env." >&2
+  fi
+fi
+if [[ -n $addons && ! $addons =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then echo "RUNNER_ADDONS must be comma-separated add-on ids (letters, digits, dashes), got: $addons" >&2; exit 1; fi
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
@@ -200,6 +215,16 @@ if [[ -n "$NETGUARD_PREV" ]]; then
 fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
+# BOS-1583: tell the server which add-ons this image holds (outbox/runner-addons.built, one line, may be empty), so the tick boxes
+# start from what is really built, including add-ons that were only ever set by hand in .env. Written in the root-only state
+# folder, then renamed in, like the drain request.
+if [[ -n ${BOSSMAN_DEPLOYER:-} && -d $BOSSMAN_DEPLOYER/outbox ]]; then
+  mkdir -p "$BOSSMAN_DEPLOYER/state" && chmod 700 "$BOSSMAN_DEPLOYER/state"
+  built_tmp="$(mktemp "$BOSSMAN_DEPLOYER/state/addons.XXXXXX")"
+  printf '%s\n' "$addons" >"$built_tmp"
+  chmod 644 "$built_tmp"; chown 1000:1000 "$built_tmp" 2>/dev/null || true
+  mv -fT "$built_tmp" "$BOSSMAN_DEPLOYER/outbox/runner-addons.built" || echo "WARNING: could not record the built add-ons for Settings." >&2
+fi
 # Put launcher code live with this same button (BOS-335), before the drain so the new launcher runs it.
 rebuild_launcher
 move_runners
