@@ -948,7 +948,7 @@ export function MergeCarrySetting() {
             })
           }
         >
-          Save
+          Save landing turn
         </button>
       </label>
       {act.view}
