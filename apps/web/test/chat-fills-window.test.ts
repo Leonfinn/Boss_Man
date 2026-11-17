@@ -101,7 +101,10 @@ async function openChat(width: number, height: number, hasTouch: boolean): Promi
   const page = (await browser!.newPage({ viewport: { width, height }, hasTouch, isMobile: hasTouch })) as Page;
   await page.route("**/api/**", (route: any) => {
     const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(api[path] ?? {}) });
+    // An answer in flight when the test closes its page rejects with "has been closed": expected, not a failure (BOS-1708).
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(api[path] ?? {}) }).catch((e: unknown) => {
+      if (!/closed/i.test(String((e as Error)?.message ?? e))) throw e;
+    });
   });
   await page.goto(`${server!.resolvedUrls.local[0]}#/chat/c1/a1`, { waitUntil: "networkidle" });
   // The panel paints once its data poll answers; wait for a real message and the message box.

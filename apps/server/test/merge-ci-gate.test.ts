@@ -59,6 +59,10 @@ function fakeGitHub() {
     annotations: new Map<number, unknown[]>(),
     /** A job's log text, or the HTTP status the log read is refused with. Absent: 404. */
     logs: new Map<number, string | number>(),
+    /** The runs the CI branch lists (GitHub's `?branch=` read): used to tell a run replaced by a newer push from a lone cancel. */
+    branchRuns: [] as Array<{ id: number; head_sha: string; created_at: string; status: string; conclusion: string | null }>,
+    reruns: [] as string[],
+    rerunStatus: 201,
   };
   const last = new Map<number, WorkflowRun>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -70,6 +74,11 @@ function fakeGitHub() {
     const runs = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(url);
     const jobs = /\/actions\/runs\/(\d+)\/jobs/.exec(url);
     const notes = /\/check-runs\/(\d+)\/annotations/.exec(url);
+    if (/\/actions\/runs\/\d+\/rerun$/.test(url)) {
+      state.reruns.push(url);
+      return state.rerunStatus === 201 ? json(201, {}) : json(state.rerunStatus, { message: "Resource not accessible by personal access token" });
+    }
+    if (/\/actions\/runs\?branch=/.test(url)) return json(200, { total_count: state.branchRuns.length, workflow_runs: state.branchRuns });
     if (runs) {
       const sha = runs[1]!;
       const nth = (reads.get(sha) ?? 0) + 1;
@@ -336,6 +345,52 @@ describe("merge gate waits for GitHub CI (BOS-1070)", () => {
     c.gh.state.ci = (sha) => (sha === MERGE ? red([{ ...unstarted(3), conclusion: "cancelled" }]) : green());
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "verify_failed" });
     expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+  });
+
+  // The cancelled-run cases: GitHub stops a run when a newer run on the same branch replaces it. Nothing was tested, so it's never a send-back.
+  const cancelledRun = (): Ci => ({ runs: [run("completed", "cancelled", [{ ...job("check", "cancelled", 1), steps: [] }])] });
+  const landingEnds = async (c: NonNullable<typeof ctx>) => {
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    let landing: { state?: string; outcome?: string } | undefined;
+    for (let i = 0; i < 600 && landing?.state !== "finished"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    }
+    return landing;
+  };
+
+  it("a run cancelled because a newer run on the CI branch replaced it is no failure: nothing goes back and no card", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? cancelledRun() : green());
+    c.gh.state.branchRuns = [
+      { id: 10, head_sha: "9".repeat(40), created_at: "2026-11-16T10:05:00Z", status: "in_progress", conclusion: null },
+      { id: 9, head_sha: MERGE, created_at: "2026-11-16T10:00:00Z", status: "completed", conclusion: "cancelled" },
+    ];
+    await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    for (let i = 0; i < 300 && !(await c.events()).some((e) => /newer run/.test(e)); i++) await new Promise((r) => setTimeout(r, 10));
+    expect((await c.events()).some((e) => /replaced it\. No test failed/.test(e))).toBe(true);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select().from(decisions).where(eq(decisions.status, "open"))).toEqual([]);
+    expect(c.gh.state.reruns).toEqual([]);
+  });
+
+  it("a run cancelled with no newer run is run once more, and merges when that passes", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha, nth) => (sha === MERGE ? (nth < 2 ? cancelledRun() : green()) : green());
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.gh.state.reruns).toEqual([`${API}/actions/runs/9/rerun`]);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+  });
+
+  it("a run cancelled with no newer run and a refused re-run says plainly that GitHub cancelled it, with a card and no send-back", async () => {
+    const c = (ctx = await setup());
+    c.gh.state.ci = (sha) => (sha === MERGE ? cancelledRun() : green());
+    c.gh.state.rerunStatus = 403;
+    expect(await landingEnds(c)).toMatchObject({ state: "finished", outcome: "check_stuck" });
+    expect(c.merges()).toEqual(["prepare", "publish"]);
+    expect((await c.events()).some((e) => /GitHub cancelled the run/.test(e))).toBe(true);
+    expect(await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id))).toEqual([]);
+    expect(await c.db.select({ dedupeKey: decisions.dedupeKey }).from(decisions).where(eq(decisions.status, "open"))).toEqual([{ dedupeKey: `merge-stuck:${c.ticket.id}` }]);
   });
 
   it("a failing test whose name or message mentions billing still goes back to the assignee, with no owner card", async () => {

@@ -77,6 +77,9 @@ type TicketPatch = {
   ownerSetup?: string | null;
   /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
   ownerSetupOverride?: string | null;
+  /** BOS-1650: the one-line "why" and "if skipped" the go-live card opens with; blank clears. Written with the steps. */
+  ownerSetupWhy?: string | null;
+  ownerSetupIfSkipped?: string | null;
   /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
   setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
@@ -711,6 +714,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // An override covers only the text it came with, so any other write of the steps clears it.
         fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
       }
+      if (patch.ownerSetupWhy !== undefined) fields.ownerSetupWhy = patch.ownerSetupWhy?.trim() || null;
+      if (patch.ownerSetupIfSkipped !== undefined) fields.ownerSetupIfSkipped = patch.ownerSetupIfSkipped?.trim() || null;
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
         if (bad) throw new WorkError(400, bad);

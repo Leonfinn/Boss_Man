@@ -20,7 +20,7 @@ export type CiRun = { id: number; name: string; url: string; step?: string; unst
  * What the merge gate reads before it merges (BOS-1070). `waiting`: jobs not finished yet. `billing`: a job didn't start
  * because of the account's spending limit or payments, which isn't the agent's to fix.
  */
-export type CiStatus = { state: "passed" | "failed" | "pending" | "none"; failed: CiRun[]; waiting: string[]; billing: boolean };
+export type CiStatus = { state: "passed" | "failed" | "pending" | "none" | "cancelled"; failed: CiRun[]; waiting: string[]; billing: boolean; cancelled?: CiRun[] };
 const FAILED_CONCLUSIONS = ["failure", "timed_out", "cancelled", "startup_failure", "action_required", "stale"];
 const BILLING_TEXT = /spending limit|billing|account payments|payment (?:has )?failed/i;
 /**
@@ -39,6 +39,8 @@ export type WorkflowRun = {
   conclusion: string | null;
   headSha: string;
   headMessage: string;
+  /** The workflow's file, e.g. .github/workflows/ci.yml (BOS-1688: a commit that changed it is a suspect). */
+  path?: string;
   url: string;
   createdAt: string;
   updatedAt: string;
@@ -51,6 +53,8 @@ export type CommitAnnotations = { name: string; lines: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 /** A pull request and the commits that made it: the host lists them in order, oldest first. */
 export type PullRequestCommits = { pull: PullRequest; commits: string[] };
+/** A compare between two commits (BOS-1688): its commits, oldest first, and every file the range changed (old names of renames too). */
+export type CompareDetail = { commits: Array<{ sha: string; message: string; parents: string[] }>; files: string[] };
 
 export class GitHostError extends Error {
   constructor(
@@ -246,9 +250,16 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const nameOf = (r: Record<string, unknown>) => String(r.name ?? r.display_title ?? "CI");
       const waiting = runs.filter((r) => r.status !== "completed").map(nameOf);
       const failed: CiRun[] = [];
+      const cancelled: CiRun[] = [];
       for (const r of runs.filter((x) => x.status === "completed" && FAILED_CONCLUSIONS.includes(String(x.conclusion)))) {
         const jobs = await this.runJobs(cfg, token, Number(r.id));
         const bad = jobs.filter((j) => FAILED_CONCLUSIONS.includes(String(j.conclusion)));
+        // A run GitHub cancelled (a newer run replaced it, or someone stopped it) tested nothing: it's no failure unless a
+        // job in it really failed. The gate decides what a cancelled run means (it knows the branch's other runs).
+        if (r.conclusion === "cancelled" && !bad.some((j) => j.conclusion !== "cancelled")) {
+          cancelled.push({ id: Number(r.id), name: nameOf(r), url: String(r.html_url ?? "") });
+          continue;
+        }
         // A run that failed before any job (a broken workflow file) is named by the run itself.
         if (!bad.length) failed.push({ id: 0, name: nameOf(r), url: String(r.html_url ?? "") });
         for (const j of bad) {
@@ -256,8 +267,15 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           failed.push({ id: j.id, name: j.name, url: j.url, ...(step ? { step: step.name } : {}), ...(j.conclusion === "failure" && !j.steps.length && !j.runner ? { unstarted: true } : {}) });
         }
       }
-      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : "passed";
-      return { state, failed, waiting, billing: false };
+      const state = failed.length ? "failed" : !runs.length ? "none" : waiting.length ? "pending" : cancelled.length ? "cancelled" : "passed";
+      return { state, failed, waiting, billing: false, ...(cancelled.length ? { cancelled } : {}) };
+    },
+
+    /** Ask GitHub to run a workflow run again (needs Actions: Write). False when it refuses, which the caller reports plainly. */
+    async rerunRun(cfg: GitHostConfig, token: string, runId: number): Promise<boolean> {
+      if (cfg.kind !== "github") return false;
+      const res = await call(cfg, token, "POST", `/actions/runs/${runId}/rerun`).catch(() => null);
+      return !!res?.ok;
     },
 
     /**
@@ -340,6 +358,7 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
           conclusion: typeof r.conclusion === "string" ? r.conclusion : null,
           headSha: String(r.head_sha ?? ""),
           headMessage: typeof head.message === "string" ? head.message : "",
+          ...(typeof r.path === "string" && r.path ? { path: r.path.split("@")[0]! } : {}),
           url: String(r.html_url ?? ""),
           createdAt: String(r.created_at ?? ""),
           updatedAt: String(r.updated_at ?? r.created_at ?? ""),
@@ -477,6 +496,32 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       // this only answers for GitHub; elsewhere it fails and the check is left to the runner.
       const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
       return rows.map((c) => (typeof c.sha === "string" ? c.sha.slice(0, 40) : "")).filter(Boolean);
+    },
+
+    /**
+     * GitHub's compare with what the main-CI watcher needs to rank suspects (BOS-1688): every commit
+     * from..to with its parents and first message line, and the files the whole range changed. Needs
+     * the token's Contents read; with Actions read only it throws and the caller says so.
+     */
+    async compareDetail(cfg: GitHostConfig, token: string, from: string, to: string): Promise<CompareDetail> {
+      const res = await call(cfg, token, "GET", `/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}?per_page=250`);
+      if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't compare ${from.slice(0, 8)} with ${to.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
+      const files = Array.isArray(res.json.files) ? (res.json.files as Array<Record<string, unknown>>) : [];
+      return {
+        commits: rows
+          .filter((c) => typeof c.sha === "string" && c.sha)
+          .map((c) => {
+            const commit = (c.commit ?? {}) as Record<string, unknown>;
+            const parents = Array.isArray(c.parents) ? (c.parents as Array<Record<string, unknown>>) : [];
+            return {
+              sha: String(c.sha),
+              message: typeof commit.message === "string" ? commit.message.split("\n")[0]! : "",
+              parents: parents.map((p) => String(p.sha ?? "")).filter(Boolean),
+            };
+          }),
+        files: files.flatMap((f) => [f.filename, f.previous_filename]).filter((n): n is string => typeof n === "string" && !!n),
+      };
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

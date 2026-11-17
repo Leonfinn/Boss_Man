@@ -226,7 +226,9 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     }
   }, 60_000);
 
-  it("the screens open at 1550, 1667 x 724 and a phone width without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)", async () => {
+  // One test per width (BOS-1708): the three widths walked in one test shared a single 120 s budget, which GitHub's
+  // slower runners overran (18 page loads, each with a fixed sleep). Each width has its own budget now.
+  for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) it(`the screens open at ${w} px wide without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)`, async () => {
     expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
     const browser = await launch();
     if (!browser) {
@@ -235,11 +237,14 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     }
     const dir = process.env.BOSSMAN_SCRATCH;
     try {
-      for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) {
+      {
         for (const route of ["board", "decisions", "agents", "notifications", "dashboard", "ticket"]) {
           const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
           await page.goto(`${base}/#/${route === "dashboard" ? "" : route === "ticket" ? "tickets/t1" : route}`, { waitUntil: "networkidle" });
-          await page.waitForTimeout(400);
+          // Wait for the app to have drawn something (a route's own content or the error page), then two frames, so a
+          // render error has shown before it is read; no fixed sleep.
+          await page.waitForFunction(() => (document.getElementById("root")?.textContent ?? "").trim().length > 0, undefined, { timeout: 15_000 });
+          await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
           const failed = await page.evaluate(() => {
             const t = document.body.textContent ?? "";
             return t.includes("This page hit an error") ? t.slice(t.indexOf("This page hit an error"), t.indexOf("This page hit an error") + 200) : "";

@@ -74,6 +74,16 @@ describe("CI on a commit for the merge gate (BOS-1070, read through Actions sinc
     expect((await github([]).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("none");
   });
 
+  it("a cancelled run is no failure: its own state, unless a job in it really failed", async () => {
+    const cancelledJob = { id: 5, name: "check", status: "completed", conclusion: "cancelled", runner_name: "GitHub Actions 2", steps: [] };
+    const s = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(s).toEqual({ state: "cancelled", failed: [], waiting: [], billing: false, cancelled: [{ id: 9, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }] });
+    const real = await github([run(9, "completed", "cancelled")], { 9: [cancelledJob, job(6, "lint", "failure")] }).host.ciStatus(cfg("github"), "t", SHA);
+    expect(real.state).toBe("failed");
+    // Another workflow still running: wait for it before saying anything about the cancelled one.
+    expect((await github([run(9, "completed", "cancelled"), run(8, "in_progress", null, { workflow_id: 2 })], { 9: [cancelledJob] }).host.ciStatus(cfg("github"), "t", SHA)).state).toBe("pending");
+  });
+
   it("a run that failed before any job is named by the run", async () => {
     const { host } = github([run(9, "completed", "startup_failure")]);
     expect((await host.ciStatus(cfg("github"), "t", SHA)).failed).toEqual([{ id: 0, name: "CI", url: "https://github.com/leon/site/actions/runs/9" }]);
@@ -249,6 +259,23 @@ describe("reading a branch's Actions runs (BOS-1072)", () => {
     const [job] = await h.runJobs(cfg("github"), "t", 5);
     expect(job).toMatchObject({ id: 9, name: "test", steps: [{ name: "Run tests", conclusion: "failure" }] });
     expect(await h.workflowRuns(cfg("gitea"), "t", "main")).toEqual([]);
+  });
+
+  it("reads the workflow file of a run, and a compare's commits with parents and every changed file (BOS-1688)", async () => {
+    const h = host((p) =>
+      p.startsWith("/actions/runs?")
+        ? json(200, { workflow_runs: [{ id: 5, name: "CI", event: "push", status: "completed", conclusion: "failure", head_sha: "a".repeat(40), path: ".github/workflows/ci.yml@refs/heads/main" }] })
+        : json(200, {
+            commits: [{ sha: "b".repeat(40), commit: { message: "Merge y\n\nbody" }, parents: [{ sha: "a".repeat(40) }, { sha: "e".repeat(40) }] }],
+            files: [{ filename: "apps/server/test/a.test.ts" }, { filename: "new.ts", previous_filename: "old.ts" }],
+          }),
+    );
+    expect((await h.workflowRuns(cfg("github"), "t", "main"))[0]!.path).toBe(".github/workflows/ci.yml");
+    expect(await h.compareDetail(cfg("github"), "t", "a".repeat(40), "b".repeat(40))).toEqual({
+      commits: [{ sha: "b".repeat(40), message: "Merge y", parents: ["a".repeat(40), "e".repeat(40)] }],
+      files: ["apps/server/test/a.test.ts", "new.ts", "old.ts"],
+    });
+    await expect(host(() => json(403, { message: "Resource not accessible" })).compareDetail(cfg("github"), "t", "a", "b")).rejects.toMatchObject({ status: 403 });
   });
 
   it("throws a GitHostError when the token can't read the runs", async () => {
