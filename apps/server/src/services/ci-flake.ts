@@ -52,6 +52,7 @@ export function repoRelative(p: string): string {
  * gate can't know it re-ran the right thing.
  */
 export function namedTestFiles(jobs: FailedJobEvidence[]): NamedTests {
+  // not state: a local of this pure function, built per call.
   const files = new Set<string>();
   const unnamed: string[] = [];
   const unsafe: string[] = [];
@@ -115,6 +116,7 @@ export const retryRowFiles = (detail: string | null): string[] => (detail ?? "")
 
 /** Retries per file from the company's recent ci_flake_retry rows. */
 export function retryCounts(details: Array<string | null>): Map<string, number> {
+  // not state: a local of this pure function, built per call.
   const out = new Map<string, number>();
   for (const d of details) for (const f of new Set(retryRowFiles(d))) out.set(f, (out.get(f) ?? 0) + 1);
   return out;
