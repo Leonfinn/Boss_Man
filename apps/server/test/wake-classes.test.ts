@@ -98,8 +98,14 @@ describe("wake classes: the table", () => {
     // no_update, agents_running and no_checks are the refusal codes of the update-now endpoint (BOS-1600).
     for (const r of ["update pending", "no_wrapup", "too_early", "no_update", "agents_running", "no_checks"]) found.delete(r); // the maintenance hold's label, not a wake
     for (const r of NOT_WAKE_REASONS) found.delete(r);
-    const unclassified = [...found].filter(([r]) => !(r in WAKE_CLASS)).map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
-    expect(unclassified).toEqual([]);
+    const missing = [...found].filter(([r]) => !(r in WAKE_CLASS));
+    const unclassified = missing.map(([r, f]) => `${r} (${path.relative(SRC, f)})`);
+    // The message is the exact fix (BOS-1727): a line per reason for the WAKE_CLASS table, or the NOT_WAKE_REASONS list if it is no wake.
+    const fix =
+      `For a wake reason, add to WAKE_CLASS in apps/server/src/services/wake-classes.ts (class waiting, scheduled or agent; see the table's header):\n` +
+      missing.map(([r]) => `  ${/^[a-z_]+$/.test(r) ? r : JSON.stringify(r)}: "<class>",`).join("\n") +
+      `\nIf it is not a wake's reason, add ${missing.map(([r]) => JSON.stringify(r)).join(", ")} to NOT_WAKE_REASONS in apps/server/test/wake-classes.test.ts.`;
+    expect(unclassified, fix).toEqual([]);
   });
 
   it("puts the reasons DR-002 names in their classes", () => {
