@@ -3,7 +3,7 @@
 //  - Status tags: sentence case, 12 px body font (not the code font), a coloured dot, 4.5:1 text contrast.
 //  - Notifications: a "<Company> needs a decision" card shows its question as the title, the company in the
 //    small line above, and a very long title is cut to its lines with the full text on hover.
-// Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or CI.
+// Skipped where the build or a browser is missing on a dev machine; FAILS under BOSSMAN_MERGE_CHECK or BOSSMAN_REQUIRE_BROWSER.
 import { execFileSync } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -17,8 +17,11 @@ import { feedTitle } from "../src/components/FeedItem";
 const DIST = path.join(path.resolve(fileURLToPath(new URL("..", import.meta.url))), "dist");
 const builtNow = () => existsSync(path.join(DIST, "index.html"));
 const built = builtNow();
-// At the merge gate and in CI a missing build or browser fails the test; on a bare dev machine it skips.
-const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.CI);
+// Where a browser is promised, a missing build or browser fails the test: the merge gate (BOSSMAN_MERGE_CHECK) and
+// the CI jobs that install one (the web-browser job and the worker-image job set BOSSMAN_REQUIRE_BROWSER=1).
+// CI's plain `check` job has no browser and runs `pnpm test` without it, so there the test skips (the web-browser
+// job re-runs every web test in a browser and fails on any skip). On a bare dev machine it skips too.
+const strict = Boolean(process.env.BOSSMAN_MERGE_CHECK || process.env.BOSSMAN_REQUIRE_BROWSER);
 
 const now = () => new Date().toISOString();
 const company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, ticketPrefix: "BOS", nextTicketNumber: 12, agents: [], projects: [] };
@@ -223,7 +226,9 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     }
   }, 60_000);
 
-  it("the screens open at 1550, 1667 x 724 and a phone width without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)", async () => {
+  // One test per width (BOS-1708): the three widths walked in one test shared a single 120 s budget, which GitHub's
+  // slower runners overran (18 page loads, each with a fixed sleep). Each width has its own budget now.
+  for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) it(`the screens open at ${w} px wide without sideways scrolling (screenshots go to BOSSMAN_SCRATCH)`, async () => {
     expect(builtNow(), "apps/web/dist is missing and the build did not make it").toBe(true);
     const browser = await launch();
     if (!browser) {
@@ -232,11 +237,14 @@ describe.skipIf(!built && !strict)("BOS-1124 tags and feed items as painted at 1
     }
     const dir = process.env.BOSSMAN_SCRATCH;
     try {
-      for (const [w, h] of [[1550, 1611], [1667, 724], [390, 844]] as const) {
+      {
         for (const route of ["board", "decisions", "agents", "notifications", "dashboard", "ticket"]) {
           const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
           await page.goto(`${base}/#/${route === "dashboard" ? "" : route === "ticket" ? "tickets/t1" : route}`, { waitUntil: "networkidle" });
-          await page.waitForTimeout(400);
+          // Wait for the app to have drawn something (a route's own content or the error page), then two frames, so a
+          // render error has shown before it is read; no fixed sleep.
+          await page.waitForFunction(() => (document.getElementById("root")?.textContent ?? "").trim().length > 0, undefined, { timeout: 15_000 });
+          await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
           const failed = await page.evaluate(() => {
             const t = document.body.textContent ?? "";
             return t.includes("This page hit an error") ? t.slice(t.indexOf("This page hit an error"), t.indexOf("This page hit an error") + 200) : "";

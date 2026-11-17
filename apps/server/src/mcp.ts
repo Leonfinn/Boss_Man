@@ -36,6 +36,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, liveTagOf, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { holdView } from "./services/review-holds.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { openReviewLines } from "./services/review-kinds.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
@@ -213,7 +214,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
   if (retroAgent) registerRetro(server, services.retro, scope);
   registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
   registerRoadmap(server, db, services.work, scope);
-  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts }, scope, hooks, false);
+  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, false);
   registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
   registerViewImage(server, services.images, scope);
   registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
@@ -286,13 +287,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     {
       description:
         "Ask for a check of your ticket to be run for you by the runner, outside your session, so it survives the end of your run and nobody can stop it. ticketId; scope quick (default: the 2-5 minute check of what your branch changed) or full (only after the merge gate has bounced the ticket twice, or for a change to check-all.sh or the test setup). Commit first: the check runs on your latest commit. It queues behind merge checks. You are woken with the result: end your turn or do other work, and do not poll or run your own loop. Only the ticket's assignee can use it while the ticket is in progress or in review. The merge gate runs the one full check itself.",
-      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional() },
+      inputSchema: { ticketId: z.string().uuid(), scope: z.enum(["quick", "full"]).optional(), ciNotApplicable: z.string().max(500).optional().describe("Only when your branch changes .github/workflows/ or image files: GitHub's own CI jobs then run before review and the move to review waits for them to pass. If they truly don't apply, give the reason here instead (it is shown on the ticket).") },
     },
-    async ({ ticketId, scope: checkScope }) => {
+    async ({ ticketId, scope: checkScope, ciNotApplicable }) => {
       if (!scope.agentId) return fail("Only an agent can ask for a check.");
       if (!checkRequests) return fail("The check queue is not available on this server.");
       try {
-        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope });
+        const msg = await checkRequests.request({ companyId: scope.companyId, agentId: scope.agentId, ticketId, scope: checkScope, ciNotApplicable });
         await noteRunTicket(ticketId);
         return text(msg);
       } catch (err) {
@@ -370,7 +371,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // (the other card's id and a short label) so the owner's queue numbers them and says which to do first.
       inputSchema: {
         // BOS-1193: the open question card this one corrects. Created and the old one closed as superseded in one call.
-        replaces: z.string().uuid().optional(),
+        replaces: cardIdInput().optional(),
         // BOS-1318: the only reasons a card stays on the owner's queue without steps. Without one (and without ownerMustDo or steps) the CEO takes it first.
         ownerOnly: z.enum(OWNER_ONLY_KINDS).optional().describe("Only for a card that really needs the owner: secret, money, host (a host step or runner rebuild), signoff, owner_choice (product direction or scope the owner kept for themselves; needs ownerOnlyWhy) or owner_setup. Without it, and without ownerMustDo or steps, your CEO answers the card first."),
         ownerOnlyWhy: z.string().max(200).optional().describe("One line on why this choice is the owner's; required with ownerOnly owner_choice."),
@@ -414,7 +415,13 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         }).strict().optional(),
       },
     },
-    async ({ replaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+    async ({ replaces: givenReplaces, ownerOnly, ownerOnlyWhy, question, options, recommended, blocksTicketId, alsoBlocks, holdsMerge, triedFirst, ownerMustDo, steps, stillNeeded, lintOverride, setsUp, newHost, approveSummary, proof, doAfter, doBefore, resetsOnRestart, criterion, optionVerdicts, clearsWhen }) => {
+      let replaces: string | undefined;
+      if (givenReplaces) {
+        const r = await resolveCardId(db, scope.companyId, givenReplaces);
+        if (!r.ok) return fail(`replaces: ${r.error}`);
+        replaces = r.id;
+      }
       if (ownerOnly === "owner_choice" && !ownerOnlyWhy?.trim()) return fail("ownerOnly owner_choice needs ownerOnlyWhy: one line saying why this choice is the owner's and not the CEO's.");
       let clearWhen: ClearWhen[] | undefined;
       if (clearsWhen) {
@@ -435,7 +442,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(and(eq(agents.id, scope.agentId), eq(agents.companyId, scope.companyId))) : [];
       const ask = checkAsk({ ...(steps?.length && usesOwnerSetupToken(steps) ? { ownerSetup: await ownerSetupFacts(db, scope.companyId) } : {}), triedFirst, ownerMustDo, steps, options, lintOverride, byCeo: me?.role === "ceo", hosts: await hostFacts.hosts(), serverHost: await hostFacts.serverHost(), ...(newHost ? { newHost } : {}), hostValues: await hostFacts.valuesFor(steps), addons: steps?.length ? await addons?.() : undefined, setsUp, proof, ...(steps?.length && selfDeployCards ? { selfDeploy: await selfDeployCards() } : {}), company: steps?.length ? await loadCompanyFacts(db, scope.companyId, steps) : undefined, ...(await seenImageDates(db, scope.companyId, steps).then((images) => (images ? { images } : {}))), ...(await screenMismatchSites(db, scope.companyId, steps, await hostFacts.serverHost()).then((mismatchedSites) => (mismatchedSites ? { mismatchedSites } : {}))) });
       if (ask.error) return fail(ask.error);
-      steps = ask.steps ?? steps; // {{host.…}} filled in
+      steps = ask.steps ?? steps; // {{host.…}} filled in, checker tags taken out (BOS-1665)
+      const stepSources = ask.stepSources;
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -496,7 +504,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string; droppedLinks?: DroppedOrderLink[]; withCeo?: boolean };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, replaces, question, options, recommended, blocksTicketId, ...(alsoIds.length ? { alsoBlocksTicketIds: alsoIds } : {}), holdsMerge: holdsMerge || undefined, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, ...(steps?.length && stepSources ? { stepSources } : {}), stillNeeded: stillNeeded?.trim() || undefined, lint: ask.lint, setsUp, ...(clearWhen ? { clearWhen } : {}), criterionIndexes, optionVerdicts, doAfter, doBefore, resetsOnRestart, ownerMustDo: ownerMustDo || undefined, approveSummary: summary, ceoFirst: true, ...(ownerOnly ? { ownerOnly, ...(ownerOnlyWhy?.trim() ? { ownerOnlyWhy: ownerOnlyWhy.trim() } : {}) } : {}) });
       } catch (err) {
         if (err instanceof WorkError || err instanceof AnswerError) return fail(err.message);
         throw err;
@@ -551,10 +559,17 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "withdraw_decision",
     {
       description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason (at least 10 characters) and what replaces the card in replacedBy, both required: card:<id> (a newer open card), ticket:<ref> with when (what brings the card back), or none (then the reason must say why, 30+ characters). If the card had reached the owner, Boss Man tells them with a note on Decisions and a quiet feed note. A question card or a plan card (once its run has ended) can be withdrawn. When a card is being re-checked (you were woken to confirm or withdraw it), use action confirm with checked, one line on what you checked against the live state, if it still holds: the flag clears and nothing is written on the card. Boss Man refuses a confirm for a card it can see is dead.",
-      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
+      inputSchema: { decisionId: cardIdInput(), reason: z.string().max(500).optional(), action: z.enum(["withdraw", "confirm"]).optional(), checked: z.string().max(300).optional(), replacedBy: z.string().max(80).optional(), when: z.string().max(300).optional() },
     },
-    async ({ decisionId, reason, action, checked, replacedBy, when }) => {
+    async ({ decisionId: givenId, reason, action, checked, replacedBy: givenReplacedBy, when }) => {
       if (!scope.agentId) return fail("Only an agent's run can withdraw a decision.");
+      // BOS-1695: the short id agents are shown (a unique prefix in this company) works as well as the full one.
+      const resolved = await resolveCardId(db, scope.companyId, givenId);
+      if (!resolved.ok) return fail(resolved.error);
+      const decisionId = resolved.id;
+      const rb = await resolveReplacedBy(db, scope.companyId, givenReplacedBy);
+      if (!rb.ok) return fail(rb.error);
+      const replacedBy = rb.value;
       if (action === "confirm") {
         try {
           const r = await decisions.confirmRecheck(decisionId, { agentId: scope.agentId }, checked ?? "");
@@ -1073,7 +1088,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running. Say Boss Man is up only when the stack field says healthy: one server answering is not enough. stack is healthy, degraded or down, and stackWhy gives the reasons (for example a failed or partial last deploy, which stays degraded until a later deploy result replaces it). Also shown: both blue/green colours (colours), when the database last started (database.startedAt), the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, server freezes over 1 s with memory, GC time and requests in flight (stalls), and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). Also runLimits: the all-companies and per-company run limits in force, with how many work runs each has going (counts only); limit is the number in force and saved the owner's saved number; when allCompanies or background is lower than saved, because says why (a server update's hold), since since when and until the latest it lifts, and mergeChecks.paused says new merge checks wait for the same hold, so never ask the owner whether they meant a lower number; a waiting wake held 'at a concurrency limit: all companies' waits for the first, 'this company' for the second, and 'this agent is busy' for the agent's own run. Also mergeFailures: failed merge attempts in the last hour, with a count per reason (check_failed, landing_refused, main_moved, conflict, lock_timeout, restart, gate_fault). Also mergeTrain: per project, the merge train's seats, who is seated and who waits, tickets held to land on main alone (who they clashed with, the files, and whether they hold the line), and since when a seat has stood empty or nothing has landed (empty on a server that isn't in charge). Also addons: ntfy, Tailscale and Penpot, each with state (not_set_up, stopped, needs_login, running or unknown), since and source. Never tell the owner an add-on carries over, is back up or works unless its state is running; unknown means Boss Man can't see it, so say so. For ntfy, running means only that ntfy accepted the last push, not that the phone got it: say a push reached the phone only when ntfy.phone.confirmedAt (the owner's tap on Got it on a test notification) is later than the push, or the owner says so. ntfy.phoneType is the owner's phone (android, iphone, both or unknown): when unknown, ask the owner rather than guessing a phone. It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1433,7 +1448,7 @@ function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHoo
 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
-  registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts }, scope, hooks, true);
+  registerTicketMoves(server, db, { review, work, feedback, skillProposals, hostFacts: services.hostFacts, checkRequests: services.checkRequests }, scope, hooks, true);
   registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.

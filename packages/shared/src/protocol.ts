@@ -258,13 +258,15 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the owner's sign-off on commit `signed` still covers the branch head: only clean automatic merges of the target came in since (BOS-734, DR-038). */
   z.object({ type: z.literal("workspace.covers"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), signed: z.string().regex(/^[0-9a-f]{7,64}$/), head: z.string().regex(/^[0-9a-f]{7,64}$/).optional() }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional(), phase: z.enum(["prepare", "finish", "publish", "unpublish"]).optional(), commit: z.string().min(7).optional(), tree: z.string().min(7).optional(), expectTree: z.string().min(7).optional(),
     /** BOS-1413: the branch head the reviews and sign-off covered; a branch at any other commit is not merged (branch_moved). */
     pin: z.string().min(7).optional(),
     /** Merge train (BOS-1366, runner feature "merge-base"): prepare on this commit (main's tip or a train member ahead) instead of main's tip. */
     base: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     /** Merge train: finish pushes only if main's tip is exactly this commit, the base the checked tree was prepared on. */
-    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional() }),
+    expectBase: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    /** BOS-1664 (runner feature "ci-publish-scan"): the owner's private-details list, applied to the secrets scan that runs before the "publish" push makes the commit public. */
+    scanList: z.string().max(60_000).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -409,8 +411,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "merge-base", "merge-conflicts", "merge-pin", "check-bundle"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). "check-jobs": runs server-queued checks (DR-003). "clash-check": answers workspace.clash (BOS-426). "signoff-covers": answers the sign-off covers check. "deploy-tag": answers workspace.resolve and workspace.tag (DR-033). "ci-publish": workspace.merge's "publish" and "unpublish" phases and its expectTree (BOS-1070); an older runner would read an unknown phase as a plain merge, so the server only sends them to a runner that says this. "merge-base": honours workspace.merge's base and expectBase (BOS-1366; an older runner's zod would silently drop them). "merge-conflicts": answers workspace.mergeLine (BOS-1411). "merge-pin": honours workspace.merge's and workspace.push's pin and names the branch commit (branchSha) in its prepared answer (BOS-1413); the server sends no pin to a runner without it. A check worker (BOS-1435) announces WORKER_FEATURES instead. "check-bundle" (BOS-1436): on a runner, answers check.bundle (packs a job's code for a worker); on a worker, fetches it. A worker gets jobs only when both have it. "ci-publish-scan" (BOS-1664): runs the secrets scan, with the owner's private-details list from workspace.merge's scanList, before a "publish" push; the early GitHub run (pre-flight) is offered only to a runner that says this. */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence", "check-jobs", "clash-check", "signoff-covers", "deploy-tag", "ci-publish", "merge-base", "merge-conflicts", "merge-pin", "check-bundle", "ci-publish-scan"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -484,6 +486,12 @@ export type WorkspaceDiff = {
    * work area from the shared repo, so a check of head would fail with "invalid reference": request_check refuses instead.
    */
   unsynced?: string;
+  /**
+   * BOS-1647: set (only on a diff measured against a fetched base branch) when the ticket's head is already inside that
+   * branch, with the commit on it that brought the head in (the merge commit, or head itself for a fast-forward) and,
+   * for a merge commit, the files it changed. A push that landed but was never recorded shows up as exactly this.
+   */
+  mergedInto?: { commit: string; files?: string[] };
 };
 
 /** The outcome of a ticket's check (R47). */
@@ -526,6 +534,12 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 export type MigrationRenamed = { from: string; to: string };
 
 /**
+ * The branch the merge gate publishes a ticket's merge commit to for the git host's CI (BOS-1070). Not bossman/<id>:
+ * the runner fetches every origin branch into the agents' view, and there that name is the ticket's own branch.
+ */
+export const ciBranchFor = (ticketId: string) => `bossman-ci/${ticketId}`;
+
+/**
  * The ticket's copy holds changes its branch doesn't (R46). `files` are the author's to commit. `foreign` (BOS-1231): the
  * copy fell behind its own branch (the branch moved on from another folder) and couldn't be moved up safely; these files
  * differ only because the branch moved on, so they are never the author's to commit. While any are there, the CEO is
@@ -538,6 +552,13 @@ export type MergeResult =
   | { status: "prepared"; commit: string; tree: string; targetSha: string; /** BOS-1413: the branch commit the merge was built from; a runner without it can't be pinned. */ branchSha?: string; renamed?: MigrationRenamed[] }
   /** BOS-1413: the branch is not at the pinned head (a commit came in after the approval). Nothing was built, kept or pushed. */
   | { status: "branch_moved"; head: string; pinned: string }
+  /**
+   * Phase "publish" (BOS-1070): the prepared merge commit was force-pushed to `branch` (bossman-ci/<ticket>) so the git host's
+   * CI tests exactly what would land. `hasWorkflows` false: the commit has no .github/workflows, so nothing was pushed and no CI will run.
+   */
+  | { status: "published"; branch: string; commit: string; hasWorkflows: boolean }
+  /** Phase "unpublish": the CI branch is gone from origin (or was never there). */
+  | { status: "unpublished"; branch: string }
   /** `renamed`: the gate renumbered the branch's migrations itself (BOS-690): the SQL is unchanged, only the name and journal line moved. */
   | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number }; renamed?: MigrationRenamed[] }
   | { status: "already_merged"; commit: string }

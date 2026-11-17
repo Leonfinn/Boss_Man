@@ -427,13 +427,13 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         // A deploy card carrying the fix for a live problem (BOS-639) is paged, once per fix: a later card for
         // the same fix (main moved on) is a plain ask. Quiet hours still lower it, in notify, as for any page.
         const c = d.context as DecisionContext;
-        const urgentFix = c.type === "self_deploy" && d.tier !== "ceo" ? c.urgent : undefined;
+        const urgentFix = (c.type === "self_deploy" || c.type === "deploy") && d.tier !== "ceo" ? c.urgent : undefined;
         const level: NotifyLevel = d.tier === "ceo" ? "note" : urgentFix && !urgentFix.repeat ? "page" : alertOnly ? "flag" : "ask";
         // BOS-1097: only two kinds of card are urgent by themselves: a live-problem deploy, and a card the CEO
         // marked urgent when escalating it (context.urgentPush). Blocking a ticket no longer counts, and a
         // "Got it" notice never pushes. Pages come from notify_owner and the test push is urgent in `test`.
         const mark = urgentPushOf(d.context);
-        const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? "A deploy that carries the fix for a live problem" : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
+        const urgentReason = d.tier === "ceo" || alertOnly ? undefined : urgentFix ? (urgentFix.kind === "ready" ? "Work you marked Priority 1 has merged and is ready to put live" : "A deploy that carries the fix for a live problem") : mark ? `The CEO marked it urgent: ${mark.why}` : undefined;
         // BOS-1010: the runner update is routine. It stays in the feed and the browser, and never goes to the phone,
         // even under "All decisions". (A self_deploy card that is not the runner update is unchanged.)
         // BOS-1462: unless it carries a live fix that pages (urgentFix, not a repeat): then it pages like a server card.

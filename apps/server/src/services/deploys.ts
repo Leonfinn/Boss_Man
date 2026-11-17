@@ -11,6 +11,7 @@ import { DEPLOY_REF, deployTagNameProblem, findCredential, riskOf, stagingFirst,
 import type { Db } from "../db/client.js";
 import { agents, decisions, deploys, deployTargets, projects, runners as runnersTable, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { readyUrgentFor } from "./priority-group.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { ownerActed } from "./stale-requests.js";
 
@@ -394,15 +395,18 @@ export function deploysService(
 
       const [agent] = actor.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, actor.agentId)) : [];
       const ships = resolved.commit ? ` (ships ${short(resolved.commit)})` : "";
+      // BOS-1516: a deploy that carries the owner's Priority 1 work, once its whole group has merged, is headed "Ready to put live"
+      // and paged once (the same urgent path as a live fix; a later card for the same ticket is a plain ask).
+      const ready = input.ticketId ? await readyUrgentFor(db, input.ticketId) : undefined;
       await db.insert(decisions).values({
         companyId: actor.companyId,
         kind: "approval",
-        question: `${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
+        question: `${ready ? `${ready.heading}.\n\n` : ""}${agent?.name ?? "An agent"} wants to deploy ${input.ref}${ships} to ${t.name}${t.isProduction ? " (production)" : ""}.${input.notes ? ` Notes: ${input.notes}` : ""}${tagNote}`,
         options: ["Approve", "Reject"],
         recommendedOption: "Approve",
         raisedByAgentId: actor.agentId,
         tier: "owner",
-        context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}) },
+        context: { type: "deploy", deployId: d!.id, ...(resolved.commit ? { commit: resolved.commit } : {}), ...(ready ? { urgent: ready } : {}) },
       });
       return { deploy: d!, note: `Waiting for the owner to approve. You'll be woken with the answer; don't wait in this turn.${tagNote}` };
     },

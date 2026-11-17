@@ -76,12 +76,24 @@ beforeAll(async () => {
   const addr = server!.address();
   base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 });
+// A cold Chromium start on a loaded merge gate took most of the old 30 s test budget (BOS-1627), and each
+// test used to pay it. One browser is started once, in beforeAll, with its own generous deadline; every
+// test then only opens a page. LIMIT is for the loaded machine: it still ends a hung page, and the
+// contrast assertions themselves are unchanged, so an unreadable light theme still fails.
+const LIMIT = 120_000;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let sharedBrowser: any | null = null;
+const launch = async (): Promise<any | null> => sharedBrowser;
+beforeAll(async () => {
+  if (built) sharedBrowser = await launchChromium();
+}, LIMIT);
 afterAll(async () => {
+  await sharedBrowser?.close();
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
 });
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-async function launch(): Promise<any | null> {
+async function launchChromium(): Promise<any | null> {
   let chromium: any;
   try {
     chromium = createRequire(import.meta.url)("playwright").chromium;
@@ -191,9 +203,9 @@ describe.skipIf(!built)("BOS-1050 read-only text boxes read in dark mode at 1667
       expect(edit.ratio, `edit mode contrast ${JSON.stringify(edit)}`).toBeGreaterThanOrEqual(4.5);
       await page.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 
   it("the light theme keeps the standing rules dark on a light box", async () => {
     const browser = await launch();
@@ -205,16 +217,17 @@ describe.skipIf(!built)("BOS-1050 read-only text boxes read in dark mode at 1667
         content:
           ":root { color-scheme: light; --ink: #1d2530; --head: #10161f; --muted: #55606e; --ground: #f4f6f9; --card: #ffffff; --field: #f7f8fa; --raise: #eef1f5; --line: #dde2e9; --line-strong: #cfd6df; --lane: #f0f3f7; }",
       });
-      await page.waitForTimeout(150);
+      // Wait for the style to be applied (the page's ink colour turns to the light theme's), not a fixed sleep.
+      await page.waitForFunction(() => getComputedStyle(document.documentElement).colorScheme === "light", undefined, { timeout: 15_000 });
       await saveShot("bos-1050-standing-rules-light.png", page);
       const view = await page.evaluate(measureBox, "#standing-rules-h ~ .readonly-text");
       expect(view.found).toBe(true);
       expect(view.ratio, `light theme contrast ${JSON.stringify(view)}`).toBeGreaterThanOrEqual(4.5);
       await page.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 
   it("the import preview's agent instructions use the same shared box", async () => {
     const browser = await launch();
@@ -232,7 +245,6 @@ describe.skipIf(!built)("BOS-1050 read-only text boxes read in dark mode at 1667
         </li></ul></details></section></main></body></html>`,
         { waitUntil: "domcontentloaded" },
       );
-      await page.waitForTimeout(200);
       await page.evaluate(() => { (document.querySelector("details") as HTMLDetailsElement).open = true; });
       await waitForSelector(page, "#import-h ~ details .readonly-text");
       await saveShot("bos-1050-import-instructions-after.png", page);
@@ -242,9 +254,9 @@ describe.skipIf(!built)("BOS-1050 read-only text boxes read in dark mode at 1667
       expect(box.ratio, `import instructions contrast ${JSON.stringify(box)}`).toBeGreaterThanOrEqual(4.5);
       await page.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 
   it("catches the fault it guards: the old near-white --panel box fails the same measurement", async () => {
     const browser = await launch();
@@ -253,13 +265,13 @@ describe.skipIf(!built)("BOS-1050 read-only text boxes read in dark mode at 1667
       const page = await openPage(browser, "#/settings/c1/team");
       await waitForSelector(page, "#standing-rules-h ~ .readonly-text");
       await page.addStyleTag({ content: "#standing-rules-h ~ .readonly-text { background: var(--panel, #f6f6f6); border: 0; }" });
-      await page.waitForTimeout(100);
+      await page.waitForFunction(() => getComputedStyle(document.querySelector("#standing-rules-h ~ .readonly-text")!).borderTopWidth === "0px", undefined, { timeout: 15_000 });
       const old = await page.evaluate(measureBox, "#standing-rules-h ~ .readonly-text");
       expect(old.found).toBe(true);
       expect(old.ratio, `the old box must fail ${JSON.stringify(old)}`).toBeLessThan(4.5);
       await page.close();
     } finally {
-      await browser.close();
+      for (const ctx of browser.contexts()) await ctx.close(); // the shared browser itself closes in afterAll
     }
-  });
+  }, LIMIT);
 });

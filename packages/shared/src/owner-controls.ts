@@ -68,7 +68,7 @@ export const OWNER_CONTROLS = {
     "Approve and open a pull request", "Approve and merge", "Request changes", "Run now", "Description", "Edit",
     "Save description", "Refresh all changes", "All changes", "Refresh the last turn", "The last turn", "Try merging now",
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
-    "Mark urgent", "Marked urgent", "Edit steps", "Save steps", "Discard draft",
+    "Make Priority 1", "Priority 1 is on", "Edit steps", "Save steps", "Discard draft",
     // A text field someone else changed was refused: the owner's draft stays and this brings in the latest (BOS-905).
     "Reload the latest",
     // A Details row's own request failed: fetch it again (BOS-1195).
@@ -221,7 +221,7 @@ export const OWNER_FIELDS = {
     "To", "Feature", "Milestone", "Make it wait on", "Acceptance criteria, one per line",
     "What you have to do, one step per line", "What should the agent change",
     "Lesson learned (optional) — the CEO decides whether to add it to the project brief, and you are told the outcome", "Doesn't need code changes",
-    "Urgent", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
+    "Priority 1", "Blocked until (optional)", "Why (one line)", "Written by", "Assigned to", "Risk", "Size", "Watcher",
   ],
   // The project settings (ProjectRow): on a project's Config tab and, for every project, on the Projects page.
   Config: [
@@ -245,6 +245,7 @@ export const OWNER_FIELDS = {
     "Weight of demand", "The CEO triages new feedback (each batch costs a run)", "New criterion", "Weight", "New area",
     "New feature", "Area", "Sort by", "Show released and declined", "New task", "Project", "Risk", "Description", "Status",
     "Effort", "Subfeature of", "Objective or milestone", "Roadmap column", "Rank",
+    "Priority 1: every open task of it goes first, and you get one page when all of it has merged",
     "Show on the feedback portal, where visitors can vote on it", "Keep off the portal (sensitive)", "Why it's kept off (optional)", "Public title (optional)", "Public summary", "Show publicly", "Not shown yet",
   ],
   Feedback: [
@@ -280,6 +281,8 @@ export const OWNER_FIELDS = {
     "Hold new starts while this many quick checks are queued (leave empty for off)",
     // Settings → Checks: who runs the quick check, and how many at once (BOS-798).
     "Each agent runs its own", "Boss Man runs them", "Checks at once (1 to",
+    // Settings → Checks: hold each merge until GitHub CI passes on it (BOS-1070).
+    "Wait for GitHub CI before merging",
     // Settings → Checks: the merge train switch (BOS-1366).
     "Merge approved work in the order it was approved",
     // Settings → Checks → Check workers (BOS-1435): one machine's form.
@@ -345,3 +348,30 @@ export const OWNER_TABS = {
   ],
   Board: ["Kanban", "Budget", "Config"],
 } as const;
+
+/**
+ * The section headings on each tab, as the page shows them (Section titles, h3 headings and the "Advanced" folds). A
+ * card's path may name one after its tab ("Settings → Server and runner → This server → Network guard"); a path part
+ * that is none of a tab, a heading, a button or a field is refused (R8, BOS-1649). `owner-control-list.test.ts` reads
+ * the web app and fails when an entry here is no longer on its page or a literal Section title is missing here.
+ */
+export const OWNER_SECTIONS = {
+  Funding: ["Funding sources", "Budgets", "What the provider controls"],
+  Secrets: ["All stored secrets"],
+  "Tools and deploys": ["Tool servers (MCP)", "Penpot", "Deploy targets", "If the git host protects the tag"],
+  Reviews: ["Reviews"],
+  "Team and CEO": [
+    "Standing rules", "CEO chapters", "Asking the CEO for advice", "Nudges", "Run time limit", "Workflow retros", "Ticket references",
+    "Did it move the goal?", "Cleaning up temp files",
+  ],
+  Watchdog: ["Watchdog"],
+  Permissions: ["Permission rules", "Advice on permission cards", "Second opinion", "Second opinion from a model (optional)", "Agent fence", "Setting up a host", "Try a command"],
+  Updates: ["Updates", "Other actions", "Now running", "Recent updates", "Stop all work", "What the host said"],
+  "Limits and checks": ["Agents at once", "Tickets in progress", "Checks", "Check workers"],
+  Runner: ["Runner", "Add-ons", "Workspace disk"],
+  Email: ["Outgoing email", "Main's CI"],
+  "This server": ["Server", "This host", "Facts only you can give", "Network guard", "Allowed automatically", "Extra lines from your .env"],
+  "Devices and privacy": ["Your devices", "Private details to block"],
+  "Import and export": ["Import a company"],
+  Budget: ["Spending limit", "Pay-as-you-go spend", "On your subscriptions", "Tokens", "Costliest tasks"],
+} as const satisfies Record<string, readonly string[]>;

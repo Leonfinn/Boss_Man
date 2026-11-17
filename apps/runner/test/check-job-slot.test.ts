@@ -45,11 +45,25 @@ function setup() {
 }
 
 const slotFree = (coord: string) => spawnSync("flock", ["-n", path.join(coord, "queue", "check-all.slot.1"), "true"]).status === 0;
+// True as soon as f() has been seen true. It must not call f() again to decide: the slot probes flap (check-slot.sh itself
+// takes the lock for a moment to look at it, and so does slotFree), so a second look could read "free" right after a
+// "held" and fail the test within a few hundred ms (BOS-1712, GitHub run 44038222824, "expected false to be true").
 const until = async (f: () => boolean, ms = 15_000) => {
   const t = Date.now();
-  while (!f() && Date.now() - t < ms) await new Promise((r) => setTimeout(r, 100));
-  return f();
+  for (;;) {
+    if (f()) return true;
+    if (Date.now() - t >= ms) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
 };
+
+describe("until (test helper)", () => {
+  it("answers with what it saw, even when the probe flaps back at once", async () => {
+    let calls = 0;
+    expect(await until(() => ++calls === 2, 2000)).toBe(true); // true on the 2nd look only
+    expect(await until(() => calls++ % 2 === 0, 2000)).toBe(true); // flaps: a re-look after a true would read false
+  });
+});
 
 describe.skipIf(!hasFlock)("check job runner slot", () => {
   it("holds a slot while it runs and gives it back when it ends", async () => {
@@ -61,7 +75,7 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     });
     expect(r.ok).toBe(true);
     expect(r.output).toContain("check-all: slot taken, running the checks");
-    expect(slotFree(coord)).toBe(true);
+    expect(await until(() => slotFree(coord))).toBe(true);
   });
 
   it("waits while another check holds the only slot, then runs", async () => {
@@ -69,7 +83,8 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     mkdirSync(path.join(coord, "queue"), { recursive: true });
     // A hand-run check holding slot 1 (same lock the job uses).
     const hold = spawn("flock", [path.join(coord, "queue", "check-all.slot.1"), "sleep", "4"], { stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the lock to really be held (not a fixed sleep: a slow machine started flock late and the job took the slot first).
+    expect(await until(() => !slotFree(coord))).toBe(true);
     const ws = new Workspaces(root, env, coord);
     let seen = "";
     const started = Date.now();
@@ -85,14 +100,18 @@ describe.skipIf(!hasFlock)("check job runner slot", () => {
     mkdirSync(path.join(coord, "queue"), { recursive: true });
     const ws = new Workspaces(root, env, coord);
     let cancel: () => void = () => {};
-    const running = ws.runCommitCheck({ projectId, jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", commit }, "sleep 300", 600_000, { onStart: (c) => (cancel = c) });
-    expect(await until(() => !slotFree(coord))).toBe(true);
+    let seen = "";
+    const running = ws.runCommitCheck({ projectId, jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", commit }, "sleep 300", 600_000, { onStart: (c) => (cancel = c), onOutput: (t) => (seen = t) });
+    // Wait for the job to say it holds the slot (the event), not for a probe of the lock: the job's own lock probes read as "held" too.
+    expect(await until(() => seen.includes("check-all: slot taken, running the checks"))).toBe(true);
+    expect(slotFree(coord)).toBe(false);
     cancel();
     await running;
     expect(await until(() => slotFree(coord))).toBe(true);
     const failed = await ws.runCommitCheck({ projectId, jobId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", commit }, "exit 3", 60_000);
     expect(failed.exitCode).toBe(3);
-    expect(slotFree(coord)).toBe(true);
+    // The slot's lock is dropped when the holder process exits, a moment after the job's own result: wait for it, with a deadline.
+    expect(await until(() => slotFree(coord))).toBe(true);
     expect(existsSync(path.join(coord, "queue"))).toBe(true);
   });
 

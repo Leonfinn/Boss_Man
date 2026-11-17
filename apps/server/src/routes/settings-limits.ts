@@ -69,6 +69,9 @@ export function settingsLimitsRoutes(
       company: v?.company ?? scheduler.limits.company,
       background: v?.background ?? scheduler.limits.background,
       defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company, background: DEFAULT_LIMITS.background },
+      // BOS-1634: the numbers the scheduler really uses (all companies, background) and whether new merge checks are paused,
+      // each differing from the saved one only with a reason (a server update's hold).
+      inForce: await scheduler.limitsInForce(),
     };
   };
   owner.get("/api/run-limits", async () => runLimits());
@@ -263,4 +266,7 @@ export function settingsLimitsRoutes(
   // BOS-313: check the merged result before pushing it (off by default while it rolls out).
   owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
   owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
+  // BOS-1070: the merge gate waits for GitHub CI on the merge commit before it merges.
+  owner.get("/api/settings/wait-for-ci", async () => ({ on: await review.waitForCi() }));
+  owner.put("/api/settings/wait-for-ci", async (req) => ({ on: await review.setWaitForCi(z.object({ on: z.boolean() }).parse(req.body).on) }));
 }

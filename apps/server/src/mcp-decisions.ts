@@ -9,6 +9,7 @@ import { agents, decisions as decisionsTable, tickets, tickets as ticketsTable }
 import { record } from "./services/activity.js";
 import { AnswerError, adviceOf, checkAsk, FIXES_LIVE_MAX, fixesLiveProblem, isSystemCard } from "./services/decisions.js";
 import { type CardLint, lintLines } from "./services/steps.js";
+import { cardIdInput, resolveCardId, resolveReplacedBy } from "./services/card-id.js";
 import { ReviewError, type HoldInput } from "./services/review.js";
 import { checkQueue } from "./services/check-queue.js";
 import { pageDiff } from "./services/review-diff-page.js";
@@ -47,7 +48,7 @@ export function registerDecisionTools(
         options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
         recommended: z.string().max(200).optional(),
         summary: z.string().max(1000).optional(),
-        id: z.string().uuid().optional(),
+        id: cardIdInput().optional(),
         answer: z.string().max(200).optional(),
         assigneeAgentId: z.string().uuid().optional(),
         note: z.string().max(2000).optional(),
@@ -78,6 +79,17 @@ export function registerDecisionTools(
       const isCeo = me?.role === "ceo";
       // A plan approver answers only plans put to them, never permission requests.
       const mine = (d: typeof decisionsTable.$inferSelect) => isCeo || (!!scope.agentId && d.forAgentId === scope.agentId && (d.context as { plan?: boolean }).plan === true);
+      // BOS-1695: the 8-character short id agents are shown works as well as the full one (a unique prefix in this company).
+      if (input.id) {
+        const r = await resolveCardId(db, scope.companyId, input.id);
+        if (!r.ok) return fail(r.error);
+        input.id = r.id;
+      }
+      if (input.replacedBy) {
+        const r = await resolveReplacedBy(db, scope.companyId, input.replacedBy);
+        if (!r.ok) return fail(r.error);
+        input.replacedBy = r.value;
+      }
       if (input.action === "changes") {
         if (!isCeo) return fail("Only the CEO reads workflow-retro changes.");
         const { changes } = await retro.latest(scope.companyId);
@@ -247,7 +259,7 @@ export function registerDecisionTools(
             if (ask.error) return fail(ask.error);
             if (input.urgent && (input.urgentWhy?.trim().length ?? 0) < 10) return fail("An urgent reissue needs urgentWhy: one short sentence (10 to 200 characters) on what the owner must act on now (it is shown on their phone list).");
             const reissueSteps = ask.steps ?? input.steps;
-            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: reissueSteps?.length ? reissueSteps : undefined, ...(reissueSteps?.length && ask.stepSources ? { stepSources: ask.stepSources } : {}), lint: ask.lint, ...(input.optionVerdicts ? { optionVerdicts: input.optionVerdicts } : {}), ...(input.urgent ? { urgentWhy: input.urgentWhy!.trim() } : {}) });
           } else if (input.outcome === "advice") {
             const [card] = await db.select({ kind: decisionsTable.kind, context: decisionsTable.context }).from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
             const permission = !!card && card.kind === "permission" && (card.context as { type?: string }).type === "permission";
@@ -306,7 +318,7 @@ export function registerDecisionTools(
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base, about 60,000 characters at a time: a long diff ends with a cut note saying how many files and lines are left and which, so call diff again with the offset it gives, or with path for one file, until you have read it all, and never approve on a part), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Usability gate: on a feature's ticket, one with owner setup steps, or one that changes what the owner installs, a code or infra approval must carry a \"Real use:\" walk-through in the summary (day 1, after routine updates and restarts, a week on, the owner away; every step the owner repeats and how often), or it is refused; a step the owner must repeat routinely fails the review. Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a ticket's waiting merge or quick check next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. Each kind's reviewer is set in Settings > Reviews, where a kind may list several agents: each review goes to one of them (never someone who worked on the ticket), and the same one keeps it across rounds while available. action: diff (ticketId; shows the changes against the ticket's base, about 60,000 characters at a time: a long diff ends with a cut note saying how many files and lines are left and which, so call diff again with the offset it gives, or with path for one file, until you have read it all, and never approve on a part; an approval is refused if the branch moved since your last diff, so read it again), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one marked before merge, and when you request changes, name the criterion that fails; a criterion marked checked after merge is for a live host, so it never holds the review up. Usability gate: on a feature's ticket, one with owner setup steps, or one that changes what the owner installs, a code or infra approval must carry a \"Real use:\" walk-through in the summary (day 1, after routine updates and restarts, a week on, the owner away; every step the owner repeats and how often), or it is refused; a step the owner must repeat routinely fails the review. Also check the follow-up exists: when the summary, the description or a reply says someone else will do something next (\"the CEO will attach them\"), that work must be a ticket (set_ticket_state followUps), or the ticket must say why none is needed. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off) and prioritise_merge (ticketId, reason: puts a ticket's waiting merge or quick check next in line, below a fix for a broken main; logged; the whole check still runs) and retry_merge (ticketId: starts a fresh merge attempt on an approved ticket still in review whose merge was refused or never finished; the whole check runs again, it never skips the check or the owner's sign-off). Verdict approved_hold passes the review but holds the merge (give holdReason, and waitsOn tickets or decisions and/or holdUntil a date): the board shows the ticket as Held, nobody is woken about it, and you are woken once when what it waits on closes or the date comes, to re-check against current main and then use action release_hold (the normal approval and merge follow) or cancel_hold (withdraws your pass; it is reviewed again). The holding reviewer, the CEO and the owner can release or cancel a hold. You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule", "retry_merge", "release_hold", "cancel_hold", "prioritise_merge"]),
         ticketId: z.string().uuid(),
@@ -350,8 +362,10 @@ export function registerDecisionTools(
           const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
           if (!t) return fail("No such ticket in your company.");
           const job = await checkQueue(db).moveToFront(scope.companyId, input.ticketId, me.name, input.reason.trim());
-          if (!job) return fail("That ticket has no merge or quick check waiting for a check slot (it may be running, held, or not queued yet), so there is nothing to move.");
-          const what = job.kind === "merge" ? "merge" : "quick check";
+          // BOS-1516: a ticket still waiting for a merge train seat has no job yet: it moves on the train.
+          const seat = await checkQueue(db).moveSeatWaiter(scope.companyId, input.ticketId, me.name, input.reason.trim());
+          if (!job && !seat) return fail("That ticket has no merge or quick check waiting for a check slot, and isn't waiting for a merge train seat (it may be running, held, or not queued yet), so there is nothing to move.");
+          const what = job ? (job.kind === "merge" ? "merge" : "quick check") : "merge (it waits for a train seat)";
           return text(`This ${what} is next in line, below a fix for a broken main. It still runs its whole check; nothing was skipped, and a check already running is not stopped.`);
         }
         if (input.action === "release_hold" || input.action === "cancel_hold") {
@@ -378,6 +392,10 @@ export function registerDecisionTools(
           // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
           await noteRunTicket(input.ticketId);
           const d = await review.diff(input.ticketId, scope.companyId);
+          // BOS-1567: remember the head this diff showed, so submit can refuse an approval if the branch moved since.
+          // A later page on another head than the stored one means the diff was read across two heads: start again.
+          const readBefore = await review.noteRead(input.ticketId, scope.agentId, d.head);
+          const movedMidRead = !!input.offset && !!readBefore && !!d.head && readBefore !== d.head;
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
           const paged = pageDiff({ diff: d.diff, path: input.path, offset: input.offset });
@@ -394,7 +412,8 @@ export function registerDecisionTools(
             ? `Fixes live: ${rt.fixesLive.trim()}\nWhen this merges the deploy card is headed "Urgent: contains the fix for" these words and pages the owner. Check it names a real live symptom this change fixes; correct it with submit fixesLive, or request changes.\n\n`
             : "";
           const gate = usabilityGateBlock(rt, d.files.map((f) => f.path), d.diff);
-          return text(`${checklist}${setup}${live}${gate}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          const moved = movedMidRead ? "The branch moved since your first page; start again from offset 0 so you read one head throughout.\n\n" : "";
+          return text(`${moved}${checklist}${setup}${live}${gate}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
         // A verdict on a ticket is touching it, like any other hook (BOS-268).

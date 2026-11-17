@@ -77,12 +77,17 @@ type TicketPatch = {
   ownerSetup?: string | null;
   /** The CEO's lintOverride reason for these steps (DR-052); stored with them, cleared by any write without one. */
   ownerSetupOverride?: string | null;
+  /** BOS-1650: the one-line "why" and "if skipped" the go-live card opens with; blank clears. Written with the steps. */
+  ownerSetupWhy?: string | null;
+  ownerSetupIfSkipped?: string | null;
   /** The CEO is fixing a merged ticket's steps while Boss Man's "can't go to the owner" card is open (DR-052). */
   setupFix?: boolean;
   /** "Fixes live" (BOS-639): one sentence naming the live symptom this fixes; null or blank clears it. */
   fixesLive?: string | null;
   /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
   urgent?: boolean;
+  /** BOS-1516: the urgent mark was set by the owner ("Priority 1"). Only the owner's routes pass it; clearing urgent clears it too. */
+  urgentByOwner?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
   /** A move into review: "new" opens a review round (the owner's move), "keep" (the default here) leaves it to the caller (review.ts moves tickets into review itself). */
@@ -481,6 +486,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
       if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
+      const featureP1 = featureId ? !!(await db.select({ p: features.priorityOne }).from(features).where(eq(features.id, featureId)))[0]?.p : false;
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
       // BOS-1571: a feature's ticket, or one with owner setup steps, carries the usability gate from the start.
       const criteria = withUsabilityCriterion(input.acceptanceCriteria ?? [], { featureId, ownerSetup: input.ownerSetup, noCode: input.noCode });
@@ -504,7 +510,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           noCode: input.noCode ?? false,
           ownerSetup: input.ownerSetup?.trim() || null,
           fixesLive: input.fixesLive?.trim() || null,
-          urgent: input.urgent ?? false,
+          // BOS-1516: a ticket made in a Priority 1 feature carries the owner's mark from the start.
+          urgent: input.urgent ?? featureP1,
+          urgentByOwner: (input.urgent ?? featureP1) && (input.urgentByOwner ?? featureP1),
           lastActivityAt: now(),
           risk: input.risk ?? null,
           size: input.size ?? null,
@@ -676,6 +684,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (parent.projectId !== (dest?.id ?? t.projectId)) throw new WorkError(422, "The parent task is in another project. Move the parent, or move this ticket to the parent's project in the same call.");
         fields.featureId = parent.featureId;
       }
+      // BOS-1516: switching urgent off (by anyone) drops the owner's mark too; turning it on keeps whatever the caller said (agents never set it).
+      if (patch.urgent === false) fields.urgentByOwner = false;
       if (dest && t.parentTicketId && newParent === undefined) {
         const [old] = await db.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, t.parentTicketId));
         if (old?.projectId !== dest.id) throw new WorkError(422, "It is a sub-task: move its parent task (sub-tasks go with it), or take it out of the parent first.");
@@ -704,6 +714,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // An override covers only the text it came with, so any other write of the steps clears it.
         fields.ownerSetupOverride = fields.ownerSetup ? (patch.ownerSetupOverride ?? null) : null;
       }
+      if (patch.ownerSetupWhy !== undefined) fields.ownerSetupWhy = patch.ownerSetupWhy?.trim() || null;
+      if (patch.ownerSetupIfSkipped !== undefined) fields.ownerSetupIfSkipped = patch.ownerSetupIfSkipped?.trim() || null;
       if (patch.fixesLive !== undefined) {
         const bad = patch.fixesLive ? fixesLiveProblem(patch.fixesLive) : null;
         if (bad) throw new WorkError(400, bad);

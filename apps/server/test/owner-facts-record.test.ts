@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkWorkers } from "../src/db/schema.js";
+import { checkWorkers, settings } from "../src/db/schema.js";
 import { buildBrief } from "../src/services/brief.js";
 import { checkAsk } from "../src/services/decisions.js";
 import { fillOwnerSetupTokens, ownerFactHeld, ownerSetupFacts, workersLine } from "../src/services/owner-record.js";
@@ -62,6 +62,15 @@ describe("contradiction hold", () => {
   it("lets first-install wording about a second machine through", async () => {
     expect(await ownerFactHeld(ctx.db, ctx.companyId, "Add a second machine in Settings.")).toBeNull();
     expect(await ownerFactHeld(ctx.db, ctx.companyId, "Do you have a second machine free?")).toBeNull();
+  });
+
+  it("holds a step asking to open Boss Man from outside the network until a public address is set", async () => {
+    const STEP = "On your phone, switch off Wi-Fi and open Boss Man from outside your Tailscale network.";
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, STEP)).toMatch(/no public address is set/);
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, "Open Boss Man on mobile data.")).toMatch(/Not sent/);
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, "Open Boss Man on your home network.")).toBeNull();
+    await ctx.db.insert(settings).values({ key: "notifications", value: { publicUrl: "https://boss.example.com" } });
+    expect(await ownerFactHeld(ctx.db, ctx.companyId, STEP)).toBeNull();
   });
 
   it("counts only workers granted to this company", async () => {

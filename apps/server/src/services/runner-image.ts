@@ -22,13 +22,10 @@ export async function runnerImageCommit(db: Db, companyId: string): Promise<stri
  * True only when the image was built from `commit` or from a merge that came after it. False when the image's
  * commit isn't recorded or either commit can't be placed in merge order: then the owner is asked, as before.
  */
-export function imageContains(image: string | null, commit: string | null | undefined, order: string[]): boolean {
+export function imageContains(image: string | null, commit: string | null | undefined, order: string[], contains: readonly string[] = []): boolean {
   if (!image || !commit) return false;
-  const want = commit.toLowerCase();
-  if (image === want) return true;
-  const at = order.indexOf(want);
-  const built = order.indexOf(image);
-  return at >= 0 && built >= 0 && at <= built;
+  // `contains`: commits the image's commit is known to contain (BOS-1640), when it is the server's live commit.
+  return serverContains(image, commit, order, contains);
 }
 
 /** A ticket's setup steps as lines: one per step, blank lines and a leading "1." left off. */
