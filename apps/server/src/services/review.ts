@@ -2554,12 +2554,13 @@ export function reviewService(
               }
               cur = row;
               await started(cur);
-              // The ticket left review (sent back, moved by hand) while its check waited or ran (BOS-1504 for the train, BOS-1769
-              // for every path). The round ends; in the train, trainMerge's `finally` then gives up the seat and the members
-              // behind restack. The job is cancelled only while the ticket is still out of review: one already back in review
-              // gets a new landing, which reuses this job on the same tree (enqueue's "live") and keeps its place, so
-              // cancelling it here would fail that landing with "job stuck".
-              if ((cur.state === "queued" || cur.state === "running") && o.leftReview && (await o.leftReview())) {
+              // The ticket left review (sent back, moved by hand) while its check waited or ran (BOS-1504 for the train, BOS-1757
+              // and BOS-1769 for every path: a check for a ticket that can't merge must not hold a slot). The round ends; in the
+              // train, trainMerge's `finally` then gives up the seat and the members behind restack. `leftReview` also counts a
+              // ticket that went out and straight back (BOS-1769). The job is cancelled only while the ticket is still out of
+              // review: one already back in review gets a new landing, which reuses this job on the same tree (enqueue's "live")
+              // and keeps its place, so cancelling it here would fail that landing with "job stuck".
+              if ((cur.state === "queued" || cur.state === "running") && (await (o.leftReview ?? leftReview)())) {
                 if (!(await inReview())) await deps.cancelCheck?.(cur.id, "The ticket left review, so its merge check was stopped.").catch(() => undefined);
                 await lineEvent(db, t, { event: "check_ended", ...line, passed: null, why: "the ticket left review" });
                 return { status: "left_review" };
@@ -2931,8 +2932,8 @@ export function reviewService(
         : await plainOrChecked();
       // The attempt ended inside the split merge (BOS-1070): CI failed or couldn't be read, or the legacy check failed.
       if (m1.status === "early") return m1.result;
-      // The ticket left review while its merge waited (in or for the train, or on its check job: BOS-1769); nothing was pushed.
-      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while its merge waited, so it was not merged." } };
+      // The ticket left review while its merge waited (in or for the train, or on its check job: BOS-1757, BOS-1769); nothing was pushed.
+      if (m1.status === "left_review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while its merge check waited or ran, so nothing was merged." } };
       if (m1.status === "handed_over") return { outcome: "check_stuck", delivered: null, detail: { note: "Handed over while the merge waited in the merge train; the server now in charge restarts it." } };
       const m0 = m1;
       // BOS-1413: the branch got a commit the reviews never covered. Nothing was pushed; the queued check is dropped, the sign-off

@@ -5,6 +5,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, projects, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { ReviewHeldError } from "../src/services/review.js";
+import { ensureSystemHold } from "../src/services/review-holds.js";
 
 // BOS-919 (DR-047 point 3): an owner card only knocks work that hasn't been handed in into blocked. A ticket in
 // review or done keeps its state (still linked to the card), its merge waits while the card is open, and
@@ -67,6 +68,24 @@ describe("an owner card on handed-in work (BOS-919)", () => {
     expect(devWake[0]!.note).toContain("Mollie");
     expect(await stateOf(own.id)).toBe("review");
     expect(await stateOf(other.id)).toBe("review");
+  });
+
+  it("a ticket held on a waits-on hold isn't woken by an answer on another ticket's card (BOS-1717)", async () => {
+    const [dev] = await ctx.db.insert(agents).values({ companyId: ctx.co.company.id, name: "Dev", role: "worker", agentKind: "claude" }).returning();
+    const cardTicket = await ctx.ticket({ systemState: "review" });
+    const held = await ctx.ticket({ systemState: "review", assigneeAgentId: dev!.id });
+    const free = await ctx.ticket({ systemState: "review", assigneeAgentId: dev!.id });
+    const card = await ctx.raise(cardTicket.id);
+    await ensureSystemHold(ctx.db, held.id, [cardTicket.id], "waits on another ticket");
+    // Both are linked to the card, but it belongs to cardTicket.
+    await ctx.db.insert(ticketDependencies).values([
+      { blockedTicketId: held.id, blockerDecisionId: card.id },
+      { blockedTicketId: free.id, blockerDecisionId: card.id },
+    ]);
+    await ctx.decisions.answer(card.id, "Stripe");
+    const devWakes = await ctx.db.select({ ticketId: wakes.ticketId }).from(wakes).where(and(eq(wakes.reason, "decision answered"), eq(wakes.agentId, dev!.id)));
+    // The held ticket hears nothing; the one with no hold still does.
+    expect(devWakes.map((w) => w.ticketId)).toEqual([free.id]);
   });
 
   it("a done ticket stays done", async () => {

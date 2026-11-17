@@ -9,7 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, reviewHolds, reviewRequests, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { ReviewError, ReviewHeldError } from "../src/services/review.js";
 import { requestReviews } from "../src/services/review-kinds.js";
-import { holdView, mergeHolds } from "../src/services/review-holds.js";
+import { ensureSystemHold, holdView, mergeHolds } from "../src/services/review-holds.js";
 
 const HOUR = 3_600_000;
 const MIN = 60_000;
@@ -303,5 +303,35 @@ describe("shown as held (BOS-808)", () => {
     await ctx.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 9 * HOUR) }).where(eq(tickets.id, id));
     const later = (await ctx.req("GET", `/api/companies/${ctx.company.id}/merge-queue`)).json() as { stuckCount: number };
     expect(later.stuckCount).toBe(0);
+  });
+});
+
+describe("a ticket held on a system hold stays quiet, then its hold ends once (BOS-1717)", () => {
+  it("no wake for its assignee while held; when what it waits on merges the hold is released and the merge starts once, and no sweep repeats it", async () => {
+    ctx = await setup();
+    const waited = await ctx.ticket("The wait", { assigneeAgentId: null, systemState: "in_progress" });
+    const held = await ctx.ticket("Held on a system hold");
+    await ctx.slot(held, "approved");
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: held, blockerTicketId: waited });
+    await ensureSystemHold(ctx.db, held, [waited], "waits on another ticket");
+    await ctx.db.delete(wakes);
+    // Several sweeps while the wait is open: nobody is woken and nothing merges.
+    for (let i = 0; i < 3; i++) { ctx.advance(10 * MIN); await ctx.sweeps.run(); }
+    expect((await ctx.db.select().from(wakes)).filter((w) => w.agentId === ctx.worker.id)).toHaveLength(0);
+    expect(merged()).toHaveLength(0);
+    expect(await holdView(ctx.db, held)).not.toBeNull();
+    // The waited-on ticket merges: the hold ends and the merge attempt starts, once (the ticket's own merge is its wake).
+    await ctx.db.update(tickets).set({ systemState: "done", mergeCommit: "c".repeat(40), mergedAt: new Date() }).where(eq(tickets.id, waited));
+    await ctx.sweeps.run();
+    const counts = async () => {
+      const rows = await ctx.db.select({ k: activity.kind, s: activity.summary }).from(activity).where(eq(activity.ticketId, held));
+      return { released: rows.filter((a) => a.k === "review_hold_released").length, started: rows.filter((a) => a.k === "merge_line" && a.s.includes("merge attempt started")).length };
+    };
+    expect(await counts()).toEqual({ released: 1, started: 1 });
+    expect(await holdView(ctx.db, held)).toBeNull();
+    ctx.advance(10 * MIN);
+    await ctx.sweeps.run();
+    expect(await counts()).toEqual({ released: 1, started: 1 });
+    expect((await ctx.db.select().from(wakes)).filter((w) => w.agentId === ctx.worker.id && w.ticketId === held)).toHaveLength(0);
   });
 });
