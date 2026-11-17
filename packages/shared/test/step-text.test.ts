@@ -63,3 +63,32 @@ describe("one reading of a step's fences (BOS-550)", () => {
     expect(parseStep("")).toEqual([]);
   });
 });
+
+import { CHECKER_TAG_PATTERNS, leftoverCheckerTag, splitOwnerSteps, splitStepSource } from "../src/step-text.js";
+
+describe("R19 source tags are hidden from the owner's text (BOS-1665)", () => {
+  const id = "66010c79-1111-4222-8333-444455556666";
+  it("takes a seen tag out of the text and reads it into source", () => {
+    const r = splitStepSource(`Click Save (seen: ${id})`);
+    expect(r.text).toBe("Click Save");
+    expect(r.source).toEqual({ kind: "seen", imageId: id });
+  });
+  it("takes a not-seen tag out and keeps the url and date", () => {
+    const r = splitStepSource("Open DNS. not seen: https://docs.example.com/dns, 2026-11-01");
+    expect(r.text).toBe("Open DNS.");
+    expect(r.source).toEqual({ kind: "notSeen", url: "https://docs.example.com/dns", date: "2026-11-01" });
+  });
+  it("leaves a step with no tag as it is", () => {
+    expect(splitStepSource("Click Save")).toEqual({ text: "Click Save" });
+  });
+  it("splitOwnerSteps leaves no checker tag in any step and keeps each source; leftoverCheckerTag sees every pattern", () => {
+    const eng = "engagement:11111111-2222-4333-8444-555555555555";
+    const r = splitOwnerSteps([`Click Save (seen: ${id})`, "Open DNS. not seen: https://docs.example.com/dns, 2026-11-01", "Plain"], { [id]: "2026-11-02T10:00:00Z" });
+    for (const s of r.steps) expect(leftoverCheckerTag(s)).toBeUndefined();
+    expect(r.stepSources).toEqual([{ kind: "seen", imageId: id, takenAt: "2026-11-02" }, { kind: "notSeen", url: "https://docs.example.com/dns", date: "2026-11-01" }, null]);
+    expect(splitOwnerSteps(["Plain"]).stepSources).toBeUndefined();
+    // Every listed pattern matches its own tag, so a tag left in owner text is caught.
+    expect(CHECKER_TAG_PATTERNS.length).toBe(3);
+    for (const t of [`seen: ${id}`, "not seen: https://docs.example.com/x, 2026-11-01", eng]) expect(leftoverCheckerTag(`Do it (${t})`), t).toBeDefined();
+  });
+});
