@@ -14,5 +14,6 @@ test("every pnpm typecheck/test run in ci.yml is recursive with --no-bail", () =
 test("the check job's test step still runs after a failed typecheck", () => {
   const i = ci.indexOf("run: pnpm -r --no-bail test");
   assert.ok(i > 0);
-  assert.match(ci.slice(Math.max(0, i - 80), i), /if: \$\{\{ !cancelled\(\) \}\}/);
+  // The step's own header (id, if, env) sits above its run line; 200 chars covers it without reaching the previous step.
+  assert.match(ci.slice(Math.max(0, i - 200), i), /if: \$\{\{ !cancelled\(\) \}\}/);
 });

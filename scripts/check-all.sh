@@ -195,7 +195,19 @@ if [ -z "$pre_done" ]; then
   # run that one command while holding it, and exit with its status. None of the full checks run.
   if [ -z "${CHECK_ALL_SLOT_COMMAND:-}" ]; then
     pnpm install --frozen-lockfile --prefer-offline >/dev/null
-    node --test scripts/*.test.mjs
+    # Print the failing subtests' "not ok" lines and their errors first: a log that is cut to its last lines shows only passes.
+    script_test_log=$(mktemp)
+    if ! node --test scripts/*.test.mjs >"$script_test_log" 2>&1; then
+      echo "script tests failed; failing subtests:"
+      grep -nE '^\s*not ok' "$script_test_log" || true
+      grep -nE -B2 -A12 '^\s*not ok' "$script_test_log" | head -150 || true
+      echo "script tests failed; full output:"
+      cat "$script_test_log"
+      rm -f "$script_test_log"
+      exit 1
+    fi
+    cat "$script_test_log"
+    rm -f "$script_test_log"
     # One run per file, so a skip is tied to its file and checked against scripts/skipped-tests.txt (BOS-1729).
     skipdir="$(mktemp -d)"
     for f in scripts/*.test.mjs; do
