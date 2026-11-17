@@ -313,12 +313,14 @@ export function SelfDeploy({ go }: { go: (to: string) => void }) {
               title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
               onClick={() =>
                 act.run(async () => {
-                  const r = await api<{ queued?: boolean; message?: string }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
+                  const r = await api<{ queued?: boolean; message?: string; note?: string | null }>("/api/self-deploy/update-runners", { method: "POST", body: {} });
                   // BOS-1086: a press that cannot run yet is queued, not refused; the status box says when it starts.
                   if (r?.queued) {
                     view.reload();
                     return r.message ?? "The runner update is queued.";
                   }
+                  // BOS-1644: Boss Man couldn't confirm a fix is live and went ahead; say why instead of moving on silently.
+                  if (r?.note) return `${r.note} Its card is in Decisions.`;
                   go("decisions");
                 })
               }
